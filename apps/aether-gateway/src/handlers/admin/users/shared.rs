@@ -12,6 +12,7 @@ use serde_json::{json, Value};
 
 #[derive(Debug, serde::Deserialize)]
 pub(super) struct AdminCreateUserApiKeyRequest {
+    pub(super) group_id: String,
     #[serde(default)]
     pub(super) name: Option<String>,
     #[serde(default)]
@@ -44,6 +45,8 @@ pub(super) struct AdminCreateUserApiKeyRequest {
 
 #[derive(Debug, serde::Deserialize)]
 pub(super) struct AdminUpdateUserApiKeyRequest {
+    #[serde(default)]
+    pub(super) group_id: Option<String>,
     #[serde(default)]
     pub(super) name: Option<String>,
     #[serde(default)]

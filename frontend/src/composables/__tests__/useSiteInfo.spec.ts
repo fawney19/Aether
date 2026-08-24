@@ -33,6 +33,27 @@ describe('useSiteInfo', () => {
     expect(document.title).toBe('Custom Aether')
   })
 
+  it('applies public branding flags from site info', async () => {
+    apiClientMocks.get.mockResolvedValue({
+      data: {
+        site_name: 'Shop',
+        site_subtitle: 'API',
+        show_github_link: false,
+        guide_mode: 'custom',
+        guide_custom_type: 'url',
+        guide_url: 'https://docs.example.com',
+      },
+    })
+
+    const { useSiteInfo } = await import('../useSiteInfo')
+    const { showGithubLink, guideMode, guideUrl, refreshSiteInfo } = useSiteInfo()
+    await refreshSiteInfo()
+
+    expect(showGithubLink.value).toBe(false)
+    expect(guideMode.value).toBe('custom')
+    expect(guideUrl.value).toBe('https://docs.example.com')
+  })
+
   it('keeps default site text hidden until public site info resolves', async () => {
     let resolveRequest: (value: { data: { site_name: string; site_subtitle: string } }) => void = () => {}
     apiClientMocks.get.mockReturnValue(new Promise((resolve) => {

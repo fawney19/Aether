@@ -22,6 +22,9 @@ SELECT
   users.is_active AS user_is_active,
   users.is_deleted AS user_is_deleted,
   users.rate_limit AS user_rate_limit,
+  COALESCE(user_groups.sell_rate_multiplier, 1) AS sell_rate_multiplier,
+  user_groups.id AS billing_group_id,
+  user_groups.name AS billing_group_name,
   users.allowed_providers AS user_allowed_providers,
   users.allowed_api_formats AS user_allowed_api_formats,
   users.allowed_models AS user_allowed_models,
@@ -39,6 +42,7 @@ SELECT
   api_keys.ip_rules AS api_key_ip_rules
 FROM api_keys
 JOIN users ON users.id = api_keys.user_id
+LEFT JOIN user_groups ON user_groups.id = api_keys.group_id
 WHERE api_keys.key_hash = $1
 LIMIT 1
 "#;
@@ -53,6 +57,9 @@ SELECT
   users.is_active AS user_is_active,
   users.is_deleted AS user_is_deleted,
   users.rate_limit AS user_rate_limit,
+  COALESCE(user_groups.sell_rate_multiplier, 1) AS sell_rate_multiplier,
+  user_groups.id AS billing_group_id,
+  user_groups.name AS billing_group_name,
   users.allowed_providers AS user_allowed_providers,
   users.allowed_api_formats AS user_allowed_api_formats,
   users.allowed_models AS user_allowed_models,
@@ -70,6 +77,7 @@ SELECT
   api_keys.ip_rules AS api_key_ip_rules
 FROM api_keys
 JOIN users ON users.id = api_keys.user_id
+LEFT JOIN user_groups ON user_groups.id = api_keys.group_id
 WHERE api_keys.id = $1
 LIMIT 1
 "#;
@@ -84,6 +92,9 @@ SELECT
   users.is_active AS user_is_active,
   users.is_deleted AS user_is_deleted,
   users.rate_limit AS user_rate_limit,
+  COALESCE(user_groups.sell_rate_multiplier, 1) AS sell_rate_multiplier,
+  user_groups.id AS billing_group_id,
+  user_groups.name AS billing_group_name,
   users.allowed_providers AS user_allowed_providers,
   users.allowed_api_formats AS user_allowed_api_formats,
   users.allowed_models AS user_allowed_models,
@@ -101,6 +112,7 @@ SELECT
   api_keys.ip_rules AS api_key_ip_rules
 FROM api_keys
 JOIN users ON users.id = api_keys.user_id
+LEFT JOIN user_groups ON user_groups.id = api_keys.group_id
 WHERE api_keys.id = $1 AND users.id = $2
 LIMIT 1
 "#;
@@ -115,6 +127,9 @@ SELECT
   users.is_active AS user_is_active,
   users.is_deleted AS user_is_deleted,
   users.rate_limit AS user_rate_limit,
+  COALESCE(user_groups.sell_rate_multiplier, 1) AS sell_rate_multiplier,
+  user_groups.id AS billing_group_id,
+  user_groups.name AS billing_group_name,
   users.allowed_providers AS user_allowed_providers,
   users.allowed_api_formats AS user_allowed_api_formats,
   users.allowed_models AS user_allowed_models,
@@ -132,6 +147,7 @@ SELECT
   api_keys.ip_rules AS api_key_ip_rules
 FROM api_keys
 JOIN users ON users.id = api_keys.user_id
+LEFT JOIN user_groups ON user_groups.id = api_keys.group_id
 WHERE api_keys.id = ANY($1::TEXT[])
 ORDER BY api_keys.id ASC
 "#;
@@ -143,6 +159,7 @@ SELECT
   api_keys.key_hash,
   api_keys.key_encrypted,
   api_keys.name,
+  api_keys.group_id,
   api_keys.allowed_providers,
   api_keys.allowed_api_formats,
   api_keys.allowed_models,
@@ -174,6 +191,7 @@ SELECT
   api_keys.key_hash,
   api_keys.key_encrypted,
   api_keys.name,
+  api_keys.group_id,
   api_keys.allowed_providers,
   api_keys.allowed_api_formats,
   api_keys.allowed_models,
@@ -204,6 +222,7 @@ SELECT
   api_keys.key_hash,
   api_keys.key_encrypted,
   api_keys.name,
+  api_keys.group_id,
   api_keys.allowed_providers,
   api_keys.allowed_api_formats,
   api_keys.allowed_models,
@@ -234,6 +253,7 @@ SELECT
   api_keys.key_hash,
   api_keys.key_encrypted,
   api_keys.name,
+  api_keys.group_id,
   api_keys.allowed_providers,
   api_keys.allowed_api_formats,
   api_keys.allowed_models,
@@ -264,6 +284,7 @@ SELECT
   api_keys.key_hash,
   api_keys.key_encrypted,
   api_keys.name,
+  api_keys.group_id,
   api_keys.allowed_providers,
   api_keys.allowed_api_formats,
   api_keys.allowed_models,
@@ -338,6 +359,7 @@ SELECT
   api_keys.key_hash,
   api_keys.key_encrypted,
   api_keys.name,
+  api_keys.group_id,
   api_keys.allowed_providers,
   api_keys.allowed_api_formats,
   api_keys.allowed_models,
@@ -375,6 +397,7 @@ INSERT INTO api_keys (
   key_hash,
   key_encrypted,
   name,
+  group_id,
   allowed_providers,
   allowed_api_formats,
   allowed_models,
@@ -400,6 +423,7 @@ VALUES (
   $3,
   $4,
   $5,
+  $19,
   $6,
   $7,
   $8,
@@ -425,6 +449,7 @@ RETURNING
   key_hash,
   key_encrypted,
   name,
+  group_id,
   allowed_providers,
   allowed_api_formats,
   allowed_models,
@@ -452,6 +477,7 @@ INSERT INTO api_keys (
   key_hash,
   key_encrypted,
   name,
+  group_id,
   allowed_providers,
   allowed_api_formats,
   allowed_models,
@@ -477,6 +503,7 @@ VALUES (
   $3,
   $4,
   $5,
+  NULL,
   $6,
   $7,
   $8,
@@ -502,6 +529,7 @@ RETURNING
   key_hash,
   key_encrypted,
   name,
+  group_id,
   allowed_providers,
   allowed_api_formats,
   allowed_models,
@@ -526,6 +554,7 @@ const UPDATE_USER_API_KEY_BASIC_SQL: &str = r#"
 UPDATE api_keys
 SET
   name = COALESCE($3, name),
+  group_id = COALESCE($8, group_id),
   rate_limit = COALESCE($4, rate_limit),
   concurrent_limit = COALESCE($5, concurrent_limit),
   ip_rules = CASE WHEN $6 THEN $7::jsonb ELSE ip_rules END,
@@ -539,6 +568,7 @@ RETURNING
   key_hash,
   key_encrypted,
   name,
+  group_id,
   allowed_providers,
   allowed_api_formats,
   allowed_models,
@@ -580,6 +610,7 @@ RETURNING
   key_hash,
   key_encrypted,
   name,
+  group_id,
   allowed_providers,
   allowed_api_formats,
   allowed_models,
@@ -614,6 +645,7 @@ RETURNING
   key_hash,
   key_encrypted,
   name,
+  group_id,
   allowed_providers,
   allowed_api_formats,
   allowed_models,
@@ -647,6 +679,7 @@ RETURNING
   key_hash,
   key_encrypted,
   name,
+  group_id,
   allowed_providers,
   allowed_api_formats,
   allowed_models,
@@ -681,6 +714,7 @@ RETURNING
   key_hash,
   key_encrypted,
   name,
+  group_id,
   allowed_providers,
   allowed_api_formats,
   allowed_models,
@@ -725,6 +759,7 @@ RETURNING
   key_hash,
   key_encrypted,
   name,
+  group_id,
   allowed_providers,
   allowed_api_formats,
   allowed_models,
@@ -759,6 +794,7 @@ RETURNING
   key_hash,
   key_encrypted,
   name,
+  group_id,
   allowed_providers,
   allowed_api_formats,
   allowed_models,
@@ -1198,6 +1234,7 @@ impl AuthApiKeyWriteRepository for SqlxAuthApiKeySnapshotReadRepository {
             .bind(record.total_requests as i64)
             .bind(record.total_tokens as i64)
             .bind(record.total_cost_usd)
+            .bind(record.billing_group_id)
             .fetch_optional(&self.pool)
             .await
             .map_postgres_err()?;
@@ -1280,6 +1317,7 @@ impl AuthApiKeyWriteRepository for SqlxAuthApiKeySnapshotReadRepository {
             .bind(record.concurrent_limit)
             .bind(record.ip_rules.is_some())
             .bind(ip_rules)
+            .bind(record.billing_group_id)
             .fetch_optional(&self.pool)
             .await
             .map_postgres_err()?;
@@ -1569,7 +1607,13 @@ fn map_auth_api_key_snapshot_row(
         row_get(row, "api_key_allowed_models")?,
     )?
     .with_api_key_ip_rules(row_get(row, "api_key_ip_rules")?)?;
-    Ok(snapshot.with_user_rate_limit(row_get(row, "user_rate_limit")?))
+    Ok(snapshot
+        .with_user_rate_limit(row_get(row, "user_rate_limit")?)
+        .with_billing_group(
+            row_get(row, "billing_group_id")?,
+            row_get(row, "billing_group_name")?,
+            row_get(row, "sell_rate_multiplier")?,
+        ))
 }
 
 fn map_auth_api_key_export_row(
@@ -1598,6 +1642,7 @@ fn map_auth_api_key_export_row(
     )
     .and_then(|record| record.with_ip_rules(row_get(row, "ip_rules")?))
     .map(|record| record.with_feature_settings(feature_settings))
+    .and_then(|record| Ok(record.with_billing_group_id(row_get(row, "group_id")?)))
     .and_then(|record| {
         record.with_activity_timestamps(
             row_get(row, "last_used_at_unix_secs")?,

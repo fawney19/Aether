@@ -77,6 +77,7 @@ export interface DailyUsageRecord {
   id?: string | null
   date: string | null
   timezone?: string | null
+  // 已结算、应用计费组倍率后的实际扣费
   total_cost: number
   total_requests: number
   input_tokens: number

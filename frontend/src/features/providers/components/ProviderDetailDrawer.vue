@@ -174,6 +174,13 @@
                         @delete="handleDeleteKey(key)"
                       />
                     </div>
+                    <ProviderKeyTestCard
+                      v-if="provider.id"
+                      :provider-id="provider.id"
+                      :api-key="key"
+                      :models="providerModels"
+                      :loading-models="loadingProviderModels"
+                    />
                     <!-- Codex 上游额度信息（仅当有元数据时显示） -->
                     <div
                       v-if="hasCodexQuotaDisplayData(key)"
@@ -182,7 +189,9 @@
                       <ProviderQuotaSectionHeader
                         :title="legacyT('账号配额')"
                         :loading="refreshingQuota"
+                        :show-refresh="true"
                         :updated-text="getCodexQuotaDisplay(key)?.updated_at ? formatCodexUpdatedAt(getCodexQuotaDisplay(key)?.updated_at || 0) : null"
+                        @query="handleQueryKeyQuota(key)"
                       />
                       <!-- 普通 Codex 限额并排显示：Team/Plus/Enterprise 账号 2列, Free 账号 1列 -->
                       <div
@@ -191,25 +200,25 @@
                       >
                         <!-- 主限额 -->
                         <ProviderQuotaProgressRow
-                          v-if="getCodexQuotaDisplay(key)?.primary_used_percent !== undefined"
+                          v-if="getCodexQuotaDisplay(key)?.primary_used_percent !== undefined || isCodexAccountQuotaExhausted(key)"
                           :label="legacyT(getCodexPrimaryQuotaLabel(key))"
-                          :used-percent="getCodexQuotaDisplay(key)?.primary_used_percent || 0"
-                          :remaining-percent="toCodexRemainingPercent(getCodexQuotaDisplay(key)?.primary_used_percent)"
-                          :meter-class="getQuotaRemainingClass(getCodexQuotaDisplay(key)?.primary_used_percent || 0)"
-                          :bar-class="getQuotaRemainingBarColor(getCodexQuotaDisplay(key)?.primary_used_percent || 0)"
-                          :reset-text="(getCodexQuotaDisplay(key)?.primary_reset_at || getCodexQuotaDisplay(key)?.primary_reset_seconds) && shouldStartCodexResetCountdown(getCodexQuotaDisplay(key)?.primary_used_percent || 0)
+                          :used-percent="getCodexPrimaryUsedPercentForDisplay(key) || 0"
+                          :remaining-percent="toCodexRemainingPercent(getCodexPrimaryUsedPercentForDisplay(key))"
+                          :meter-class="getQuotaRemainingClass(getCodexPrimaryUsedPercentForDisplay(key) || 0)"
+                          :bar-class="getQuotaRemainingBarColor(getCodexPrimaryUsedPercentForDisplay(key) || 0)"
+                          :reset-text="(getCodexQuotaDisplay(key)?.primary_reset_at || getCodexQuotaDisplay(key)?.primary_reset_seconds) && shouldStartCodexResetCountdown(getCodexPrimaryUsedPercentForDisplay(key) || 0)
                             ? getResetCountdownText(
                               getCodexQuotaDisplay(key)?.primary_reset_at,
                               getCodexQuotaDisplay(key)?.primary_reset_seconds,
                               getCodexQuotaDisplay(key)?.updated_at,
-                              getCodexQuotaDisplay(key)?.primary_used_percent
+                              getCodexPrimaryUsedPercentForDisplay(key)
                             )
-                            : null"
+                            : (isCodexAccountQuotaExhausted(key) ? legacyT('额度耗尽') : null)"
                           :footer-class="getResetCountdownClass(
                             getCodexQuotaDisplay(key)?.primary_reset_at,
                             getCodexQuotaDisplay(key)?.primary_reset_seconds,
                             getCodexQuotaDisplay(key)?.updated_at,
-                            getCodexQuotaDisplay(key)?.primary_used_percent
+                            getCodexPrimaryUsedPercentForDisplay(key)
                           )"
                         />
                         <!-- 5H限额（仅 Team/Plus/Enterprise 显示） -->
@@ -709,7 +718,7 @@
                         </span>
                         <span
                           v-if="editingMultiplierKey !== key.id || editingMultiplierFormat !== format"
-                          :title="legacyT('点击编辑倍率')"
+                          :title="legacyT('成本倍率，不影响用户扣款。点击编辑')"
                           class="cursor-pointer hover:text-primary hover:underline"
                           :class="{ 'text-destructive': isFormatCircuitOpen(key, format) }"
                           @click="startEditMultiplier(key, format)"
@@ -984,6 +993,7 @@ import ProviderKeyIdentityBlock from '@/features/providers/components/ProviderKe
 import ProviderMonthlyQuotaCard from '@/features/providers/components/ProviderMonthlyQuotaCard.vue'
 import ProviderQuotaProgressRow from '@/features/providers/components/ProviderQuotaProgressRow.vue'
 import ProviderQuotaSectionHeader from '@/features/providers/components/ProviderQuotaSectionHeader.vue'
+import ProviderKeyTestCard from '@/features/providers/components/ProviderKeyTestCard.vue'
 import { useProxyNodesStore } from '@/stores/proxy-nodes'
 import {
   compareAntigravityQuotaItems,
@@ -2057,6 +2067,25 @@ function getCodexQuotaDisplay(key: EndpointAPIKey): CodexUpstreamMetadata | null
   return mergeCodexQuotaDisplays(snapshotDisplay, metadataDisplay)
 }
 
+function isCodexAccountQuotaExhausted(key: EndpointAPIKey): boolean {
+  const quota = getQuotaSnapshotForProvider(key, 'codex')
+  const metadata = key.upstream_metadata?.codex
+  return quota?.exhausted === true
+    || quota?.code === 'exhausted'
+    || quota?.limit_reached === true
+    || quota?.allowed === false
+    || metadata?.limit_reached === true
+    || metadata?.allowed === false
+}
+
+function getCodexPrimaryUsedPercentForDisplay(key: EndpointAPIKey): number | undefined {
+  const used = getCodexQuotaDisplay(key)?.primary_used_percent
+  if (isCodexAccountQuotaExhausted(key)) {
+    return Math.max(typeof used === 'number' && Number.isFinite(used) ? used : 0, 100)
+  }
+  return used
+}
+
 function getCodexPrimaryQuotaLabel(key: EndpointAPIKey): string {
   return getCodexQuotaWindowLimitLabel({
     code: 'weekly',
@@ -2067,14 +2096,14 @@ function getCodexPrimaryQuotaLabel(key: EndpointAPIKey): string {
 
 function hasCodexQuotaDisplayData(key: EndpointAPIKey): boolean {
   const codex = getCodexQuotaDisplay(key)
-  return !!codex && (
+  return isCodexAccountQuotaExhausted(key) || (!!codex && (
     codex.primary_used_percent !== undefined
     || codex.secondary_used_percent !== undefined
     || codex.spark_primary_used_percent !== undefined
     || codex.spark_secondary_used_percent !== undefined
     || codexDisplayHasResetCredits(codex)
     || hasPendingCodexResetCredit(key)
-  )
+  ))
 }
 
 function hasCodexSparkQuotaDisplayData(key: EndpointAPIKey): boolean {
@@ -2810,6 +2839,30 @@ function applyQuotaResults(
 }
 
 // 通用的自动刷新配额函数（支持 Codex、Gemini CLI、Antigravity、Kiro、Windsurf 和 ChatGPT Web）
+async function handleQueryKeyQuota(key: EndpointAPIKey) {
+  if (!props.providerId || refreshingQuota.value) return
+  refreshingQuota.value = true
+  try {
+    const result = await refreshProviderQuota(props.providerId, [key.id])
+    applyQuotaResults(result.results)
+    emit('refresh')
+    const queried = result.results?.find((item) => item.key_id === key.id)
+    if (queried?.status === 'quota_exhausted') {
+      showWarning(queried.message || legacyT('额度耗尽'))
+    } else if (queried?.status === 'success' || queried?.quota_snapshot) {
+      showSuccess(legacyT('额度已更新'))
+    } else if (queried?.message) {
+      showWarning(queried.message)
+    } else {
+      showSuccess(legacyT('已查询额度'))
+    }
+  } catch (err: unknown) {
+    showError(localizedApiError(err, '查询额度失败'), legacyT('错误'))
+  } finally {
+    refreshingQuota.value = false
+  }
+}
+
 async function autoRefreshQuotaInBackground(): Promise<boolean> {
   const providerId = props.providerId
   if (!providerId) return false

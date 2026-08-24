@@ -29,6 +29,7 @@
 
       <div class="max-h-64 overflow-y-auto pr-0.5">
         <button
+          v-if="allowAll"
           type="button"
           class="relative flex w-full items-center rounded-lg py-1.5 pl-8 pr-2 text-left text-sm transition-colors hover:bg-accent focus:bg-accent"
           @click="selectUser('__all__')"
@@ -38,6 +39,18 @@
             :class="modelValue === '__all__' ? 'opacity-100' : 'opacity-0'"
           />
           <span>全部用户</span>
+        </button>
+        <button
+          v-if="noneValue"
+          type="button"
+          class="relative flex w-full items-center rounded-lg py-1.5 pl-8 pr-2 text-left text-sm transition-colors hover:bg-accent focus:bg-accent"
+          @click="selectUser(noneValue)"
+        >
+          <Check
+            class="absolute left-2 h-4 w-4"
+            :class="modelValue === noneValue ? 'opacity-100' : 'opacity-0'"
+          />
+          <span>{{ noneLabel }}</span>
         </button>
 
         <div
@@ -110,9 +123,15 @@ const props = withDefaults(defineProps<{
   modelValue: string
   initialUsers?: UserOption[]
   dropdown?: boolean
+  allowAll?: boolean
+  noneValue?: string | null
+  noneLabel?: string
 }>(), {
   initialUsers: () => [],
   dropdown: false,
+  allowAll: true,
+  noneValue: null,
+  noneLabel: '不对比',
 })
 
 const emit = defineEmits<{
@@ -131,9 +150,10 @@ let loadedInitialBatch = false
 
 const selectedUser = computed(() => knownUsers.value.get(props.modelValue))
 const selectedLabel = computed(() => {
-  if (props.modelValue === '__all__') return '全部用户'
+  if (props.noneValue && props.modelValue === props.noneValue) return props.noneLabel
+  if (props.allowAll && props.modelValue === '__all__') return '全部用户'
   const user = selectedUser.value
-  return user ? getUserLabel(user) : `User ${props.modelValue}`
+  return user ? getUserLabel(user) : (props.modelValue ? `User ${props.modelValue}` : '选择用户')
 })
 const pinnedUser = computed(() => {
   if (props.modelValue === '__all__') return null

@@ -1,4 +1,5 @@
 export { ensureUserLoaded } from './authGuard'
 export { resolveHomeRedirect } from './homeGuard'
+export { resolveGuideRedirect } from './guideGuard'
 export { checkAdminAccess } from './adminGuard'
 export { checkModuleAccess } from './moduleGuard'

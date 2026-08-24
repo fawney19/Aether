@@ -702,6 +702,7 @@ export interface LeaderboardItem {
   requests: number
   tokens: number
   cost: number
+  actual_cost?: number
 }
 
 export interface LeaderboardResponse {

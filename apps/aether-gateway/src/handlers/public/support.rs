@@ -246,21 +246,47 @@ pub(crate) async fn maybe_build_local_public_support_response(
                 .read_system_config_json_value("site_name")
                 .await
                 .ok()
-                .flatten()
-                .and_then(|value| value.as_str().map(ToOwned::to_owned))
-                .unwrap_or_else(|| "Aether".to_string());
+                .flatten();
             let site_subtitle = state
                 .read_system_config_json_value("site_subtitle")
                 .await
                 .ok()
-                .flatten()
-                .and_then(|value| value.as_str().map(ToOwned::to_owned))
-                .unwrap_or_else(|| "AI Gateway".to_string());
+                .flatten();
+            let show_github_link = state
+                .read_system_config_json_value("show_github_link")
+                .await
+                .ok()
+                .flatten();
+            let guide_mode = state
+                .read_system_config_json_value("guide_mode")
+                .await
+                .ok()
+                .flatten();
+            let guide_custom_type = state
+                .read_system_config_json_value("guide_custom_type")
+                .await
+                .ok()
+                .flatten();
+            let guide_url = state
+                .read_system_config_json_value("guide_url")
+                .await
+                .ok()
+                .flatten();
+            let guide_html = state
+                .read_system_config_json_value("guide_html")
+                .await
+                .ok()
+                .flatten();
             return Some(
-                Json(json!({
-                    "site_name": site_name,
-                    "site_subtitle": site_subtitle,
-                }))
+                Json(aether_admin::system::build_public_site_info_payload(
+                    site_name,
+                    site_subtitle,
+                    show_github_link,
+                    guide_mode,
+                    guide_custom_type,
+                    guide_url,
+                    guide_html,
+                ))
                 .into_response(),
             );
         }

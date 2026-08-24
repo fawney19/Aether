@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS user_groups (
     allowed_models_mode TEXT NOT NULL DEFAULT 'inherit',
     rate_limit INTEGER,
     rate_limit_mode TEXT NOT NULL DEFAULT 'inherit',
+    sell_rate_multiplier REAL NOT NULL DEFAULT 1,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
     UNIQUE (normalized_name)
@@ -65,6 +66,7 @@ CREATE INDEX IF NOT EXISTS user_group_members_user_id_idx ON user_group_members 
 CREATE TABLE IF NOT EXISTS api_keys (
     id TEXT PRIMARY KEY NOT NULL,
     user_id TEXT NOT NULL,
+    group_id TEXT,
     key_hash TEXT NOT NULL,
     key_encrypted TEXT,
     name TEXT,
@@ -93,6 +95,7 @@ CREATE TABLE IF NOT EXISTS api_keys (
     UNIQUE (key_hash)
 );
 CREATE INDEX IF NOT EXISTS api_keys_user_id_idx ON api_keys (user_id);
+CREATE INDEX IF NOT EXISTS api_keys_group_id_idx ON api_keys (group_id);
 
 CREATE TABLE IF NOT EXISTS audit_logs (
     id TEXT PRIMARY KEY NOT NULL,

@@ -2,12 +2,17 @@ import { ref, computed } from 'vue'
 import { useToast } from '@/composables/useToast'
 import { adminApi } from '@/api/admin'
 import { log } from '@/utils/logger'
-import { useSiteInfo } from '@/composables/useSiteInfo'
+import { isPublicHttpUrl, useSiteInfo, type GuideCustomType, type GuideMode } from '@/composables/useSiteInfo'
 
 export interface SystemConfig {
   // 站点信息
   site_name: string
   site_subtitle: string
+  show_github_link: boolean
+  guide_mode: GuideMode
+  guide_custom_type: GuideCustomType
+  guide_url: string
+  guide_html: string
   // 网络代理
   system_proxy_node_id: string | null
   // 基础配置
@@ -65,6 +70,11 @@ const CONFIG_KEYS = [
   // 站点信息
   'site_name',
   'site_subtitle',
+  'show_github_link',
+  'guide_mode',
+  'guide_custom_type',
+  'guide_url',
+  'guide_html',
   // 网络代理
   'system_proxy_node_id',
   // 基础配置
@@ -122,6 +132,11 @@ function createDefaultConfig(): SystemConfig {
     // 站点信息
     site_name: 'Aether',
     site_subtitle: 'AI Gateway',
+    show_github_link: true,
+    guide_mode: 'builtin',
+    guide_custom_type: 'url',
+    guide_url: '',
+    guide_html: '',
     // 网络代理
     system_proxy_node_id: null,
     // 基础配置
@@ -198,7 +213,12 @@ export function useSystemConfig() {
     if (!originalConfig.value) return false
     return (
       systemConfig.value.site_name !== originalConfig.value.site_name ||
-      systemConfig.value.site_subtitle !== originalConfig.value.site_subtitle
+      systemConfig.value.site_subtitle !== originalConfig.value.site_subtitle ||
+      systemConfig.value.show_github_link !== originalConfig.value.show_github_link ||
+      systemConfig.value.guide_mode !== originalConfig.value.guide_mode ||
+      systemConfig.value.guide_custom_type !== originalConfig.value.guide_custom_type ||
+      systemConfig.value.guide_url !== originalConfig.value.guide_url ||
+      systemConfig.value.guide_html !== originalConfig.value.guide_html
     )
   })
 
@@ -347,6 +367,21 @@ export function useSystemConfig() {
 
   // 保存函数
   async function saveSiteInfo() {
+    if (systemConfig.value.guide_mode === 'custom') {
+      if (systemConfig.value.guide_custom_type === 'url' && !isPublicHttpUrl(systemConfig.value.guide_url)) {
+        error('自定义文档需要填写有效的 http(s) 链接')
+        return
+      }
+      if (systemConfig.value.guide_custom_type === 'html' && !systemConfig.value.guide_html.trim()) {
+        error('自定义文档需要提供 HTML 内容')
+        return
+      }
+      if (new TextEncoder().encode(systemConfig.value.guide_html).length > 512 * 1024) {
+        error('HTML 内容不能超过 512KB')
+        return
+      }
+    }
+
     siteInfoLoading.value = true
     try {
       const configItems = [
@@ -355,6 +390,31 @@ export function useSystemConfig() {
           key: 'site_subtitle',
           value: systemConfig.value.site_subtitle,
           description: '站点副标题',
+        },
+        {
+          key: 'show_github_link',
+          value: systemConfig.value.show_github_link,
+          description: '是否显示 GitHub 图标',
+        },
+        {
+          key: 'guide_mode',
+          value: systemConfig.value.guide_mode,
+          description: '文档页模式：builtin / hidden / custom',
+        },
+        {
+          key: 'guide_custom_type',
+          value: systemConfig.value.guide_custom_type,
+          description: '自定义文档类型：url / html',
+        },
+        {
+          key: 'guide_url',
+          value: systemConfig.value.guide_url,
+          description: '自定义文档 HTTP 链接',
+        },
+        {
+          key: 'guide_html',
+          value: systemConfig.value.guide_html,
+          description: '自定义文档 HTML 内容',
         },
       ]
       await Promise.all(
@@ -365,6 +425,11 @@ export function useSystemConfig() {
       if (originalConfig.value) {
         originalConfig.value.site_name = systemConfig.value.site_name
         originalConfig.value.site_subtitle = systemConfig.value.site_subtitle
+        originalConfig.value.show_github_link = systemConfig.value.show_github_link
+        originalConfig.value.guide_mode = systemConfig.value.guide_mode
+        originalConfig.value.guide_custom_type = systemConfig.value.guide_custom_type
+        originalConfig.value.guide_url = systemConfig.value.guide_url
+        originalConfig.value.guide_html = systemConfig.value.guide_html
       }
       await refreshSiteInfo()
       success('站点信息已保存')

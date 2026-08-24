@@ -90,6 +90,7 @@ pub struct AdminStatsLeaderboardItem {
     pub requests: u64,
     pub tokens: u64,
     pub cost: f64,
+    pub actual_cost: f64,
 }
 
 #[derive(Clone, Debug)]
@@ -813,7 +814,7 @@ pub fn build_admin_stats_leaderboard_response(
             let value = match metric {
                 AdminStatsLeaderboardMetric::Requests => json!(item.requests),
                 AdminStatsLeaderboardMetric::Tokens => json!(item.tokens),
-                AdminStatsLeaderboardMetric::Cost => json!(round_to(item.cost, 6)),
+                AdminStatsLeaderboardMetric::Cost => json!(round_to(item.actual_cost, 6)),
             };
             let name = match name_mode {
                 AdminStatsLeaderboardNameMode::Id => item.id.clone(),
@@ -827,6 +828,7 @@ pub fn build_admin_stats_leaderboard_response(
                 "requests": item.requests,
                 "tokens": item.tokens,
                 "cost": round_to(item.cost, 6),
+                "actual_cost": round_to(item.actual_cost, 6),
             })
         })
         .collect();
@@ -1720,6 +1722,7 @@ pub fn build_model_leaderboard_items(
                     requests: 0,
                     tokens: 0,
                     cost: 0.0,
+                    actual_cost: 0.0,
                 });
         entry.requests = entry.requests.saturating_add(1);
         entry.tokens = entry.tokens.saturating_add(
@@ -1729,6 +1732,7 @@ pub fn build_model_leaderboard_items(
                 .saturating_add(item.cache_read_input_tokens),
         );
         entry.cost += item.total_cost_usd;
+        entry.actual_cost += item.actual_total_cost_usd;
     }
     grouped.into_values().collect()
 }
@@ -1744,6 +1748,7 @@ pub fn build_model_leaderboard_items_from_summaries(
             requests: item.request_count,
             tokens: item.total_tokens,
             cost: item.total_cost_usd,
+            actual_cost: item.actual_total_cost_usd,
         })
         .collect()
 }
@@ -1803,10 +1808,12 @@ pub fn build_user_leaderboard_items(
                     requests: 0,
                     tokens: 0,
                     cost: 0.0,
+                    actual_cost: 0.0,
                 });
         entry.requests = entry.requests.saturating_add(1);
         entry.tokens = entry.tokens.saturating_add(admin_usage_total_tokens(item));
         entry.cost += item.total_cost_usd;
+        entry.actual_cost += item.actual_total_cost_usd;
     }
 
     grouped.into_values().collect()
@@ -1857,6 +1864,7 @@ pub fn build_user_leaderboard_items_from_summaries(
             requests: item.request_count,
             tokens: item.total_tokens,
             cost: item.total_cost_usd,
+            actual_cost: item.actual_total_cost_usd,
         });
     }
 
@@ -1923,6 +1931,7 @@ pub fn build_api_key_leaderboard_items(
                     requests: 0,
                     tokens: 0,
                     cost: 0.0,
+                    actual_cost: 0.0,
                 });
         entry.requests = entry.requests.saturating_add(1);
         entry.tokens = entry.tokens.saturating_add(
@@ -1932,6 +1941,7 @@ pub fn build_api_key_leaderboard_items(
                 .saturating_add(item.cache_read_input_tokens),
         );
         entry.cost += item.total_cost_usd;
+        entry.actual_cost += item.actual_total_cost_usd;
     }
 
     grouped.into_values().collect()
@@ -1988,6 +1998,7 @@ pub fn build_api_key_leaderboard_items_from_summaries(
             requests: item.request_count,
             tokens: item.total_tokens,
             cost: item.total_cost_usd,
+            actual_cost: item.actual_total_cost_usd,
         });
     }
 
@@ -2004,8 +2015,8 @@ pub fn compare_leaderboard_items(
         AdminStatsLeaderboardMetric::Requests => left.requests.cmp(&right.requests),
         AdminStatsLeaderboardMetric::Tokens => left.tokens.cmp(&right.tokens),
         AdminStatsLeaderboardMetric::Cost => left
-            .cost
-            .partial_cmp(&right.cost)
+            .actual_cost
+            .partial_cmp(&right.actual_cost)
             .unwrap_or(std::cmp::Ordering::Equal),
     };
     let metric_order = match order {
@@ -2027,7 +2038,7 @@ fn leaderboard_metric_equal(
     match metric {
         AdminStatsLeaderboardMetric::Requests => left.requests == right.requests,
         AdminStatsLeaderboardMetric::Tokens => left.tokens == right.tokens,
-        AdminStatsLeaderboardMetric::Cost => (left.cost - right.cost).abs() < 1e-9,
+        AdminStatsLeaderboardMetric::Cost => (left.actual_cost - right.actual_cost).abs() < 1e-9,
     }
 }
 
@@ -2113,6 +2124,9 @@ mod tests {
             user_is_active: true,
             user_is_deleted: false,
             user_rate_limit: None,
+            sell_rate_multiplier: 1.0,
+            billing_group_id: None,
+            billing_group_name: None,
             user_allowed_providers: None,
             user_allowed_api_formats: None,
             user_allowed_models: None,
@@ -2141,6 +2155,7 @@ mod tests {
             request_count: 3,
             total_tokens: 60,
             total_cost_usd: 0.6,
+            actual_total_cost_usd: 0.3,
         }
     }
 

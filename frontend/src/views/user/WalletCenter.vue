@@ -432,7 +432,7 @@
                         -{{ todayUsage.total_cost.toFixed(4) }}
                       </TableCell>
                       <TableCell class="text-xs text-muted-foreground">
-                        按日汇总
+                        实际扣费汇总
                       </TableCell>
                       <TableCell class="text-xs text-muted-foreground">
                         {{ todayUsage.total_requests }} 次请求 · {{ formatTokenCount(todayUsage.input_tokens) }} / {{ formatTokenCount(todayUsage.output_tokens) }} tokens
@@ -492,7 +492,7 @@
                           -{{ item.data.total_cost.toFixed(4) }}
                         </TableCell>
                         <TableCell class="text-xs text-muted-foreground">
-                          按日汇总
+                          实际扣费汇总
                         </TableCell>
                         <TableCell class="text-xs text-muted-foreground">
                           {{ item.data.total_requests }} 次请求 · {{ formatTokenCount(item.data.input_tokens) }} / {{ formatTokenCount(item.data.output_tokens) }} tokens

@@ -1075,12 +1075,15 @@ mod tests {
             balance_remaining: None,
             access_allowed: true,
             user_rate_limit: None,
+            sell_rate_multiplier: 1.0,
             api_key_rate_limit: None,
             api_key_is_standalone: true,
             admin_bypass_limits: false,
             local_rejection: None,
             allowed_models: None,
             ip_rules: None,
+            billing_group_id: None,
+            billing_group_name: None,
         });
         let request_context = GatewayPublicRequestContext {
             trace_id: "trace-codex-realtime-call".to_string(),
@@ -1129,12 +1132,15 @@ mod tests {
             balance_remaining: Some(1.25),
             access_allowed: true,
             user_rate_limit: None,
+            sell_rate_multiplier: 1.0,
             api_key_rate_limit: None,
             api_key_is_standalone: false,
             admin_bypass_limits: false,
             local_rejection: None,
             allowed_models: None,
             ip_rules: None,
+            billing_group_id: None,
+            billing_group_name: None,
         });
         let request_context = GatewayPublicRequestContext {
             trace_id: "trace-live-finite".to_string(),
@@ -1195,12 +1201,15 @@ mod tests {
             balance_remaining: None,
             access_allowed: true,
             user_rate_limit: None,
+            sell_rate_multiplier: 1.0,
             api_key_rate_limit: None,
             api_key_is_standalone: true,
             admin_bypass_limits: false,
             local_rejection: None,
             allowed_models: None,
             ip_rules: None,
+            billing_group_id: None,
+            billing_group_name: None,
         });
         let request_context = GatewayPublicRequestContext {
             trace_id: "trace-live-unmapped".to_string(),

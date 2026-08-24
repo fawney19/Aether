@@ -26,6 +26,7 @@ export interface UserGroupFormState {
   allowed_models: string[]
   rate_limit_mode: RateLimitPolicyMode
   rate_limit: number | undefined
+  sell_rate_multiplier: number
 }
 
 export interface UserManagementRow {

@@ -185,8 +185,14 @@
                           :class="detailPricingAvailable ? 'text-green-600 dark:text-green-400' : 'text-muted-foreground'"
                           data-request-detail-total-cost
                         >
-                          {{ detailPricingAvailable ? `$${detailTotalCostForDisplay.toFixed(6)}` : (detailUsageAvailable ? '未计价' : '不可用') }}
+                          {{ detailPricingAvailable ? detailChargeSummary : (detailUsageAvailable ? '未计价' : '不可用') }}
                         </span>
+                      </span>
+                      <span
+                        v-if="detailPricingAvailable && detailUpstreamCostSummary"
+                        class="text-[10px] text-muted-foreground"
+                      >
+                        {{ detailUpstreamCostSummary }}
                       </span>
                       <span class="text-muted-foreground">|</span>
                       <span>
@@ -211,8 +217,14 @@
                           :class="detailPricingAvailable ? 'text-green-600 dark:text-green-400' : 'text-muted-foreground'"
                           data-request-detail-total-cost
                         >
-                          {{ detailPricingAvailable ? `$${detailTotalCostForDisplay.toFixed(6)}` : (detailUsageAvailable ? '未计价' : '不可用') }}
+                          {{ detailPricingAvailable ? detailChargeSummary : (detailUsageAvailable ? '未计价' : '不可用') }}
                         </span>
+                      </span>
+                      <span
+                        v-if="detailPricingAvailable && detailUpstreamCostSummary"
+                        class="text-[10px] text-muted-foreground"
+                      >
+                        {{ detailUpstreamCostSummary }}
                       </span>
                       <span class="text-muted-foreground">|</span>
                       <span class="whitespace-nowrap">
@@ -1015,6 +1027,37 @@ const detailPricingAvailable = computed(() => (
 const detailTotalCostForDisplay = computed(() => (
   detail.value ? (detailTotalCost(detail.value) ?? 0) : 0
 ))
+
+const detailSellRateMultiplier = computed(() => {
+  const snapshot = settlementPricingSnapshot.value
+  const fromSnapshot = Number(snapshot?.sell_rate_multiplier ?? snapshot?.rate_multiplier)
+  if (Number.isFinite(fromSnapshot) && fromSnapshot >= 0) return fromSnapshot
+  const fromRecord = Number(detail.value?.rate_multiplier)
+  return Number.isFinite(fromRecord) && fromRecord >= 0 ? fromRecord : 1
+})
+
+const detailActualCharge = computed(() => Number(detail.value?.actual_cost) || 0)
+
+const detailChargeSummary = computed(() => {
+  const catalog = detailTotalCostForDisplay.value
+  const rate = detailSellRateMultiplier.value
+  const charged = detailActualCharge.value
+  const groupName = settlementPricingSnapshot.value?.billing_group_name
+  const groupLabel = typeof groupName === 'string' && groupName ? `计费组 ${groupName} · ` : ''
+  return `${groupLabel}标价 $${catalog.toFixed(6)} × ${rate} = 实扣 $${charged.toFixed(6)}`
+})
+
+const detailCostRateMultiplier = computed(() => {
+  const value = Number(settlementPricingSnapshot.value?.cost_rate_multiplier)
+  return Number.isFinite(value) && value >= 0 ? value : null
+})
+
+const detailUpstreamCostSummary = computed(() => {
+  const rate = detailCostRateMultiplier.value
+  if (rate == null) return ''
+  const catalog = detailTotalCostForDisplay.value
+  return `上游 $${catalog.toFixed(6)} × 账户 ${rate} = $${(catalog * rate).toFixed(6)}`
+})
 const timelineRef = ref<InstanceType<typeof HorizontalRequestTimeline> | null>(null)
 const timelineLoaded = ref(false)
 const timelineHasTrace = ref(false)

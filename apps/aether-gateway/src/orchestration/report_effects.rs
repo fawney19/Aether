@@ -277,6 +277,12 @@ fn codex_websocket_quota_from_stream_payload(
         .ok()?;
     let text = std::str::from_utf8(&body).ok()?;
     let mut latest = None::<Value>;
+    if let Ok(value) = serde_json::from_str::<Value>(text.trim()) {
+        latest = admin_provider_quota_pure::parse_codex_websocket_rate_limits_response(
+            &value,
+            now_unix_secs,
+        );
+    }
     for raw_line in text.lines() {
         let line = raw_line.trim_matches('\r').trim();
         let data = line.strip_prefix("data:").map(str::trim).unwrap_or(line);

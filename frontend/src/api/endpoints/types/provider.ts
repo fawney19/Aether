@@ -331,6 +331,8 @@ export interface CodexUpstreamMetadata {
   credential_generation?: string
   updated_at?: number  // 更新时间（Unix 时间戳）
   plan_type?: string  // 套餐类型
+  allowed?: boolean
+  limit_reached?: boolean
   primary_used_percent?: number  // 周限额窗口使用百分比
   primary_reset_seconds?: number  // 周限额重置剩余秒数
   primary_reset_after_seconds?: number  // 周限额重置剩余秒数（兼容字段）

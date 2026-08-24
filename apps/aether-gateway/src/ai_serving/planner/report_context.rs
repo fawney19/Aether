@@ -284,6 +284,9 @@ mod tests {
             balance_remaining: None,
             access_allowed: true,
             api_key_is_standalone: false,
+            sell_rate_multiplier: 1.0,
+            billing_group_id: None,
+            billing_group_name: None,
         };
         let original_headers = http::HeaderMap::new();
         let provider_request_headers = BTreeMap::new();
@@ -370,6 +373,9 @@ mod tests {
             balance_remaining: None,
             access_allowed: true,
             api_key_is_standalone: false,
+            sell_rate_multiplier: 1.0,
+            billing_group_id: None,
+            billing_group_name: None,
         };
         let original_headers = http::HeaderMap::new();
         let provider_request_headers = BTreeMap::new();
@@ -438,6 +444,9 @@ mod tests {
             balance_remaining: None,
             access_allowed: true,
             api_key_is_standalone: false,
+            sell_rate_multiplier: 1.0,
+            billing_group_id: None,
+            billing_group_name: None,
         };
         let mut original_headers = http::HeaderMap::new();
         original_headers.insert("x-aether-tls-ja3", "ja3-value".parse().unwrap());

@@ -82,6 +82,22 @@ pub fn build_ai_execution_report_context(parts: AiExecutionReportContextParts<'_
             .unwrap_or(Value::Null),
     );
     object.insert(
+        "sell_rate_multiplier".to_string(),
+        Value::from(parts.auth_context.sell_rate_multiplier),
+    );
+    if let Some(group_id) = parts.auth_context.billing_group_id.as_ref() {
+        object.insert(
+            "billing_group_id".to_string(),
+            Value::String(group_id.clone()),
+        );
+    }
+    if let Some(group_name) = parts.auth_context.billing_group_name.as_ref() {
+        object.insert(
+            "billing_group_name".to_string(),
+            Value::String(group_name.clone()),
+        );
+    }
+    object.insert(
         "request_id".to_string(),
         Value::String(parts.request_id.to_string()),
     );
@@ -269,6 +285,9 @@ mod tests {
             balance_remaining: Some(42.0),
             access_allowed: true,
             api_key_is_standalone: false,
+            sell_rate_multiplier: 1.0,
+            billing_group_id: None,
+            billing_group_name: None,
         }
     }
 

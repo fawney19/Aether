@@ -1021,12 +1021,15 @@ mod tests {
             balance_remaining: None,
             access_allowed: true,
             user_rate_limit: None,
+            sell_rate_multiplier: 1.0,
             api_key_rate_limit: None,
             api_key_is_standalone: true,
             admin_bypass_limits: false,
             local_rejection: None,
             allowed_models: None,
             ip_rules: None,
+            billing_group_id: None,
+            billing_group_name: None,
         });
         let diagnostic = LocalExecutionRuntimeMissDiagnostic {
             reason: "candidate_list_empty".to_string(),
@@ -1201,12 +1204,15 @@ mod tests {
             balance_remaining: None,
             access_allowed: true,
             user_rate_limit: None,
+            sell_rate_multiplier: 1.0,
             api_key_rate_limit: None,
             api_key_is_standalone: true,
             admin_bypass_limits: false,
             local_rejection: None,
             allowed_models: None,
             ip_rules: None,
+            billing_group_id: None,
+            billing_group_name: None,
         });
 
         record_live_websocket_preflight_failure(

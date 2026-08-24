@@ -29,6 +29,8 @@ const USERS_ME_API_KEY_WRITE_UNAVAILABLE_DETAIL: &str = "用户 API 密钥写入
 #[derive(Debug, Deserialize)]
 struct UsersMeCreateApiKeyRequest {
     name: String,
+    #[serde(alias = "groupId")]
+    group_id: String,
     #[serde(default)]
     rate_limit: Option<i32>,
     #[serde(default)]
@@ -43,6 +45,8 @@ struct UsersMeCreateApiKeyRequest {
 struct UsersMeUpdateApiKeyRequest {
     #[serde(default)]
     name: Option<String>,
+    #[serde(default, alias = "groupId")]
+    group_id: Option<String>,
     #[serde(default)]
     rate_limit: Option<i32>,
     #[serde(default)]
@@ -159,6 +163,7 @@ fn build_users_me_api_key_list_payload(
     json!({
         "id": record.api_key_id,
         "name": record.name,
+        "group_id": record.billing_group_id,
         "key_display": users_me_masked_api_key_display(state, record.key_encrypted.as_deref()),
         "is_active": record.is_active,
         "is_locked": is_locked,
@@ -183,6 +188,7 @@ fn build_users_me_api_key_detail_payload(
     json!({
         "id": record.api_key_id,
         "name": record.name,
+        "group_id": record.billing_group_id,
         "key_display": users_me_masked_api_key_display(state, record.key_encrypted.as_deref()),
         "is_active": record.is_active,
         "is_locked": is_locked,
@@ -196,6 +202,41 @@ fn build_users_me_api_key_detail_payload(
         "expires_at": format_users_me_optional_unix_secs_iso8601(record.expires_at_unix_secs),
         "created_at": format_users_me_optional_unix_secs_iso8601(record.created_at_unix_secs),
     })
+}
+
+async fn resolve_users_me_billing_group(
+    state: &AppState,
+    user_id: &str,
+    group_id: &str,
+) -> Result<aether_data::repository::users::StoredUserGroup, Response<Body>> {
+    let group_id = group_id.trim();
+    if group_id.is_empty() {
+        return Err(build_auth_error_response(
+            http::StatusCode::BAD_REQUEST,
+            "必须选择当前有效用户组",
+            false,
+        ));
+    }
+    let groups = state
+        .list_effective_user_groups_for_user(user_id)
+        .await
+        .map_err(|err| {
+            build_auth_error_response(
+                http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("user group lookup failed: {err:?}"),
+                false,
+            )
+        })?;
+    groups
+        .into_iter()
+        .find(|group| group.id == group_id)
+        .ok_or_else(|| {
+            build_auth_error_response(
+                http::StatusCode::BAD_REQUEST,
+                "所选用户组无效或当前用户无权使用",
+                false,
+            )
+        })
 }
 
 fn normalize_users_me_required_api_key_name(value: &str) -> Result<String, String> {
@@ -530,6 +571,11 @@ pub(super) async fn handle_users_me_api_key_create(
             )
         }
     };
+    let billing_group =
+        match resolve_users_me_billing_group(state, &auth.user.id, &payload.group_id).await {
+            Ok(value) => value,
+            Err(response) => return response,
+        };
     let name = match normalize_users_me_required_api_key_name(&payload.name) {
         Ok(value) => value,
         Err(detail) => {
@@ -575,6 +621,7 @@ pub(super) async fn handle_users_me_api_key_create(
     let record = aether_data::repository::auth::CreateUserApiKeyRecord {
         user_id: auth.user.id.clone(),
         api_key_id: uuid::Uuid::new_v4().to_string(),
+        billing_group_id: billing_group.id,
         key_hash: hash_users_me_api_key(&plaintext_key),
         key_encrypted: Some(key_encrypted),
         name: Some(name.clone()),
@@ -685,6 +732,15 @@ pub(super) async fn handle_users_me_api_key_update(
             )
         }
     };
+    let billing_group_id = match payload.group_id {
+        Some(group_id) => {
+            match resolve_users_me_billing_group(state, &auth.user.id, &group_id).await {
+                Ok(group) => Some(group.id),
+                Err(response) => return response,
+            }
+        }
+        None => None,
+    };
     let name = match payload.name {
         Some(value) => match normalize_users_me_required_api_key_name(&value) {
             Ok(value) => Some(value),
@@ -732,6 +788,7 @@ pub(super) async fn handle_users_me_api_key_update(
         .update_user_api_key_basic(aether_data::repository::auth::UpdateUserApiKeyBasicRecord {
             user_id: auth.user.id.clone(),
             api_key_id: snapshot.api_key_id.clone(),
+            billing_group_id,
             name,
             rate_limit,
             concurrent_limit,

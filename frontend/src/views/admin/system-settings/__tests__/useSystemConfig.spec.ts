@@ -122,7 +122,35 @@ describe('useSystemConfig', () => {
     await state.loadSystemConfig()
 
     expect(state.systemConfig.value.request_record_level).toBe('full')
+    expect(state.systemConfig.value.show_github_link).toBe(true)
+    expect(state.systemConfig.value.guide_mode).toBe('builtin')
     expect(state.systemConfig.value).not.toHaveProperty('max_request_body_size')
     expect(state.systemConfig.value).not.toHaveProperty('max_response_body_size')
+  })
+
+  it('saves github visibility and guide branding with site info', async () => {
+    getAllSystemConfigsMock.mockResolvedValue([])
+    updateSystemConfigMock.mockResolvedValue({})
+
+    const state = useSystemConfig()
+    await state.loadSystemConfig()
+
+    state.systemConfig.value.show_github_link = false
+    state.systemConfig.value.guide_mode = 'hidden'
+    expect(state.hasSiteInfoChanges.value).toBe(true)
+
+    await state.saveSiteInfo()
+
+    expect(updateSystemConfigMock).toHaveBeenCalledWith(
+      'show_github_link',
+      false,
+      '是否显示 GitHub 图标',
+    )
+    expect(updateSystemConfigMock).toHaveBeenCalledWith(
+      'guide_mode',
+      'hidden',
+      '文档页模式：builtin / hidden / custom',
+    )
+    expect(state.hasSiteInfoChanges.value).toBe(false)
   })
 })

@@ -1700,6 +1700,11 @@ pub fn admin_system_config_default_value(key: &str) -> Option<serde_json::Value>
     match key {
         "site_name" => Some(json!("Aether")),
         "site_subtitle" => Some(json!("AI Gateway")),
+        "show_github_link" => Some(json!(true)),
+        "guide_mode" => Some(json!("builtin")),
+        "guide_custom_type" => Some(json!("url")),
+        "guide_url" => Some(json!("")),
+        "guide_html" => Some(json!("")),
         "default_user_initial_gift_usd" => Some(json!(10.0)),
         "password_policy_level" => Some(json!("weak")),
         REQUEST_RECORD_LEVEL_KEY => Some(json!("full")),
@@ -1789,6 +1794,99 @@ pub fn admin_system_config_default_value(key: &str) -> Option<serde_json::Value>
         "module.chat_pii_redaction.placeholder_prefix" => Some(json!("AETHER")),
         _ => None,
     }
+}
+
+pub const MAX_GUIDE_HTML_BYTES: usize = 512 * 1024;
+
+fn config_string_or_default(value: Option<&Value>, default: &str) -> String {
+    value
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(default)
+        .to_string()
+}
+
+fn is_public_http_url(raw: &str) -> bool {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.len() > 2048 {
+        return false;
+    }
+    let Ok(parsed) = url::Url::parse(trimmed) else {
+        return false;
+    };
+    matches!(parsed.scheme(), "http" | "https") && parsed.host_str().is_some()
+}
+
+pub fn normalize_show_github_link(value: Option<&Value>) -> bool {
+    value.and_then(Value::as_bool).unwrap_or(true)
+}
+
+pub fn normalize_guide_mode(value: Option<&Value>) -> &'static str {
+    match value.and_then(Value::as_str).map(str::trim) {
+        Some("hidden") => "hidden",
+        Some("custom") => "custom",
+        _ => "builtin",
+    }
+}
+
+pub fn normalize_guide_custom_type(value: Option<&Value>) -> &'static str {
+    match value.and_then(Value::as_str).map(str::trim) {
+        Some("html") => "html",
+        _ => "url",
+    }
+}
+
+pub fn normalize_guide_url(value: Option<&Value>) -> String {
+    value
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| is_public_http_url(value))
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn normalize_guide_html(value: Option<&Value>) -> String {
+    match value.and_then(Value::as_str) {
+        Some(html) if html.len() <= MAX_GUIDE_HTML_BYTES => html.to_string(),
+        Some(html) => html
+            .get(..MAX_GUIDE_HTML_BYTES)
+            .unwrap_or_default()
+            .to_string(),
+        None => String::new(),
+    }
+}
+
+pub fn build_public_site_info_payload(
+    site_name: Option<Value>,
+    site_subtitle: Option<Value>,
+    show_github_link: Option<Value>,
+    guide_mode: Option<Value>,
+    guide_custom_type: Option<Value>,
+    guide_url: Option<Value>,
+    guide_html: Option<Value>,
+) -> Value {
+    let mode = normalize_guide_mode(guide_mode.as_ref());
+    let custom_type = normalize_guide_custom_type(guide_custom_type.as_ref());
+    let public_url = if mode == "custom" && custom_type == "url" {
+        normalize_guide_url(guide_url.as_ref())
+    } else {
+        String::new()
+    };
+    let public_html = if mode == "custom" && custom_type == "html" {
+        normalize_guide_html(guide_html.as_ref())
+    } else {
+        String::new()
+    };
+    json!({
+        "site_name": config_string_or_default(site_name.as_ref(), "Aether"),
+        "site_subtitle": config_string_or_default(site_subtitle.as_ref(), "AI Gateway"),
+        "show_github_link": normalize_show_github_link(show_github_link.as_ref()),
+        "guide_mode": mode,
+        "guide_custom_type": custom_type,
+        "guide_url": public_url,
+        "guide_html": public_html,
+    })
 }
 
 pub fn build_admin_system_configs_payload(
@@ -2393,6 +2491,90 @@ pub fn parse_admin_system_config_update(
             }
             None if value.is_null() => value = json!("AETHER"),
             None => {
+                return Err((
+                    http::StatusCode::BAD_REQUEST,
+                    json!({ "detail": "请求数据验证失败" }),
+                ));
+            }
+        },
+        "show_github_link" => match value.as_bool() {
+            Some(enabled) => value = json!(enabled),
+            None if value.is_null() => value = json!(true),
+            None => {
+                return Err((
+                    http::StatusCode::BAD_REQUEST,
+                    json!({ "detail": "请求数据验证失败" }),
+                ));
+            }
+        },
+        "guide_mode" => match value.as_str().map(str::trim) {
+            Some("builtin" | "hidden" | "custom") => {
+                value = json!(value.as_str().unwrap().trim());
+            }
+            Some(_) => {
+                return Err((
+                    http::StatusCode::BAD_REQUEST,
+                    json!({ "detail": "文档页模式必须是 builtin、hidden 或 custom" }),
+                ));
+            }
+            None if value.is_null() => value = json!("builtin"),
+            None => {
+                return Err((
+                    http::StatusCode::BAD_REQUEST,
+                    json!({ "detail": "请求数据验证失败" }),
+                ));
+            }
+        },
+        "guide_custom_type" => match value.as_str().map(str::trim) {
+            Some("url" | "html") => {
+                value = json!(value.as_str().unwrap().trim());
+            }
+            Some(_) => {
+                return Err((
+                    http::StatusCode::BAD_REQUEST,
+                    json!({ "detail": "自定义文档类型必须是 url 或 html" }),
+                ));
+            }
+            None if value.is_null() => value = json!("url"),
+            None => {
+                return Err((
+                    http::StatusCode::BAD_REQUEST,
+                    json!({ "detail": "请求数据验证失败" }),
+                ));
+            }
+        },
+        "guide_url" => match value.as_str() {
+            Some(raw) => {
+                let trimmed = raw.trim();
+                if trimmed.is_empty() {
+                    value = json!("");
+                } else if is_public_http_url(trimmed) {
+                    value = json!(trimmed);
+                } else {
+                    return Err((
+                        http::StatusCode::BAD_REQUEST,
+                        json!({ "detail": "文档链接必须是 http:// 或 https:// 地址" }),
+                    ));
+                }
+            }
+            None if value.is_null() => value = json!(""),
+            None => {
+                return Err((
+                    http::StatusCode::BAD_REQUEST,
+                    json!({ "detail": "请求数据验证失败" }),
+                ));
+            }
+        },
+        "guide_html" => match &value {
+            Value::String(raw) if raw.len() <= MAX_GUIDE_HTML_BYTES => {}
+            Value::String(_) => {
+                return Err((
+                    http::StatusCode::BAD_REQUEST,
+                    json!({ "detail": "HTML 内容不能超过 512KB" }),
+                ));
+            }
+            Value::Null => value = json!(""),
+            _ => {
                 return Err((
                     http::StatusCode::BAD_REQUEST,
                     json!({ "detail": "请求数据验证失败" }),
@@ -3467,6 +3649,82 @@ mod tests {
             "module.bark_push.device_key"
         ));
         assert!(!is_sensitive_admin_system_config_key("site_name"));
+        assert!(!is_sensitive_admin_system_config_key("show_github_link"));
+        assert!(!is_sensitive_admin_system_config_key("guide_html"));
+    }
+
+    #[test]
+    fn public_site_info_defaults_keep_open_source_branding() {
+        let payload = build_public_site_info_payload(None, None, None, None, None, None, None);
+        assert_eq!(payload["site_name"], "Aether");
+        assert_eq!(payload["site_subtitle"], "AI Gateway");
+        assert_eq!(payload["show_github_link"], true);
+        assert_eq!(payload["guide_mode"], "builtin");
+        assert_eq!(payload["guide_custom_type"], "url");
+        assert_eq!(payload["guide_url"], "");
+        assert_eq!(payload["guide_html"], "");
+    }
+
+    #[test]
+    fn public_site_info_omits_unused_custom_guide_payload() {
+        let payload = build_public_site_info_payload(
+            Some(json!("Shop")),
+            Some(json!("API")),
+            Some(json!(false)),
+            Some(json!("hidden")),
+            Some(json!("html")),
+            Some(json!("https://docs.example.com")),
+            Some(json!("<h1>secret</h1>")),
+        );
+        assert_eq!(payload["site_name"], "Shop");
+        assert_eq!(payload["show_github_link"], false);
+        assert_eq!(payload["guide_mode"], "hidden");
+        assert_eq!(payload["guide_url"], "");
+        assert_eq!(payload["guide_html"], "");
+    }
+
+    #[test]
+    fn public_site_info_exposes_custom_html_only_in_custom_html_mode() {
+        let payload = build_public_site_info_payload(
+            None,
+            None,
+            Some(json!(false)),
+            Some(json!("custom")),
+            Some(json!("html")),
+            Some(json!("https://docs.example.com")),
+            Some(json!("<h1>Docs</h1>")),
+        );
+        assert_eq!(payload["guide_mode"], "custom");
+        assert_eq!(payload["guide_custom_type"], "html");
+        assert_eq!(payload["guide_url"], "");
+        assert_eq!(payload["guide_html"], "<h1>Docs</h1>");
+    }
+
+    #[test]
+    fn site_branding_config_updates_validate_values() {
+        let github = parse_admin_system_config_update("show_github_link", br#"{"value":false}"#)
+            .expect("boolean github visibility should parse");
+        assert_eq!(github.value, json!(false));
+        assert!(
+            parse_admin_system_config_update("show_github_link", br#"{"value":"false"}"#,).is_err()
+        );
+
+        let mode = parse_admin_system_config_update("guide_mode", br#"{"value":"hidden"}"#)
+            .expect("guide mode should parse");
+        assert_eq!(mode.value, json!("hidden"));
+        assert!(parse_admin_system_config_update("guide_mode", br#"{"value":"off"}"#).is_err());
+
+        let url = parse_admin_system_config_update(
+            "guide_url",
+            br#"{"value":"https://docs.example.com/guide"}"#,
+        )
+        .expect("https guide url should parse");
+        assert_eq!(url.value, json!("https://docs.example.com/guide"));
+        assert!(parse_admin_system_config_update(
+            "guide_url",
+            br#"{"value":"javascript:alert(1)"}"#,
+        )
+        .is_err());
     }
 
     #[test]

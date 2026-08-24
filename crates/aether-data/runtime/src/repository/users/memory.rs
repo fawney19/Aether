@@ -290,6 +290,7 @@ fn memory_group_from_record(
         record.allowed_models_mode,
         record.rate_limit,
         record.rate_limit_mode,
+        record.sell_rate_multiplier,
         Some(now),
         Some(now),
     )
@@ -312,6 +313,7 @@ fn memory_update_group_from_record(
     group.allowed_models_mode = record.allowed_models_mode;
     group.rate_limit = record.rate_limit;
     group.rate_limit_mode = record.rate_limit_mode;
+    group.sell_rate_multiplier = record.sell_rate_multiplier;
     group.updated_at = Some(chrono::Utc::now());
     StoredUserGroup::new(
         group.id,
@@ -327,6 +329,7 @@ fn memory_update_group_from_record(
         group.allowed_models_mode,
         group.rate_limit,
         group.rate_limit_mode,
+        group.sell_rate_multiplier,
         group.created_at,
         group.updated_at,
     )

@@ -767,6 +767,37 @@ describe('PoolManagement Codex cycle stats mode', () => {
     expect(root.querySelector('[data-testid="pool-stats-cycle-single-marker"]')).toBeNull()
   })
 
+  it('shows Codex remaining 0% on the pool table when the account is exhausted', async () => {
+    const exhaustedCodexKey = createPoolKey('codex', {
+      status_snapshot: {
+        oauth: { code: 'valid' },
+        account: { code: 'ok', blocked: false },
+        quota: {
+          code: 'exhausted',
+          exhausted: true,
+          provider_type: 'codex',
+          usage_ratio: 1,
+          windows: [
+            {
+              code: 'weekly',
+              remaining_ratio: 1,
+              window_minutes: 10_080,
+            },
+          ],
+        },
+      },
+    })
+    endpointMocks.getPoolOverview.mockResolvedValue({ items: [createOverview('codex')] })
+    endpointMocks.listPoolKeys.mockResolvedValue(createKeyPage(exhaustedCodexKey))
+    endpointMocks.getProvider.mockResolvedValue(createProvider('codex'))
+
+    const root = mountPoolManagement()
+    await settle()
+
+    const meter = root.querySelector('[data-testid="pool-quota-meter-text"]')
+    expect(meter?.textContent?.trim()).toBe('0.0%')
+  })
+
   it('opens only one score popover across desktop and mobile layouts', async () => {
     const scoredKey = createPoolKey('codex', {
       pool_score: {

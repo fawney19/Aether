@@ -1497,6 +1497,8 @@ pub struct BillingUsageInput {
     pub image_quality: Option<String>,
     pub image_output_format: Option<String>,
     pub cache_ttl_minutes: Option<i64>,
+    #[serde(default = "crate::pricing::default_sell_rate_multiplier")]
+    pub sell_rate_multiplier: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1508,6 +1510,8 @@ pub struct BillingAuthorizationEstimateInput {
     pub cache_ttl_minutes: Option<i64>,
     pub input_tokens: i64,
     pub max_output_tokens: Option<i64>,
+    #[serde(default = "crate::pricing::default_sell_rate_multiplier")]
+    pub sell_rate_multiplier: f64,
 }
 
 impl BillingAuthorizationEstimateInput {
@@ -1519,6 +1523,7 @@ impl BillingAuthorizationEstimateInput {
             cache_ttl_minutes: None,
             input_tokens: input_tokens.max(0),
             max_output_tokens: None,
+            sell_rate_multiplier: default_sell_rate_multiplier(),
         }
     }
 }
@@ -1542,8 +1547,13 @@ impl BillingUsageInput {
             image_quality: None,
             image_output_format: None,
             cache_ttl_minutes: None,
+            sell_rate_multiplier: default_sell_rate_multiplier(),
         }
     }
+}
+
+pub fn default_sell_rate_multiplier() -> f64 {
+    aether_data_contracts::repository::users::DEFAULT_SELL_RATE_MULTIPLIER
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1551,6 +1561,7 @@ pub struct BillingComputation {
     pub cost_result: crate::CostResult,
     pub actual_total_cost: f64,
     pub rate_multiplier: f64,
+    pub cost_rate_multiplier: f64,
     pub is_free_tier: bool,
     pub pricing_resolution: BillingPricingResolution,
 }

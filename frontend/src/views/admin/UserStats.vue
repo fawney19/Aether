@@ -14,41 +14,24 @@
           v-model="timeRange"
           :allow-hourly="true"
         />
-        <Select
-          v-model="selectedUserId"
-        >
-          <SelectTrigger class="h-8 text-xs w-52">
-            <SelectValue placeholder="选择用户" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem
-              v-for="user in users"
-              :key="user.id"
-              :value="user.id"
-            >
-              {{ user.username || user.email }}
-            </SelectItem>
-          </SelectContent>
-        </Select>
-        <Select
-          v-model="compareUserId"
-        >
-          <SelectTrigger class="h-8 text-xs w-52">
-            <SelectValue placeholder="对比用户（可选）" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="__none__">
-              不对比
-            </SelectItem>
-            <SelectItem
-              v-for="user in users"
-              :key="`compare-${user.id}`"
-              :value="user.id"
-            >
-              {{ user.username || user.email }}
-            </SelectItem>
-          </SelectContent>
-        </Select>
+        <ServerUserSelector
+          :model-value="selectedUserId || ''"
+          :initial-users="userOptions"
+          dropdown
+          :allow-all="false"
+          class="w-52"
+          @update:model-value="selectedUserId = $event || null"
+        />
+        <ServerUserSelector
+          :model-value="compareUserId"
+          :initial-users="userOptions"
+          dropdown
+          :allow-all="false"
+          none-value="__none__"
+          none-label="不对比"
+          class="w-52"
+          @update:model-value="compareUserId = $event || '__none__'"
+        />
       </div>
     </div>
 
@@ -93,7 +76,15 @@
           </div>
           <div>
             <div class="text-xs text-muted-foreground">
-              成本
+              用户扣费
+            </div>
+            <div class="font-semibold">
+              {{ formatCurrency(userSummary?.total_actual_cost ?? userSummary?.total_cost ?? 0) }}
+            </div>
+          </div>
+          <div>
+            <div class="text-xs text-muted-foreground">
+              上游
             </div>
             <div class="font-semibold">
               {{ formatCurrency(userSummary?.total_cost ?? 0) }}
@@ -145,10 +136,11 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
-import { Card, Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui'
+import { Card } from '@/components/ui'
 import LineChart from '@/components/charts/LineChart.vue'
 import { LoadingState, TimeRangePicker } from '@/components/common'
 import { LeaderboardTable } from '@/components/stats'
+import ServerUserSelector from '@/features/usage/components/ServerUserSelector.vue'
 import { adminApi, type LeaderboardItem } from '@/api/admin'
 import { usersApi, type User } from '@/api/users'
 import { usageApi } from '@/api/usage'
@@ -170,8 +162,15 @@ interface UsageSummary {
   total_requests: number
   total_tokens: number
   total_cost: number
+  total_actual_cost?: number
   error_rate: number
 }
+
+const userOptions = computed(() => users.value.map((user) => ({
+  id: user.id,
+  username: user.username,
+  email: user.email,
+})))
 
 interface TimeSeriesItem {
   date: string

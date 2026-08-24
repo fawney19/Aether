@@ -239,6 +239,7 @@ impl AppState {
                 unlimited,
             )
             .await
+            .map(|value| value.map(|(user, _created)| user))
             .map_err(|err| GatewayError::Internal(err.to_string()))
     }
 

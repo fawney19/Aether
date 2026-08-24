@@ -18,7 +18,7 @@
               Tokens
             </SelectItem>
             <SelectItem value="cost">
-              成本
+              用户扣费
             </SelectItem>
           </SelectContent>
         </Select>
@@ -54,7 +54,10 @@
             Tokens
           </TableHead>
           <TableHead class="text-right">
-            成本
+            用户扣费
+          </TableHead>
+          <TableHead class="text-right">
+            上游
           </TableHead>
         </TableRow>
       </TableHeader>
@@ -72,6 +75,9 @@
           </TableCell>
           <TableCell class="text-right">
             {{ formatTokens(item.tokens) }}
+          </TableCell>
+          <TableCell class="text-right">
+            {{ formatCurrency(item.actual_cost ?? item.cost) }}
           </TableCell>
           <TableCell class="text-right">
             {{ formatCurrency(item.cost) }}

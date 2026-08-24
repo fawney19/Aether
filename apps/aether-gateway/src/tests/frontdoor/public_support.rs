@@ -699,11 +699,53 @@ async fn gateway_handles_public_catalog_site_info_without_proxying_upstream() {
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
     assert_eq!(payload["site_name"], "Aether Local");
     assert_eq!(payload["site_subtitle"], "Rust Only");
-    assert_eq!(payload.as_object().map(|object| object.len()), Some(2));
+    assert_eq!(payload["show_github_link"], true);
+    assert_eq!(payload["guide_mode"], "builtin");
+    assert_eq!(payload["guide_custom_type"], "url");
+    assert_eq!(payload["guide_url"], "");
+    assert_eq!(payload["guide_html"], "");
+    assert_eq!(payload.as_object().map(|object| object.len()), Some(7));
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();
     upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_exposes_custom_guide_html_on_public_site_info() {
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(
+                crate::data::GatewayDataState::disabled().with_system_config_values_for_tests(
+                    vec![
+                        ("show_github_link".to_string(), json!(false)),
+                        ("guide_mode".to_string(), json!("custom")),
+                        ("guide_custom_type".to_string(), json!("html")),
+                        ("guide_url".to_string(), json!("https://docs.example.com")),
+                        ("guide_html".to_string(), json!("<h1>Shop Docs</h1>")),
+                    ],
+                ),
+            ),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let payload: serde_json::Value = reqwest::Client::new()
+        .get(format!("{gateway_url}/api/public/site-info"))
+        .send()
+        .await
+        .expect("request should succeed")
+        .json()
+        .await
+        .expect("json body should parse");
+
+    assert_eq!(payload["show_github_link"], false);
+    assert_eq!(payload["guide_mode"], "custom");
+    assert_eq!(payload["guide_custom_type"], "html");
+    assert_eq!(payload["guide_url"], "");
+    assert_eq!(payload["guide_html"], "<h1>Shop Docs</h1>");
+
+    gateway_handle.abort();
 }
 
 #[tokio::test]
@@ -2912,6 +2954,7 @@ async fn gateway_handles_user_monitoring_rate_limit_status_locally_without_proxy
             allowed_models_mode: "unrestricted".to_string(),
             rate_limit: Some(80),
             rate_limit_mode: "custom".to_string(),
+            sell_rate_multiplier: 1.0,
         })
         .await
         .expect("group should create")
@@ -4778,16 +4821,18 @@ async fn gateway_handles_wallet_today_cost_locally_without_proxying_upstream() {
         ]),
         auth_now + chrono::Duration::hours(1),
     );
+    let mut today_usage = sample_user_usage_audit(
+        "usage-wallet-today-1",
+        "req-wallet-today-1",
+        "user-auth-1",
+        "gpt-4.1",
+        "OpenAI",
+        "completed",
+        usage_now - chrono::Duration::minutes(30),
+    );
+    today_usage.actual_total_cost_usd = 0.5;
     let usage_repository = Arc::new(InMemoryUsageReadRepository::seed(vec![
-        sample_user_usage_audit(
-            "usage-wallet-today-1",
-            "req-wallet-today-1",
-            "user-auth-1",
-            "gpt-4.1",
-            "OpenAI",
-            "completed",
-            usage_now - chrono::Duration::minutes(30),
-        ),
+        today_usage,
         sample_user_usage_audit(
             "usage-wallet-old-1",
             "req-wallet-old-1",
@@ -4828,7 +4873,7 @@ async fn gateway_handles_wallet_today_cost_locally_without_proxying_upstream() {
     assert_eq!(payload["total_requests"], 1);
     assert_eq!(payload["input_tokens"], 120);
     assert_eq!(payload["cache_read_tokens"], 15);
-    assert_eq!(payload["total_cost"], 1.25);
+    assert_eq!(payload["total_cost"], 0.5);
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();
@@ -5653,6 +5698,7 @@ async fn gateway_handles_users_me_usage_locally_without_proxying_upstream() {
         now - chrono::Duration::minutes(5),
     );
     streaming_usage.candidate_index = Some(2);
+    streaming_usage.actual_total_cost_usd = 0.625;
     streaming_usage.request_metadata = Some(json!({
         "rate_multiplier": 0.5,
         "input_price_per_1m": 3.0,
@@ -5744,6 +5790,9 @@ async fn gateway_handles_users_me_usage_locally_without_proxying_upstream() {
     assert_eq!(payload["records"][0]["output_price_per_1m"], 9.0);
     assert_eq!(payload["records"][0]["cache_creation_price_per_1m"], 3.75);
     assert_eq!(payload["records"][0]["cache_read_price_per_1m"], 0.3);
+    assert_eq!(payload["records"][0]["actual_cost"], 0.625);
+    assert_eq!(payload["records"][0]["rate_multiplier"], 0.5);
+    assert!(payload["total_actual_cost"].is_number());
     assert_eq!(payload["records"][0]["has_fallback"], true);
     assert_eq!(payload["records"][0]["api_key"]["name"], "renamed-key");
     assert_eq!(payload["records"][0]["api_key"]["display"], "renamed-key");
@@ -7078,6 +7127,28 @@ async fn gateway_handles_users_me_api_key_writes_locally_without_proxying_upstre
         .expect("export record should build")]),
     );
     let user_repository = Arc::new(InMemoryUserReadRepository::seed_auth_users(vec![user]));
+    let billing_group = user_repository
+        .create_user_group(UpsertUserGroupRecord {
+            name: "标准计费组".to_string(),
+            description: None,
+            priority: 0,
+            allowed_providers: None,
+            allowed_providers_mode: "inherit".to_string(),
+            allowed_api_formats: None,
+            allowed_api_formats_mode: "inherit".to_string(),
+            allowed_models: None,
+            allowed_models_mode: "inherit".to_string(),
+            rate_limit: None,
+            rate_limit_mode: "inherit".to_string(),
+            sell_rate_multiplier: 0.8,
+        })
+        .await
+        .expect("billing group should create")
+        .expect("billing group should exist");
+    user_repository
+        .replace_user_groups_for_user("user-auth-1", std::slice::from_ref(&billing_group.id))
+        .await
+        .expect("billing group membership should update");
     let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
         vec![sample_provider("provider-openai", "openai", 10)],
         vec![sample_endpoint(
@@ -7118,6 +7189,7 @@ async fn gateway_handles_users_me_api_key_writes_locally_without_proxying_upstre
         .header("user-agent", "AetherTest/1.0")
         .json(&json!({
             "name": "writer-key",
+            "group_id": billing_group.id,
             "rate_limit": 120
         }))
         .send()
@@ -7155,6 +7227,7 @@ async fn gateway_handles_users_me_api_key_writes_locally_without_proxying_upstre
         .header("user-agent", "AetherTest/1.0")
         .json(&json!({
             "name": "writer-key-renamed",
+            "group_id": billing_group.id,
             "rate_limit": 30,
             "concurrent_limit": 4,
             "feature_settings": {
@@ -8315,6 +8388,7 @@ async fn gateway_handles_users_me_providers_locally_without_proxying_upstream() 
             allowed_models_mode: "unrestricted".to_string(),
             rate_limit: None,
             rate_limit_mode: "system".to_string(),
+            sell_rate_multiplier: 1.0,
         })
         .await
         .expect("group should create")
@@ -9773,6 +9847,7 @@ async fn gateway_refreshes_users_me_available_models_after_group_assignment() {
             allowed_models_mode: "specific".to_string(),
             rate_limit: None,
             rate_limit_mode: "system".to_string(),
+            sell_rate_multiplier: 1.0,
         })
         .await
         .expect("group should create")
@@ -9881,6 +9956,7 @@ async fn gateway_returns_no_users_me_available_models_when_group_denies_all_mode
             allowed_models_mode: "deny_all".to_string(),
             rate_limit: None,
             rate_limit_mode: "system".to_string(),
+            sell_rate_multiplier: 1.0,
         })
         .await
         .expect("group should create")
@@ -9974,6 +10050,7 @@ async fn gateway_returns_service_unavailable_for_users_me_available_models_witho
             allowed_models_mode: "unrestricted".to_string(),
             rate_limit: None,
             rate_limit_mode: "system".to_string(),
+            sell_rate_multiplier: 1.0,
         })
         .await
         .expect("group should create")

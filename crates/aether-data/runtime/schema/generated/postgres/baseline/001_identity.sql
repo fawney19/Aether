@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS public.user_groups (
     allowed_models_mode character varying(32) DEFAULT 'inherit' NOT NULL,
     rate_limit integer,
     rate_limit_mode character varying(32) DEFAULT 'inherit' NOT NULL,
+    sell_rate_multiplier double precision DEFAULT 1 NOT NULL,
     created_at bigint NOT NULL,
     updated_at bigint NOT NULL
 );
@@ -70,6 +71,7 @@ CREATE INDEX IF NOT EXISTS user_group_members_user_id_idx ON public.user_group_m
 CREATE TABLE IF NOT EXISTS public.api_keys (
     id character varying(64) NOT NULL,
     user_id character varying(64) NOT NULL,
+    group_id character varying(64),
     key_hash character varying(255) NOT NULL,
     key_encrypted text,
     name character varying(255),
@@ -100,6 +102,7 @@ CREATE TABLE IF NOT EXISTS public.api_keys (
 ALTER TABLE ONLY public.api_keys ADD CONSTRAINT api_keys_pkey PRIMARY KEY (id);
 ALTER TABLE ONLY public.api_keys ADD CONSTRAINT api_keys_key_hash_key UNIQUE (key_hash);
 CREATE INDEX IF NOT EXISTS api_keys_user_id_idx ON public.api_keys USING btree (user_id);
+CREATE INDEX IF NOT EXISTS api_keys_group_id_idx ON public.api_keys USING btree (group_id);
 
 CREATE TABLE IF NOT EXISTS public.audit_logs (
     id character varying(64) NOT NULL,

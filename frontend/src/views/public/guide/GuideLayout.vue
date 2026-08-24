@@ -1,5 +1,7 @@
 <template>
+  <CustomGuidePage v-if="siteInfoLoaded && guideMode === 'custom'" />
   <AppShell
+    v-else-if="siteInfoLoaded && guideMode === 'builtin'"
     :main-class="mainClasses"
     :sidebar-class="sidebarClasses"
     :content-class="contentClasses"
@@ -228,6 +230,7 @@
         <div class="flex items-center gap-2">
           <ThemeModeButton />
           <a
+            v-if="showGithubLink"
             href="https://github.com/fawney19/Aether"
             target="_blank"
             rel="noopener noreferrer"
@@ -304,9 +307,10 @@ import AppShell from '@/components/layout/AppShell.vue'
 import { useSiteInfo } from '@/composables/useSiteInfo'
 import { useI18n } from '@/i18n'
 import { guideNavItems } from './guide-config'
+import CustomGuidePage from './CustomGuidePage.vue'
 
 const route = useRoute()
-const { siteName, siteSubtitle } = useSiteInfo()
+const { siteName, siteSubtitle, showGithubLink, guideMode, siteInfoLoaded } = useSiteInfo()
 const { t } = useI18n()
 
 const mobileMenuOpen = ref(false)

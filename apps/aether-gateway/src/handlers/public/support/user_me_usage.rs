@@ -1017,7 +1017,8 @@ pub(super) async fn handle_users_me_usage_get(
         })
     });
 
-    let include_actual_cost = auth.user.role.eq_ignore_ascii_case("admin");
+    let include_actual_cost = true;
+    let include_provider_summary = auth.user.role.eq_ignore_ascii_case("admin");
     let auth_api_key_reader_available = state.has_auth_api_key_data_reader();
     let mut usage_summary =
         aether_data_contracts::repository::usage::StoredUsageDashboardSummary::default();
@@ -1071,7 +1072,7 @@ pub(super) async fn handle_users_me_usage_get(
                 );
             }
         };
-        if include_actual_cost {
+        if include_provider_summary {
             summary_by_provider = match state
                 .summarize_usage_breakdown(&UsageBreakdownSummaryQuery {
                     created_from_unix_secs,
@@ -1316,8 +1317,8 @@ pub(super) async fn handle_users_me_usage_get(
         },
         "records": records,
     });
-    if include_actual_cost {
-        payload["total_actual_cost"] = json!(total_actual_cost);
+    payload["total_actual_cost"] = json!(total_actual_cost);
+    if include_provider_summary {
         payload["summary_by_provider"] = json!(build_users_me_usage_summary_by_provider(
             &summary_by_provider
         ));
@@ -1548,7 +1549,7 @@ pub(super) async fn handle_users_me_usage_heatmap_get(
         }
     };
 
-    let include_actual_cost = auth.user.role.eq_ignore_ascii_case("admin");
+    let include_actual_cost = true;
     let grouped: std::collections::HashMap<String, _> =
         summaries.into_iter().map(|s| (s.date.clone(), s)).collect();
 

@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct StoredAuthApiKeySnapshot {
     pub user_id: String,
     pub username: String,
@@ -10,6 +10,9 @@ pub struct StoredAuthApiKeySnapshot {
     pub user_is_active: bool,
     pub user_is_deleted: bool,
     pub user_rate_limit: Option<i32>,
+    pub sell_rate_multiplier: f64,
+    pub billing_group_id: Option<String>,
+    pub billing_group_name: Option<String>,
     pub user_allowed_providers: Option<Vec<String>>,
     pub user_allowed_api_formats: Option<Vec<String>>,
     pub user_allowed_models: Option<Vec<String>>,
@@ -61,6 +64,9 @@ impl StoredAuthApiKeySnapshot {
             user_is_active,
             user_is_deleted,
             user_rate_limit: None,
+            sell_rate_multiplier: crate::repository::users::DEFAULT_SELL_RATE_MULTIPLIER,
+            billing_group_id: None,
+            billing_group_name: None,
             user_allowed_providers: parse_string_list(
                 user_allowed_providers,
                 "users.allowed_providers",
@@ -132,9 +138,22 @@ impl StoredAuthApiKeySnapshot {
         self.user_rate_limit = user_rate_limit;
         self
     }
+
+    pub fn with_billing_group(
+        mut self,
+        group_id: Option<String>,
+        group_name: Option<String>,
+        sell_rate_multiplier: f64,
+    ) -> Self {
+        self.billing_group_id = group_id;
+        self.billing_group_name = group_name;
+        self.sell_rate_multiplier =
+            crate::repository::users::clamp_sell_rate_multiplier(sell_rate_multiplier);
+        self
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ResolvedAuthApiKeySnapshot {
     pub user_id: String,
     pub username: String,
@@ -144,6 +163,9 @@ pub struct ResolvedAuthApiKeySnapshot {
     pub user_is_active: bool,
     pub user_is_deleted: bool,
     pub user_rate_limit: Option<i32>,
+    pub sell_rate_multiplier: f64,
+    pub billing_group_id: Option<String>,
+    pub billing_group_name: Option<String>,
     pub user_allowed_providers: Option<Vec<String>>,
     pub user_allowed_api_formats: Option<Vec<String>>,
     pub user_allowed_models: Option<Vec<String>>,
@@ -174,6 +196,9 @@ impl ResolvedAuthApiKeySnapshot {
             user_is_active: snapshot.user_is_active,
             user_is_deleted: snapshot.user_is_deleted,
             user_rate_limit: snapshot.user_rate_limit,
+            sell_rate_multiplier: snapshot.sell_rate_multiplier,
+            billing_group_id: snapshot.billing_group_id,
+            billing_group_name: snapshot.billing_group_name,
             user_allowed_providers: snapshot.user_allowed_providers,
             user_allowed_api_formats: snapshot.user_allowed_api_formats,
             user_allowed_models: snapshot.user_allowed_models,
@@ -357,6 +382,7 @@ pub struct StoredAuthApiKeyExportRecord {
     pub key_hash: String,
     pub key_encrypted: Option<String>,
     pub name: Option<String>,
+    pub billing_group_id: Option<String>,
     pub allowed_providers: Option<Vec<String>>,
     pub allowed_api_formats: Option<Vec<String>>,
     pub allowed_models: Option<Vec<String>>,
@@ -426,6 +452,7 @@ impl StoredAuthApiKeyExportRecord {
             key_hash,
             key_encrypted,
             name,
+            billing_group_id: None,
             allowed_providers: parse_string_list(allowed_providers, "api_keys.allowed_providers")?,
             allowed_api_formats: parse_string_list(
                 allowed_api_formats,
@@ -470,6 +497,11 @@ impl StoredAuthApiKeyExportRecord {
         Ok(self)
     }
 
+    pub fn with_billing_group_id(mut self, group_id: Option<String>) -> Self {
+        self.billing_group_id = group_id;
+        self
+    }
+
     pub fn with_feature_settings(mut self, feature_settings: Option<serde_json::Value>) -> Self {
         self.feature_settings = normalize_optional_json(feature_settings);
         self
@@ -501,6 +533,7 @@ pub struct StandaloneApiKeyExportListQuery {
 pub struct CreateUserApiKeyRecord {
     pub user_id: String,
     pub api_key_id: String,
+    pub billing_group_id: String,
     pub key_hash: String,
     pub key_encrypted: Option<String>,
     pub name: Option<String>,
@@ -523,6 +556,7 @@ pub struct CreateUserApiKeyRecord {
 pub struct UpdateUserApiKeyBasicRecord {
     pub user_id: String,
     pub api_key_id: String,
+    pub billing_group_id: Option<String>,
     pub name: Option<String>,
     pub rate_limit: Option<i32>,
     pub concurrent_limit: Option<i32>,

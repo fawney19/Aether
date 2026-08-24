@@ -200,6 +200,8 @@ async fn gateway_handles_dashboard_stats_locally_without_proxying_upstream() {
     assert_eq!(payload["token_breakdown"]["cache_creation"], 20);
     assert_eq!(payload["token_breakdown"]["cache_read"], 30);
     assert_eq!(payload["monthly_cost"], json!(2.5));
+    assert_eq!(payload["monthly_catalog_cost"], json!(2.5));
+    assert_eq!(payload["monthly_actual_cost"], json!(2.0));
     assert_eq!(payload["stats"].as_array().map(Vec::len), Some(4));
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
@@ -374,6 +376,8 @@ async fn gateway_dashboard_stats_include_end_of_day_boundary() {
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
     assert_eq!(payload["today"]["requests"], 1);
     assert_eq!(payload["monthly_cost"], json!(1.25));
+    assert_eq!(payload["monthly_catalog_cost"], json!(1.25));
+    assert_eq!(payload["monthly_actual_cost"], json!(1.25));
     assert_eq!(payload["stats"][1]["value"], json!("1"));
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
@@ -653,13 +657,16 @@ async fn gateway_handles_admin_dashboard_stats_locally_without_proxying_upstream
     assert_eq!(stats.len(), 4);
     let today_request_stats = stats
         .iter()
-        .find(|item| item["name"] == json!("今日请求 / 费用"))
+        .find(|item| item["name"] == json!("今日请求"))
         .expect("today request stats card should exist");
-    assert_eq!(today_request_stats["value"], json!("2 / $2.50"));
-    assert_eq!(
-        today_request_stats["subValue"],
-        json!("成功率 100.0% / 节省 $0.01")
-    );
+    assert_eq!(today_request_stats["value"], json!("2"));
+    assert_eq!(today_request_stats["subValue"], json!("成功率 100.0%"));
+    assert_eq!(payload["cost_stats"]["total_cost"], json!(3.75));
+    assert_eq!(payload["cost_stats"]["total_actual_cost"], json!(3.75));
+    assert!(!payload["cost_stats"]
+        .as_object()
+        .expect("cost_stats should be object")
+        .contains_key("effective_sell_rate"));
     let today_token_stats = stats
         .iter()
         .find(|item| item["name"] == json!("今日 Token"))

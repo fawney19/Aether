@@ -26,11 +26,21 @@
             id="section-site-info"
             :site-name="systemConfig.site_name"
             :site-subtitle="systemConfig.site_subtitle"
+            :show-github-link="systemConfig.show_github_link"
+            :guide-mode="systemConfig.guide_mode"
+            :guide-custom-type="systemConfig.guide_custom_type"
+            :guide-url="systemConfig.guide_url"
+            :guide-html="systemConfig.guide_html"
             :loading="systemConfigLoading || siteInfoLoading"
             :has-changes="hasSiteInfoChanges"
             @save="saveSiteInfo"
             @update:site-name="systemConfig.site_name = $event"
             @update:site-subtitle="systemConfig.site_subtitle = $event"
+            @update:show-github-link="systemConfig.show_github_link = $event"
+            @update:guide-mode="systemConfig.guide_mode = $event"
+            @update:guide-custom-type="systemConfig.guide_custom_type = $event"
+            @update:guide-url="systemConfig.guide_url = $event"
+            @update:guide-html="systemConfig.guide_html = $event"
           />
 
           <!-- 数据管理 -->

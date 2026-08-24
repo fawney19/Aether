@@ -64,6 +64,9 @@ mod tests {
                 balance_remaining: Some(12.5),
                 access_allowed: true,
                 api_key_is_standalone: false,
+                sell_rate_multiplier: 1.0,
+                billing_group_id: None,
+                billing_group_name: None,
             }),
         );
 

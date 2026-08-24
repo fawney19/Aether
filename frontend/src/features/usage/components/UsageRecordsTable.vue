@@ -315,7 +315,7 @@
             <span
               v-if="record.usage_available !== false && record.usage_pricing_available !== false"
               class="text-sm text-primary font-semibold leading-5"
-            >{{ formatCurrency(record.cost || 0) }}</span>
+            >{{ formatCurrency(record.actual_cost || 0) }}</span>
             <span
               v-else-if="record.usage_available === false"
               data-usage-unavailable="cost"
@@ -329,9 +329,9 @@
               title="token 用量可验证，但当前计价规则不支持该音频用量分项"
             >未计价</span>
             <span
-              v-if="record.usage_available !== false && record.usage_pricing_available !== false && showActualCost && record.actual_cost !== undefined && record.rate_multiplier && record.rate_multiplier !== 1.0"
+              v-if="record.usage_available !== false && record.usage_pricing_available !== false"
               class="text-[10px] text-muted-foreground"
-            >{{ formatCurrency(record.actual_cost) }}</span>
+            >标价 {{ formatCurrency(record.cost || 0) }}<template v-if="record.rate_multiplier !== undefined"> · {{ record.rate_multiplier }}×</template></span>
           </div>
         </div>
 
@@ -962,12 +962,10 @@
               v-if="record.usage_available !== false && record.usage_pricing_available !== false"
               class="flex flex-col items-end text-xs gap-0.5"
             >
-              <span class="text-primary font-medium">{{ formatCurrency(record.cost || 0) }}</span>
-              <span
-                v-if="showActualCost && record.actual_cost !== undefined && record.rate_multiplier && record.rate_multiplier !== 1.0"
-                class="text-muted-foreground"
-              >
-                {{ formatCurrency(record.actual_cost) }}
+              <span class="text-primary font-medium">{{ formatCurrency(record.actual_cost || 0) }}</span>
+              <span class="text-muted-foreground">
+                标价 {{ formatCurrency(record.cost || 0) }}
+                <template v-if="record.rate_multiplier !== undefined"> · {{ record.rate_multiplier }}×</template>
               </span>
             </div>
             <div

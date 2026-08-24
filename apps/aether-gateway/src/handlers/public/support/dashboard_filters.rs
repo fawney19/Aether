@@ -688,6 +688,7 @@ fn dashboard_build_daily_stats_payload(
                 "requests": aggregate.totals.requests,
                 "tokens": aggregate.totals.total_tokens,
                 "cost": dashboard_round_f64(aggregate.totals.total_cost_usd, 4),
+                "actual_cost": dashboard_round_f64(aggregate.totals.actual_total_cost_usd, 4),
                 "avg_response_time": aggregate.totals.avg_response_time_seconds(),
                 "unique_models": aggregate.models.len(),
                 "model_breakdown": model_breakdown,
@@ -702,6 +703,7 @@ fn dashboard_build_daily_stats_payload(
                 "requests": 0,
                 "tokens": 0,
                 "cost": 0.0,
+                "actual_cost": 0.0,
                 "avg_response_time": 0.0,
                 "unique_models": 0,
                 "model_breakdown": [],
@@ -1073,22 +1075,16 @@ pub(super) async fn handle_dashboard_stats_get(
                 / today_totals.requests as f64
                 * 100.0
         };
-        let (period_cost_savings_summary, today_cost_savings_summary) =
+        let (period_cost_savings_summary, _today_cost_savings_summary) =
             admin_cost_savings.unwrap_or_default();
-        let today_cost_savings = dashboard_cache_savings_usd(&today_cost_savings_summary);
         let period_cost_savings = dashboard_cache_savings_usd(&period_cost_savings_summary);
         let stats = json!([
             {
-                "name": "今日请求 / 费用",
-                "value": format!(
-                    "{} / {}",
-                    dashboard_format_integer(today_totals.requests),
-                    dashboard_format_usd(today_totals.total_cost_usd)
-                ),
+                "name": "今日请求",
+                "value": dashboard_format_integer(today_totals.requests),
                 "subValue": format!(
-                    "成功率 {} / 节省 {}",
+                    "成功率 {}",
                     dashboard_format_percentage(success_rate),
-                    dashboard_format_usd(today_cost_savings.max(0.0))
                 ),
                 "icon": "Activity",
             },
@@ -1213,6 +1209,8 @@ pub(super) async fn handle_dashboard_stats_get(
         "cache_stats": cache_stats,
         "token_breakdown": token_breakdown,
         "monthly_cost": dashboard_round_f64(period_totals.total_cost_usd, 4),
+        "monthly_catalog_cost": dashboard_round_f64(period_totals.total_cost_usd, 4),
+        "monthly_actual_cost": dashboard_round_f64(period_totals.actual_total_cost_usd, 4),
     });
     dashboard_cached_json_response(state, cache_key, cache_ttl, &payload)
 }
@@ -1227,6 +1225,7 @@ fn dashboard_daily_aggregate_record(
         .total_tokens
         .saturating_add(row.total_tokens);
     aggregate.totals.total_cost_usd += row.total_cost_usd;
+    aggregate.totals.actual_total_cost_usd += row.actual_total_cost_usd;
     aggregate.totals.response_time_sum_ms += row.response_time_sum_ms;
     aggregate.totals.response_time_samples = aggregate
         .totals

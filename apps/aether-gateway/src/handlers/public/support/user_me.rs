@@ -23,6 +23,9 @@ use user_me_management_tokens::*;
 #[path = "user_me_api_keys.rs"]
 mod user_me_api_keys;
 use user_me_api_keys::*;
+#[path = "user_me_groups.rs"]
+mod user_me_groups;
+use user_me_groups::*;
 #[path = "user_me_usage.rs"]
 mod user_me_usage;
 use user_me_usage::*;

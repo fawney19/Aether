@@ -202,6 +202,11 @@ async fn gateway_serves_frontend_routes_and_assets_without_shadowing_public_api(
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
     assert_eq!(payload["site_name"], "Aether");
     assert_eq!(payload["site_subtitle"], "AI Gateway");
+    assert_eq!(payload["show_github_link"], true);
+    assert_eq!(payload["guide_mode"], "builtin");
+    assert_eq!(payload["guide_custom_type"], "url");
+    assert_eq!(payload["guide_url"], "");
+    assert_eq!(payload["guide_html"], "");
 
     let response = client
         .get(format!("{gateway_url}/install/4b143b471afa4d9ebc652d95"))
