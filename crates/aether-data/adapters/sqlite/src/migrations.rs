@@ -127,6 +127,13 @@ mod tests {
         assert!(matches!(error, MigrateError::VersionMissing(found) if found == version));
     }
 
+    #[test]
+    fn embeds_aggregate_id_width_migration() {
+        assert!(MIGRATOR
+            .iter()
+            .any(|migration| migration.version == 20260825000000));
+    }
+
     #[tokio::test]
     async fn migrates_cross_driver_schema_parity_contract() {
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
