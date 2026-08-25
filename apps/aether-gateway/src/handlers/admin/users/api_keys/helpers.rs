@@ -37,6 +37,7 @@ pub(super) fn build_admin_user_api_key_detail_payload(
     json!({
         "id": record.api_key_id,
         "name": record.name,
+        "group_id": record.billing_group_id,
         "key_display": masked_user_api_key_display(state, record.key_encrypted.as_deref()),
         "is_active": record.is_active,
         "is_locked": is_locked,

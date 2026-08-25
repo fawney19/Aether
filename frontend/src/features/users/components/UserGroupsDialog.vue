@@ -28,10 +28,12 @@
         <div class="space-y-5">
           <UserGroupProfileFields
             :name="form.name"
+            :sell-rate-multiplier="form.sell_rate_multiplier"
             :member-user-ids="memberUserIds"
             :user-options="userOptions"
             :members-disabled="Boolean(selectedGroup?.is_default)"
             @update:name="form.name = $event"
+            @update:sell-rate-multiplier="form.sell_rate_multiplier = $event"
             @update:member-user-ids="memberUserIds = $event"
           />
 
@@ -207,6 +209,7 @@ async function selectGroup(groupId: string): Promise<void> {
     allowed_models: group.allowed_models ? [...group.allowed_models] : [],
     rate_limit_mode: normalizeRateMode(group.rate_limit_mode),
     rate_limit: group.rate_limit ?? undefined,
+    sell_rate_multiplier: group.sell_rate_multiplier,
   }
   try {
     const members = await usersStore.listUserGroupMembers(group.id)
@@ -236,6 +239,7 @@ function createEmptyForm(): UserGroupFormState {
     allowed_models: [],
     rate_limit_mode: 'system',
     rate_limit: undefined,
+    sell_rate_multiplier: 1,
   }
 }
 
@@ -287,6 +291,7 @@ function buildPayload(): UpsertUserGroupRequest {
     rate_limit: form.value.rate_limit_mode === 'custom'
       ? (form.value.rate_limit ?? 0)
       : null,
+    sell_rate_multiplier: form.value.sell_rate_multiplier,
   }
 }
 

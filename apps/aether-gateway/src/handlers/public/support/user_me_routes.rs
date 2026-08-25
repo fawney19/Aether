@@ -9,18 +9,19 @@ use super::{
     handle_users_me_api_keys_get, handle_users_me_available_models,
     handle_users_me_client_config_get, handle_users_me_delete_other_sessions,
     handle_users_me_delete_session, handle_users_me_detail_put,
-    handle_users_me_endpoint_status_get, handle_users_me_management_token_create,
-    handle_users_me_management_token_delete, handle_users_me_management_token_detail_get,
-    handle_users_me_management_token_regenerate, handle_users_me_management_token_toggle,
-    handle_users_me_management_token_update, handle_users_me_management_tokens_list,
-    handle_users_me_model_capabilities_get, handle_users_me_model_capabilities_put,
-    handle_users_me_password_patch, handle_users_me_preferences_get,
-    handle_users_me_preferences_put, handle_users_me_providers_get, handle_users_me_referral_get,
-    handle_users_me_sessions_get, handle_users_me_update_session, handle_users_me_usage_active_get,
-    handle_users_me_usage_get, handle_users_me_usage_heatmap_get,
-    handle_users_me_usage_interval_timeline_get, users_me_api_key_capabilities_path_matches,
-    users_me_api_key_detail_path_matches, users_me_api_key_install_sessions_path_matches,
-    users_me_api_key_providers_path_matches, users_me_management_token_detail_path_matches,
+    handle_users_me_endpoint_status_get, handle_users_me_groups_get,
+    handle_users_me_management_token_create, handle_users_me_management_token_delete,
+    handle_users_me_management_token_detail_get, handle_users_me_management_token_regenerate,
+    handle_users_me_management_token_toggle, handle_users_me_management_token_update,
+    handle_users_me_management_tokens_list, handle_users_me_model_capabilities_get,
+    handle_users_me_model_capabilities_put, handle_users_me_password_patch,
+    handle_users_me_preferences_get, handle_users_me_preferences_put,
+    handle_users_me_providers_get, handle_users_me_referral_get, handle_users_me_sessions_get,
+    handle_users_me_update_session, handle_users_me_usage_active_get, handle_users_me_usage_get,
+    handle_users_me_usage_heatmap_get, handle_users_me_usage_interval_timeline_get,
+    users_me_api_key_capabilities_path_matches, users_me_api_key_detail_path_matches,
+    users_me_api_key_install_sessions_path_matches, users_me_api_key_providers_path_matches,
+    users_me_management_token_detail_path_matches,
     users_me_management_token_regenerate_path_matches,
     users_me_management_token_toggle_path_matches, users_me_management_tokens_root,
     users_me_session_detail_path_matches, AppState, GatewayPublicRequestContext,
@@ -69,6 +70,9 @@ pub(crate) async fn maybe_build_local_users_me_response(
         }
         Some("api_keys_list") if request_context.request_path == "/api/users/me/api-keys" => {
             Some(handle_users_me_api_keys_get(state, request_context, headers).await)
+        }
+        Some("groups") if request_context.request_path == "/api/users/me/groups" => {
+            Some(handle_users_me_groups_get(state, request_context, headers).await)
         }
         Some("management_tokens_list")
             if users_me_management_tokens_root(&request_context.request_path) =>

@@ -532,6 +532,7 @@ CREATE TABLE IF NOT EXISTS public.billing_plans (
 CREATE TABLE IF NOT EXISTS public.user_plan_entitlements (
     id character varying(64) NOT NULL,
     user_id character varying(64) NOT NULL,
+    group_id character varying(64),
     plan_id character varying(64) NOT NULL,
     payment_order_id character varying(64) NOT NULL,
     status character varying(64) DEFAULT 'active'::character varying NOT NULL,

@@ -555,6 +555,8 @@ impl AuthApiKeyWriteRepository for InMemoryAuthApiKeySnapshotRepository {
                 api_key_allowed_api_formats: record.allowed_api_formats.clone(),
                 api_key_allowed_models: record.allowed_models.clone(),
                 api_key_ip_rules: record.ip_rules.clone(),
+                billing_group_id: Some(record.billing_group_id.clone()),
+                billing_group_name: None,
                 ..template
             }
         } else {
@@ -599,6 +601,11 @@ impl AuthApiKeyWriteRepository for InMemoryAuthApiKeySnapshotRepository {
                     .as_ref()
                     .map(|value| serde_json::json!(value)),
             )?
+            .with_billing_group(
+                Some(record.billing_group_id.clone()),
+                None,
+                crate::repository::users::DEFAULT_SELL_RATE_MULTIPLIER,
+            )
         };
 
         let now_unix_secs = current_unix_secs() as i64;
@@ -637,6 +644,7 @@ impl AuthApiKeyWriteRepository for InMemoryAuthApiKeySnapshotRepository {
                 .as_ref()
                 .map(|value| serde_json::json!(value)),
         )?
+        .with_billing_group_id(Some(record.billing_group_id.clone()))
         .with_activity_timestamps(None, Some(now_unix_secs), Some(now_unix_secs))?;
 
         index
@@ -800,6 +808,15 @@ impl AuthApiKeyWriteRepository for InMemoryAuthApiKeySnapshotRepository {
         };
         if snapshot.user_id != record.user_id || snapshot.api_key_is_standalone {
             return Ok(None);
+        }
+        if let Some(group_id) = record.billing_group_id {
+            if let Some(snapshot) = index.by_api_key_id.get_mut(&record.api_key_id) {
+                snapshot.billing_group_id = Some(group_id.clone());
+                snapshot.billing_group_name = None;
+            }
+            if let Some(export) = index.export_by_api_key_id.get_mut(&record.api_key_id) {
+                export.billing_group_id = Some(group_id);
+            }
         }
         if let Some(name) = record.name {
             if let Some(snapshot) = index.by_api_key_id.get_mut(&record.api_key_id) {
@@ -1356,6 +1373,7 @@ mod tests {
             .update_user_api_key_basic(UpdateUserApiKeyBasicRecord {
                 user_id: "user-1".to_string(),
                 api_key_id: "key-1".to_string(),
+                billing_group_id: None,
                 name: None,
                 rate_limit: None,
                 concurrent_limit: Some(11),

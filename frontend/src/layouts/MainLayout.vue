@@ -400,6 +400,7 @@
           <ThemeModeButton />
           <!-- GitHub Link -->
           <a
+            v-if="showGithubLink"
             href="https://github.com/fawney19/Aether"
             target="_blank"
             rel="noopener noreferrer"
@@ -527,7 +528,7 @@ const router = useRouter()
 const route = useRoute()
 const authStore = useAuthStore()
 const moduleStore = useModuleStore()
-const { siteName, siteSubtitle } = useSiteInfo()
+const { siteName, siteSubtitle, showGithubLink } = useSiteInfo()
 const { success, error: showError } = useToast()
 const { t, locale } = useI18n()
 const isDemo = computed(() => isDemoMode())

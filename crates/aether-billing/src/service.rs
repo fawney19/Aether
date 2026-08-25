@@ -85,6 +85,10 @@ impl BillingService {
             cache_ttl_minutes: estimate
                 .cache_ttl_minutes
                 .or(pricing.provider_api_key_cache_ttl_minutes),
+            sell_rate_multiplier:
+                aether_data_contracts::repository::users::clamp_sell_rate_multiplier(
+                    estimate.sell_rate_multiplier,
+                ),
             ..BillingUsageInput::new(estimate.task_type.clone())
         };
         let mut scenarios = vec![base_input.clone()];
@@ -260,7 +264,9 @@ impl BillingService {
         } else {
             0.0
         };
-        let rate_multiplier = pricing.rate_multiplier_for_api_format(input.api_format.as_deref());
+        let cost_rate_multiplier =
+            pricing.rate_multiplier_for_api_format(input.api_format.as_deref());
+        let rate_multiplier = resolved_sell_rate_multiplier(input);
         let is_free_tier = pricing.is_free_tier();
         let actual_total_cost = if is_free_tier {
             0.0
@@ -292,6 +298,7 @@ impl BillingService {
             },
             actual_total_cost,
             rate_multiplier,
+            cost_rate_multiplier,
             is_free_tier,
             pricing_resolution,
         })
@@ -409,10 +416,15 @@ fn no_rule_computation(
             },
         },
         actual_total_cost: 0.0,
-        rate_multiplier: pricing.rate_multiplier_for_api_format(input.api_format.as_deref()),
+        rate_multiplier: resolved_sell_rate_multiplier(input),
+        cost_rate_multiplier: pricing.rate_multiplier_for_api_format(input.api_format.as_deref()),
         is_free_tier: pricing.is_free_tier(),
         pricing_resolution,
     }
+}
+
+fn resolved_sell_rate_multiplier(input: &BillingUsageInput) -> f64 {
+    aether_data_contracts::repository::users::clamp_sell_rate_multiplier(input.sell_rate_multiplier)
 }
 
 fn pricing_covers_input_context(pricing: &Value, total_input_context: i64) -> bool {
@@ -980,6 +992,7 @@ mod tests {
             input_tokens,
             cache_creation_tokens: 10,
             cache_ttl_minutes: Some(30),
+            sell_rate_multiplier: 1.0,
             ..BillingUsageInput::new("chat")
         }
     }
@@ -1006,6 +1019,7 @@ mod tests {
                     image_quality: None,
                     image_output_format: None,
                     cache_ttl_minutes: Some(60),
+                    sell_rate_multiplier: 1.0,
                 },
             )
             .expect("billing should calculate");
@@ -1013,7 +1027,42 @@ mod tests {
         assert_eq!(result.cost_result.status, BillingSnapshotStatus::Complete);
         assert!(result.cost_result.cost > 0.0);
         assert!(result.actual_total_cost > 0.0);
-        assert_eq!(result.rate_multiplier, 0.5);
+        assert_eq!(result.rate_multiplier, 1.0);
+        assert_eq!(result.cost_rate_multiplier, 0.5);
+        assert_eq!(result.actual_total_cost, result.cost_result.cost);
+    }
+
+    #[test]
+    fn sell_rate_multiplier_charges_independently_of_account_cost_rate() {
+        let result = BillingService::new()
+            .calculate(
+                &pricing(),
+                &BillingUsageInput {
+                    task_type: "chat".to_string(),
+                    api_format: Some("openai:chat".to_string()),
+                    requested_processing_tier: None,
+                    actual_processing_tier: None,
+                    request_count: 1,
+                    input_tokens: 1_000,
+                    output_tokens: 500,
+                    cache_creation_tokens: 0,
+                    cache_creation_ephemeral_5m_tokens: 0,
+                    cache_creation_ephemeral_1h_tokens: 0,
+                    cache_read_tokens: 100,
+                    image_count: 0,
+                    image_size: None,
+                    image_quality: None,
+                    image_output_format: None,
+                    cache_ttl_minutes: Some(60),
+                    sell_rate_multiplier: 2.0,
+                },
+            )
+            .expect("billing should calculate");
+
+        assert_eq!(result.cost_result.status, BillingSnapshotStatus::Complete);
+        assert_eq!(result.rate_multiplier, 2.0);
+        assert_eq!(result.cost_rate_multiplier, 0.5);
+        assert_eq!(result.actual_total_cost, result.cost_result.cost * 2.0);
     }
 
     #[test]
@@ -1038,6 +1087,7 @@ mod tests {
                     image_quality: None,
                     image_output_format: None,
                     cache_ttl_minutes: Some(60),
+                    sell_rate_multiplier: 1.0,
                 },
             )
             .expect("billing should calculate");
@@ -1082,6 +1132,7 @@ mod tests {
                     image_quality: None,
                     image_output_format: None,
                     cache_ttl_minutes: Some(60),
+                    sell_rate_multiplier: 1.0,
                 },
             )
             .expect("billing should calculate");
@@ -1865,6 +1916,7 @@ mod tests {
                     image_quality: Some("medium".to_string()),
                     image_output_format: Some("png".to_string()),
                     cache_ttl_minutes: None,
+                    sell_rate_multiplier: 1.0,
                 },
             )
             .expect("billing should calculate");
@@ -1931,6 +1983,7 @@ mod tests {
                     image_quality: Some("medium".to_string()),
                     image_output_format: Some("png".to_string()),
                     cache_ttl_minutes: None,
+                    sell_rate_multiplier: 1.0,
                 },
             )
             .expect("billing should calculate");
@@ -1984,6 +2037,7 @@ mod tests {
                     image_quality: Some("medium".to_string()),
                     image_output_format: Some("png".to_string()),
                     cache_ttl_minutes: None,
+                    sell_rate_multiplier: 1.0,
                 },
             )
             .expect("billing should calculate");
@@ -2033,6 +2087,7 @@ mod tests {
                     image_quality: Some("medium".to_string()),
                     image_output_format: Some("png".to_string()),
                     cache_ttl_minutes: None,
+                    sell_rate_multiplier: 1.0,
                 },
             )
             .expect("billing should calculate");
@@ -2095,6 +2150,7 @@ mod tests {
                     image_quality: Some("medium".to_string()),
                     image_output_format: Some("png".to_string()),
                     cache_ttl_minutes: None,
+                    sell_rate_multiplier: 1.0,
                 },
             )
             .expect("billing should calculate");
@@ -2162,6 +2218,7 @@ mod tests {
                     image_quality: Some("medium".to_string()),
                     image_output_format: Some("png".to_string()),
                     cache_ttl_minutes: None,
+                    sell_rate_multiplier: 1.0,
                 },
             )
             .expect("billing should calculate");
@@ -2262,6 +2319,7 @@ mod tests {
                     image_quality: None,
                     image_output_format: None,
                     cache_ttl_minutes: Some(5),
+                    sell_rate_multiplier: 1.0,
                 },
             )
             .expect("billing should calculate");
@@ -2337,6 +2395,7 @@ mod tests {
                     image_quality: None,
                     image_output_format: None,
                     cache_ttl_minutes: Some(60),
+                    sell_rate_multiplier: 1.0,
                 },
             )
             .expect("billing should calculate");

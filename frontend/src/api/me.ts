@@ -64,8 +64,8 @@ export interface UsageRecordDetail {
   output_tokens: number
   total_tokens: number
   cost: number  // 官方费率
-  actual_cost?: number  // 倍率消耗（仅管理员可见）
-  rate_multiplier?: number  // 成本倍率（仅管理员可见）
+  actual_cost?: number  // 分组倍率后的实际扣费
+  rate_multiplier?: number  // 分组扣费倍率
   response_time_ms?: number | null
   first_byte_time_ms?: number | null
   end_to_end_time_ms?: number | null
@@ -120,7 +120,7 @@ export interface ModelSummary {
   total_input_context?: number
   cache_hit_rate?: number
   total_cost_usd: number
-  actual_total_cost_usd?: number  // 倍率消耗（仅管理员可见）
+  actual_total_cost_usd?: number  // 分组倍率后的实际扣费
 }
 
 // 提供商统计接口
@@ -177,9 +177,16 @@ export interface UsageResponse {
   activity_heatmap?: ActivityHeatmap | null
 }
 
+export interface UserBillingGroup {
+  id: string
+  name: string
+  sell_rate_multiplier: number
+}
+
 export interface ApiKey {
   id: string // UUID
   name: string
+  group_id: string
   key?: string
   key_display: string
   is_active: boolean
@@ -188,6 +195,7 @@ export interface ApiKey {
   created_at?: string | null
   total_requests?: number
   total_cost_usd?: number
+  actual_total_cost_usd?: number
   rate_limit?: number | null
   concurrent_limit?: number | null
   ip_rules?: string[] | null
@@ -275,7 +283,12 @@ export const meApi = {
     return response.data
   },
 
-  async createApiKey(data: { name: string; rate_limit?: number | null; concurrent_limit?: number | null; ip_rules?: string[] | null; feature_settings?: FeatureSettingsMap | null }): Promise<ApiKey> {
+  async getBillingGroups(): Promise<UserBillingGroup[]> {
+    const response = await apiClient.get<{ items: UserBillingGroup[] }>('/api/users/me/groups')
+    return response.data.items
+  },
+
+  async createApiKey(data: { name: string; group_id: string; rate_limit?: number | null; concurrent_limit?: number | null; ip_rules?: string[] | null; feature_settings?: FeatureSettingsMap | null }): Promise<ApiKey> {
     const response = await apiClient.post<ApiKey>('/api/users/me/api-keys', data)
     return response.data
   },
@@ -315,7 +328,7 @@ export const meApi = {
 
   async updateApiKey(
     keyId: string,
-    data: { name?: string; rate_limit?: number | null; concurrent_limit?: number | null; ip_rules?: string[] | null; feature_settings?: FeatureSettingsMap | null | undefined }
+    data: { name?: string; group_id?: string; rate_limit?: number | null; concurrent_limit?: number | null; ip_rules?: string[] | null; feature_settings?: FeatureSettingsMap | null | undefined }
   ): Promise<ApiKey & { message: string }> {
     const response = await apiClient.put<ApiKey & { message: string }>(
       `/api/users/me/api-keys/${keyId}`,

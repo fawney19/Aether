@@ -2030,6 +2030,21 @@ pub fn parse_codex_websocket_rate_limits_response(
     updated_at_unix_secs: u64,
 ) -> Option<serde_json::Value> {
     let mut latest = parse_codex_websocket_quota_event(value, updated_at_unix_secs);
+    if let Some(body) = value.get("body") {
+        if let Some(parsed) = parse_codex_websocket_quota_event(body, updated_at_unix_secs) {
+            latest = Some(parsed);
+        }
+        for chunk in body
+            .get("chunks")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            if let Some(parsed) = parse_codex_websocket_quota_event(chunk, updated_at_unix_secs) {
+                latest = Some(parsed);
+            }
+        }
+    }
     for chunk in value
         .get("chunks")
         .and_then(serde_json::Value::as_array)
@@ -2183,6 +2198,13 @@ fn parse_codex_websocket_usage_limit_error(
     // Preserve that fact even if an intermediary strips some Codex headers.
     result.insert("allowed".to_string(), json!(false));
     result.insert("limit_reached".to_string(), json!(true));
+    if result
+        .get("primary_used_percent")
+        .and_then(coerce_json_f64)
+        .is_none()
+    {
+        result.insert("primary_used_percent".to_string(), json!(100.0));
+    }
     result.insert("updated_at".to_string(), json!(updated_at_unix_secs));
     Some(serde_json::Value::Object(result))
 }
@@ -5639,6 +5661,68 @@ mod tests {
             Some(&json!(1_787_274_385u64))
         );
         assert!(codex_rate_limit_metadata_exhausted(&parsed));
+    }
+
+    #[test]
+    fn parses_codex_websocket_usage_limit_error_from_logged_header_body_wrapper() {
+        let parsed = parse_codex_websocket_rate_limits_response(
+            &json!({
+                "header": {
+                    "upgrade": "websocket",
+                    "connection": "upgrade",
+                },
+                "body": {
+                    "type": "error",
+                    "error": {
+                        "type": "usage_limit_reached",
+                        "plan_type": "pro",
+                        "resets_at": 1_788_138_591u64,
+                    },
+                    "status_code": 429,
+                    "headers": {
+                        "X-Codex-Plan-Type": "pro",
+                        "X-Codex-Primary-Used-Percent": "100",
+                        "X-Codex-Primary-Window-Minutes": "10080",
+                        "X-Codex-Primary-Reset-At": "1788138592",
+                    },
+                }
+            }),
+            1_787_558_431,
+        )
+        .expect("logged websocket wrapper should parse quota headers from body");
+
+        assert_eq!(parsed.get("allowed"), Some(&json!(false)));
+        assert_eq!(parsed.get("limit_reached"), Some(&json!(true)));
+        assert_eq!(parsed.get("plan_type"), Some(&json!("pro")));
+        assert_eq!(parsed.get("primary_used_percent"), Some(&json!(100.0)));
+        assert_eq!(
+            parsed.get("primary_window_minutes"),
+            Some(&json!(10_080u64))
+        );
+    }
+
+    #[test]
+    fn parses_codex_websocket_usage_limit_error_without_used_percent_header_as_exhausted() {
+        let parsed = parse_codex_websocket_rate_limits_response(
+            &json!({
+                "type": "error",
+                "error": {
+                    "type": "usage_limit_reached",
+                    "plan_type": "pro",
+                    "resets_at": 1_788_138_591u64,
+                },
+                "status_code": 429,
+                "headers": {
+                    "X-Codex-Plan-Type": "pro",
+                },
+            }),
+            1_787_558_431,
+        )
+        .expect("usage-limit error without used-percent header should still parse");
+
+        assert_eq!(parsed.get("allowed"), Some(&json!(false)));
+        assert_eq!(parsed.get("limit_reached"), Some(&json!(true)));
+        assert_eq!(parsed.get("primary_used_percent"), Some(&json!(100.0)));
     }
 
     #[test]

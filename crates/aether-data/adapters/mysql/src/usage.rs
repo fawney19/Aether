@@ -827,6 +827,7 @@ SELECT
   CAST(COALESCE(SUM(total_requests), 0) AS SIGNED) AS requests,
   CAST(COALESCE(SUM(input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens), 0) AS SIGNED) AS total_tokens,
   CAST(COALESCE(SUM(COALESCE(total_cost, 0)), 0) AS DOUBLE) AS total_cost_usd,
+  CAST(COALESCE(SUM(COALESCE(actual_total_cost, 0)), 0) AS DOUBLE) AS actual_total_cost_usd,
   CAST(0.0 AS DOUBLE) AS response_time_sum_ms,
   CAST(0 AS SIGNED) AS response_time_samples
 FROM stats_user_daily
@@ -860,6 +861,7 @@ SELECT
   CAST(COALESCE(SUM(total_requests), 0) AS SIGNED) AS requests,
   CAST(COALESCE(SUM(input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens), 0) AS SIGNED) AS total_tokens,
   CAST(COALESCE(SUM(COALESCE(total_cost, 0)), 0) AS DOUBLE) AS total_cost_usd,
+  CAST(COALESCE(SUM(COALESCE(actual_total_cost, 0)), 0) AS DOUBLE) AS actual_total_cost_usd,
   CAST(0.0 AS DOUBLE) AS response_time_sum_ms,
   CAST(0 AS SIGNED) AS response_time_samples
 FROM stats_daily
@@ -886,6 +888,7 @@ ORDER BY `date` ASC
                     requests: row_u64(row, "requests")?,
                     total_tokens: row_u64(row, "total_tokens")?,
                     total_cost_usd: row.try_get("total_cost_usd").map_sql_err()?,
+                    actual_total_cost_usd: row.try_get("actual_total_cost_usd").map_sql_err()?,
                     response_time_sum_ms: row.try_get("response_time_sum_ms").map_sql_err()?,
                     response_time_samples: row_u64(row, "response_time_samples")?,
                 })

@@ -619,7 +619,7 @@ impl GatewayDataState {
         logged_in_at: chrono::DateTime<chrono::Utc>,
         initial_gift_usd: f64,
         unlimited: bool,
-    ) -> Result<Option<StoredUserAuthRecord>, DataLayerError> {
+    ) -> Result<Option<(StoredUserAuthRecord, bool)>, DataLayerError> {
         let Some(repository) = self.user_reader.as_ref() else {
             return Ok(None);
         };
@@ -645,7 +645,7 @@ impl GatewayDataState {
                 }
             }
         }
-        Ok(Some(outcome.user))
+        Ok(Some((outcome.user, outcome.created)))
     }
 
     #[allow(dead_code)]
@@ -1803,6 +1803,18 @@ impl GatewayDataState {
         let groups = self
             .effective_user_groups_for_user(&snapshot.user_id)
             .await?;
+        if !snapshot.api_key_is_standalone && !snapshot.user_role.eq_ignore_ascii_case("admin") {
+            let selected_group = snapshot
+                .billing_group_id
+                .as_deref()
+                .and_then(|group_id| groups.iter().find(|group| group.id == group_id));
+            if let Some(group) = selected_group {
+                snapshot.billing_group_name = Some(group.name.clone());
+                snapshot.sell_rate_multiplier = group.sell_rate_multiplier;
+            } else {
+                snapshot.api_key_is_active = false;
+            }
+        }
 
         let GatewayUserEffectiveListPolicies {
             allowed_providers,
@@ -1836,7 +1848,7 @@ impl GatewayDataState {
         Ok(resolve_group_effective_list_policies(&groups))
     }
 
-    async fn effective_user_groups_for_user(
+    pub(crate) async fn effective_user_groups_for_user(
         &self,
         user_id: &str,
     ) -> Result<Vec<aether_data::repository::users::StoredUserGroup>, DataLayerError> {
@@ -2217,6 +2229,7 @@ mod tests {
             rate_limit_mode: rate_limit_mode.to_string(),
             created_at: None,
             updated_at: None,
+            sell_rate_multiplier: 1.0,
         }
     }
 
@@ -2485,6 +2498,7 @@ mod tests {
                 allowed_models_mode: "specific".to_string(),
                 rate_limit: Some(1),
                 rate_limit_mode: "custom".to_string(),
+                sell_rate_multiplier: 1.0,
             })
             .await
             .expect("group should create")
@@ -2602,6 +2616,7 @@ mod tests {
                 allowed_models_mode: "specific".to_string(),
                 rate_limit: Some(30),
                 rate_limit_mode: "custom".to_string(),
+                sell_rate_multiplier: 1.0,
             })
             .await
             .expect("group should create")
@@ -2675,6 +2690,7 @@ mod tests {
                 allowed_models_mode: "unrestricted".to_string(),
                 rate_limit: None,
                 rate_limit_mode: "system".to_string(),
+                sell_rate_multiplier: 1.0,
             })
             .await
             .expect("group should create")

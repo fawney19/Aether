@@ -946,6 +946,43 @@ fn codex_quota_window_snapshot(
     Some(Value::Object(window))
 }
 
+fn clamp_codex_primary_window_as_exhausted(windows: &mut Vec<Value>) {
+    let primary_index = windows.iter().position(|window| {
+        let code = window
+            .get("code")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let scope = window
+            .get("scope")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        scope.eq_ignore_ascii_case("account")
+            && !code.starts_with("spark_")
+            && (code == "weekly" || code == "monthly")
+    });
+    if let Some(index) = primary_index {
+        if let Some(object) = windows[index].as_object_mut() {
+            object.insert("used_ratio".to_string(), json!(1.0));
+            object.insert("remaining_ratio".to_string(), json!(0.0));
+            object.insert("is_exhausted".to_string(), json!(true));
+        }
+        return;
+    }
+    windows.insert(
+        0,
+        json!({
+            "code": "weekly",
+            "label": "周",
+            "scope": "account",
+            "unit": "percent",
+            "used_ratio": 1.0,
+            "remaining_ratio": 0.0,
+            "is_exhausted": true,
+        }),
+    );
+}
+
 fn build_codex_quota_status_snapshot(
     upstream_metadata: Option<&Value>,
     source: &str,
@@ -1052,6 +1089,11 @@ fn build_codex_quota_status_snapshot(
         &Value::Object(metadata.clone()),
     );
     let exhausted = exhausted_by_signal || exhausted_by_credits || exhausted_by_window;
+    let usage_ratio = if exhausted { Some(1.0) } else { usage_ratio };
+    let mut windows = windows;
+    if exhausted {
+        clamp_codex_primary_window_as_exhausted(&mut windows);
+    }
 
     let mut credits = Map::new();
     if let Some(value) = credits_has_credits {
@@ -3144,6 +3186,42 @@ mod tests {
             quota.get("windows").and_then(Value::as_array).map(Vec::len),
             Some(2usize)
         );
+    }
+
+    #[test]
+    fn provider_key_status_snapshot_payload_clamps_codex_exhausted_usage_ratio() {
+        let mut key = sample_catalog_key();
+        key.upstream_metadata = Some(json!({
+            "codex": {
+                "updated_at": 1_775_553_285u64,
+                "plan_type": "pro",
+                "allowed": false,
+                "limit_reached": true,
+                "primary_reset_at": 1_900_000_000u64,
+                "primary_window_minutes": 10_080u64
+            }
+        }));
+
+        let payload = provider_key_status_snapshot_payload(&key, "codex");
+        let quota = payload
+            .get("quota")
+            .and_then(Value::as_object)
+            .expect("quota snapshot should be object");
+
+        assert_eq!(quota.get("code"), Some(&json!("exhausted")));
+        assert_eq!(quota.get("exhausted"), Some(&json!(true)));
+        assert_eq!(quota.get("usage_ratio"), Some(&json!(1.0)));
+        let weekly = quota
+            .get("windows")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_object)
+            .find(|window| window.get("code") == Some(&json!("weekly")))
+            .expect("weekly window should exist");
+        assert_eq!(weekly.get("remaining_ratio"), Some(&json!(0.0)));
+        assert_eq!(weekly.get("used_ratio"), Some(&json!(1.0)));
+        assert_eq!(weekly.get("is_exhausted"), Some(&json!(true)));
     }
 
     #[test]

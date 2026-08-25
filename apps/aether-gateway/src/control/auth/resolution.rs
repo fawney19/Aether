@@ -69,6 +69,10 @@ impl AntigravityBearerBridgeConfig {
     }
 }
 
+fn default_control_sell_rate_multiplier() -> f64 {
+    aether_data::repository::users::DEFAULT_SELL_RATE_MULTIPLIER
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct GatewayControlAuthContext {
     pub(crate) user_id: String,
@@ -81,6 +85,12 @@ pub(crate) struct GatewayControlAuthContext {
     pub(crate) access_allowed: bool,
     #[serde(skip)]
     pub(crate) user_rate_limit: Option<i32>,
+    #[serde(skip, default = "default_control_sell_rate_multiplier")]
+    pub(crate) sell_rate_multiplier: f64,
+    #[serde(skip)]
+    pub(crate) billing_group_id: Option<String>,
+    #[serde(skip)]
+    pub(crate) billing_group_name: Option<String>,
     #[serde(skip)]
     pub(crate) api_key_rate_limit: Option<i32>,
     #[serde(skip)]
@@ -949,6 +959,9 @@ pub(super) async fn resolve_data_backed_auth_context(
                     balance_remaining: None,
                     access_allowed: false,
                     user_rate_limit: None,
+                    sell_rate_multiplier: 1.0,
+                    billing_group_id: None,
+                    billing_group_name: None,
                     api_key_rate_limit: None,
                     api_key_is_standalone: false,
                     admin_bypass_limits: false,
@@ -1062,6 +1075,9 @@ async fn resolve_antigravity_bearer_bridge_auth_context(
             balance_remaining: None,
             access_allowed: false,
             user_rate_limit: None,
+            sell_rate_multiplier: 1.0,
+            billing_group_id: None,
+            billing_group_name: None,
             api_key_rate_limit: None,
             api_key_is_standalone: false,
             admin_bypass_limits: false,
@@ -1121,6 +1137,9 @@ async fn resolve_trusted_auth_context(
             balance_remaining: trusted_headers.balance_remaining,
             access_allowed: false,
             user_rate_limit: None,
+            sell_rate_multiplier: 1.0,
+            billing_group_id: None,
+            billing_group_name: None,
             api_key_rate_limit: None,
             api_key_is_standalone: false,
             admin_bypass_limits: false,
@@ -1218,6 +1237,9 @@ async fn build_data_backed_auth_context(
         balance_remaining: wallet_remaining.or(balance_remaining),
         access_allowed: key_access_allowed && local_rejection.is_none(),
         user_rate_limit: snapshot.user_rate_limit,
+        sell_rate_multiplier: snapshot.sell_rate_multiplier,
+        billing_group_id: snapshot.billing_group_id,
+        billing_group_name: snapshot.billing_group_name,
         api_key_rate_limit: snapshot.api_key_rate_limit,
         api_key_is_standalone: snapshot.api_key_is_standalone,
         admin_bypass_limits: snapshot.user_role.eq_ignore_ascii_case("admin")

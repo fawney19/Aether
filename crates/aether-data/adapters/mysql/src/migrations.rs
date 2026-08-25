@@ -101,6 +101,13 @@ mod tests {
     }
 
     #[test]
+    fn embeds_aggregate_id_width_migration() {
+        assert!(MIGRATOR
+            .iter()
+            .any(|migration| migration.version == 20260825000000));
+    }
+
+    #[test]
     fn embeds_scoped_codex_live_permission_migration() {
         let migration = MIGRATOR
             .iter()

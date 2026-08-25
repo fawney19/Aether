@@ -149,7 +149,8 @@
     <UserApiKeyFormDialog
       :open="showUserApiKeyFormDialog"
       :form="userApiKeyForm"
-      :is-editing="Boolean(editingUserApiKey)"
+      :billing-groups="selectedUserBillingGroups"
+      :is-editing="Boolean(editingUserApiKey)"},{
       :creating="creatingApiKey"
       @close="closeUserApiKeyFormDialog"
       @update:form="userApiKeyForm = $event"
@@ -289,6 +290,7 @@ const sessionDialogActionLoading = ref<string | null>(null)
 const editingUserApiKey = ref<ApiKey | null>(null)
 const userApiKeyForm = ref<UserApiKeyFormState>({
   name: '',
+  group_id: '',
   rate_limit: undefined,
   concurrent_limit: undefined,
   ip_rules_text: '',
@@ -312,6 +314,10 @@ const filterStatus = ref<'all' | 'active' | 'inactive'>('all')
 const filterGroup = ref('all')
 const sortOption = ref<'default' | 'created_at_desc' | 'created_at_asc'>('default')
 const userGroups = ref<UserGroup[]>([])
+const selectedUserBillingGroups = computed(() => {
+  const groupIds = new Set(selectedUser.value?.groups?.map(group => group.id) ?? [])
+  return userGroups.value.filter(group => groupIds.has(group.id))
+})
 const userRoleFilterOptions = USER_ROLE_FILTER_OPTIONS
 const userStatusFilterOptions = USER_STATUS_FILTER_OPTIONS
 const userSortOptions = USER_SORT_OPTIONS
@@ -909,6 +915,7 @@ function openCreateUserApiKeyDialog() {
   )
   userApiKeyForm.value = {
     name: `Key-${new Date().toISOString().split('T')[0]}`,
+    group_id: '',
     rate_limit: undefined,
     concurrent_limit: undefined,
     ip_rules_text: '',
@@ -928,6 +935,7 @@ function openEditUserApiKeyDialog(apiKey: ApiKey) {
   editingUserApiKey.value = apiKey
   userApiKeyForm.value = {
     name: apiKey.name || '',
+    group_id: apiKey.group_id,
     rate_limit: apiKey.rate_limit ?? undefined,
     concurrent_limit: apiKey.concurrent_limit ?? undefined,
     ip_rules_text: apiKey.ip_rules?.join(', ') ?? '',
@@ -947,6 +955,7 @@ function closeUserApiKeyFormDialog() {
   editingUserApiKey.value = null
   userApiKeyForm.value = {
     name: '',
+    group_id: '',
     rate_limit: undefined,
     concurrent_limit: undefined,
     ip_rules_text: '',
@@ -960,6 +969,10 @@ async function submitUserApiKeyForm() {
   if (!selectedUser.value) return
   if (!userApiKeyForm.value.name.trim()) {
     error(legacyT('请输入密钥名称'), legacyT(editingUserApiKey.value ? '更新 API Key 失败' : '创建 API Key 失败'))
+    return
+  }
+  if (!userApiKeyForm.value.group_id) {
+    error(legacyT('请选择计费用户组'), legacyT(editingUserApiKey.value ? '更新 API Key 失败' : '创建 API Key 失败'))
     return
   }
 
@@ -988,6 +1001,7 @@ async function submitUserApiKeyForm() {
     if (editingApiKey) {
       await usersStore.updateApiKey(targetUserId, editingApiKey.id, {
         name: form.name,
+        group_id: form.group_id,
         rate_limit: form.rate_limit ?? 0,
         concurrent_limit: form.concurrent_limit,
         ip_rules: ipRules,
@@ -998,6 +1012,7 @@ async function submitUserApiKeyForm() {
     } else {
       const response = await usersStore.createApiKey(targetUserId, {
         name: form.name,
+        group_id: form.group_id,
         rate_limit: form.rate_limit ?? 0,
         concurrent_limit: form.concurrent_limit,
         ip_rules: ipRules,

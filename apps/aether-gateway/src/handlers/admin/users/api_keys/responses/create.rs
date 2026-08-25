@@ -78,6 +78,21 @@ pub(crate) async fn build_admin_create_user_api_key_response(
         )
             .into_response());
     }
+    let billing_group_id = payload.group_id.trim();
+    let billing_group_is_valid = state
+        .list_effective_user_groups_for_user(&target_user_id)
+        .await?
+        .iter()
+        .any(|group| group.id == billing_group_id);
+    if !billing_group_is_valid {
+        return Ok((
+            http::StatusCode::BAD_REQUEST,
+            Json(json!({ "detail": "所选用户组无效或当前用户无权使用" })),
+        )
+            .into_response());
+    }
+    let billing_group_id = billing_group_id.to_string();
+
     let feature_settings = match normalize_admin_feature_settings(payload.feature_settings) {
         Ok(value) => value,
         Err(detail) => {
@@ -153,6 +168,7 @@ pub(crate) async fn build_admin_create_user_api_key_response(
         .create_user_api_key(aether_data::repository::auth::CreateUserApiKeyRecord {
             user_id: target_user_id.clone(),
             api_key_id: uuid::Uuid::new_v4().to_string(),
+            billing_group_id,
             key_hash: hash_admin_user_api_key(&plaintext_key),
             key_encrypted: Some(key_encrypted),
             name: Some(name.clone()),

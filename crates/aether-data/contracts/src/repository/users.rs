@@ -2,6 +2,26 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 
+pub const DEFAULT_SELL_RATE_MULTIPLIER: f64 = 1.0;
+pub const MAX_SELL_RATE_MULTIPLIER: f64 = 100.0;
+
+pub fn normalize_sell_rate_multiplier(value: f64) -> Result<f64, crate::DataLayerError> {
+    if !value.is_finite() || !(0.0..=MAX_SELL_RATE_MULTIPLIER).contains(&value) {
+        return Err(crate::DataLayerError::InvalidInput(format!(
+            "user_groups.sell_rate_multiplier must be between 0 and {MAX_SELL_RATE_MULTIPLIER}"
+        )));
+    }
+    Ok(value)
+}
+
+pub fn clamp_sell_rate_multiplier(value: f64) -> f64 {
+    if value.is_finite() {
+        value.clamp(0.0, MAX_SELL_RATE_MULTIPLIER)
+    } else {
+        DEFAULT_SELL_RATE_MULTIPLIER
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct StoredUserSummary {
     pub id: String,
@@ -498,6 +518,7 @@ pub struct StoredUserGroup {
     pub allowed_models_mode: String,
     pub rate_limit: Option<i32>,
     pub rate_limit_mode: String,
+    pub sell_rate_multiplier: f64,
     pub created_at: Option<DateTime<Utc>>,
     pub updated_at: Option<DateTime<Utc>>,
 }
@@ -518,6 +539,7 @@ impl StoredUserGroup {
         allowed_models_mode: String,
         rate_limit: Option<i32>,
         rate_limit_mode: String,
+        sell_rate_multiplier: f64,
         created_at: Option<DateTime<Utc>>,
         updated_at: Option<DateTime<Utc>>,
     ) -> Result<Self, crate::DataLayerError> {
@@ -568,6 +590,7 @@ impl StoredUserGroup {
                 &rate_limit_mode,
                 "user_groups.rate_limit_mode",
             )?,
+            sell_rate_multiplier: normalize_sell_rate_multiplier(sell_rate_multiplier)?,
             created_at,
             updated_at,
         })
@@ -608,6 +631,7 @@ pub struct UpsertUserGroupRecord {
     pub allowed_models_mode: String,
     pub rate_limit: Option<i32>,
     pub rate_limit_mode: String,
+    pub sell_rate_multiplier: f64,
 }
 
 impl UpsertUserGroupRecord {

@@ -237,6 +237,11 @@ length = 32
 default = "inherit"
 
 [[table.user_groups.columns]]
+name = "sell_rate_multiplier"
+type = "float64"
+default = 1
+
+[[table.user_groups.columns]]
 name = "created_at"
 type = "unix_seconds"
 
@@ -289,6 +294,12 @@ length = 64
 name = "user_id"
 type = "text_id"
 length = 64
+
+[[table.api_keys.columns]]
+name = "group_id"
+type = "text_id"
+length = 64
+nullable = true
 
 [[table.api_keys.columns]]
 name = "key_hash"
@@ -424,6 +435,10 @@ columns = ["key_hash"]
 [[table.api_keys.indexes]]
 name = "api_keys_user_id_idx"
 columns = ["user_id"]
+
+[[table.api_keys.indexes]]
+name = "api_keys_group_id_idx"
+columns = ["group_id"]
 
 [table.audit_logs]
 domain = "identity"

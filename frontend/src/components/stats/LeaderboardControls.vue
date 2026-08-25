@@ -22,7 +22,7 @@
           Tokens
         </SelectItem>
         <SelectItem value="cost">
-          成本
+          用户扣费
         </SelectItem>
       </SelectContent>
     </Select>

@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS user_groups (
     `allowed_models_mode` VARCHAR(32) NOT NULL DEFAULT 'inherit',
     `rate_limit` INT,
     `rate_limit_mode` VARCHAR(32) NOT NULL DEFAULT 'inherit',
+    `sell_rate_multiplier` DOUBLE NOT NULL DEFAULT 1,
     `created_at` BIGINT NOT NULL,
     `updated_at` BIGINT NOT NULL,
     PRIMARY KEY (`id`),
@@ -67,6 +68,7 @@ CREATE TABLE IF NOT EXISTS user_group_members (
 CREATE TABLE IF NOT EXISTS api_keys (
     `id` VARCHAR(64) NOT NULL,
     `user_id` VARCHAR(64) NOT NULL,
+    `group_id` VARCHAR(64),
     `key_hash` VARCHAR(255) NOT NULL,
     `key_encrypted` LONGTEXT,
     `name` VARCHAR(255),
@@ -94,7 +96,8 @@ CREATE TABLE IF NOT EXISTS api_keys (
     `updated_at` BIGINT NOT NULL,
     PRIMARY KEY (`id`),
     UNIQUE KEY api_keys_key_hash_key (`key_hash`),
-    KEY api_keys_user_id_idx (`user_id`)
+    KEY api_keys_user_id_idx (`user_id`),
+    KEY api_keys_group_id_idx (`group_id`)
 );
 
 CREATE TABLE IF NOT EXISTS audit_logs (

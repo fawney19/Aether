@@ -189,6 +189,9 @@ pub(crate) fn build_execution_runtime_auth_context(
         balance_remaining: auth_context.balance_remaining,
         access_allowed: auth_context.access_allowed,
         api_key_is_standalone: auth_context.api_key_is_standalone,
+        sell_rate_multiplier: auth_context.sell_rate_multiplier,
+        billing_group_id: auth_context.billing_group_id.clone(),
+        billing_group_name: auth_context.billing_group_name.clone(),
     }
 }
 

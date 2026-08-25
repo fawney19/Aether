@@ -22,6 +22,9 @@ SELECT
   users.is_active AS user_is_active,
   users.is_deleted AS user_is_deleted,
   users.rate_limit AS user_rate_limit,
+  COALESCE(user_groups.sell_rate_multiplier, 1) AS sell_rate_multiplier,
+  user_groups.id AS billing_group_id,
+  user_groups.name AS billing_group_name,
   users.allowed_providers AS user_allowed_providers,
   users.allowed_api_formats AS user_allowed_api_formats,
   users.allowed_models AS user_allowed_models,
@@ -39,6 +42,7 @@ SELECT
   api_keys.ip_rules AS api_key_ip_rules
 FROM api_keys
 JOIN users ON users.id = api_keys.user_id
+LEFT JOIN user_groups ON user_groups.id = api_keys.group_id
 "#;
 
 const EXPORT_COLUMNS: &str = r#"
@@ -48,6 +52,7 @@ SELECT
   api_keys.key_hash,
   api_keys.key_encrypted,
   api_keys.name,
+  api_keys.group_id,
   api_keys.allowed_providers,
   api_keys.allowed_api_formats,
   api_keys.allowed_models,
@@ -114,13 +119,13 @@ impl MysqlAuthApiKeyReadRepository {
         sqlx::query(
             r#"
 INSERT INTO api_keys (
-  id, user_id, key_hash, key_encrypted, name, allowed_providers,
+  id, user_id, key_hash, key_encrypted, name, group_id, allowed_providers,
   allowed_api_formats, allowed_models, ip_rules, rate_limit, concurrent_limit,
   force_capabilities, feature_settings, is_active, expires_at, auto_delete_on_expiry,
   total_requests, total_tokens, total_cost_usd, is_standalone,
   created_at, updated_at
 )
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 "#,
         )
         .bind(&record.api_key_id)
@@ -128,6 +133,7 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         .bind(&record.key_hash)
         .bind(&record.key_encrypted)
         .bind(&record.name)
+        .bind(&record.billing_group_id)
         .bind(json_string_from_string_list(
             record.allowed_providers.as_ref(),
             "api_keys.allowed_providers",
@@ -179,6 +185,7 @@ struct CreateApiKeyInsertRecord {
     key_hash: String,
     key_encrypted: Option<String>,
     name: Option<String>,
+    billing_group_id: Option<String>,
     allowed_providers: Option<Vec<String>>,
     allowed_api_formats: Option<Vec<String>>,
     allowed_models: Option<Vec<String>>,
@@ -422,6 +429,7 @@ WHERE id = ?
             key_hash: record.key_hash,
             key_encrypted: record.key_encrypted,
             name: record.name,
+            billing_group_id: Some(record.billing_group_id),
             allowed_providers: record.allowed_providers,
             allowed_api_formats: record.allowed_api_formats,
             allowed_models: record.allowed_models,
@@ -450,6 +458,7 @@ WHERE id = ?
             key_hash: record.key_hash,
             key_encrypted: record.key_encrypted,
             name: record.name,
+            billing_group_id: None,
             allowed_providers: record.allowed_providers,
             allowed_api_formats: record.allowed_api_formats,
             allowed_models: record.allowed_models,
@@ -477,6 +486,7 @@ WHERE id = ?
             r#"
 UPDATE api_keys
 SET name = COALESCE(?, name),
+    group_id = COALESCE(?, group_id),
     rate_limit = COALESCE(?, rate_limit),
     concurrent_limit = COALESCE(?, concurrent_limit),
     ip_rules = CASE WHEN ? THEN ? ELSE ip_rules END,
@@ -487,6 +497,7 @@ WHERE id = ?
 "#,
         )
         .bind(record.name.as_deref())
+        .bind(record.billing_group_id.as_deref())
         .bind(record.rate_limit)
         .bind(record.concurrent_limit)
         .bind(record.ip_rules.is_some())
@@ -977,7 +988,13 @@ fn map_auth_api_key_snapshot_row(
         row.try_get("api_key_ip_rules").map_sql_err()?,
         "api_keys.ip_rules",
     )?)?;
-    Ok(snapshot.with_user_rate_limit(row.try_get("user_rate_limit").map_sql_err()?))
+    Ok(snapshot
+        .with_user_rate_limit(row.try_get("user_rate_limit").map_sql_err()?)
+        .with_billing_group(
+            row.try_get("billing_group_id").map_sql_err()?,
+            row.try_get("billing_group_name").map_sql_err()?,
+            row.try_get("sell_rate_multiplier").map_sql_err()?,
+        ))
 }
 
 fn map_auth_api_key_export_row(
@@ -1026,6 +1043,7 @@ fn map_auth_api_key_export_row(
         )?)
     })
     .map(|record| record.with_feature_settings(feature_settings))
+    .and_then(|record| Ok(record.with_billing_group_id(row.try_get("group_id").map_sql_err()?)))
     .and_then(|record| {
         record.with_activity_timestamps(
             row.try_get("last_used_at_unix_secs").map_sql_err()?,

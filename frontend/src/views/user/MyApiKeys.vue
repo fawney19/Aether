@@ -79,8 +79,11 @@
               <TableHead class="min-w-[160px] h-12 font-semibold">
                 密钥
               </TableHead>
-              <TableHead class="min-w-[100px] h-12 font-semibold">
+              <TableHead class="min-w-[140px] h-12 font-semibold">
                 费用(USD)
+                <span class="block text-[10px] font-normal text-muted-foreground">
+                  扣款倍率 {{ sellRateMultiplier }}x
+                </span>
               </TableHead>
               <TableHead class="min-w-[100px] h-12 font-semibold">
                 请求次数
@@ -140,9 +143,14 @@
 
               <!-- 费用 -->
               <TableCell class="py-4">
-                <span class="text-sm font-semibold text-amber-600 dark:text-amber-500">
-                  ${{ (apiKey.total_cost_usd || 0).toFixed(4) }}
-                </span>
+                <div class="flex flex-col">
+                  <span class="text-sm font-semibold text-amber-600 dark:text-amber-500">
+                    ${{ keyActualCost(apiKey).toFixed(4) }}
+                  </span>
+                  <span class="text-[10px] text-muted-foreground">
+                    标价 ${{ keyCatalogCost(apiKey).toFixed(4) }} · {{ sellRateMultiplier }}x
+                  </span>
+                </div>
               </TableCell>
 
               <!-- 请求次数 -->
@@ -367,7 +375,10 @@
               </div>
               <div class="flex items-center gap-3 text-xs">
                 <span class="text-amber-600 dark:text-amber-500 font-semibold">
-                  ${{ (apiKey.total_cost_usd || 0).toFixed(4) }}
+                  ${{ keyActualCost(apiKey).toFixed(4) }}
+                </span>
+                <span class="text-muted-foreground">
+                  标价 ${{ keyCatalogCost(apiKey).toFixed(4) }} · {{ sellRateMultiplier }}x
                 </span>
                 <span class="text-muted-foreground">•</span>
                 <span class="text-foreground font-medium">
@@ -436,6 +447,11 @@
             给密钥起一个有意义的名称方便识别
           </p>
         </div>
+
+        <BillingGroupSelect
+          v-model="newKeyBillingGroupId"
+          :groups="billingGroups"
+        />
 
         <div class="space-y-2">
           <Label
@@ -913,7 +929,7 @@
 
 <script setup lang="ts">
 import { ref, onMounted, onBeforeUnmount, computed, watch, reactive } from 'vue'
-import { meApi, type ApiKey, type InstallSessionTargetSystem, type InstallTargetCli, type ApiKeyInstallSession } from '@/api/me'
+import { meApi, type ApiKey, type UserBillingGroup, type InstallSessionTargetSystem, type InstallTargetCli, type ApiKeyInstallSession } from '@/api/me'
 import Card from '@/components/ui/card.vue'
 import Button from '@/components/ui/button.vue'
 import Input from '@/components/ui/input.vue'
@@ -946,6 +962,7 @@ import { parseApiError } from '@/utils/errorParser'
 import { formatRateLimitSimple } from '@/utils/format'
 import { parseNumberInput } from '@/utils/form'
 import { getErrorStatus } from '@/types/api-error'
+import BillingGroupSelect from '@/features/api-keys/components/BillingGroupSelect.vue'
 import {
   hasChatPiiRedactionFeatureSettings,
   mergeChatPiiRedactionFeatureSettings,
@@ -985,6 +1002,15 @@ const apiKeys = ref<ApiKey[]>([])
 const loading = ref(false)
 const creating = ref(false)
 const deleting = ref(false)
+const billingGroups = ref<UserBillingGroup[]>([])
+
+function keyCatalogCost(apiKey: ApiKey): number {
+  return Number(apiKey.total_cost_usd) || 0
+}
+
+function keyActualCost(apiKey: ApiKey): number {
+  return Number(apiKey.actual_total_cost_usd) || 0
+}
 
 // 分页相关
 const currentPage = ref(1)
@@ -1002,6 +1028,7 @@ const showInstallDialog = ref(false)
 const showCcSwitchDialog = ref(false)
 
 const newKeyName = ref('')
+const newKeyBillingGroupId = ref('')
 const newKeyRateLimit = ref<number | undefined>(undefined)
 const newKeyConcurrentLimit = ref<number | undefined>(undefined)
 const newKeyIpRulesText = ref('')
@@ -1111,7 +1138,9 @@ watch(showKeyDialog, (isOpen) => {
 async function loadApiKeys() {
   loading.value = true
   try {
-    apiKeys.value = await meApi.getApiKeys()
+    const [keys, groups] = await Promise.all([meApi.getApiKeys(), meApi.getBillingGroups()])
+    apiKeys.value = keys
+    billingGroups.value = groups
   } catch (error: unknown) {
     log.error('加载 API 密钥失败:', error)
     const status = getErrorStatus(error)
@@ -1144,6 +1173,7 @@ function openEditApiKeyDialog(apiKey: ApiKey) {
   const redactionFeature = readChatPiiRedactionFeatureSettings(apiKey.feature_settings)
   editingApiKey.value = apiKey
   newKeyName.value = apiKey.name || ''
+  newKeyBillingGroupId.value = apiKey.group_id
   newKeyRateLimit.value = apiKey.rate_limit ?? undefined
   newKeyConcurrentLimit.value = apiKey.concurrent_limit ?? undefined
   newKeyIpRulesText.value = apiKey.ip_rules?.join(', ') ?? ''
@@ -1157,6 +1187,7 @@ function openCreateApiKeyDialog() {
   editingApiKey.value = null
   createdApiKey.value = null
   newKeyName.value = ''
+  newKeyBillingGroupId.value = ''
   newKeyRateLimit.value = undefined
   newKeyConcurrentLimit.value = undefined
   newKeyIpRulesText.value = ''
@@ -1440,6 +1471,7 @@ function closeApiKeyDialog() {
     createdApiKey.value = null
   }
   newKeyName.value = ''
+  newKeyBillingGroupId.value = ''
   newKeyRateLimit.value = undefined
   newKeyConcurrentLimit.value = undefined
   newKeyIpRulesText.value = ''
@@ -1453,6 +1485,10 @@ async function saveApiKey() {
     showError('请输入密钥名称')
     return
   }
+  if (!newKeyBillingGroupId.value) {
+    showError('请选择计费用户组')
+    return
+  }
 
   creating.value = true
   try {
@@ -1461,6 +1497,7 @@ async function saveApiKey() {
     if (editingApiKey.value) {
       await meApi.updateApiKey(editingApiKey.value.id, {
         name: newKeyName.value,
+        group_id: newKeyBillingGroupId.value,
         rate_limit: newKeyRateLimit.value ?? 0,
         concurrent_limit: newKeyConcurrentLimit.value,
         ip_rules: ipRules,
@@ -1475,6 +1512,7 @@ async function saveApiKey() {
     } else {
       const newKey = await meApi.createApiKey({
         name: newKeyName.value,
+        group_id: newKeyBillingGroupId.value,
         rate_limit: newKeyRateLimit.value ?? 0,
         concurrent_limit: newKeyConcurrentLimit.value,
         ip_rules: ipRules,

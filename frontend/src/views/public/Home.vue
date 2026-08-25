@@ -59,6 +59,7 @@
           <ThemeModeButton size="sm" />
           <LanguageSwitcher />
           <a
+            v-if="showGithubLink"
             href="https://github.com/fawney19/Aether"
             target="_blank"
             rel="noopener noreferrer"
@@ -112,6 +113,7 @@
               />
             </button>
             <RouterLink
+              v-if="guideMode !== 'hidden'"
               to="/guide"
               class="group relative px-3 py-2 text-sm font-medium transition whitespace-nowrap text-[#666663] dark:text-muted-foreground hover:text-[#191919] dark:hover:text-white"
             >
@@ -154,6 +156,7 @@
           <ThemeModeButton />
           <LanguageSwitcher />
           <a
+            v-if="showGithubLink"
             href="https://github.com/fawney19/Aether"
             target="_blank"
             rel="noopener noreferrer"
@@ -462,7 +465,7 @@ import { useI18n } from '@/i18n'
 const authStore = useAuthStore()
 const { isDark } = useDarkMode()
 const { copyToClipboard } = useClipboard()
-const { siteName, siteSubtitle } = useSiteInfo()
+const { siteName, siteSubtitle, showGithubLink, guideMode } = useSiteInfo()
 const { t } = useI18n()
 
 const dashboardPath = computed(() =>

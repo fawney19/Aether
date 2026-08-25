@@ -1132,7 +1132,7 @@ import {
 } from '@/features/pool/utils/poolStatsDisplay'
 import { resetCodexCycleUsageWindows } from '@/features/pool/utils/poolCycleStats'
 import { mergePoolKeyQuotaSnapshots } from '@/features/pool/utils/poolQuotaRefresh'
-import { getCodexQuotaWindowPresentation } from '@/utils/codexQuotaWindow'
+import { getCodexPrimaryQuotaWindow, getCodexQuotaWindowPresentation } from '@/utils/codexQuotaWindow'
 import { getOAuthOrgBadge } from '@/utils/oauthIdentity'
 import { formatOAuthPlanType, getOAuthPlanTypeClass } from '@/utils/oauthPlanType'
 import { getOAuthRefreshFeedback } from '@/utils/oauthRefreshFeedback'
@@ -3532,6 +3532,39 @@ function getQuotaWindowRemainingPercent(window: QuotaWindowSnapshot | null | und
   return usedPercent == null ? null : clampPercent(100 - usedPercent)
 }
 
+function isCodexPoolKeyQuotaExhausted(key: PoolKeyDetail, quota: QuotaStatusSnapshot): boolean {
+  const metadata = key.upstream_metadata?.codex
+  return quota.exhausted === true
+    || quota.code === 'exhausted'
+    || metadata?.allowed === false
+    || metadata?.limit_reached === true
+}
+
+function isCodexPrimaryAccountWindow(
+  window: QuotaWindowSnapshot,
+  quota: QuotaStatusSnapshot,
+): boolean {
+  const primary = getCodexPrimaryQuotaWindow(quota.windows)
+  const windowCode = String(window.code || '').trim().toLowerCase()
+  if (primary) {
+    return windowCode === String(primary.code || '').trim().toLowerCase()
+  }
+  return windowCode === 'weekly' || windowCode === 'monthly'
+}
+
+function resolveCodexWindowRemainingPercent(
+  key: PoolKeyDetail,
+  quota: QuotaStatusSnapshot,
+  window: QuotaWindowSnapshot,
+): number | null {
+  const remaining = getQuotaWindowRemainingPercent(window)
+    ?? (window.is_exhausted === true ? 0 : null)
+  const exhausted = window.is_exhausted === true
+    || (isCodexPrimaryAccountWindow(window, quota) && isCodexPoolKeyQuotaExhausted(key, quota))
+  if (exhausted) return 0
+  return remaining
+}
+
 function formatQuotaValue(value: number | null | undefined): string {
   const normalized = Number(value)
   if (!Number.isFinite(normalized)) return '0'
@@ -3601,7 +3634,7 @@ function buildQuotaProgressItemsFromSnapshot(key: PoolKeyDetail): QuotaProgressI
     return (quota.windows ?? [])
       .map((window): QuotaProgressItem | null => {
         const presentation = getCodexQuotaWindowPresentation(window)
-        const remainingPercent = getQuotaWindowRemainingPercent(window)
+        const remainingPercent = resolveCodexWindowRemainingPercent(key, quota, window)
         if (!presentation || remainingPercent == null) return null
         return {
           label: presentation.label,

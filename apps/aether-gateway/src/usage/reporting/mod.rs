@@ -1188,6 +1188,99 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn submit_stream_report_persists_codex_quota_from_logged_header_body_wrapper() {
+        crate::orchestration::clear_local_report_effect_caches_for_tests();
+
+        let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+            vec![sample_provider_catalog_provider(
+                "provider-codex-websocket-wrapper",
+                "codex",
+            )],
+            Vec::new(),
+            vec![sample_provider_catalog_key(
+                "key-codex-websocket-wrapper",
+                "provider-codex-websocket-wrapper",
+            )],
+        ));
+        let state = build_provider_catalog_test_state(Arc::clone(&provider_catalog_repository));
+        let wrapper = json!({
+            "header": {
+                "upgrade": "websocket",
+                "connection": "upgrade",
+            },
+            "body": {
+                "type": "error",
+                "error": {
+                    "type": "usage_limit_reached",
+                    "plan_type": "pro",
+                    "resets_at": 1_788_138_591u64,
+                },
+                "status_code": 429,
+                "headers": {
+                    "X-Codex-Plan-Type": "pro",
+                    "X-Codex-Primary-Used-Percent": "100",
+                    "X-Codex-Primary-Window-Minutes": "10080",
+                    "X-Codex-Primary-Reset-At": "1788138592",
+                },
+            }
+        });
+
+        submit_stream_report(
+            &state,
+            GatewayStreamReportRequest {
+                trace_id: "trace-codex-reporting-websocket-wrapper".to_string(),
+                report_kind: "openai_responses_stream_success".to_string(),
+                report_context: Some(json!({
+                    "request_id": "req-codex-reporting-websocket-wrapper",
+                    "key_id": "key-codex-websocket-wrapper",
+                    "websocket_mode": true,
+                })),
+                status_code: 429,
+                headers: BTreeMap::new(),
+                provider_body_base64: Some(
+                    base64::engine::general_purpose::STANDARD
+                        .encode(wrapper.to_string().as_bytes()),
+                ),
+                provider_body_state: Some(UsageBodyCaptureState::Inline),
+                client_body_base64: None,
+                client_body_state: None,
+                terminal_summary: None,
+                telemetry: None,
+            },
+        )
+        .await
+        .expect("stream report should stay local");
+
+        let reloaded = provider_catalog_repository
+            .list_keys_by_ids(&["key-codex-websocket-wrapper".to_string()])
+            .await
+            .expect("keys should list");
+        let codex = reloaded[0]
+            .upstream_metadata
+            .as_ref()
+            .and_then(serde_json::Value::as_object)
+            .and_then(|metadata| metadata.get("codex"))
+            .and_then(serde_json::Value::as_object)
+            .expect("codex metadata should exist");
+        assert_eq!(codex.get("allowed"), Some(&json!(false)));
+        assert_eq!(codex.get("limit_reached"), Some(&json!(true)));
+        assert_eq!(codex.get("plan_type"), Some(&json!("pro")));
+        assert_eq!(codex.get("primary_used_percent"), Some(&json!(100.0)));
+        assert_eq!(codex.get("primary_window_minutes"), Some(&json!(10_080u64)));
+
+        let quota = reloaded[0]
+            .status_snapshot
+            .as_ref()
+            .and_then(serde_json::Value::as_object)
+            .and_then(|snapshot| snapshot.get("quota"))
+            .and_then(serde_json::Value::as_object)
+            .expect("quota snapshot should exist");
+        assert_eq!(quota.get("source"), Some(&json!("websocket_response_body")));
+        assert_eq!(quota.get("code"), Some(&json!("exhausted")));
+        assert_eq!(quota.get("usage_ratio"), Some(&json!(1.0)));
+    }
+
+    #[tokio::test]
     async fn submit_stream_report_updates_codex_quota_from_provider_response_headers() {
         crate::orchestration::clear_local_report_effect_caches_for_tests();
 

@@ -5,6 +5,7 @@ import { log } from '@/utils/logger'
 import {
   ensureUserLoaded,
   resolveHomeRedirect,
+  resolveGuideRedirect,
   checkAdminAccess,
   checkModuleAccess
 } from './guards'
@@ -25,6 +26,9 @@ router.beforeEach(async (to, from, next) => {
     // 首页重定向
     const homeRedirect = resolveHomeRedirect(to, from, authStore)
     if (homeRedirect !== null) return next(homeRedirect === '' ? undefined : homeRedirect)
+
+    const guideRedirect = await resolveGuideRedirect(to)
+    if (guideRedirect) return next(guideRedirect)
 
     // 需要认证但未认证
     const requiresAuth = to.matched.some(record => record.meta.requiresAuth !== false)

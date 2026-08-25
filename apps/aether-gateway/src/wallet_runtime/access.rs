@@ -398,6 +398,7 @@ mod tests {
             user_is_active: true,
             user_is_deleted: false,
             user_rate_limit: None,
+            sell_rate_multiplier: 1.0,
             user_allowed_providers: None,
             user_allowed_api_formats: None,
             user_allowed_models: None,
@@ -414,6 +415,8 @@ mod tests {
             api_key_allowed_models: None,
             api_key_ip_rules: None,
             currently_usable: true,
+            billing_group_id: None,
+            billing_group_name: None,
         }
     }
 }

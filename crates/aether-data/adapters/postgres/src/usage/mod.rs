@@ -389,6 +389,9 @@ fn decode_dashboard_daily_breakdown_row(
             .map_postgres_err()?
             .max(0) as u64,
         total_cost_usd: row.try_get::<f64, _>("total_cost_usd").map_postgres_err()?,
+        actual_total_cost_usd: row
+            .try_get::<f64, _>("actual_total_cost_usd")
+            .map_postgres_err()?,
         response_time_sum_ms: row
             .try_get::<f64, _>("response_time_sum_ms")
             .map_postgres_err()?,
@@ -796,6 +799,7 @@ fn decode_usage_cache_affinity_hit_summary_row(
     })
 }
 
+#[allow(dead_code)] // Catalog-cost rollups cannot represent group-adjusted settled charges.
 fn absorb_usage_settled_cost_summary(
     target: &mut StoredUsageSettledCostSummary,
     row: StoredUsageSettledCostSummary,
@@ -1311,6 +1315,9 @@ fn decode_usage_leaderboard_row(
             .map_postgres_err()?
             .max(0) as u64,
         total_cost_usd: row.try_get::<f64, _>("total_cost_usd").map_postgres_err()?,
+        actual_total_cost_usd: row
+            .try_get::<f64, _>("actual_total_cost_usd")
+            .unwrap_or(0.0),
     })
 }
 
@@ -1332,6 +1339,7 @@ fn absorb_usage_leaderboard_rows(
         entry.request_count = entry.request_count.saturating_add(row.request_count);
         entry.total_tokens = entry.total_tokens.saturating_add(row.total_tokens);
         entry.total_cost_usd += row.total_cost_usd;
+        entry.actual_total_cost_usd += row.actual_total_cost_usd;
     }
 }
 
@@ -2465,6 +2473,7 @@ SELECT
   COALESCE(SUM(total_requests), 0)::BIGINT AS requests,
   COALESCE(SUM(input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens), 0)::BIGINT AS total_tokens,
   COALESCE(SUM(total_cost), 0)::DOUBLE PRECISION AS total_cost_usd,
+  COALESCE(SUM(actual_total_cost), 0)::DOUBLE PRECISION AS actual_total_cost_usd,
   0::DOUBLE PRECISION AS response_time_sum_ms,
   0::BIGINT AS response_time_samples
 FROM stats_user_daily
@@ -2484,6 +2493,7 @@ SELECT
   COALESCE(SUM(total_requests), 0)::BIGINT AS requests,
   COALESCE(SUM(input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens), 0)::BIGINT AS total_tokens,
   COALESCE(SUM(total_cost), 0)::DOUBLE PRECISION AS total_cost_usd,
+  COALESCE(SUM(actual_total_cost), 0)::DOUBLE PRECISION AS actual_total_cost_usd,
   0::DOUBLE PRECISION AS response_time_sum_ms,
   0::BIGINT AS response_time_samples
 FROM stats_daily
@@ -4013,7 +4023,7 @@ WHERE hour_utc >= $1
         let mut builder = QueryBuilder::<Postgres>::new(
             r#"
 SELECT
-  COALESCE(SUM(COALESCE(CAST("usage".total_cost_usd AS DOUBLE PRECISION), 0)), 0)
+  COALESCE(SUM(COALESCE(CAST("usage".actual_total_cost_usd AS DOUBLE PRECISION), 0)), 0)
     AS total_cost_usd,
   COUNT(*)::BIGINT AS total_requests,
   COALESCE(SUM(GREATEST(COALESCE("usage".input_tokens, 0), 0)), 0)::BIGINT AS input_tokens,
@@ -4060,7 +4070,7 @@ FROM usage_billing_facts AS "usage"
         has_where = true;
         builder.push("\"usage\".billing_status = 'settled'");
         builder.push(if has_where { " AND " } else { " WHERE " });
-        builder.push("COALESCE(CAST(\"usage\".total_cost_usd AS DOUBLE PRECISION), 0) > 0");
+        builder.push("COALESCE(CAST(\"usage\".actual_total_cost_usd AS DOUBLE PRECISION), 0) > 0");
 
         let row = builder
             .build()
@@ -4070,6 +4080,7 @@ FROM usage_billing_facts AS "usage"
         decode_usage_settled_cost_row(&row)
     }
 
+    #[allow(dead_code)] // Retained for catalog-cost rollups; wallet charge summaries use raw facts.
     async fn summarize_usage_settled_cost_from_daily_aggregates(
         &self,
         start_day_utc: DateTime<Utc>,
@@ -4126,6 +4137,7 @@ WHERE date >= $1
         decode_usage_settled_cost_row(&row)
     }
 
+    #[allow(dead_code)]
     async fn summarize_usage_settled_cost_from_hourly_aggregates(
         &self,
         start_utc: DateTime<Utc>,
@@ -4182,6 +4194,7 @@ WHERE hour_utc >= $1
         decode_usage_settled_cost_row(&row)
     }
 
+    #[allow(dead_code)]
     async fn summarize_usage_settled_cost_segment(
         &self,
         start_utc: DateTime<Utc>,
@@ -4259,53 +4272,7 @@ WHERE hour_utc >= $1
         &self,
         query: &UsageSettledCostSummaryQuery,
     ) -> Result<StoredUsageSettledCostSummary, DataLayerError> {
-        let start_utc = dashboard_unix_secs_to_utc(query.created_from_unix_secs);
-        let end_utc = dashboard_unix_secs_to_utc(query.created_until_unix_secs);
-        if query.api_key_id.is_some() {
-            return self.summarize_usage_settled_cost_raw(query).await;
-        }
-        let user_id = query.user_id.as_deref();
-        let Some(cutoff_utc) = self.read_stats_daily_cutoff_date().await? else {
-            return self
-                .summarize_usage_settled_cost_segment(start_utc, end_utc, user_id)
-                .await;
-        };
-
-        let split = split_dashboard_daily_aggregate_range(start_utc, end_utc, cutoff_utc);
-        let Some(_) = split.aggregate else {
-            return self
-                .summarize_usage_settled_cost_segment(start_utc, end_utc, user_id)
-                .await;
-        };
-
-        let mut summary = StoredUsageSettledCostSummary::default();
-        if let Some((raw_start, raw_end)) = split.raw_leading {
-            absorb_usage_settled_cost_summary(
-                &mut summary,
-                self.summarize_usage_settled_cost_segment(raw_start, raw_end, user_id)
-                    .await?,
-            );
-        }
-        if let Some((aggregate_start, aggregate_end)) = split.aggregate {
-            absorb_usage_settled_cost_summary(
-                &mut summary,
-                self.summarize_usage_settled_cost_from_daily_aggregates(
-                    aggregate_start,
-                    aggregate_end,
-                    user_id,
-                )
-                .await?,
-            );
-        }
-        if let Some((raw_start, raw_end)) = split.raw_trailing {
-            absorb_usage_settled_cost_summary(
-                &mut summary,
-                self.summarize_usage_settled_cost_segment(raw_start, raw_end, user_id)
-                    .await?,
-            );
-        }
-
-        Ok(summary)
+        self.summarize_usage_settled_cost_raw(query).await
     }
 
     async fn summarize_usage_cache_affinity_hit_summary_raw(
@@ -4900,6 +4867,7 @@ SELECT
   COALESCE(SUM(total_requests), 0)::BIGINT AS requests,
   COALESCE(SUM(total_tokens), 0)::BIGINT AS total_tokens,
   COALESCE(SUM(total_cost), 0)::DOUBLE PRECISION AS total_cost_usd,
+  COALESCE(SUM(actual_total_cost), 0)::DOUBLE PRECISION AS actual_total_cost_usd,
   COALESCE(SUM(response_time_sum_ms), 0) AS response_time_sum_ms,
   COALESCE(SUM(response_time_samples), 0)::BIGINT AS response_time_samples
 FROM stats_user_daily_model_provider
@@ -4918,6 +4886,7 @@ SELECT
   COALESCE(SUM(total_requests), 0)::BIGINT AS requests,
   COALESCE(SUM(total_tokens), 0)::BIGINT AS total_tokens,
   COALESCE(SUM(total_cost), 0)::DOUBLE PRECISION AS total_cost_usd,
+  COALESCE(SUM(actual_total_cost), 0)::DOUBLE PRECISION AS actual_total_cost_usd,
   COALESCE(SUM(response_time_sum_ms), 0) AS response_time_sum_ms,
   COALESCE(SUM(response_time_samples), 0)::BIGINT AS response_time_samples
 FROM stats_daily_model_provider
@@ -4982,6 +4951,8 @@ SELECT
   COALESCE(SUM("usage".total_tokens), 0)::BIGINT AS total_tokens,
   COALESCE(SUM(COALESCE(CAST("usage".total_cost_usd AS DOUBLE PRECISION), 0)), 0)
     AS total_cost_usd,
+  COALESCE(SUM(COALESCE(CAST("usage".actual_total_cost_usd AS DOUBLE PRECISION), 0)), 0)
+    AS actual_total_cost_usd,
   COALESCE(SUM(
     CASE
       WHEN "usage".response_time_ms IS NOT NULL
@@ -7065,7 +7036,9 @@ SELECT
   COUNT(*)::BIGINT AS request_count,
   COALESCE(SUM(GREATEST(COALESCE("usage".total_tokens, 0), 0)), 0)::BIGINT AS total_tokens,
   COALESCE(SUM(COALESCE(CAST("usage".total_cost_usd AS DOUBLE PRECISION), 0)), 0)
-    AS total_cost_usd
+    AS total_cost_usd,
+  COALESCE(SUM(COALESCE(CAST("usage".actual_total_cost_usd AS DOUBLE PRECISION), 0)), 0)
+    AS actual_total_cost_usd
 FROM usage_billing_facts AS "usage"
 WHERE "usage".created_at >= TO_TIMESTAMP($1::double precision)
   AND "usage".created_at < TO_TIMESTAMP($2::double precision)

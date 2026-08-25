@@ -526,12 +526,15 @@ mod tests {
             balance_remaining: Some(10.0),
             access_allowed: true,
             user_rate_limit: Some(1),
+            sell_rate_multiplier: 1.0,
             api_key_rate_limit: Some(10),
             api_key_is_standalone: false,
             admin_bypass_limits: false,
             local_rejection: None,
             allowed_models: None,
             ip_rules: None,
+            billing_group_id: None,
+            billing_group_name: None,
         });
         let state = AppState::new().expect("state should build for tests");
 
@@ -566,12 +569,15 @@ mod tests {
             balance_remaining: Some(10.0),
             access_allowed: true,
             user_rate_limit: None,
+            sell_rate_multiplier: 1.0,
             api_key_rate_limit: Some(10),
             api_key_is_standalone: false,
             admin_bypass_limits: false,
             local_rejection: None,
             allowed_models: None,
             ip_rules: None,
+            billing_group_id: None,
+            billing_group_name: None,
         });
         let state = AppState::new().expect("state should build for tests");
 
@@ -606,12 +612,15 @@ mod tests {
             balance_remaining: Some(10.0),
             access_allowed: true,
             user_rate_limit: Some(1),
+            sell_rate_multiplier: 1.0,
             api_key_rate_limit: Some(1),
             api_key_is_standalone: false,
             admin_bypass_limits: true,
             local_rejection: None,
             allowed_models: None,
             ip_rules: None,
+            billing_group_id: None,
+            billing_group_name: None,
         });
         let state = AppState::new().expect("state should build for tests");
 
@@ -650,12 +659,15 @@ mod tests {
             balance_remaining: Some(10.0),
             access_allowed: true,
             user_rate_limit: Some(1),
+            sell_rate_multiplier: 1.0,
             api_key_rate_limit: Some(10),
             api_key_is_standalone: false,
             admin_bypass_limits: false,
             local_rejection: None,
             allowed_models: None,
             ip_rules: None,
+            billing_group_id: None,
+            billing_group_name: None,
         });
         let state = AppState::new().expect("state should build for tests");
 

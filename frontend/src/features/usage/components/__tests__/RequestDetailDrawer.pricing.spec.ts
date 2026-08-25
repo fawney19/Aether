@@ -241,6 +241,49 @@ describe('RequestDetailDrawer settlement pricing', () => {
     expect(document.body.textContent).not.toContain('输出 $0/M')
   })
 
+  it('shows catalog cost multiplied by the user sell rate as the charged amount', async () => {
+    apiMocks.getRequestDetail.mockResolvedValue({
+      ...buildEmbeddingDetail(),
+      cost: { input: 0.05, output: 0.037588, total: 0.087588 },
+      total_cost: 0.087588,
+      actual_cost: 0.07007,
+      settlement: {
+        settlement_snapshot: {
+          pricing_snapshot: {
+            sell_rate_multiplier: 0.8,
+            cost_rate_multiplier: 0.5,
+          },
+        },
+      },
+    } satisfies RequestDetail)
+
+    let isOpen!: Ref<boolean>
+    const Host = defineComponent({
+      setup() {
+        isOpen = ref(false)
+        return () => h(RequestDetailDrawer, {
+          isOpen: isOpen.value,
+          requestId: 'usage-embedding-1',
+        })
+      },
+    })
+
+    const root = document.createElement('div')
+    document.body.appendChild(root)
+    const app = createApp(Host)
+    app.mount(root)
+    mountedApps.push({ app, root })
+
+    isOpen.value = true
+    await nextTick()
+
+    await vi.waitFor(() => {
+      const totals = [...document.body.querySelectorAll<HTMLElement>('[data-request-detail-total-cost]')]
+      expect(totals.some(total => total.textContent?.includes('标价 $0.087588 × 0.8 = 实扣 $0.070070'))).toBe(true)
+      expect(document.body.textContent).toContain('上游 $0.087588 × 账户 0.5 = $0.043794')
+    })
+  })
+
   it('shows Fast pricing as the base token cost multiplied by the Fast tier', async () => {
     apiMocks.getRequestDetail.mockResolvedValue(buildFastTierDetail())
 

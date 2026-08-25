@@ -16,4 +16,14 @@ pub struct ExecutionRuntimeAuthContext {
     pub access_allowed: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub api_key_is_standalone: bool,
+    #[serde(default = "default_sell_rate_multiplier")]
+    pub sell_rate_multiplier: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub billing_group_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub billing_group_name: Option<String>,
+}
+
+fn default_sell_rate_multiplier() -> f64 {
+    1.0
 }

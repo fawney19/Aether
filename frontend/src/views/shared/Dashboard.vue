@@ -216,19 +216,29 @@
                 <p
                   class="text-[9px] sm:text-[10px] font-semibold uppercase tracking-[0.2em] sm:tracking-[0.3em] text-muted-foreground"
                 >
-                  本月费用
+                  用户扣费
                 </p>
                 <p
                   class="mt-1.5 sm:mt-2 text-lg sm:text-xl font-semibold text-foreground"
                 >
-                  {{ formatCurrency(costStats.total_cost) }}
+                  {{ formatCurrency(costStats.total_actual_cost) }}
+                </p>
+                <p class="mt-0.5 text-[10px] text-muted-foreground">
+                  上游 {{ formatCurrency(costStats.total_cost) }}
+                </p>
+                <p
+                  v-if="todayStats.actual_cost != null || todayStats.cost"
+                  class="mt-0.5 text-[10px] text-muted-foreground"
+                >
+                  今日 {{ formatCurrency(todayStats.actual_cost ?? todayStats.cost) }}
+                  · 上游 {{ formatCurrency(todayStats.cost) }}
                 </p>
                 <Badge
                   v-if="costStats.cost_savings > 0"
                   variant="success"
                   class="mt-1 text-[9px] sm:text-[10px]"
                 >
-                  节省 {{ formatCurrency(costStats.cost_savings) }}
+                  缓存节省 {{ formatCurrency(costStats.cost_savings) }}
                 </Badge>
               </div>
             </Card>
@@ -331,7 +341,13 @@
                 <p
                   class="mt-1.5 sm:mt-2 text-lg sm:text-xl font-semibold text-foreground"
                 >
-                  {{ formatCurrency(userMonthlyCost) }}
+                  {{ formatCurrency(userMonthlyActualCost ?? userMonthlyCost) }}
+                </p>
+                <p
+                  v-if="userMonthlyCatalogCost != null"
+                  class="mt-0.5 text-[10px] text-muted-foreground"
+                >
+                  标价 {{ formatCurrency(userMonthlyCatalogCost) }}
                 </p>
               </div>
             </Card>
@@ -656,12 +672,17 @@
               <span class="font-medium text-sm">{{
                 formatDate(stat.date)
               }}</span>
-              <Badge
-                variant="success"
-                class="text-[10px]"
-              >
-                ${{ stat.cost.toFixed(4) }}
-              </Badge>
+              <div class="text-right">
+                <Badge
+                  variant="success"
+                  class="text-[10px]"
+                >
+                  ${{ dailyActualCost(stat).toFixed(4) }}
+                </Badge>
+                <div class="text-[9px] text-muted-foreground">
+                  {{ catalogCostLabel }} ${{ stat.cost.toFixed(4) }}
+                </div>
+              </div>
             </div>
             <div class="grid grid-cols-2 gap-2 text-xs">
               <div class="flex justify-between">
@@ -755,12 +776,17 @@
                 </Badge>
               </TableCell>
               <TableCell class="text-center">
-                <Badge
-                  variant="success"
-                  class="text-[10px]"
-                >
-                  ${{ stat.cost.toFixed(4) }}
-                </Badge>
+                <div class="flex flex-col items-center gap-0.5">
+                  <Badge
+                    variant="success"
+                    class="text-[10px]"
+                  >
+                    ${{ dailyActualCost(stat).toFixed(4) }}
+                  </Badge>
+                  <span class="text-[9px] text-muted-foreground">
+                    {{ catalogCostLabel }} ${{ stat.cost.toFixed(4) }}
+                  </span>
+                </div>
               </TableCell>
               <TableCell class="text-center">
                 <Badge
@@ -811,7 +837,10 @@
               总费用
             </div>
             <div class="font-semibold text-amber-600 dark:text-amber-400">
-              ${{ totalStats.cost.toFixed(4) }}
+              ${{ totalStats.actualCost.toFixed(4) }}
+            </div>
+            <div class="text-[10px] text-muted-foreground">
+              {{ catalogCostLabel }} ${{ totalStats.cost.toFixed(4) }}
             </div>
           </div>
           <div class="text-center">
@@ -1103,6 +1132,8 @@ const costStats = ref<{
   cost_savings: number;
 } | null>(null);
 
+const catalogCostLabel = computed(() => (isAdmin.value ? '上游' : '标价'))
+
 const cacheStats = ref<{
   cache_creation_tokens: number;
   cache_read_tokens: number;
@@ -1113,6 +1144,8 @@ const cacheStats = ref<{
 } | null>(null);
 
 const userMonthlyCost = ref<number | null>(null);
+const userMonthlyCatalogCost = ref<number | null>(null);
+const userMonthlyActualCost = ref<number | null>(null);
 
 const hasCacheData = computed(
   () => cacheStats.value && cacheStats.value.total_cache_tokens > 0,
@@ -1160,7 +1193,7 @@ const iconMap: Record<string, Component> = {
 const emptyStatPlaceholders = computed(() => {
   if (isAdmin.value) {
     return [
-      { name: "今日请求 / 今日费用", icon: Activity },
+      { name: "今日请求", icon: Activity },
       { name: "今日 Tokens", icon: Hash },
       { name: "全站 RPM / 全站 TPM", icon: Activity },
       { name: "在线用户 / 启用用户", icon: Users },
@@ -1176,24 +1209,33 @@ const emptyStatPlaceholders = computed(() => {
 
 const statSkeletonCount = computed(() => emptyStatPlaceholders.value.length);
 
+function dailyActualCost(stat: DailyStat): number {
+  if (typeof stat.actual_cost === 'number' && Number.isFinite(stat.actual_cost)) {
+    return stat.actual_cost
+  }
+  return stat.cost
+}
+
 const totalStats = computed(() => {
   if (dailyStats.value.length === 0) {
-    return { requests: 0, tokens: 0, cost: 0, avgResponseTime: 0 };
+    return { requests: 0, tokens: 0, cost: 0, actualCost: 0, avgResponseTime: 0 };
   }
   const totals = dailyStats.value.reduce(
     (acc, stat) => {
       acc.requests += stat.requests;
       acc.tokens += stat.tokens;
       acc.cost += stat.cost;
+      acc.actualCost += dailyActualCost(stat);
       acc.totalResponseTime += stat.avg_response_time * stat.requests;
       return acc;
     },
-    { requests: 0, tokens: 0, cost: 0, totalResponseTime: 0 },
+    { requests: 0, tokens: 0, cost: 0, actualCost: 0, totalResponseTime: 0 },
   );
   return {
     requests: totals.requests,
     tokens: totals.tokens,
     cost: totals.cost,
+    actualCost: totals.actualCost,
     avgResponseTime:
       totals.requests > 0 ? totals.totalResponseTime / totals.requests : 0,
   };
@@ -1526,6 +1568,10 @@ async function loadDashboardData() {
         tokenBreakdown.value = statsData.token_breakdown;
       if (statsData.monthly_cost !== undefined)
         userMonthlyCost.value = statsData.monthly_cost;
+      if (statsData.monthly_catalog_cost !== undefined)
+        userMonthlyCatalogCost.value = statsData.monthly_catalog_cost;
+      if (statsData.monthly_actual_cost !== undefined)
+        userMonthlyActualCost.value = statsData.monthly_actual_cost;
     }
   } finally {
     loading.value = false;

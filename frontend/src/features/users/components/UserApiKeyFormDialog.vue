@@ -39,6 +39,12 @@
         />
       </div>
 
+      <BillingGroupSelect
+        :model-value="form.group_id"
+        :groups="billingGroups"
+        @update:model-value="updateField('group_id', $event)"
+      />
+
       <div class="space-y-2">
         <Label
           for="admin-user-key-rate-limit"
@@ -182,9 +188,12 @@ import { Key } from 'lucide-vue-next'
 import { Button, Dialog, Input, Label, Switch } from '@/components/ui'
 import { useI18n } from '@/i18n'
 import { parseNumberInput } from '@/utils/form'
+import BillingGroupSelect from '@/features/api-keys/components/BillingGroupSelect.vue'
+import type { UserBillingGroup } from '@/api/me'
 
 export interface UserApiKeyFormState {
   name: string
+  group_id: string
   rate_limit?: number
   concurrent_limit?: number
   ip_rules_text: string
@@ -196,6 +205,7 @@ export interface UserApiKeyFormState {
 const props = defineProps<{
   open: boolean
   form: UserApiKeyFormState
+  billingGroups: UserBillingGroup[]
   isEditing: boolean
   creating: boolean
 }>()

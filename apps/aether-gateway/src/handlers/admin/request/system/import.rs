@@ -1041,6 +1041,12 @@ fn build_imported_user_group_record(
                     "inherit".to_string()
                 }
             });
+    let sell_rate_multiplier =
+        imported_optional_f64(group.get("sell_rate_multiplier"), "sell_rate_multiplier")?
+            .unwrap_or(aether_data::repository::users::DEFAULT_SELL_RATE_MULTIPLIER);
+    let sell_rate_multiplier =
+        aether_data::repository::users::normalize_sell_rate_multiplier(sell_rate_multiplier)
+            .map_err(|err| err.to_string())?;
 
     let normalized_name = name.to_ascii_lowercase();
 
@@ -1059,6 +1065,7 @@ fn build_imported_user_group_record(
             allowed_models_mode,
             rate_limit,
             rate_limit_mode,
+            sell_rate_multiplier,
         },
     ))
 }
@@ -2928,6 +2935,8 @@ impl<'a> AdminAppState<'a> {
                 .into_iter()
                 .map(|record| (record.key_hash.clone(), record))
                 .collect::<BTreeMap<_, _>>();
+            let effective_billing_groups =
+                self.list_effective_user_groups_for_user(&user_id).await?;
 
             for (key_index, raw_key) in imported_api_keys.iter().enumerate() {
                 let key = match imported_object_field(
@@ -2949,6 +2958,27 @@ impl<'a> AdminAppState<'a> {
                 };
                 let source_api_key_id =
                     invalid_value!(imported_optional_string(key.get("api_key_id")));
+                let requested_group_id = invalid_value!(imported_optional_string(
+                    key.get("group_id").or_else(|| key.get("billing_group_id")),
+                ));
+                let requested_group_id = requested_group_id.map(|group_id| {
+                    imported_group_id_map
+                        .get(&group_id)
+                        .cloned()
+                        .unwrap_or(group_id)
+                });
+                if requested_group_id.as_ref().is_some_and(|group_id| {
+                    !effective_billing_groups
+                        .iter()
+                        .any(|group| group.id == *group_id)
+                }) {
+                    return Ok(Err(invalid_request("API Key 绑定的用户组无效")));
+                }
+                let create_billing_group_id = requested_group_id.clone().or_else(|| {
+                    effective_billing_groups
+                        .first()
+                        .map(|group| group.id.clone())
+                });
                 let name = invalid_value!(imported_optional_string(key.get("name")));
                 let allowed_providers = invalid_value!(normalize_imported_user_string_list(
                     key,
@@ -3019,6 +3049,7 @@ impl<'a> AdminAppState<'a> {
                                     aether_data::repository::auth::UpdateUserApiKeyBasicRecord {
                                         user_id: user_id.clone(),
                                         api_key_id: existing_key.api_key_id.clone(),
+                                        billing_group_id: requested_group_id.clone(),
                                         name: name.clone(),
                                         rate_limit: Some(rate_limit),
                                         concurrent_limit: if key.contains_key("concurrent_limit") {
@@ -3108,10 +3139,16 @@ impl<'a> AdminAppState<'a> {
                     continue;
                 }
 
+                let Some(billing_group_id) = create_billing_group_id else {
+                    return Ok(Err(invalid_request(
+                        "用户没有可用于 API Key 计费的有效用户组",
+                    )));
+                };
                 let created = self
                     .create_user_api_key(aether_data::repository::auth::CreateUserApiKeyRecord {
                         user_id: user_id.clone(),
                         api_key_id: Uuid::new_v4().to_string(),
+                        billing_group_id,
                         key_hash: key_hash.clone(),
                         key_encrypted,
                         name,

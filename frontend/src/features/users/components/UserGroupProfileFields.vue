@@ -11,6 +11,22 @@
     </div>
 
     <div class="space-y-2">
+      <Label class="text-sm font-medium">{{ legacyT('销售倍率') }}</Label>
+      <Input
+        :model-value="sellRateMultiplier"
+        class="h-10"
+        type="number"
+        min="0"
+        max="100"
+        step="0.01"
+        @update:model-value="$emit('update:sellRateMultiplier', Number($event))"
+      />
+      <p class="text-xs text-muted-foreground">
+        {{ legacyT('API Key 按所选分组倍率计算实际扣费') }}
+      </p>
+    </div>
+
+    <div class="space-y-2">
       <Label class="text-sm font-medium">{{ legacyT('成员') }}</Label>
       <MultiSelect
         :model-value="memberUserIds"
@@ -34,6 +50,7 @@ import type { UserSelectOption } from './user-management-types'
 
 defineProps<{
   name: string
+  sellRateMultiplier: number
   memberUserIds: string[]
   userOptions: UserSelectOption[]
   membersDisabled: boolean
@@ -41,6 +58,7 @@ defineProps<{
 
 defineEmits<{
   'update:name': [value: string]
+  'update:sellRateMultiplier': [value: number]
   'update:memberUserIds': [value: string[]]
 }>()
 

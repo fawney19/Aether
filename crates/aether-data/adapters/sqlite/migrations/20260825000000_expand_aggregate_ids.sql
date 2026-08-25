@@ -1,0 +1,2 @@
+-- SQLite TEXT columns do not enforce a length limit. PostgreSQL and MySQL
+-- widen deterministic aggregate identifiers to match the logical schema.

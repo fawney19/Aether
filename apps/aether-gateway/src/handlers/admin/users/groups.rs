@@ -37,6 +37,8 @@ struct AdminUserGroupPayload {
     rate_limit: Option<i32>,
     #[serde(default = "default_rate_limit_mode")]
     rate_limit_mode: String,
+    #[serde(default = "default_sell_rate_multiplier")]
+    sell_rate_multiplier: f64,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -370,6 +372,10 @@ fn parse_group_record(
     if payload.rate_limit.is_some_and(|value| value < 0) {
         return Err("rate_limit 必须大于等于 0".to_string());
     }
+    let sell_rate_multiplier = aether_data::repository::users::normalize_sell_rate_multiplier(
+        payload.sell_rate_multiplier,
+    )
+    .map_err(|_| "sell_rate_multiplier 必须在 0 到 100 之间".to_string())?;
     let allowed_providers =
         normalize_admin_user_string_list(payload.allowed_providers, "allowed_providers")?;
     let allowed_api_formats = normalize_admin_user_api_formats(payload.allowed_api_formats)?;
@@ -390,6 +396,7 @@ fn parse_group_record(
         allowed_models_mode: normalize_list_mode(&payload.allowed_models_mode)?,
         rate_limit: payload.rate_limit,
         rate_limit_mode: normalize_rate_mode(&payload.rate_limit_mode)?,
+        sell_rate_multiplier,
     })
 }
 
@@ -420,6 +427,7 @@ fn user_group_payload(
         "allowed_models_mode": group.allowed_models_mode,
         "rate_limit": group.rate_limit,
         "rate_limit_mode": group.rate_limit_mode,
+        "sell_rate_multiplier": group.sell_rate_multiplier,
         "is_default": default_group_id == Some(group.id.as_str()),
         "created_at": format_optional_datetime_iso8601(group.created_at),
         "updated_at": format_optional_datetime_iso8601(group.updated_at),
@@ -448,6 +456,10 @@ fn default_list_mode() -> String {
 
 fn default_rate_limit_mode() -> String {
     "inherit".to_string()
+}
+
+fn default_sell_rate_multiplier() -> f64 {
+    aether_data::repository::users::DEFAULT_SELL_RATE_MULTIPLIER
 }
 
 fn normalize_ids(values: Vec<String>) -> Vec<String> {

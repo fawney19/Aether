@@ -235,6 +235,7 @@ fn calculate_billing_computation(
         image_output_format: usage_event_dimension_string(&event.data, "image_output_format"),
         cache_ttl_minutes: usage_event_provider_cache_ttl_minutes(&event.data)
             .or(pricing.provider_api_key_cache_ttl_minutes),
+        sell_rate_multiplier: usage_event_sell_rate_multiplier(&event.data),
     };
 
     BillingService::new()
@@ -273,6 +274,16 @@ fn usage_event_provider_cache_ttl_minutes(
         data.provider_request_body.as_ref(),
     )
     .or_else(|| extract_provider_cache_ttl_minutes_from_metadata(data.request_metadata.as_ref()))
+}
+
+fn usage_event_sell_rate_multiplier(data: &aether_usage_runtime::UsageEventData) -> f64 {
+    data.request_metadata
+        .as_ref()
+        .and_then(Value::as_object)
+        .and_then(|metadata| metadata.get("sell_rate_multiplier"))
+        .and_then(Value::as_f64)
+        .map(aether_data_contracts::repository::users::clamp_sell_rate_multiplier)
+        .unwrap_or(aether_data_contracts::repository::users::DEFAULT_SELL_RATE_MULTIPLIER)
 }
 
 fn usage_event_is_image_usage(data: &aether_usage_runtime::UsageEventData) -> bool {
@@ -374,7 +385,18 @@ fn merge_billing_snapshot_metadata(
     let billing_snapshot = serde_json::to_value(snapshot).map_err(|err| {
         DataLayerError::UnexpectedValue(format!("failed to serialize billing snapshot: {err}"))
     })?;
-    let settlement_snapshot = build_settlement_snapshot(pricing, computation);
+    let billing_group_id = request_metadata
+        .as_ref()
+        .and_then(Value::as_object)
+        .and_then(|metadata| metadata.get("billing_group_id"))
+        .and_then(Value::as_str);
+    let billing_group_name = request_metadata
+        .as_ref()
+        .and_then(Value::as_object)
+        .and_then(|metadata| metadata.get("billing_group_name"))
+        .and_then(Value::as_str);
+    let settlement_snapshot =
+        build_settlement_snapshot(pricing, computation, billing_group_id, billing_group_name);
 
     let mut metadata = match request_metadata.take() {
         Some(Value::Object(object)) => object,
@@ -395,6 +417,14 @@ fn merge_billing_snapshot_metadata(
         Value::from(computation.rate_multiplier),
     );
     metadata.insert(
+        "sell_rate_multiplier".to_string(),
+        Value::from(computation.rate_multiplier),
+    );
+    metadata.insert(
+        "cost_rate_multiplier".to_string(),
+        Value::from(computation.cost_rate_multiplier),
+    );
+    metadata.insert(
         "is_free_tier".to_string(),
         Value::from(computation.is_free_tier),
     );
@@ -405,6 +435,8 @@ fn merge_billing_snapshot_metadata(
 fn build_settlement_snapshot(
     pricing: &BillingModelPricingSnapshot,
     computation: &BillingComputation,
+    billing_group_id: Option<&str>,
+    billing_group_name: Option<&str>,
 ) -> Value {
     let snapshot = &computation.cost_result.snapshot;
     let resolution = &computation.pricing_resolution;
@@ -428,6 +460,10 @@ fn build_settlement_snapshot(
             "tiered_pricing": resolution.tiered_pricing,
             "price_per_request": resolution.price_per_request,
             "rate_multiplier": computation.rate_multiplier,
+            "sell_rate_multiplier": computation.rate_multiplier,
+            "billing_group_id": billing_group_id,
+            "billing_group_name": billing_group_name,
+            "cost_rate_multiplier": computation.cost_rate_multiplier,
             "is_free_tier": computation.is_free_tier,
         },
         "billing_plan_snapshot": {

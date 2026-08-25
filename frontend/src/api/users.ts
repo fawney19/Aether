@@ -175,6 +175,7 @@ export interface UserGroup {
   allowed_models_mode: ListPolicyMode
   rate_limit?: number | null
   rate_limit_mode: RateLimitPolicyMode
+  sell_rate_multiplier: number
   is_default?: boolean
   created_at?: string | null
   updated_at?: string | null
@@ -191,6 +192,7 @@ export interface UpsertUserGroupRequest {
   allowed_models_mode?: ListPolicyMode
   rate_limit?: number | null
   rate_limit_mode?: RateLimitPolicyMode
+  sell_rate_multiplier: number
 }
 
 export interface UserGroupMember {
@@ -211,6 +213,7 @@ export interface ListUserGroupsResponse {
 
 export interface ApiKey {
   id: string // UUID
+  group_id: string
   key?: string  // 完整的 key，只在创建时返回
   key_display?: string  // 脱敏后的密钥显示
   name?: string
@@ -230,6 +233,7 @@ export interface ApiKey {
 
 export interface UpsertUserApiKeyRequest {
   name?: string
+  group_id: string
   rate_limit?: number | null
   concurrent_limit?: number | null
   ip_rules?: string[] | null

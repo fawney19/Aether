@@ -345,6 +345,16 @@ impl AppState {
             .map(|value| value.unwrap_or_default())
     }
 
+    pub(crate) async fn list_effective_user_groups_for_user(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<aether_data::repository::users::StoredUserGroup>, GatewayError> {
+        self.data
+            .effective_user_groups_for_user(user_id)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
     pub(crate) async fn list_user_group_memberships_by_user_ids(
         &self,
         user_ids: &[String],
@@ -871,7 +881,8 @@ impl AppState {
             return Ok(Some((user, wallet)));
         }
 
-        self.data
+        let registered = self
+            .data
             .register_local_auth_user(
                 email,
                 email_verified,
@@ -881,7 +892,8 @@ impl AppState {
                 unlimited,
             )
             .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        Ok(registered)
     }
 }
 
@@ -926,6 +938,7 @@ mod tests {
             allowed_models_mode: allowed_models_mode.to_string(),
             rate_limit: None,
             rate_limit_mode: "inherit".to_string(),
+            sell_rate_multiplier: 1.0,
         }
     }
 
@@ -938,12 +951,15 @@ mod tests {
             balance_remaining: None,
             access_allowed: true,
             user_rate_limit: None,
+            sell_rate_multiplier: 1.0,
             api_key_rate_limit: None,
             api_key_is_standalone: false,
             admin_bypass_limits: false,
             local_rejection: None,
             allowed_models: Some(vec!["gpt-4.1".to_string()]),
             ip_rules: None,
+            billing_group_id: None,
+            billing_group_name: None,
         }
     }
 

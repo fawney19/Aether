@@ -134,7 +134,14 @@ async fn execution_plan_balance_capacity_rejection_inner(
         validate_execution_plan_pricing_configuration_for_plan(state, plan, report_context).await?;
         return Ok(None);
     };
-    match estimate_execution_plan_cost_upper_bound_usd(state, plan, report_context).await? {
+    match estimate_execution_plan_cost_upper_bound_usd(
+        state,
+        plan,
+        report_context,
+        auth_context.sell_rate_multiplier,
+    )
+    .await?
+    {
         Some(estimated_cost_usd)
             if estimated_cost_usd <= available_usd + DAILY_QUOTA_EPSILON_USD =>
         {
@@ -228,10 +235,16 @@ async fn estimate_execution_plan_cost_upper_bound_usd(
     state: &AppState,
     plan: &aether_contracts::ExecutionPlan,
     report_context: Option<&serde_json::Value>,
+    sell_rate_multiplier: f64,
 ) -> Result<Option<f64>, GatewayError> {
     let started_at = std::time::Instant::now();
-    let result =
-        estimate_execution_plan_cost_upper_bound_usd_inner(state, plan, report_context).await;
+    let result = estimate_execution_plan_cost_upper_bound_usd_inner(
+        state,
+        plan,
+        report_context,
+        sell_rate_multiplier,
+    )
+    .await;
     observe_gateway_stage_ms(
         "auth_capacity_cost_estimate",
         started_at.elapsed().as_millis() as u64,
@@ -243,6 +256,7 @@ async fn estimate_execution_plan_cost_upper_bound_usd_inner(
     state: &AppState,
     plan: &aether_contracts::ExecutionPlan,
     report_context: Option<&serde_json::Value>,
+    sell_rate_multiplier: f64,
 ) -> Result<Option<f64>, GatewayError> {
     let api_format = crate::ai_serving::normalize_api_format_alias(&plan.provider_api_format);
     let body_json = plan.body.json_body.as_ref();
@@ -319,6 +333,7 @@ async fn estimate_execution_plan_cost_upper_bound_usd_inner(
         max_output_tokens,
         requested_processing_tier.as_deref(),
         cache_ttl_minutes,
+        sell_rate_multiplier,
     );
     let ttl = state.frontdoor_runtime_guards.auth_capacity_cache_ttl;
     if ttl.is_zero() {
@@ -334,6 +349,7 @@ async fn estimate_execution_plan_cost_upper_bound_usd_inner(
             max_output_tokens,
             requested_processing_tier.as_deref(),
             cache_ttl_minutes,
+            sell_rate_multiplier,
         )
         .await;
     }
@@ -352,6 +368,7 @@ async fn estimate_execution_plan_cost_upper_bound_usd_inner(
                 max_output_tokens,
                 requested_processing_tier.as_deref(),
                 cache_ttl_minutes,
+                sell_rate_multiplier,
             )
             .await
         })
@@ -370,6 +387,7 @@ async fn calculate_execution_plan_cost_upper_bound(
     max_output_tokens: Option<i64>,
     requested_processing_tier: Option<&str>,
     cache_ttl_minutes: Option<i64>,
+    sell_rate_multiplier: f64,
 ) -> Result<Option<f64>, GatewayError> {
     let context =
         load_execution_plan_billing_context(state, plan, model_id, global_model_name).await?;
@@ -382,6 +400,8 @@ async fn calculate_execution_plan_cost_upper_bound(
     estimate.requested_processing_tier = requested_processing_tier.map(ToOwned::to_owned);
     estimate.cache_ttl_minutes = cache_ttl_minutes;
     estimate.max_output_tokens = max_output_tokens;
+    estimate.sell_rate_multiplier =
+        aether_data::repository::users::clamp_sell_rate_multiplier(sell_rate_multiplier);
     aether_billing::BillingService::new()
         .estimate_authorization_cost_upper_bound(
             &aether_billing::BillingModelPricingSnapshot::from(context),
@@ -539,9 +559,10 @@ fn execution_plan_cost_upper_bound_cache_key(
     max_output_tokens: Option<i64>,
     requested_processing_tier: Option<&str>,
     cache_ttl_minutes: Option<i64>,
+    sell_rate_multiplier: f64,
 ) -> String {
     format!(
-        "{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}",
+        "{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}",
         plan.provider_id,
         plan.key_id,
         model_id.unwrap_or(""),
@@ -555,6 +576,7 @@ fn execution_plan_cost_upper_bound_cache_key(
         cache_ttl_minutes
             .map(|value| value.to_string())
             .unwrap_or_else(|| "none".to_string()),
+        sell_rate_multiplier,
     )
 }
 
@@ -918,12 +940,15 @@ mod tests {
             balance_remaining: None,
             access_allowed: true,
             user_rate_limit: None,
+            sell_rate_multiplier: 1.0,
             api_key_rate_limit: None,
             api_key_is_standalone: false,
             admin_bypass_limits: false,
             local_rejection: None,
             allowed_models: Some(allowed_models),
             ip_rules: None,
+            billing_group_id: None,
+            billing_group_name: None,
         });
         decision
     }
@@ -2019,7 +2044,7 @@ mod tests {
     }
 
     #[test]
-    fn daily_quota_estimate_applies_provider_key_rate_multiplier() {
+    fn daily_quota_estimate_ignores_provider_key_rate_multiplier() {
         let context = billing_context_with_pricing(
             Some(json!({
                 "tiers": [{
@@ -2036,6 +2061,37 @@ mod tests {
         let estimate =
             estimate_from_billing_context(&context, "openai:chat", 1_000_000, Some(1_000_000))
                 .expect("estimate should be bounded");
+
+        // Account cost multipliers no longer change user-facing authorization holds.
+        assert_eq!(estimate, 3.25);
+    }
+
+    #[test]
+    fn daily_quota_estimate_applies_sell_rate_multiplier() {
+        let context = billing_context_with_pricing(
+            Some(json!({
+                "tiers": [{
+                    "up_to": null,
+                    "input_price_per_1m": 1.0,
+                    "output_price_per_1m": 2.0
+                }]
+            })),
+            None,
+            Some(json!({ "openai:chat": 2.0 })),
+            None,
+        );
+        let mut estimate =
+            aether_billing::BillingAuthorizationEstimateInput::new("chat", 1_000_000);
+        estimate.api_format = Some("openai:chat".to_string());
+        estimate.max_output_tokens = Some(1_000_000);
+        estimate.sell_rate_multiplier = 2.0;
+        let estimate = aether_billing::BillingService::new()
+            .estimate_authorization_cost_upper_bound(
+                &aether_billing::BillingModelPricingSnapshot::from(context),
+                &estimate,
+            )
+            .expect("estimate should calculate")
+            .expect("estimate should be bounded");
 
         assert_eq!(estimate, 6.5);
     }
@@ -2091,6 +2147,7 @@ mod tests {
             Some(10),
             Some("priority"),
             None,
+            1.0,
         );
         let with_ttl = execution_plan_cost_upper_bound_cache_key(
             &plan,
@@ -2101,6 +2158,7 @@ mod tests {
             Some(10),
             Some("priority"),
             Some(30),
+            1.0,
         );
 
         assert_ne!(without_ttl, with_ttl);

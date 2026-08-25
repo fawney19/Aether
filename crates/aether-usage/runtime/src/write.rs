@@ -1923,6 +1923,16 @@ fn context_u64(context: Option<&Map<String, Value>>, key: &str) -> Option<u64> {
     })
 }
 
+fn context_f64(context: Option<&Map<String, Value>>, key: &str) -> Option<f64> {
+    context.and_then(|value| {
+        value.get(key).and_then(|raw| {
+            raw.as_f64()
+                .or_else(|| raw.as_i64().map(|number| number as f64))
+                .or_else(|| raw.as_u64().map(|number| number as f64))
+        })
+    })
+}
+
 fn routing_u64_from_metadata(value: Option<&Value>, key: &str) -> Option<u64> {
     value
         .and_then(Value::as_object)
@@ -2099,6 +2109,18 @@ fn build_runtime_request_metadata_seed_from_parts(
     }
     if let Some(user_agent) = context_string(context, "user_agent") {
         metadata.insert("user_agent".to_string(), Value::String(user_agent));
+    }
+    if let Some(sell_rate_multiplier) = context_f64(context, "sell_rate_multiplier") {
+        metadata.insert(
+            "sell_rate_multiplier".to_string(),
+            Value::from(sell_rate_multiplier),
+        );
+    }
+    if let Some(group_id) = context_string(context, "billing_group_id") {
+        metadata.insert("billing_group_id".to_string(), Value::String(group_id));
+    }
+    if let Some(group_name) = context_string(context, "billing_group_name") {
+        metadata.insert("billing_group_name".to_string(), Value::String(group_name));
     }
     if let Some(client_requested_stream) = context_bool(context, "client_requested_stream") {
         metadata.insert(

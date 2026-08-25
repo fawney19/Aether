@@ -76,6 +76,13 @@ impl<'a> AdminAppState<'a> {
         self.app.list_user_groups().await
     }
 
+    pub(crate) async fn list_effective_user_groups_for_user(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<aether_data::repository::users::StoredUserGroup>, GatewayError> {
+        self.app.list_effective_user_groups_for_user(user_id).await
+    }
+
     pub(crate) async fn find_user_group_by_id(
         &self,
         group_id: &str,
