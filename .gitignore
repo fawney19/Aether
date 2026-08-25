@@ -248,3 +248,6 @@ src/_version.py
 analysis/
 new-api/
 apps/aether-tunnel/aether-tunnel.toml
+
+# Local runtime data (SQLite database, backups, PostgreSQL socket)
+/data/
