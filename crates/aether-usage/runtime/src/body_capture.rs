@@ -10,6 +10,8 @@ use crate::event::UsageEvent;
 use crate::runtime::{UsageBodyCapturePolicy, UsageRequestRecordLevel};
 
 const TRUNCATED_BODY_STRING_SUFFIX: &str = "...[truncated]";
+const BASE64_IMAGE_DATA_URL_PREFIX: &str = "data:image/";
+const BASE64_DATA_URL_MARKER: &str = ";base64,";
 
 #[derive(Debug)]
 struct LimitedUsageBodyCapture {
@@ -165,7 +167,7 @@ impl UsageBodyCaptureEngine {
         apply_usage_body_capture_limit(
             UsageBodyField::RequestBody,
             "request",
-            None,
+            self.policy,
             payload.request_body,
             payload.request_body_ref,
             payload.request_body_state,
@@ -174,7 +176,7 @@ impl UsageBodyCaptureEngine {
         apply_usage_body_capture_limit(
             UsageBodyField::ProviderRequestBody,
             "provider_request",
-            None,
+            self.policy,
             payload.provider_request_body,
             payload.provider_request_body_ref,
             payload.provider_request_body_state,
@@ -183,7 +185,7 @@ impl UsageBodyCaptureEngine {
         apply_usage_body_capture_limit(
             UsageBodyField::ResponseBody,
             "response",
-            None,
+            self.policy,
             payload.response_body,
             payload.response_body_ref,
             payload.response_body_state,
@@ -192,7 +194,7 @@ impl UsageBodyCaptureEngine {
         apply_usage_body_capture_limit(
             UsageBodyField::ClientResponseBody,
             "client_response",
-            None,
+            self.policy,
             payload.client_response_body,
             payload.client_response_body_ref,
             payload.client_response_body_state,
@@ -240,7 +242,7 @@ fn disable_usage_body_capture_field(
 fn apply_usage_body_capture_limit(
     field: UsageBodyField,
     metadata_key: &str,
-    max_bytes: Option<usize>,
+    policy: UsageBodyCapturePolicy,
     body: &mut Option<Value>,
     body_ref: &mut Option<String>,
     state: &mut Option<UsageBodyCaptureState>,
@@ -265,7 +267,7 @@ fn apply_usage_body_capture_limit(
         return;
     }
 
-    let Some(value) = body.take() else {
+    let Some(mut value) = body.take() else {
         if matches!(state, Some(UsageBodyCaptureState::Unavailable)) {
             upsert_body_capture_metadata_value_entry(
                 request_metadata,
@@ -282,7 +284,23 @@ fn apply_usage_body_capture_limit(
         return;
     };
 
-    let limited = limit_usage_body_capture_value(value, max_bytes);
+    let original_source_bytes = policy
+        .compact_base64_images
+        .then(|| json_serialized_len(&value))
+        .flatten();
+    let compacted_image_count = if policy.compact_base64_images {
+        compact_base64_image_data_urls(&mut value)
+    } else {
+        0
+    };
+    let mut limited = limit_usage_body_capture_value(value, policy.max_body_bytes);
+    if compacted_image_count > 0 {
+        limited.source_bytes = original_source_bytes.or(limited.source_bytes);
+        limited.truncated = true;
+        if limited.reason.is_none() {
+            limited.reason = Some("base64_image_data_url_compacted");
+        }
+    }
     let next_state = if limited.truncated {
         UsageBodyCaptureState::Truncated
     } else {
@@ -299,6 +317,99 @@ fn apply_usage_body_capture_limit(
         limited.source_bytes,
         limited.reason,
     );
+}
+
+fn compact_base64_image_data_urls(value: &mut Value) -> usize {
+    match value {
+        Value::String(text) => {
+            if let Some((compacted, count)) = compact_base64_image_data_urls_in_string(text) {
+                *text = compacted;
+                count
+            } else {
+                0
+            }
+        }
+        Value::Array(items) => items.iter_mut().map(compact_base64_image_data_urls).sum(),
+        Value::Object(object) => object
+            .values_mut()
+            .map(compact_base64_image_data_urls)
+            .sum(),
+        Value::Null | Value::Bool(_) | Value::Number(_) => 0,
+    }
+}
+
+fn compact_base64_image_data_urls_in_string(value: &str) -> Option<(String, usize)> {
+    let mut cursor = 0usize;
+    let mut compacted = String::new();
+    let mut replacement_count = 0usize;
+
+    while let Some(relative_start) = value[cursor..].find(BASE64_IMAGE_DATA_URL_PREFIX) {
+        let start = cursor + relative_start;
+        let metadata_start = start + BASE64_IMAGE_DATA_URL_PREFIX.len();
+        let Some(relative_marker) = value[metadata_start..].find(BASE64_DATA_URL_MARKER) else {
+            break;
+        };
+        let marker = metadata_start + relative_marker;
+        let media_subtype = &value[metadata_start..marker];
+        if media_subtype.is_empty()
+            || media_subtype.len() > 127
+            || !media_subtype
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'+' | b'-'))
+        {
+            cursor = metadata_start;
+            continue;
+        }
+
+        let payload_start = marker + BASE64_DATA_URL_MARKER.len();
+        let payload_len = value.as_bytes()[payload_start..]
+            .iter()
+            .take_while(|byte| {
+                let byte = **byte;
+                byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/' | b'=')
+            })
+            .count();
+        if payload_len == 0 {
+            cursor = payload_start;
+            continue;
+        }
+        let payload_end = payload_start + payload_len;
+        let payload = &value[payload_start..payload_end];
+        let Some(original_bytes) = decoded_base64_len_hint(payload) else {
+            cursor = payload_end;
+            continue;
+        };
+
+        compacted.push_str(&value[cursor..start]);
+        compacted.push_str(&format!(
+            "<base64 image omitted; original size: {}>",
+            format_base64_image_size(original_bytes)
+        ));
+        cursor = payload_end;
+        replacement_count = replacement_count.saturating_add(1);
+    }
+
+    if replacement_count == 0 {
+        return None;
+    }
+    compacted.push_str(&value[cursor..]);
+    Some((compacted, replacement_count))
+}
+
+fn format_base64_image_size(bytes: u64) -> String {
+    const KIB: u64 = 1024;
+    const MIB: u64 = KIB * 1024;
+    const GIB: u64 = MIB * 1024;
+
+    if bytes >= GIB {
+        format!("{:.2} GiB", bytes as f64 / GIB as f64)
+    } else if bytes >= MIB {
+        format!("{:.2} MiB", bytes as f64 / MIB as f64)
+    } else if bytes >= KIB {
+        format!("{:.2} KiB", bytes as f64 / KIB as f64)
+    } else {
+        format!("{bytes} B")
+    }
 }
 
 fn limit_usage_body_capture_value(
@@ -712,13 +823,18 @@ fn usage_value_kind(value: &Value) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_plan_body_capture_metadata, sync_usage_body_ref_metadata,
-        trim_owned_non_empty_string, truncate_usage_body_string,
-        upsert_body_capture_metadata_value_entry,
+        apply_usage_body_capture_policy_to_event, build_plan_body_capture_metadata,
+        compact_base64_image_data_urls, sync_usage_body_ref_metadata, trim_owned_non_empty_string,
+        truncate_usage_body_string, upsert_body_capture_metadata_value_entry,
     };
     use aether_data_contracts::repository::usage::UsageBodyCaptureState;
     use aether_data_contracts::repository::usage::UsageBodyField;
-    use serde_json::{Map, Value};
+    use base64::Engine as _;
+    use serde_json::{json, Map, Value};
+
+    use crate::{
+        UsageBodyCapturePolicy, UsageEvent, UsageEventData, UsageEventType, UsageRequestRecordLevel,
+    };
 
     #[test]
     fn build_plan_body_capture_metadata_returns_none_without_base64_body() {
@@ -825,5 +941,127 @@ mod tests {
         assert!(serde_json::to_vec(&truncated)
             .ok()
             .is_some_and(|bytes| bytes.len() <= limit));
+    }
+
+    #[test]
+    fn compact_base64_images_replaces_nested_data_urls_with_size_placeholders() {
+        let mut body = json!({
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_image",
+                        "image_url": "data:image/png;base64,aGVsbG8="
+                    },
+                    {
+                        "type": "input_text",
+                        "text": "preview: data:image/jpeg;base64,d29ybGQ= end"
+                    }
+                ]
+            }],
+            "remote_image": "https://example.com/image.png",
+            "other_data_url": "data:text/plain;base64,aGVsbG8="
+        });
+
+        let compacted_count = compact_base64_image_data_urls(&mut body);
+
+        assert_eq!(compacted_count, 2);
+        assert_eq!(
+            body["messages"][0]["content"][0]["image_url"],
+            "<base64 image omitted; original size: 5 B>"
+        );
+        assert_eq!(
+            body["messages"][0]["content"][1]["text"],
+            "preview: <base64 image omitted; original size: 5 B> end"
+        );
+        assert_eq!(body["remote_image"], "https://example.com/image.png");
+        assert_eq!(body["other_data_url"], "data:text/plain;base64,aGVsbG8=");
+    }
+
+    #[test]
+    fn body_capture_policy_compacts_images_before_enforcing_the_size_limit() {
+        let encoded_image = base64::engine::general_purpose::STANDARD.encode(vec![0u8; 1536]);
+        let mut event = UsageEvent::new(
+            UsageEventType::Completed,
+            "req-compact-images",
+            UsageEventData {
+                provider_name: "OpenAI".to_string(),
+                model: "gpt-image".to_string(),
+                request_body: Some(json!({
+                    "input": [{
+                        "type": "input_image",
+                        "image_url": format!("data:image/png;base64,{encoded_image}")
+                    }]
+                })),
+                response_body: Some(json!({"status": "ok"})),
+                ..UsageEventData::default()
+            },
+        );
+
+        apply_usage_body_capture_policy_to_event(
+            UsageBodyCapturePolicy {
+                record_level: UsageRequestRecordLevel::Full,
+                compact_base64_images: true,
+                max_body_bytes: Some(1024),
+            },
+            &mut event,
+        );
+
+        assert_eq!(
+            event.data.request_body_state,
+            Some(UsageBodyCaptureState::Truncated)
+        );
+        assert_eq!(
+            event.data.request_body.as_ref().unwrap()["input"][0]["image_url"],
+            "<base64 image omitted; original size: 1.50 KiB>"
+        );
+        assert_eq!(
+            event.data.response_body_state,
+            Some(UsageBodyCaptureState::Inline)
+        );
+        let request_capture =
+            &event.data.request_metadata.as_ref().unwrap()["body_capture"]["request"];
+        assert_eq!(request_capture["reason"], "base64_image_data_url_compacted");
+        assert!(
+            request_capture["source_bytes"].as_u64().unwrap()
+                > request_capture["stored_bytes"].as_u64().unwrap()
+        );
+    }
+
+    #[test]
+    fn body_capture_policy_replaces_oversized_json_with_truncation_metadata() {
+        let mut event = UsageEvent::new(
+            UsageEventType::Completed,
+            "req-body-limit",
+            UsageEventData {
+                provider_name: "OpenAI".to_string(),
+                model: "gpt-5".to_string(),
+                request_body: Some(json!({"prompt": "x".repeat(2048)})),
+                ..UsageEventData::default()
+            },
+        );
+
+        apply_usage_body_capture_policy_to_event(
+            UsageBodyCapturePolicy {
+                record_level: UsageRequestRecordLevel::Full,
+                compact_base64_images: false,
+                max_body_bytes: Some(1024),
+            },
+            &mut event,
+        );
+
+        assert_eq!(
+            event.data.request_body_state,
+            Some(UsageBodyCaptureState::Truncated)
+        );
+        assert_eq!(
+            event.data.request_body.as_ref().unwrap()["reason"],
+            "body_capture_limit_exceeded"
+        );
+        assert_eq!(
+            event.data.request_metadata.as_ref().unwrap()["body_capture"]["request"]
+                ["source_bytes"],
+            2061
+        );
     }
 }

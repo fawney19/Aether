@@ -731,6 +731,9 @@ struct AdminApiFormatDefinition {
 
 const REQUEST_RECORD_LEVEL_KEY: &str = "request_record_level";
 const LEGACY_REQUEST_LOG_LEVEL_KEY: &str = "request_log_level";
+const REQUEST_RECORD_COMPACT_BASE64_IMAGES_KEY: &str = "request_record_compact_base64_images";
+const REQUEST_RECORD_MAX_BODY_SIZE_KB_KEY: &str = "request_record_max_body_size_kb";
+const MAX_REQUEST_RECORD_BODY_SIZE_KB: u64 = 1_048_576;
 const DEFAULT_BARK_API_BASE: &str = "https://api.day.app";
 const SENSITIVE_SYSTEM_CONFIG_KEYS: &[&str] = &[
     "smtp_password",
@@ -1703,6 +1706,8 @@ pub fn admin_system_config_default_value(key: &str) -> Option<serde_json::Value>
         "default_user_initial_gift_usd" => Some(json!(10.0)),
         "password_policy_level" => Some(json!("weak")),
         REQUEST_RECORD_LEVEL_KEY => Some(json!("full")),
+        REQUEST_RECORD_COMPACT_BASE64_IMAGES_KEY => Some(json!(false)),
+        REQUEST_RECORD_MAX_BODY_SIZE_KB_KEY => Some(json!(0)),
         "max_request_body_size" => Some(json!(0)),
         "max_response_body_size" => Some(json!(0)),
         "sensitive_headers" => Some(json!([
@@ -2237,6 +2242,7 @@ pub fn parse_admin_system_config_update(
 
     match normalized_key.as_str() {
         "cyber_continue_failover"
+        | REQUEST_RECORD_COMPACT_BASE64_IMAGES_KEY
         | "enable_model_directives"
         | "module.important_notification.enabled"
         | "module.important_notification.email_enabled"
@@ -2247,6 +2253,20 @@ pub fn parse_admin_system_config_update(
                 value = admin_system_config_default_value(&normalized_key).unwrap_or(json!(false));
             }
             None => {
+                return Err((
+                    http::StatusCode::BAD_REQUEST,
+                    json!({ "detail": "请求数据验证失败" }),
+                ));
+            }
+        },
+        REQUEST_RECORD_MAX_BODY_SIZE_KB_KEY => match value.as_u64() {
+            Some(size_kb) if size_kb <= MAX_REQUEST_RECORD_BODY_SIZE_KB => {
+                value = json!(size_kb);
+            }
+            None if value.is_null() => {
+                value = admin_system_config_default_value(&normalized_key).unwrap_or(json!(0));
+            }
+            Some(_) | None => {
                 return Err((
                     http::StatusCode::BAD_REQUEST,
                     json!({ "detail": "请求数据验证失败" }),
@@ -3526,6 +3546,50 @@ mod tests {
         assert!(parse_admin_system_config_update(
             "cyber_continue_failover",
             br#"{"value":"true"}"#,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn request_record_body_capture_defaults_are_backward_compatible() {
+        assert_eq!(
+            admin_system_config_default_value("request_record_compact_base64_images"),
+            Some(json!(false))
+        );
+        assert_eq!(
+            admin_system_config_default_value("request_record_max_body_size_kb"),
+            Some(json!(0))
+        );
+    }
+
+    #[test]
+    fn request_record_body_capture_updates_validate_types_and_bounds() {
+        let compact = parse_admin_system_config_update(
+            "request_record_compact_base64_images",
+            br#"{"value":true}"#,
+        )
+        .expect("boolean Base64 image compaction setting should parse");
+        assert_eq!(compact.value, json!(true));
+        assert!(parse_admin_system_config_update(
+            "request_record_compact_base64_images",
+            br#"{"value":"true"}"#,
+        )
+        .is_err());
+
+        let limit = parse_admin_system_config_update(
+            "request_record_max_body_size_kb",
+            br#"{"value":512}"#,
+        )
+        .expect("body size limit should parse");
+        assert_eq!(limit.value, json!(512));
+        assert!(parse_admin_system_config_update(
+            "request_record_max_body_size_kb",
+            br#"{"value":1048577}"#,
+        )
+        .is_err());
+        assert!(parse_admin_system_config_update(
+            "request_record_max_body_size_kb",
+            br#"{"value":-1}"#,
         )
         .is_err());
     }

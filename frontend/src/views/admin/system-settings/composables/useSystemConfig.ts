@@ -42,6 +42,8 @@ export interface SystemConfig {
   // 请求记录
   request_record_level: string
   sensitive_headers: string[]
+  request_record_compact_base64_images: boolean
+  request_record_max_body_size_kb: number
   // 请求记录清理
   enable_auto_cleanup: boolean
   detail_log_retention_days: number
@@ -98,6 +100,8 @@ const CONFIG_KEYS = [
   // 请求记录
   'request_record_level',
   'sensitive_headers',
+  'request_record_compact_base64_images',
+  'request_record_max_body_size_kb',
   // 请求记录清理
   'enable_auto_cleanup',
   'detail_log_retention_days',
@@ -156,6 +160,8 @@ function createDefaultConfig(): SystemConfig {
     // 请求记录
     request_record_level: 'full',
     sensitive_headers: ['authorization', 'x-api-key', 'api-key', 'cookie', 'set-cookie'],
+    request_record_compact_base64_images: false,
+    request_record_max_body_size_kb: 0,
     // 请求记录清理
     enable_auto_cleanup: true,
     detail_log_retention_days: 7,
@@ -250,6 +256,10 @@ export function useSystemConfig() {
     if (!originalConfig.value) return false
     return (
       systemConfig.value.request_record_level !== originalConfig.value.request_record_level ||
+      systemConfig.value.request_record_compact_base64_images !==
+        originalConfig.value.request_record_compact_base64_images ||
+      systemConfig.value.request_record_max_body_size_kb !==
+        originalConfig.value.request_record_max_body_size_kb ||
       JSON.stringify(systemConfig.value.sensitive_headers) !==
         JSON.stringify(originalConfig.value.sensitive_headers)
     )
@@ -608,6 +618,16 @@ export function useSystemConfig() {
           value: systemConfig.value.sensitive_headers,
           description: '敏感请求头列表',
         },
+        {
+          key: 'request_record_compact_base64_images',
+          value: systemConfig.value.request_record_compact_base64_images,
+          description: '请求记录 Base64 图片精简开关',
+        },
+        {
+          key: 'request_record_max_body_size_kb',
+          value: systemConfig.value.request_record_max_body_size_kb,
+          description: '请求记录单个 Body 大小上限（KB），0 表示不限制',
+        },
       ]
 
       await Promise.all(
@@ -618,6 +638,10 @@ export function useSystemConfig() {
       if (originalConfig.value) {
         originalConfig.value.request_record_level = systemConfig.value.request_record_level
         originalConfig.value.sensitive_headers = [...systemConfig.value.sensitive_headers]
+        originalConfig.value.request_record_compact_base64_images =
+          systemConfig.value.request_record_compact_base64_images
+        originalConfig.value.request_record_max_body_size_kb =
+          systemConfig.value.request_record_max_body_size_kb
       }
       success('请求记录配置已保存')
     } catch (err) {
