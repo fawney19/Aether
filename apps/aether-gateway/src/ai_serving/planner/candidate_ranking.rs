@@ -346,6 +346,7 @@ mod tests {
             provider_name: "provider-1".to_string(),
             provider_type: "custom".to_string(),
             provider_priority: 0,
+            provider_pool_enabled: false,
             endpoint_id: endpoint_id.to_string(),
             endpoint_api_format: "openai:chat".to_string(),
             key_id: key_id.to_string(),
@@ -651,6 +652,7 @@ mod tests {
             provider_name: provider_id.to_string(),
             provider_type: "custom".to_string(),
             provider_priority,
+            provider_pool_enabled: false,
             endpoint_id: endpoint_id.to_string(),
             endpoint_api_format: endpoint_api_format.to_string(),
             key_id: key_id.to_string(),
@@ -1948,7 +1950,7 @@ mod tests {
             .with_data_state_for_tests(data_state);
         let auth_snapshot = sample_auth_snapshot();
         let client_session_affinity = ClientSessionAffinity::from_session_key("session-1");
-        let cached_candidate = sample_priority_candidate(
+        let mut cached_candidate = sample_priority_candidate(
             "provider-pool",
             "endpoint-pool",
             "key-cached",
@@ -1956,6 +1958,7 @@ mod tests {
             Some(10),
             10,
         );
+        cached_candidate.provider_pool_enabled = true;
         remember_scheduler_affinity_for_candidate(
             PlannerAppState::new(&state),
             Some(&auth_snapshot),
@@ -2042,7 +2045,7 @@ mod tests {
             .with_data_state_for_tests(data_state);
         let auth_snapshot = sample_auth_snapshot();
         let client_session_affinity = ClientSessionAffinity::from_session_key("session-1");
-        let cached_candidate = sample_priority_candidate(
+        let mut cached_candidate = sample_priority_candidate(
             "provider-pool",
             "endpoint-pool",
             "key-cached",
@@ -2050,6 +2053,7 @@ mod tests {
             Some(10),
             10,
         );
+        cached_candidate.provider_pool_enabled = true;
         remember_scheduler_affinity_for_candidate(
             PlannerAppState::new(&state),
             Some(&auth_snapshot),

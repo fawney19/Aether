@@ -106,12 +106,23 @@ impl AiCandidateResolutionPort for GatewayLocalCandidateResolutionPort<'_> {
         transport: &Self::Transport,
         requested_model: Option<&str>,
     ) -> Option<&'static str> {
+        let transport_uses_pool = provider_transport_uses_pool(transport);
+        if candidate.provider_pool_enabled != transport_uses_pool {
+            return Some("provider_pool_state_changed");
+        }
+        if !transport_uses_pool
+            && self.auth_snapshot.is_some_and(|snapshot| {
+                !snapshot.provider_key_allowed(&candidate.provider_id, &candidate.key_id)
+            })
+        {
+            return Some("auth_provider_key_disallowed");
+        }
         if let Some(skip_reason) =
             routing_policy_candidate_skip_reason(self.routing_policy, candidate, transport)
         {
             return Some(skip_reason);
         }
-        if provider_transport_uses_pool(transport) {
+        if transport_uses_pool {
             return pool_group_common_transport_skip_reason(candidate, transport);
         }
         if let Some(skip_reason) =
@@ -158,7 +169,8 @@ impl AiCandidateResolutionPort for GatewayLocalCandidateResolutionPort<'_> {
         transport: Self::Transport,
     ) -> Self::Eligible {
         let provider_api_format = transport.endpoint.api_format.trim().to_ascii_lowercase();
-        let kind = if provider_transport_uses_pool(&transport) {
+        let transport_uses_pool = provider_transport_uses_pool(&transport);
+        let kind = if candidate.provider_pool_enabled && transport_uses_pool {
             LocalExecutionCandidateKind::PoolGroup
         } else {
             LocalExecutionCandidateKind::SingleKey
@@ -631,6 +643,7 @@ mod tests {
             provider_name: "provider".to_string(),
             provider_type: "custom".to_string(),
             provider_priority: 10,
+            provider_pool_enabled: false,
             endpoint_id: "endpoint-1".to_string(),
             endpoint_api_format: "claude:messages".to_string(),
             key_id: "key-1".to_string(),

@@ -13,9 +13,10 @@ use axum::{
 use serde_json::json;
 
 use super::{
-    build_admin_endpoint_health_status_payload, build_auth_error_response, query_param_value,
-    resolve_authenticated_local_user, sanitize_public_model_config_for_user, AppState,
-    GatewayPublicRequestContext, USERS_ME_AVAILABLE_MODELS_FETCH_LIMIT,
+    build_admin_endpoint_health_status_payload, build_auth_error_response,
+    filter_eligible_model_rows_for_state, query_param_value, resolve_authenticated_local_user,
+    sanitize_public_model_config_for_user, AppState, GatewayPublicRequestContext,
+    USERS_ME_AVAILABLE_MODELS_FETCH_LIMIT, USERS_ME_CATALOG_API_FORMATS,
 };
 
 const USERS_ME_MODEL_CATALOG_UNAVAILABLE_DETAIL: &str = "用户模型目录暂不可用";
@@ -71,15 +72,74 @@ fn users_me_allowed_provider_names(
 async fn resolve_users_me_allowed_global_model_ids(
     state: &AppState,
     allowed_providers: Option<&[String]>,
+    provider_key_policies: &BTreeMap<String, Vec<String>>,
 ) -> Result<Option<BTreeSet<String>>, Response<Body>> {
-    let Some(allowed_providers) = allowed_providers else {
+    if allowed_providers.is_none() && provider_key_policies.is_empty() {
         return Ok(None);
-    };
-    if allowed_providers.is_empty() {
+    }
+    if allowed_providers.is_some_and(|values| values.is_empty()) {
         return Ok(Some(BTreeSet::new()));
     }
 
-    if !state.has_provider_catalog_data_reader() {
+    if provider_key_policies.is_empty() {
+        if !state.has_provider_catalog_data_reader() {
+            return Err(build_auth_error_response(
+                http::StatusCode::SERVICE_UNAVAILABLE,
+                USERS_ME_PROVIDER_CATALOG_UNAVAILABLE_DETAIL,
+                false,
+            ));
+        }
+
+        let allowed_provider_names: BTreeSet<String> = allowed_providers
+            .unwrap_or_default()
+            .iter()
+            .map(|value| value.trim().to_ascii_lowercase())
+            .filter(|value| !value.is_empty())
+            .collect();
+        let providers = match state.list_provider_catalog_providers(true).await {
+            Ok(value) => value,
+            Err(err) => {
+                return Err(build_auth_error_response(
+                    http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("user provider lookup failed: {err:?}"),
+                    false,
+                ))
+            }
+        };
+        let provider_ids = providers
+            .into_iter()
+            .filter(|provider| {
+                allowed_provider_names.contains(&provider.id.to_ascii_lowercase())
+                    || allowed_provider_names.contains(&provider.name.to_ascii_lowercase())
+                    || allowed_provider_names.contains(&provider.provider_type.to_ascii_lowercase())
+            })
+            .map(|provider| provider.id)
+            .collect::<Vec<_>>();
+        if provider_ids.is_empty() {
+            return Ok(Some(BTreeSet::new()));
+        }
+
+        let refs = match state
+            .list_active_global_model_ids_by_provider_ids(&provider_ids)
+            .await
+        {
+            Ok(value) => value,
+            Err(err) => {
+                return Err(build_auth_error_response(
+                    http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("user provider model lookup failed: {err:?}"),
+                    false,
+                ))
+            }
+        };
+        return Ok(Some(
+            refs.into_iter()
+                .map(|entry| entry.global_model_id)
+                .collect(),
+        ));
+    }
+
+    if !state.has_minimal_candidate_selection_reader() {
         return Err(build_auth_error_response(
             http::StatusCode::SERVICE_UNAVAILABLE,
             USERS_ME_PROVIDER_CATALOG_UNAVAILABLE_DETAIL,
@@ -87,52 +147,67 @@ async fn resolve_users_me_allowed_global_model_ids(
         ));
     }
 
-    let allowed_provider_names: BTreeSet<String> = allowed_providers
-        .iter()
-        .map(|value| value.trim().to_ascii_lowercase())
-        .filter(|value| !value.is_empty())
-        .collect::<BTreeSet<_>>();
-    let providers = match state.list_provider_catalog_providers(true).await {
-        Ok(value) => value,
-        Err(err) => {
-            return Err(build_auth_error_response(
-                http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("user provider lookup failed: {err:?}"),
-                false,
-            ))
-        }
+    let constraints = aether_scheduler_core::SchedulerAuthConstraints {
+        allowed_providers: allowed_providers.map(|values| values.to_vec()),
+        provider_key_policies: provider_key_policies.clone(),
+        allowed_api_formats: None,
+        allowed_models: None,
     };
-    let provider_ids = providers
-        .into_iter()
-        .filter(|provider| {
-            allowed_provider_names.contains(&provider.id.to_ascii_lowercase())
-                || allowed_provider_names.contains(&provider.name.to_ascii_lowercase())
-                || allowed_provider_names.contains(&provider.provider_type.to_ascii_lowercase())
-        })
-        .map(|provider| provider.id)
-        .collect::<Vec<_>>();
-    if provider_ids.is_empty() {
-        return Ok(Some(BTreeSet::new()));
+    let auth_snapshot = crate::data::auth::GatewayAuthApiKeySnapshot {
+        user_id: "catalog-policy".to_string(),
+        username: "catalog-policy".to_string(),
+        email: None,
+        user_role: "user".to_string(),
+        user_auth_source: "local".to_string(),
+        user_is_active: true,
+        user_is_deleted: false,
+        user_rate_limit: None,
+        user_allowed_providers: constraints.allowed_providers.clone(),
+        user_provider_key_policies: constraints.provider_key_policies.clone(),
+        user_allowed_api_formats: None,
+        user_allowed_models: None,
+        api_key_id: "catalog-policy".to_string(),
+        api_key_name: None,
+        api_key_is_active: true,
+        api_key_is_locked: false,
+        api_key_is_standalone: false,
+        api_key_rate_limit: None,
+        api_key_concurrent_limit: None,
+        api_key_expires_at_unix_secs: None,
+        api_key_allowed_providers: None,
+        api_key_allowed_api_formats: None,
+        api_key_allowed_models: None,
+        api_key_ip_rules: None,
+        currently_usable: true,
+    };
+    let mut global_model_ids = BTreeSet::new();
+    for api_format in USERS_ME_CATALOG_API_FORMATS {
+        let rows = match state
+            .list_minimal_candidate_selection_rows_for_api_format(api_format)
+            .await
+        {
+            Ok(value) => value,
+            Err(err) => {
+                return Err(build_auth_error_response(
+                    http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("user provider model lookup failed: {err:?}"),
+                    false,
+                ))
+            }
+        };
+        let rows =
+            filter_eligible_model_rows_for_state(state, rows, Some(&auth_snapshot), api_format)
+                .await
+                .map_err(|err| {
+                    build_auth_error_response(
+                        http::StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("user provider key model lookup failed: {err:?}"),
+                        false,
+                    )
+                })?;
+        global_model_ids.extend(rows.into_iter().map(|row| row.global_model_id));
     }
-
-    let refs = match state
-        .list_active_global_model_ids_by_provider_ids(&provider_ids)
-        .await
-    {
-        Ok(value) => value,
-        Err(err) => {
-            return Err(build_auth_error_response(
-                http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("user provider model lookup failed: {err:?}"),
-                false,
-            ))
-        }
-    };
-    Ok(Some(
-        refs.into_iter()
-            .map(|entry| entry.global_model_id)
-            .collect::<BTreeSet<_>>(),
-    ))
+    Ok(Some(global_model_ids))
 }
 
 pub(super) async fn handle_users_me_available_models(
@@ -176,11 +251,16 @@ pub(super) async fn handle_users_me_available_models(
     let provider_model_ids = if auth.user.role.eq_ignore_ascii_case("admin") {
         None
     } else {
+        let empty_key_policies = BTreeMap::new();
         match resolve_users_me_allowed_global_model_ids(
             state,
             effective_policies
                 .as_ref()
                 .and_then(|policies| policies.allowed_providers.as_deref()),
+            effective_policies
+                .as_ref()
+                .map(|policies| &policies.provider_key_policies)
+                .unwrap_or(&empty_key_policies),
         )
         .await
         {
@@ -306,15 +386,15 @@ pub(super) async fn handle_users_me_providers_get(
         Err(response) => return response,
     };
     let expose_provider_details = auth.user.role.eq_ignore_ascii_case("admin");
-    let allowed_provider_names = if expose_provider_details {
+    let effective_policies = if expose_provider_details {
         None
     } else {
-        let effective_policies = match state
+        match state
             .data
             .resolve_user_effective_list_policies(&auth.user)
             .await
         {
-            Ok(value) => value,
+            Ok(value) => Some(value),
             Err(err) => {
                 return build_auth_error_response(
                     http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -322,9 +402,11 @@ pub(super) async fn handle_users_me_providers_get(
                     false,
                 )
             }
-        };
-        users_me_allowed_provider_names(effective_policies.allowed_providers.as_deref())
+        }
     };
+    let allowed_provider_names = effective_policies.as_ref().and_then(|policies| {
+        users_me_allowed_provider_names(policies.allowed_providers.as_deref())
+    });
 
     let mut providers = match state.list_provider_catalog_providers(true).await {
         Ok(value) => value,
@@ -341,6 +423,46 @@ pub(super) async fn handle_users_me_providers_get(
             allowed_provider_names.contains(&provider.id.to_ascii_lowercase())
                 || allowed_provider_names.contains(&provider.name.to_ascii_lowercase())
                 || allowed_provider_names.contains(&provider.provider_type.to_ascii_lowercase())
+        });
+    }
+    if let Some(policies) = effective_policies
+        .as_ref()
+        .filter(|policies| !policies.provider_key_policies.is_empty())
+    {
+        let restricted_provider_ids = providers
+            .iter()
+            .filter(|provider| policies.provider_key_policies.contains_key(&provider.id))
+            .map(|provider| provider.id.clone())
+            .collect::<Vec<_>>();
+        let keys = match state
+            .list_provider_catalog_key_summaries_by_provider_ids(&restricted_provider_ids)
+            .await
+        {
+            Ok(value) => value,
+            Err(err) => {
+                return build_auth_error_response(
+                    http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("user provider key lookup failed: {err:?}"),
+                    false,
+                )
+            }
+        };
+        let providers_with_allowed_keys = keys
+            .into_iter()
+            .filter(|key| key.is_active)
+            .filter(|key| {
+                policies
+                    .provider_key_policies
+                    .get(&key.provider_id)
+                    .is_none_or(|key_ids| key_ids.iter().any(|key_id| key_id == &key.id))
+            })
+            .map(|key| key.provider_id)
+            .collect::<BTreeSet<_>>();
+        providers.retain(|provider| {
+            policies
+                .provider_key_policies
+                .get(&provider.id)
+                .is_none_or(|_| providers_with_allowed_keys.contains(&provider.id))
         });
     }
     providers.sort_by(|left, right| {

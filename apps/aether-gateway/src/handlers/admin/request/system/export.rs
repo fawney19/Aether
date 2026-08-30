@@ -18,6 +18,123 @@ use chrono::Utc;
 use serde_json::json;
 use std::collections::BTreeMap;
 
+fn matching_export_providers<'a>(
+    reference: &str,
+    providers: &'a [aether_data_contracts::repository::provider_catalog::StoredProviderCatalogProvider],
+) -> Vec<&'a aether_data_contracts::repository::provider_catalog::StoredProviderCatalogProvider> {
+    let reference = reference.trim();
+    let by_id = providers
+        .iter()
+        .filter(|provider| provider.id.eq_ignore_ascii_case(reference))
+        .collect::<Vec<_>>();
+    if !by_id.is_empty() {
+        return by_id;
+    }
+    let by_name = providers
+        .iter()
+        .filter(|provider| provider.name.eq_ignore_ascii_case(reference))
+        .collect::<Vec<_>>();
+    if !by_name.is_empty() {
+        return by_name;
+    }
+    providers
+        .iter()
+        .filter(|provider| provider.provider_type.eq_ignore_ascii_case(reference))
+        .collect()
+}
+
+fn build_portable_user_group_provider_access(
+    group: &aether_data::repository::users::StoredUserGroup,
+    providers: &[aether_data_contracts::repository::provider_catalog::StoredProviderCatalogProvider],
+    keys: &[aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey],
+) -> Result<(Vec<serde_json::Value>, Vec<serde_json::Value>), String> {
+    let mut allowed_provider_refs = BTreeMap::<String, serde_json::Value>::new();
+    for reference in group.allowed_providers.as_deref().unwrap_or_default() {
+        let matches = matching_export_providers(reference, providers);
+        if matches.is_empty() {
+            return Err(format!(
+                "用户组 '{}' 引用了不存在的 Provider: {}",
+                group.name,
+                reference.trim()
+            ));
+        }
+        for provider in matches {
+            allowed_provider_refs.insert(
+                provider.id.clone(),
+                json!({ "id": provider.id, "name": provider.name }),
+            );
+        }
+    }
+
+    let mut policy_refs = Vec::new();
+    for (provider_reference, key_references) in &group.provider_key_policies {
+        let provider_matches = matching_export_providers(provider_reference, providers);
+        let [provider] = provider_matches.as_slice() else {
+            return Err(if provider_matches.is_empty() {
+                format!(
+                    "用户组 '{}' 的 Key 策略引用了不存在的 Provider: {}",
+                    group.name, provider_reference
+                )
+            } else {
+                format!(
+                    "用户组 '{}' 的 Key 策略 Provider 名称不唯一: {}",
+                    group.name, provider_reference
+                )
+            });
+        };
+        let provider_keys = keys
+            .iter()
+            .filter(|key| key.provider_id == provider.id)
+            .collect::<Vec<_>>();
+        let mut key_refs = BTreeMap::<String, serde_json::Value>::new();
+        for key_reference in key_references {
+            let id_matches = provider_keys
+                .iter()
+                .filter(|key| key.id.eq_ignore_ascii_case(key_reference))
+                .copied()
+                .collect::<Vec<_>>();
+            let matches = if id_matches.is_empty() {
+                provider_keys
+                    .iter()
+                    .filter(|key| key.name.eq_ignore_ascii_case(key_reference))
+                    .copied()
+                    .collect::<Vec<_>>()
+            } else {
+                id_matches
+            };
+            let [key] = matches.as_slice() else {
+                return Err(if matches.is_empty() {
+                    format!(
+                        "用户组 '{}' 的 Key 策略引用了不存在的 Key: {}",
+                        group.name, key_reference
+                    )
+                } else {
+                    format!(
+                        "用户组 '{}' 的 Provider '{}' 存在重名 Key: {}",
+                        group.name, provider.name, key_reference
+                    )
+                });
+            };
+            key_refs.insert(key.id.clone(), json!({ "id": key.id, "name": key.name }));
+        }
+        policy_refs.push(json!({
+            "provider": { "id": provider.id, "name": provider.name },
+            "keys": key_refs.into_values().collect::<Vec<_>>(),
+        }));
+    }
+    policy_refs.sort_by(|left, right| {
+        left.pointer("/provider/id")
+            .and_then(serde_json::Value::as_str)
+            .cmp(
+                &right
+                    .pointer("/provider/id")
+                    .and_then(serde_json::Value::as_str),
+            )
+    });
+
+    Ok((allowed_provider_refs.into_values().collect(), policy_refs))
+}
+
 impl<'a> AdminAppState<'a> {
     pub(crate) async fn build_admin_system_config_export_payload(
         &self,
@@ -182,6 +299,14 @@ impl<'a> AdminAppState<'a> {
             .list_auth_api_key_export_records_by_user_ids(&user_ids)
             .await?;
         let groups = self.list_user_groups().await?;
+        let providers = self.list_provider_catalog_providers(false).await?;
+        let provider_ids = providers
+            .iter()
+            .map(|provider| provider.id.clone())
+            .collect::<Vec<_>>();
+        let provider_keys = self
+            .list_provider_catalog_keys_by_provider_ids(&provider_ids)
+            .await?;
         let memberships = self
             .list_user_group_memberships_by_user_ids(&user_ids)
             .await?;
@@ -232,21 +357,27 @@ impl<'a> AdminAppState<'a> {
         let user_groups_data = groups
             .iter()
             .map(|group| {
-                json!({
+                let (allowed_provider_refs, provider_key_policy_refs) =
+                    build_portable_user_group_provider_access(group, &providers, &provider_keys)
+                        .map_err(GatewayError::Internal)?;
+                Ok(json!({
                     "id": group.id.clone(),
                     "name": group.name.clone(),
                     "description": group.description.clone(),
                     "allowed_providers": group.allowed_providers.clone(),
+                    "allowed_provider_refs": allowed_provider_refs,
                     "allowed_providers_mode": group.allowed_providers_mode.clone(),
+                    "provider_key_policies": group.provider_key_policies.clone(),
+                    "provider_key_policy_refs": provider_key_policy_refs,
                     "allowed_api_formats": group.allowed_api_formats.clone(),
                     "allowed_api_formats_mode": group.allowed_api_formats_mode.clone(),
                     "allowed_models": group.allowed_models.clone(),
                     "allowed_models_mode": group.allowed_models_mode.clone(),
                     "rate_limit": group.rate_limit,
                     "rate_limit_mode": group.rate_limit_mode.clone(),
-                })
+                }))
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, GatewayError>>()?;
 
         let users_data = users
             .iter()

@@ -44,11 +44,19 @@
             :disabled="form.allowed_providers_mode === 'unrestricted'"
             :placeholder="legacyT(form.allowed_providers_mode === 'unrestricted' ? '不限制所有选项' : '选择提供商')"
             :empty-text="legacyT('暂无选项')"
-            @update:model-value="(value) => updateForm({ allowed_providers: value })"
+            @update:model-value="updateProviders"
           />
         </div>
       </div>
     </div>
+
+    <ProviderKeyPolicyEditor
+      :selected-provider-ids="form.allowed_providers"
+      :key-policies="form.provider_key_policies"
+      :provider-options="providerOptions"
+      :disabled="form.allowed_providers_mode === 'unrestricted'"
+      @update:key-policies="(value) => updateForm({ provider_key_policies: value })"
+    />
 
     <div class="space-y-2">
       <Label class="text-sm font-medium">{{ legacyT('允许的端点') }}</Label>
@@ -143,9 +151,11 @@ import {
   TooltipTrigger,
 } from '@/components/ui'
 import { MultiSelect } from '@/components/common'
+import { useConfirm } from '@/composables/useConfirm'
 import { parseNumberInput } from '@/utils/form'
 import { useI18n } from '@/i18n'
 import type { UserGroupFormState, UserSelectOption } from './user-management-types'
+import ProviderKeyPolicyEditor from './ProviderKeyPolicyEditor.vue'
 
 const props = defineProps<{
   form: UserGroupFormState
@@ -160,13 +170,60 @@ const emit = defineEmits<{
 }>()
 
 const { legacyT } = useI18n()
+const { confirm } = useConfirm()
 
 function updateForm(patch: Partial<UserGroupFormState>): void {
   emit('update:form', { ...props.form, ...patch })
 }
 
-function setProvidersUnrestricted(value: boolean): void {
-  updateForm({ allowed_providers_mode: value ? 'unrestricted' : 'specific' })
+function providerLabel(providerId: string): string {
+  return props.providerOptions.find((provider) => provider.value === providerId)?.label ?? providerId
+}
+
+async function updateProviders(value: string[]): Promise<void> {
+  const selected = new Set(value)
+  const policiesToRemove = Object.keys(props.form.provider_key_policies)
+    .filter((providerId) => !selected.has(providerId))
+  if (policiesToRemove.length > 0) {
+    const names = policiesToRemove.map(providerLabel).join('、')
+    const confirmed = await confirm({
+      title: legacyT('清除 Key 规则'),
+      message: legacyT(`取消 Provider 后，将同时清除以下 Key 规则：${names}。是否继续？`),
+      confirmText: legacyT('继续'),
+      variant: 'warning',
+    })
+    if (!confirmed) return
+  }
+
+  const nextPolicies = { ...props.form.provider_key_policies }
+  for (const providerId of policiesToRemove) delete nextPolicies[providerId]
+  updateForm({
+    allowed_providers: value,
+    provider_key_policies: nextPolicies,
+  })
+}
+
+async function setProvidersUnrestricted(value: boolean): Promise<void> {
+  if (!value) {
+    updateForm({ allowed_providers_mode: 'specific' })
+    return
+  }
+
+  const policyCount = Object.keys(props.form.provider_key_policies).length
+  if (policyCount > 0) {
+    const confirmed = await confirm({
+      title: legacyT('清除 Key 规则'),
+      message: legacyT(`提供商改为不限制后，将清除 ${policyCount} 条 Key 规则。是否继续？`),
+      confirmText: legacyT('继续'),
+      variant: 'warning',
+    })
+    if (!confirmed) return
+  }
+
+  updateForm({
+    allowed_providers_mode: 'unrestricted',
+    provider_key_policies: {},
+  })
 }
 
 function setApiFormatsUnrestricted(value: boolean): void {

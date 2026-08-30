@@ -90,6 +90,7 @@ fn sample_files_candidate_row() -> StoredMinimalCandidateSelectionRow {
         provider_type: "custom".to_string(),
         provider_priority: 10,
         provider_is_active: true,
+        provider_pool_enabled: false,
         endpoint_id: "endpoint-gemini-files-local-1".to_string(),
         endpoint_api_format: "gemini:files".to_string(),
         endpoint_api_family: Some("gemini".to_string()),

@@ -31,8 +31,8 @@ use crate::ai_serving::{
     candidate_auth_channel_skip_reason, candidate_common_transport_skip_reason,
     provider_key_pool_score_scope, read_candidate_transport_snapshot,
     record_local_runtime_candidate_skip_reason, CandidateTransportPolicyFacts,
-    EligibleLocalExecutionCandidate, LocalExecutionCandidateKind, PlannerAppState,
-    SkippedLocalExecutionCandidate,
+    EligibleLocalExecutionCandidate, GatewayAuthApiKeySnapshot, LocalExecutionCandidateKind,
+    PlannerAppState, SkippedLocalExecutionCandidate,
 };
 use crate::clock::current_unix_ms;
 use crate::handlers::shared::provider_pool::read_admin_provider_pool_runtime_state;
@@ -54,11 +54,40 @@ static POOL_SCORE_SCHEDULE_INTEREST_SEMAPHORE: LazyLock<Arc<Semaphore>> =
     LazyLock::new(|| Arc::new(Semaphore::new(POOL_SCORE_SCHEDULE_INTEREST_CONCURRENCY)));
 const POOL_ACTIVE_PROBE_SEALED_SKIP_REASON: &str = "pool_active_probe_sealed";
 const ROUTING_PROFILE_DISALLOWED_KEY_SKIP_REASON: &str = "routing_profile_disallowed_key";
+const AUTH_PROVIDER_KEY_DISALLOWED_SKIP_REASON: &str = "auth_provider_key_disallowed";
 const POOL_SCORE_SCHEDULE_INTEREST_CONCURRENCY: usize = 4;
 const POOL_SCORE_SCHEDULE_INTEREST_MAX_PER_BATCH: usize = 16;
 const POOL_SCORE_SCHEDULE_INTEREST_MIN_INTERVAL_SECS: u64 = 60;
 
 type PoolCatalogKeyContext = PoolMemberSignals;
+
+fn intersect_optional_key_allowlists(
+    left: Option<&[String]>,
+    right: Option<&[String]>,
+) -> Option<Vec<String>> {
+    match (left, right) {
+        (None, None) => None,
+        (Some(key_ids), None) | (None, Some(key_ids)) => Some(unique_key_ids(key_ids)),
+        (Some(left), Some(right)) => {
+            let right = right.iter().map(String::as_str).collect::<BTreeSet<_>>();
+            Some(
+                unique_key_ids(left)
+                    .into_iter()
+                    .filter(|key_id| right.contains(key_id.as_str()))
+                    .collect(),
+            )
+        }
+    }
+}
+
+fn unique_key_ids(key_ids: &[String]) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    key_ids
+        .iter()
+        .filter(|key_id| seen.insert((*key_id).clone()))
+        .cloned()
+        .collect()
+}
 
 pub(crate) async fn apply_local_execution_pool_scheduler(
     state: PlannerAppState<'_>,
@@ -66,6 +95,7 @@ pub(crate) async fn apply_local_execution_pool_scheduler(
     sticky_session_token: Option<&str>,
     requested_model: Option<&str>,
     request_auth_channel: Option<&str>,
+    auth_snapshot: Option<&GatewayAuthApiKeySnapshot>,
 ) -> (
     Vec<EligibleLocalExecutionCandidate>,
     Vec<SkippedLocalExecutionCandidate>,
@@ -88,6 +118,7 @@ pub(crate) async fn apply_local_execution_pool_scheduler(
                 sticky_session_token,
                 requested_model,
                 request_auth_channel,
+                auth_snapshot,
             )
             .await;
             scheduled.append(&mut expanded.0);
@@ -325,16 +356,19 @@ async fn expand_pool_group_candidate(
     sticky_session_token: Option<&str>,
     requested_model: Option<&str>,
     request_auth_channel: Option<&str>,
+    auth_snapshot: Option<&GatewayAuthApiKeySnapshot>,
 ) -> (
     Vec<EligibleLocalExecutionCandidate>,
     Vec<SkippedLocalExecutionCandidate>,
 ) {
-    let mut cursor = PoolKeyCursor::new(
+    let mut cursor = PoolKeyCursor::new_with_routing_policy_and_auth(
         state,
         group,
         sticky_session_token,
         requested_model,
         request_auth_channel,
+        None,
+        auth_snapshot,
     );
     let mut scheduled = Vec::new();
     let mut skipped = Vec::new();
@@ -357,7 +391,8 @@ pub(crate) struct PoolKeyCursor<'a> {
     requested_model: Option<String>,
     request_auth_channel: Option<String>,
     routing_overlay: Option<RankingOverlay>,
-    routing_allowed_key_ids: Option<Vec<String>>,
+    auth_allowed_key_ids: Option<BTreeSet<String>>,
+    effective_allowed_key_ids: Option<Vec<String>>,
     effective_pool_config: Option<AdminProviderPoolConfig>,
     runtime_miss_trace_id: Option<String>,
     record_runtime_miss_diagnostic: bool,
@@ -373,8 +408,8 @@ pub(crate) struct PoolKeyCursor<'a> {
     score_next_offset: u32,
     score_phase_exhausted: bool,
     score_schedule_interest_count: usize,
-    routing_allowed_key_offset: usize,
-    routing_allowed_rows: Option<VecDeque<StoredMinimalCandidateSelectionRow>>,
+    allowed_key_offset: usize,
+    allowed_key_rows: Option<VecDeque<StoredMinimalCandidateSelectionRow>>,
     skip_reason_counts: BTreeMap<&'static str, u32>,
     next_pool_key_index: u32,
     sticky_candidate_loaded: bool,
@@ -420,6 +455,26 @@ impl<'a> PoolKeyCursor<'a> {
         request_auth_channel: Option<&str>,
         routing_policy: Option<&ResolvedRoutingPolicy>,
     ) -> Self {
+        Self::new_with_routing_policy_and_auth(
+            state,
+            group,
+            sticky_session_token,
+            requested_model,
+            request_auth_channel,
+            routing_policy,
+            None,
+        )
+    }
+
+    pub(crate) fn new_with_routing_policy_and_auth(
+        state: PlannerAppState<'a>,
+        group: EligibleLocalExecutionCandidate,
+        sticky_session_token: Option<&str>,
+        requested_model: Option<&str>,
+        request_auth_channel: Option<&str>,
+        routing_policy: Option<&ResolvedRoutingPolicy>,
+        auth_snapshot: Option<&GatewayAuthApiKeySnapshot>,
+    ) -> Self {
         let effective_pool_config = effective_pool_config_for_group(&group, routing_policy);
         let pool_key_order =
             pool_key_candidate_order_for_group(&group, effective_pool_config.as_ref());
@@ -427,14 +482,14 @@ impl<'a> PoolKeyCursor<'a> {
         let routing_allowed_key_ids = routing_policy
             .map(|policy| &policy.ranking_overlay.allowed_keys)
             .filter(|key_ids| !key_ids.is_empty())
-            .map(|key_ids| {
-                let mut seen = BTreeSet::new();
-                key_ids
-                    .iter()
-                    .filter(|key_id| seen.insert((*key_id).clone()))
-                    .cloned()
-                    .collect::<Vec<_>>()
-            });
+            .map(Vec::as_slice);
+        let auth_allowed_key_ids = auth_snapshot.and_then(|snapshot| {
+            snapshot.effective_provider_key_allowlist(&group.candidate.provider_id)
+        });
+        let effective_allowed_key_ids =
+            intersect_optional_key_allowlists(routing_allowed_key_ids, auth_allowed_key_ids);
+        let auth_allowed_key_ids =
+            auth_allowed_key_ids.map(|key_ids| key_ids.iter().cloned().collect::<BTreeSet<_>>());
         let score_top_n = effective_pool_config
             .as_ref()
             .map(|config| config.score_top_n)
@@ -455,7 +510,8 @@ impl<'a> PoolKeyCursor<'a> {
             requested_model: requested_model.map(str::to_string),
             request_auth_channel: request_auth_channel.map(str::to_string),
             routing_overlay,
-            routing_allowed_key_ids,
+            auth_allowed_key_ids,
+            effective_allowed_key_ids,
             effective_pool_config,
             runtime_miss_trace_id: None,
             record_runtime_miss_diagnostic: false,
@@ -471,8 +527,8 @@ impl<'a> PoolKeyCursor<'a> {
             score_next_offset: 0,
             score_phase_exhausted: false,
             score_schedule_interest_count: 0,
-            routing_allowed_key_offset: 0,
-            routing_allowed_rows: None,
+            allowed_key_offset: 0,
+            allowed_key_rows: None,
             skip_reason_counts: BTreeMap::new(),
             next_pool_key_index: 0,
             sticky_candidate_loaded: false,
@@ -616,8 +672,8 @@ impl<'a> PoolKeyCursor<'a> {
     }
 
     async fn next_page_candidates(&mut self) -> Option<Vec<EligibleLocalExecutionCandidate>> {
-        if self.routing_allowed_key_ids.is_some() {
-            return self.next_routing_allowed_candidates().await;
+        if self.effective_allowed_key_ids.is_some() {
+            return self.next_allowed_candidates().await;
         }
 
         if !self.score_phase_exhausted {
@@ -685,9 +741,7 @@ impl<'a> PoolKeyCursor<'a> {
         Some(candidates)
     }
 
-    async fn next_routing_allowed_candidates(
-        &mut self,
-    ) -> Option<Vec<EligibleLocalExecutionCandidate>> {
+    async fn next_allowed_candidates(&mut self) -> Option<Vec<EligibleLocalExecutionCandidate>> {
         loop {
             if self.budget_scanned_keys >= self.max_scanned_keys
                 || self.scanned_keys >= self.absolute_max_scanned_keys
@@ -695,12 +749,12 @@ impl<'a> PoolKeyCursor<'a> {
                 return None;
             }
 
-            let key_ids = self.routing_allowed_key_ids.as_ref()?;
+            let key_ids = self.effective_allowed_key_ids.as_ref()?;
             let has_buffered_rows = self
-                .routing_allowed_rows
+                .allowed_key_rows
                 .as_ref()
                 .is_some_and(|rows| !rows.is_empty());
-            if !has_buffered_rows && self.routing_allowed_key_offset >= key_ids.len() {
+            if !has_buffered_rows && self.allowed_key_offset >= key_ids.len() {
                 return None;
             }
             let limit = self
@@ -711,7 +765,7 @@ impl<'a> PoolKeyCursor<'a> {
             if matches!(
                 self.pool_key_order,
                 StoredPoolKeyCandidateOrder::InternalPriority
-            ) && self.routing_allowed_rows.is_none()
+            ) && self.allowed_key_rows.is_none()
             {
                 let query = StoredPoolKeyCandidateRowsByKeyIdsQuery {
                     api_format: self.group.candidate.endpoint_api_format.clone(),
@@ -734,14 +788,14 @@ impl<'a> PoolKeyCursor<'a> {
                     Ok(rows) => rows,
                     Err(err) => {
                         warn!(
-                            event_name = "pool_group_routing_key_load_failed",
+                            event_name = "pool_group_allowed_key_load_failed",
                             log_type = "event",
                             provider_id = %self.group.candidate.provider_id,
                             endpoint_id = %self.group.candidate.endpoint_id,
                             model_id = %self.group.candidate.model_id,
                             allowed_key_count = query.key_ids.len(),
                             error = ?err,
-                            "gateway pool scheduler failed to materialize routing-allowed pool keys"
+                            "gateway pool scheduler failed to materialize allowed pool keys"
                         );
                         return None;
                     }
@@ -763,20 +817,20 @@ impl<'a> PoolKeyCursor<'a> {
                         .cmp(&right_priority)
                         .then(left.key_id.cmp(&right.key_id))
                 });
-                self.routing_allowed_key_offset = key_ids.len();
-                self.routing_allowed_rows = Some(rows.into());
+                self.allowed_key_offset = key_ids.len();
+                self.allowed_key_rows = Some(rows.into());
             }
 
-            let rows = if let Some(rows) = self.routing_allowed_rows.as_mut() {
+            let rows = if let Some(rows) = self.allowed_key_rows.as_mut() {
                 let page_len = limit.min(rows.len());
                 rows.drain(..page_len).collect::<Vec<_>>()
             } else {
                 let end = self
-                    .routing_allowed_key_offset
+                    .allowed_key_offset
                     .saturating_add(limit)
                     .min(key_ids.len());
-                let page_key_ids = key_ids[self.routing_allowed_key_offset..end].to_vec();
-                self.routing_allowed_key_offset = end;
+                let page_key_ids = key_ids[self.allowed_key_offset..end].to_vec();
+                self.allowed_key_offset = end;
                 let query = StoredPoolKeyCandidateRowsByKeyIdsQuery {
                     api_format: self.group.candidate.endpoint_api_format.clone(),
                     provider_id: self.group.candidate.provider_id.clone(),
@@ -798,21 +852,21 @@ impl<'a> PoolKeyCursor<'a> {
                     Ok(rows) => rows,
                     Err(err) => {
                         warn!(
-                            event_name = "pool_group_routing_key_load_failed",
+                            event_name = "pool_group_allowed_key_load_failed",
                             log_type = "event",
                             provider_id = %self.group.candidate.provider_id,
                             endpoint_id = %self.group.candidate.endpoint_id,
                             model_id = %self.group.candidate.model_id,
                             allowed_key_count = query.key_ids.len(),
                             error = ?err,
-                            "gateway pool scheduler failed to materialize routing-allowed pool keys"
+                            "gateway pool scheduler failed to materialize allowed pool keys"
                         );
                         return None;
                     }
                 }
             };
             if rows.is_empty() {
-                if self.routing_allowed_rows.is_some() {
+                if self.allowed_key_rows.is_some() {
                     return None;
                 }
                 continue;
@@ -972,6 +1026,9 @@ impl<'a> PoolKeyCursor<'a> {
         )
         .await;
         let sticky_key_id = runtime.sticky_bound_key_id?;
+        if !self.key_is_effectively_allowed(sticky_key_id.as_str()) {
+            return None;
+        }
         if self
             .routing_overlay
             .as_ref()
@@ -1052,6 +1109,9 @@ impl<'a> PoolKeyCursor<'a> {
     async fn next_queued_candidate(&mut self) -> Option<EligibleLocalExecutionCandidate> {
         while let Some(candidate) = self.queued_candidates.pop_front() {
             let mut candidate = candidate;
+            if self.skip_candidate_if_auth_disallowed(&candidate) {
+                continue;
+            }
             if self.skip_candidate_if_routing_profile_disallowed(&candidate) {
                 continue;
             }
@@ -1090,6 +1150,37 @@ impl<'a> PoolKeyCursor<'a> {
                 extra_data: None,
             });
         true
+    }
+
+    fn skip_candidate_if_auth_disallowed(
+        &mut self,
+        candidate: &EligibleLocalExecutionCandidate,
+    ) -> bool {
+        if self.key_is_auth_allowed(candidate.candidate.key_id.as_str()) {
+            return false;
+        }
+        self.record_skip_reason(AUTH_PROVIDER_KEY_DISALLOWED_SKIP_REASON);
+        self.skipped_candidates
+            .push(SkippedLocalExecutionCandidate {
+                candidate: candidate.candidate.clone(),
+                skip_reason: AUTH_PROVIDER_KEY_DISALLOWED_SKIP_REASON,
+                transport: Some(candidate.transport.clone()),
+                ranking: candidate.ranking.clone(),
+                extra_data: None,
+            });
+        true
+    }
+
+    fn key_is_auth_allowed(&self, key_id: &str) -> bool {
+        self.auth_allowed_key_ids
+            .as_ref()
+            .is_none_or(|key_ids| key_ids.contains(key_id))
+    }
+
+    fn key_is_effectively_allowed(&self, key_id: &str) -> bool {
+        self.effective_allowed_key_ids
+            .as_ref()
+            .is_none_or(|key_ids| key_ids.iter().any(|allowed| allowed == key_id))
     }
 
     async fn skip_candidate_if_runtime_cooldown(
@@ -1277,6 +1368,10 @@ impl<'a> PoolKeyCursor<'a> {
         &mut self,
         candidate: aether_scheduler_core::SchedulerMinimalCandidateSelectionCandidate,
     ) -> Option<EligibleLocalExecutionCandidate> {
+        if !self.key_is_auth_allowed(candidate.key_id.as_str()) {
+            self.record_skip_reason(AUTH_PROVIDER_KEY_DISALLOWED_SKIP_REASON);
+            return None;
+        }
         if self
             .routing_overlay
             .as_ref()
@@ -1368,6 +1463,7 @@ fn pool_candidate_from_row(
     row: StoredMinimalCandidateSelectionRow,
 ) -> aether_scheduler_core::SchedulerMinimalCandidateSelectionCandidate {
     let mut candidate = group.candidate.clone();
+    candidate.provider_pool_enabled = false;
     candidate.key_id = row.key_id;
     candidate.key_name = row.key_name;
     candidate.key_auth_type = row.key_auth_type;
@@ -1388,6 +1484,7 @@ fn pool_candidate_from_catalog_key(
     key: StoredProviderCatalogKey,
 ) -> aether_scheduler_core::SchedulerMinimalCandidateSelectionCandidate {
     let mut candidate = group.candidate.clone();
+    candidate.provider_pool_enabled = false;
     candidate.key_id = key.id;
     candidate.key_name = key.name;
     candidate.key_auth_type = key.auth_type;
@@ -1941,8 +2038,8 @@ mod tests {
         pool_key_candidate_order_for_group, pool_key_requires_reauth_for_scheduling,
         prune_unschedulable_active_probe_members_for_request,
         remove_active_probe_members_for_request, should_trigger_active_probe_burst_for_request,
-        PoolCatalogKeyContext, PoolKeyCursor, POOL_ACTIVE_PROBE_SEALED_SKIP_REASON,
-        ROUTING_PROFILE_DISALLOWED_KEY_SKIP_REASON,
+        PoolCatalogKeyContext, PoolKeyCursor, AUTH_PROVIDER_KEY_DISALLOWED_SKIP_REASON,
+        POOL_ACTIVE_PROBE_SEALED_SKIP_REASON, ROUTING_PROFILE_DISALLOWED_KEY_SKIP_REASON,
     };
     use crate::ai_serving::{
         apply_local_runtime_candidate_terminal_reason, provider_key_pool_score_id,
@@ -1959,6 +2056,7 @@ mod tests {
     use aether_data::repository::candidate_selection::InMemoryMinimalCandidateSelectionReadRepository;
     use aether_data::repository::pool_scores::InMemoryPoolMemberScoreRepository;
     use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
+    use aether_data_contracts::repository::auth::StoredAuthApiKeySnapshot;
     use aether_data_contracts::repository::candidate_selection::{
         StoredMinimalCandidateSelectionRow, StoredPoolKeyCandidateOrder,
     };
@@ -3322,6 +3420,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pool_key_cursor_rechecks_auth_for_queued_cache_affinity_candidate() {
+        let app = AppState::new().expect("state should build");
+        let provider_config = Some(json!({
+            "pool_advanced": {
+                "scheduling_presets": [{"preset": "cache_affinity", "enabled": true}]
+            }
+        }));
+        let group = sample_eligible_candidate(
+            "provider-pool",
+            "endpoint-1",
+            "key-allowed",
+            10,
+            provider_config.clone(),
+        );
+        let auth_snapshot =
+            auth_snapshot_with_provider_key_allowlist("provider-pool", ["key-allowed"]);
+        let mut cursor = PoolKeyCursor::new_with_routing_policy_and_auth(
+            PlannerAppState::new(&app),
+            group,
+            None,
+            None,
+            None,
+            None,
+            Some(&auth_snapshot),
+        );
+        cursor.queued_candidates = VecDeque::from([
+            sample_eligible_candidate(
+                "provider-pool",
+                "endpoint-1",
+                "key-affinity-blocked",
+                10,
+                provider_config.clone(),
+            ),
+            sample_eligible_candidate(
+                "provider-pool",
+                "endpoint-1",
+                "key-allowed",
+                10,
+                provider_config,
+            ),
+        ]);
+
+        let candidate = cursor
+            .next_key()
+            .await
+            .expect("the allowed queued key should remain schedulable");
+
+        assert_eq!(candidate.candidate.key_id, "key-allowed");
+        assert_eq!(
+            cursor
+                .skip_reason_counts
+                .get(AUTH_PROVIDER_KEY_DISALLOWED_SKIP_REASON),
+            Some(&1)
+        );
+        assert_eq!(
+            cursor
+                .take_skipped_candidates()
+                .iter()
+                .map(|item| (item.candidate.key_id.as_str(), item.skip_reason))
+                .collect::<Vec<_>>(),
+            vec![(
+                "key-affinity-blocked",
+                AUTH_PROVIDER_KEY_DISALLOWED_SKIP_REASON
+            )]
+        );
+    }
+
+    #[tokio::test]
     async fn routing_allowed_key_outside_score_top_n_is_materialized_directly() {
         let provider_config = Some(json!({
             "pool_advanced": {
@@ -3383,6 +3549,203 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn auth_allowed_key_excludes_higher_scored_pool_key() {
+        let provider_config = Some(json!({
+            "pool_advanced": {
+                "score_top_n": 1,
+                "score_fallback_scan_limit": 1
+            }
+        }));
+        let (provider, endpoint, keys, rows) = large_pool_fixture(2, provider_config.clone());
+        let scores = vec![
+            sample_provider_key_pool_score("provider-pool", "key-00000", 1_000.0),
+            sample_provider_key_pool_score("provider-pool", "key-00001", 1.0),
+        ];
+        let data_state =
+            GatewayDataState::with_provider_catalog_and_minimal_candidate_selection_for_tests(
+                Arc::new(InMemoryProviderCatalogReadRepository::seed(
+                    vec![provider],
+                    vec![endpoint],
+                    keys,
+                )),
+                Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(rows)),
+            )
+            .with_pool_score_repository_for_tests(Arc::new(
+                InMemoryPoolMemberScoreRepository::seed(scores),
+            ))
+            .with_encryption_key_for_tests(aether_crypto::DEVELOPMENT_ENCRYPTION_KEY);
+        let app = AppState::new()
+            .expect("state should build")
+            .with_data_state_for_tests(data_state);
+        let group = sample_eligible_candidate(
+            "provider-pool",
+            "endpoint-1",
+            "key-00001",
+            10,
+            provider_config,
+        );
+        let auth_snapshot =
+            auth_snapshot_with_provider_key_allowlist("provider-pool", ["key-00001"]);
+        let mut cursor = PoolKeyCursor::new_with_routing_policy_and_auth(
+            PlannerAppState::new(&app),
+            group,
+            None,
+            None,
+            None,
+            None,
+            Some(&auth_snapshot),
+        );
+
+        let candidate = cursor
+            .next_key()
+            .await
+            .expect("the auth-allowed key should be materialized directly");
+
+        assert_eq!(candidate.candidate.key_id, "key-00001");
+        assert!(cursor.next_key().await.is_none());
+        assert_eq!(cursor.scanned_keys, 1);
+        assert_eq!(cursor.budget_scanned_keys, 1);
+    }
+
+    #[tokio::test]
+    async fn auth_allowlist_can_select_later_uuid_ordered_pool_key() {
+        let provider_config = Some(json!({ "pool_advanced": {} }));
+        let (provider, endpoint, mut keys, mut rows) =
+            large_pool_fixture(2, provider_config.clone());
+        let ordered_ids = [
+            "11111111-1111-4111-8111-111111111111",
+            "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        ];
+        for (index, key_id) in ordered_ids.iter().enumerate() {
+            keys[index].id = (*key_id).to_string();
+            keys[index].name = (*key_id).to_string();
+            rows[index].key_id = (*key_id).to_string();
+            rows[index].key_name = (*key_id).to_string();
+            rows[index].provider_pool_enabled = true;
+        }
+        let data_state =
+            GatewayDataState::with_provider_catalog_and_minimal_candidate_selection_for_tests(
+                Arc::new(InMemoryProviderCatalogReadRepository::seed(
+                    vec![provider],
+                    vec![endpoint],
+                    keys,
+                )),
+                Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(rows)),
+            )
+            .with_encryption_key_for_tests(aether_crypto::DEVELOPMENT_ENCRYPTION_KEY);
+        let app = AppState::new()
+            .expect("state should build")
+            .with_data_state_for_tests(data_state);
+        let group = sample_eligible_candidate(
+            "provider-pool",
+            "endpoint-1",
+            ordered_ids[0],
+            10,
+            provider_config,
+        );
+        let auth_snapshot =
+            auth_snapshot_with_provider_key_allowlist("provider-pool", [ordered_ids[1]]);
+        let mut cursor = PoolKeyCursor::new_with_routing_policy_and_auth(
+            PlannerAppState::new(&app),
+            group,
+            None,
+            None,
+            None,
+            None,
+            Some(&auth_snapshot),
+        );
+
+        let candidate = cursor
+            .next_key()
+            .await
+            .expect("the later UUID key should survive pool expansion");
+
+        assert_eq!(candidate.candidate.key_id, ordered_ids[1]);
+        assert!(!candidate.candidate.provider_pool_enabled);
+        assert!(cursor.next_key().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn empty_auth_allowlist_exhausts_pool() {
+        let provider_config = Some(json!({ "pool_advanced": {} }));
+        let (provider, endpoint, keys, rows) = large_pool_fixture(2, provider_config.clone());
+        let data_state =
+            GatewayDataState::with_provider_catalog_and_minimal_candidate_selection_for_tests(
+                Arc::new(InMemoryProviderCatalogReadRepository::seed(
+                    vec![provider],
+                    vec![endpoint],
+                    keys,
+                )),
+                Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(rows)),
+            )
+            .with_encryption_key_for_tests(aether_crypto::DEVELOPMENT_ENCRYPTION_KEY);
+        let app = AppState::new()
+            .expect("state should build")
+            .with_data_state_for_tests(data_state);
+        let group = sample_eligible_candidate(
+            "provider-pool",
+            "endpoint-1",
+            "key-00000",
+            10,
+            provider_config,
+        );
+        let auth_snapshot = auth_snapshot_with_provider_key_allowlist::<0>("provider-pool", []);
+        let mut cursor = PoolKeyCursor::new_with_routing_policy_and_auth(
+            PlannerAppState::new(&app),
+            group,
+            None,
+            None,
+            None,
+            None,
+            Some(&auth_snapshot),
+        );
+
+        assert!(cursor.next_key().await.is_none());
+        assert_eq!(cursor.effective_allowed_key_ids, Some(Vec::new()));
+    }
+
+    #[tokio::test]
+    async fn auth_and_routing_key_allowlists_are_intersected() {
+        let provider_config = Some(json!({ "pool_advanced": {} }));
+        let (provider, endpoint, keys, rows) = large_pool_fixture(2, provider_config.clone());
+        let data_state =
+            GatewayDataState::with_provider_catalog_and_minimal_candidate_selection_for_tests(
+                Arc::new(InMemoryProviderCatalogReadRepository::seed(
+                    vec![provider],
+                    vec![endpoint],
+                    keys,
+                )),
+                Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(rows)),
+            )
+            .with_encryption_key_for_tests(aether_crypto::DEVELOPMENT_ENCRYPTION_KEY);
+        let app = AppState::new()
+            .expect("state should build")
+            .with_data_state_for_tests(data_state);
+        let group = sample_eligible_candidate(
+            "provider-pool",
+            "endpoint-1",
+            "key-00001",
+            10,
+            provider_config,
+        );
+        let auth_snapshot =
+            auth_snapshot_with_provider_key_allowlist("provider-pool", ["key-00001"]);
+        let routing_policy = routing_policy_with_allowed_keys(["key-00000"]);
+        let mut cursor = PoolKeyCursor::new_with_routing_policy_and_auth(
+            PlannerAppState::new(&app),
+            group,
+            None,
+            None,
+            None,
+            Some(&routing_policy),
+            Some(&auth_snapshot),
+        );
+
+        assert!(cursor.next_key().await.is_none());
+        assert_eq!(cursor.effective_allowed_key_ids, Some(Vec::new()));
+    }
+
+    #[tokio::test]
     async fn routing_allowed_keys_continue_across_pool_pages() {
         let provider_config = Some(json!({
             "pool_advanced": {
@@ -3436,7 +3799,7 @@ mod tests {
         assert!(returned_key_ids.iter().any(|key_id| key_id == "key-00079"));
         assert_eq!(cursor.scanned_keys, 80);
         assert_eq!(cursor.budget_scanned_keys, 80);
-        assert_eq!(cursor.routing_allowed_key_offset, 80);
+        assert_eq!(cursor.allowed_key_offset, 80);
     }
 
     #[tokio::test]
@@ -4090,6 +4453,7 @@ mod tests {
             None,
             Some("gpt-5"),
             None,
+            None,
         )
         .await;
 
@@ -4189,6 +4553,7 @@ mod tests {
             vec![group_a, group_b],
             None,
             Some("gpt-5"),
+            None,
             None,
         )
         .await;
@@ -4667,6 +5032,7 @@ mod tests {
                 provider_type: "openai".to_string(),
                 provider_priority: 0,
                 provider_is_active: true,
+                provider_pool_enabled: false,
                 endpoint_id: "endpoint-1".to_string(),
                 endpoint_api_format: "openai:chat".to_string(),
                 endpoint_api_family: Some("openai".to_string()),
@@ -4728,6 +5094,41 @@ mod tests {
             probe_status: PoolMemberProbeStatus::Ok,
             updated_at: 1_000,
         }
+    }
+
+    fn auth_snapshot_with_provider_key_allowlist<const N: usize>(
+        provider_id: &str,
+        key_ids: [&str; N],
+    ) -> crate::ai_serving::GatewayAuthApiKeySnapshot {
+        let mut stored = StoredAuthApiKeySnapshot::new(
+            "user-1".to_string(),
+            "alice".to_string(),
+            None,
+            "user".to_string(),
+            "local".to_string(),
+            true,
+            false,
+            None,
+            None,
+            None,
+            "api-key-1".to_string(),
+            Some("default".to_string()),
+            true,
+            false,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("auth snapshot should build");
+        stored.user_provider_key_policies.insert(
+            provider_id.to_string(),
+            key_ids.into_iter().map(str::to_string).collect(),
+        );
+        crate::ai_serving::GatewayAuthApiKeySnapshot::from_stored(stored, 0)
     }
 
     fn sample_codex_pool_provider(
@@ -4821,6 +5222,7 @@ mod tests {
             provider_type: "codex".to_string(),
             provider_priority,
             provider_is_active: true,
+            provider_pool_enabled: false,
             endpoint_id: endpoint_id.to_string(),
             endpoint_api_format: "openai:responses".to_string(),
             endpoint_api_family: Some("openai".to_string()),
@@ -4861,6 +5263,7 @@ mod tests {
                 provider_name: provider_id.to_string(),
                 provider_type: "codex".to_string(),
                 provider_priority,
+                provider_pool_enabled: provider_config.is_some(),
                 endpoint_id: endpoint_id.to_string(),
                 endpoint_api_format: "openai:responses".to_string(),
                 key_id: format!("{provider_id}-pool-group"),
@@ -4975,6 +5378,7 @@ mod tests {
                 provider_name: provider_id.to_string(),
                 provider_type: "codex".to_string(),
                 provider_priority: 10,
+                provider_pool_enabled: false,
                 endpoint_id: endpoint_id.to_string(),
                 endpoint_api_format: "openai:chat".to_string(),
                 key_id: key_id.to_string(),

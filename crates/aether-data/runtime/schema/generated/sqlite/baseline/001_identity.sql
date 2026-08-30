@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS user_groups (
     priority INTEGER NOT NULL DEFAULT 0,
     allowed_providers TEXT,
     allowed_providers_mode TEXT NOT NULL DEFAULT 'inherit',
+    provider_key_policies TEXT,
     allowed_api_formats TEXT,
     allowed_api_formats_mode TEXT NOT NULL DEFAULT 'inherit',
     allowed_models TEXT,

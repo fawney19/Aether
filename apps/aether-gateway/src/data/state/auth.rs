@@ -17,6 +17,7 @@ use aether_data::repository::auth::ResolvedAuthApiKeySnapshotReader;
 #[derive(Debug, Clone, Default)]
 pub(crate) struct GatewayUserEffectiveListPolicies {
     pub(crate) allowed_providers: Option<Vec<String>>,
+    pub(crate) provider_key_policies: std::collections::BTreeMap<String, Vec<String>>,
     pub(crate) allowed_api_formats: Option<Vec<String>>,
     pub(crate) allowed_models: Option<Vec<String>>,
 }
@@ -1806,11 +1807,13 @@ impl GatewayDataState {
 
         let GatewayUserEffectiveListPolicies {
             allowed_providers,
+            provider_key_policies,
             allowed_api_formats,
             allowed_models,
         } = resolve_group_effective_list_policies(&groups);
         let user_rate_limit = resolve_effective_rate_limit_policy(None, "system", &groups);
         snapshot.user_allowed_providers = allowed_providers;
+        snapshot.user_provider_key_policies = provider_key_policies;
         snapshot.user_allowed_api_formats = allowed_api_formats;
         snapshot.user_allowed_models = allowed_models;
         snapshot.user_rate_limit = user_rate_limit;
@@ -1923,6 +1926,7 @@ fn resolve_group_effective_list_policies(
                 group.allowed_providers.clone(),
             )
         }),
+        provider_key_policies: resolve_group_provider_key_policies(groups),
         allowed_api_formats: resolve_effective_api_format_policy(
             None,
             "unrestricted",
@@ -1938,6 +1942,52 @@ fn resolve_group_effective_list_policies(
             (&group.allowed_models_mode, group.allowed_models.clone())
         }),
     }
+}
+
+fn resolve_group_provider_key_policies(
+    groups: &[aether_data::repository::users::StoredUserGroup],
+) -> std::collections::BTreeMap<String, Vec<String>> {
+    if groups
+        .iter()
+        .any(|group| group.allowed_providers_mode == "unrestricted")
+    {
+        return std::collections::BTreeMap::new();
+    }
+
+    let mut grants =
+        std::collections::BTreeMap::<String, Option<std::collections::BTreeSet<String>>>::new();
+    for group in groups
+        .iter()
+        .filter(|group| group.allowed_providers_mode == "specific")
+    {
+        for provider_id in group.allowed_providers.as_deref().unwrap_or_default() {
+            let provider_id = provider_id.trim();
+            if provider_id.is_empty() {
+                continue;
+            }
+            let Some(group_key_ids) = group.provider_key_policies.get(provider_id) else {
+                grants.insert(provider_id.to_string(), None);
+                continue;
+            };
+            match grants.entry(provider_id.to_string()) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(Some(group_key_ids.iter().cloned().collect()));
+                }
+                std::collections::btree_map::Entry::Occupied(mut entry) => {
+                    if let Some(key_ids) = entry.get_mut() {
+                        key_ids.extend(group_key_ids.iter().cloned());
+                    }
+                }
+            }
+        }
+    }
+
+    grants
+        .into_iter()
+        .filter_map(|(provider_id, key_ids)| {
+            key_ids.map(|key_ids| (provider_id, key_ids.into_iter().collect()))
+        })
+        .collect()
 }
 
 fn resolve_effective_list_policy(
@@ -2204,6 +2254,7 @@ mod tests {
             priority,
             allowed_providers: None,
             allowed_providers_mode: "unrestricted".to_string(),
+            provider_key_policies: Default::default(),
             allowed_api_formats: None,
             allowed_api_formats_mode: "unrestricted".to_string(),
             allowed_models: allowed_models.map(|values| {
@@ -2218,6 +2269,63 @@ mod tests {
             created_at: None,
             updated_at: None,
         }
+    }
+
+    fn sample_provider_group(
+        id: &str,
+        provider_id: &str,
+        key_policy: Option<Vec<&str>>,
+    ) -> StoredUserGroup {
+        let mut group = sample_group(id, 0, None, "unrestricted", None, "system");
+        group.allowed_providers = Some(vec![provider_id.to_string()]);
+        group.allowed_providers_mode = "specific".to_string();
+        if let Some(key_ids) = key_policy {
+            group.provider_key_policies.insert(
+                provider_id.to_string(),
+                key_ids.into_iter().map(ToOwned::to_owned).collect(),
+            );
+        }
+        group
+    }
+
+    #[test]
+    fn provider_key_policy_unions_keys_across_groups() {
+        let groups = vec![
+            sample_provider_group("team-a", "provider-1", Some(vec!["key-a"])),
+            sample_provider_group("team-b", "provider-1", Some(vec!["key-b"])),
+        ];
+
+        let policies = resolve_group_provider_key_policies(&groups);
+
+        assert_eq!(
+            policies,
+            std::collections::BTreeMap::from([(
+                "provider-1".to_string(),
+                vec!["key-a".to_string(), "key-b".to_string()],
+            )])
+        );
+    }
+
+    #[test]
+    fn unrestricted_key_grant_in_one_group_overrides_restricted_grants() {
+        let groups = vec![
+            sample_provider_group("restricted", "provider-1", Some(vec!["key-a"])),
+            sample_provider_group("all-keys", "provider-1", None),
+        ];
+
+        let policies = resolve_group_provider_key_policies(&groups);
+
+        assert!(!policies.contains_key("provider-1"));
+    }
+
+    #[test]
+    fn unrestricted_provider_group_makes_key_policy_unrestricted() {
+        let groups = vec![
+            sample_provider_group("restricted", "provider-1", Some(vec!["key-a"])),
+            sample_group("unrestricted", 0, None, "unrestricted", None, "system"),
+        ];
+
+        assert!(resolve_group_provider_key_policies(&groups).is_empty());
     }
 
     #[test]
@@ -2479,6 +2587,7 @@ mod tests {
                 priority: 10,
                 allowed_providers: Some(vec!["openai".to_string()]),
                 allowed_providers_mode: "specific".to_string(),
+                provider_key_policies: Default::default(),
                 allowed_api_formats: Some(vec!["openai:chat".to_string()]),
                 allowed_api_formats_mode: "specific".to_string(),
                 allowed_models: Some(vec!["gpt-4.1".to_string()]),
@@ -2596,6 +2705,7 @@ mod tests {
                 priority: 10,
                 allowed_providers: Some(vec!["anthropic".to_string()]),
                 allowed_providers_mode: "specific".to_string(),
+                provider_key_policies: Default::default(),
                 allowed_api_formats: Some(vec!["claude:messages".to_string()]),
                 allowed_api_formats_mode: "specific".to_string(),
                 allowed_models: Some(vec!["claude-sonnet-4-5".to_string()]),
@@ -2669,6 +2779,7 @@ mod tests {
                 priority: 10,
                 allowed_providers: None,
                 allowed_providers_mode: "unrestricted".to_string(),
+                provider_key_policies: Default::default(),
                 allowed_api_formats: Some(vec!["openai:responses".to_string()]),
                 allowed_api_formats_mode: "specific".to_string(),
                 allowed_models: None,

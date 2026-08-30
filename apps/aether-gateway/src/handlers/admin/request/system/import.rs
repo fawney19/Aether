@@ -954,6 +954,203 @@ fn normalize_imported_user_api_formats(
     )?)
 }
 
+fn normalize_imported_provider_key_policies(
+    object: &Map<String, Value>,
+) -> Result<BTreeMap<String, Vec<String>>, String> {
+    let Some(value) = object.get("provider_key_policies") else {
+        return Ok(BTreeMap::new());
+    };
+    let Value::Object(policies) = value else {
+        return Err("provider_key_policies 必须是对象".to_string());
+    };
+    let mut normalized = BTreeMap::new();
+    for (provider_id, key_ids) in policies {
+        let provider_id = provider_id.trim();
+        if provider_id.is_empty() {
+            continue;
+        }
+        let Some(key_ids) = imported_string_list_from_value(
+            Some(key_ids),
+            &format!("provider_key_policies.{provider_id}"),
+        )?
+        else {
+            continue;
+        };
+        normalized.insert(
+            provider_id.to_string(),
+            key_ids
+                .into_iter()
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect(),
+        );
+    }
+    Ok(normalized)
+}
+
+fn imported_portable_reference<'a>(
+    value: &'a Value,
+    field_name: &str,
+) -> Result<(Option<&'a str>, Option<&'a str>), String> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| format!("{field_name} 必须是对象"))?;
+    let id = object
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let name = object
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if id.is_none() && name.is_none() {
+        return Err(format!("{field_name} 至少需要 id 或 name"));
+    }
+    Ok((id, name))
+}
+
+fn resolve_imported_provider_reference(
+    value: &Value,
+    field_name: &str,
+    providers: &[aether_data_contracts::repository::provider_catalog::StoredProviderCatalogProvider],
+) -> Result<String, String> {
+    let (id, name) = imported_portable_reference(value, field_name)?;
+    if let Some(id) = id {
+        let id_matches = providers
+            .iter()
+            .filter(|provider| provider.id.eq_ignore_ascii_case(id))
+            .collect::<Vec<_>>();
+        match id_matches.as_slice() {
+            [provider] => return Ok(provider.id.clone()),
+            [] => {}
+            _ => return Err(format!("{field_name}.id 不唯一: {id}")),
+        }
+    }
+
+    let Some(name) = name else {
+        return Err(format!(
+            "{field_name} 无法按 UUID 解析，且没有可回退的 name"
+        ));
+    };
+    let name_matches = providers
+        .iter()
+        .filter(|provider| provider.name.eq_ignore_ascii_case(name))
+        .collect::<Vec<_>>();
+    match name_matches.as_slice() {
+        [provider] => Ok(provider.id.clone()),
+        [] => Err(format!("{field_name} 引用的 Provider 不存在: {name}")),
+        _ => Err(format!(
+            "{field_name} 的 Provider 名称不唯一，请修正目标实例中的重名项: {name}"
+        )),
+    }
+}
+
+fn resolve_imported_key_reference(
+    value: &Value,
+    field_name: &str,
+    provider_id: &str,
+    keys: &[aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey],
+) -> Result<String, String> {
+    let (id, name) = imported_portable_reference(value, field_name)?;
+    if let Some(id) = id {
+        let id_matches = keys
+            .iter()
+            .filter(|key| key.id.eq_ignore_ascii_case(id))
+            .collect::<Vec<_>>();
+        match id_matches.as_slice() {
+            [key] if key.provider_id == provider_id => return Ok(key.id.clone()),
+            [key] => {
+                return Err(format!("{field_name}.id 属于其他 Provider: {}", key.id));
+            }
+            [] => {}
+            _ => return Err(format!("{field_name}.id 不唯一: {id}")),
+        }
+    }
+
+    let Some(name) = name else {
+        return Err(format!(
+            "{field_name} 无法按 UUID 解析，且没有可回退的 name"
+        ));
+    };
+    let name_matches = keys
+        .iter()
+        .filter(|key| key.provider_id == provider_id && key.name.eq_ignore_ascii_case(name))
+        .collect::<Vec<_>>();
+    match name_matches.as_slice() {
+        [key] => Ok(key.id.clone()),
+        [] => Err(format!("{field_name} 引用的 Provider Key 不存在: {name}")),
+        _ => Err(format!(
+            "{field_name} 的 Provider Key 名称不唯一，请修正目标实例中的重名项: {name}"
+        )),
+    }
+}
+
+fn apply_imported_portable_provider_access(
+    group: &Map<String, Value>,
+    field_name: &str,
+    mut record: aether_data::repository::users::UpsertUserGroupRecord,
+    providers: &[aether_data_contracts::repository::provider_catalog::StoredProviderCatalogProvider],
+    keys: &[aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey],
+) -> Result<aether_data::repository::users::UpsertUserGroupRecord, String> {
+    if let Some(value) = group.get("allowed_provider_refs") {
+        let references = value
+            .as_array()
+            .ok_or_else(|| format!("{field_name}.allowed_provider_refs 必须是数组"))?;
+        let mut provider_ids = BTreeSet::new();
+        for (index, reference) in references.iter().enumerate() {
+            provider_ids.insert(resolve_imported_provider_reference(
+                reference,
+                &format!("{field_name}.allowed_provider_refs[{index}]"),
+                providers,
+            )?);
+        }
+        record.allowed_providers = Some(provider_ids.into_iter().collect());
+    }
+
+    if let Some(value) = group.get("provider_key_policy_refs") {
+        let policies = value
+            .as_array()
+            .ok_or_else(|| format!("{field_name}.provider_key_policy_refs 必须是数组"))?;
+        let mut normalized = BTreeMap::new();
+        for (policy_index, policy) in policies.iter().enumerate() {
+            let policy_field = format!("{field_name}.provider_key_policy_refs[{policy_index}]");
+            let policy = policy
+                .as_object()
+                .ok_or_else(|| format!("{policy_field} 必须是对象"))?;
+            let provider = policy
+                .get("provider")
+                .ok_or_else(|| format!("{policy_field}.provider 为必填字段"))?;
+            let provider_id = resolve_imported_provider_reference(
+                provider,
+                &format!("{policy_field}.provider"),
+                providers,
+            )?;
+            if normalized.contains_key(&provider_id) {
+                return Err(format!("{policy_field} 重复引用 Provider {provider_id}"));
+            }
+            let key_references = policy
+                .get("keys")
+                .and_then(Value::as_array)
+                .ok_or_else(|| format!("{policy_field}.keys 必须是数组"))?;
+            let mut key_ids = BTreeSet::new();
+            for (key_index, key_reference) in key_references.iter().enumerate() {
+                key_ids.insert(resolve_imported_key_reference(
+                    key_reference,
+                    &format!("{policy_field}.keys[{key_index}]"),
+                    &provider_id,
+                    keys,
+                )?);
+            }
+            normalized.insert(provider_id, key_ids.into_iter().collect());
+        }
+        record.provider_key_policies = normalized;
+    }
+
+    Ok(record)
+}
+
 fn imported_ip_rules_field<'a>(
     object: &'a Map<String, Value>,
 ) -> (&'static str, Option<&'a Value>) {
@@ -995,6 +1192,7 @@ fn build_imported_user_group_record(
     }
     let description = imported_optional_string(group.get("description"))?;
     let allowed_providers = normalize_imported_user_string_list(group, "allowed_providers")?;
+    let provider_key_policies = normalize_imported_provider_key_policies(group)?;
     let allowed_api_formats = normalize_imported_user_api_formats(group, "allowed_api_formats")?;
     let allowed_models = normalize_imported_user_string_list(group, "allowed_models")?;
     let rate_limit = imported_optional_i32(group.get("rate_limit"), "rate_limit")?;
@@ -1053,6 +1251,7 @@ fn build_imported_user_group_record(
             priority: 0,
             allowed_providers,
             allowed_providers_mode,
+            provider_key_policies,
             allowed_api_formats,
             allowed_api_formats_mode,
             allowed_models,
@@ -2486,6 +2685,82 @@ impl<'a> AdminAppState<'a> {
         let supplemental_user_usage_aggregates = invalid_value!(
             build_imported_user_usage_total_aggregates(users, root.get("exported_at"))
         );
+        let has_portable_provider_access = imported_user_groups.iter().any(|value| {
+            value.as_object().is_some_and(|group| {
+                group.contains_key("allowed_provider_refs")
+                    || group.contains_key("provider_key_policy_refs")
+            })
+        });
+        let (portable_providers, portable_keys) = if has_portable_provider_access {
+            if !self.has_provider_catalog_data_reader() {
+                return Ok(Err((
+                    http::StatusCode::SERVICE_UNAVAILABLE,
+                    json!({ "detail": "Provider catalog unavailable" }),
+                )));
+            }
+            let providers = self.list_provider_catalog_providers(false).await?;
+            let provider_ids = providers
+                .iter()
+                .map(|provider| provider.id.clone())
+                .collect::<Vec<_>>();
+            let keys = self
+                .list_provider_catalog_keys_by_provider_ids(&provider_ids)
+                .await?;
+            (providers, keys)
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        let mut normalized_imported_groups = Vec::with_capacity(imported_user_groups.len());
+        let mut group_validation_errors = Vec::new();
+        for (index, raw_group) in imported_user_groups.iter().enumerate() {
+            let field_name = format!("user_groups[{index}]");
+            let group = match imported_object_field(raw_group, &field_name) {
+                Ok(value) => value,
+                Err(detail) => {
+                    group_validation_errors.push(detail);
+                    continue;
+                }
+            };
+            let (export_id, normalized_name, record) =
+                match build_imported_user_group_record(group, &field_name) {
+                    Ok(value) => value,
+                    Err(detail) => {
+                        group_validation_errors.push(detail);
+                        continue;
+                    }
+                };
+            let record = match apply_imported_portable_provider_access(
+                group,
+                &field_name,
+                record,
+                &portable_providers,
+                &portable_keys,
+            ) {
+                Ok(value) => value,
+                Err(detail) => {
+                    group_validation_errors.push(detail);
+                    continue;
+                }
+            };
+            let record = match self
+                .normalize_user_group_provider_access_record(record)
+                .await?
+            {
+                Ok(value) => value,
+                Err(detail) => {
+                    group_validation_errors.push(format!("{field_name}: {detail}"));
+                    continue;
+                }
+            };
+            normalized_imported_groups.push((export_id, normalized_name, record));
+        }
+        if !group_validation_errors.is_empty() {
+            return Ok(Err(invalid_request(format!(
+                "用户组 Provider/Key 配置无法导入:\n- {}",
+                group_validation_errors.join("\n- ")
+            ))));
+        }
+
         let mut stats = AdminSystemUsersImportStats::default();
         let mut imported_user_id_map = BTreeMap::<String, String>::new();
         let mut imported_api_key_id_map = BTreeMap::<String, String>::new();
@@ -2504,14 +2779,7 @@ impl<'a> AdminAppState<'a> {
         let mut imported_group_id_map = BTreeMap::<String, String>::new();
         let mut imported_group_name_map = BTreeMap::<String, String>::new();
 
-        for (index, raw_group) in imported_user_groups.iter().enumerate() {
-            let group = match imported_object_field(raw_group, &format!("user_groups[{index}]")) {
-                Ok(value) => value,
-                Err(detail) => return Ok(Err(invalid_request(detail))),
-            };
-            let (export_id, normalized_name, record) = invalid_value!(
-                build_imported_user_group_record(group, &format!("user_groups[{index}]"))
-            );
+        for (export_id, normalized_name, record) in normalized_imported_groups {
             if default_group_id
                 .as_deref()
                 .is_some_and(|group_id| export_id.as_deref() == Some(group_id))
@@ -3631,6 +3899,7 @@ enum WalletOwner<'a> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::sync::Arc;
 
     use aether_data::repository::pool_scores::SqlitePoolMemberScoreRepository;
@@ -3641,13 +3910,14 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        build_imported_user_usage_total_aggregates, imported_oauth_auth_config_has_credentials,
-        imported_oauth_expiry_after_import, imported_optional_bool, imported_optional_f64,
-        imported_optional_i32, imported_optional_u64, imported_rfc3339_to_unix_secs,
-        imported_string_list_from_value, normalize_import_endpoint_format,
-        normalize_import_key_formats, normalize_import_key_raw_payload,
-        normalize_imported_wallet_target, seed_imported_oauth_pool_score,
-        validate_imported_system_users_export_version, ImportedProviderKey,
+        apply_imported_portable_provider_access, build_imported_user_usage_total_aggregates,
+        imported_oauth_auth_config_has_credentials, imported_oauth_expiry_after_import,
+        imported_optional_bool, imported_optional_f64, imported_optional_i32,
+        imported_optional_u64, imported_rfc3339_to_unix_secs, imported_string_list_from_value,
+        normalize_import_endpoint_format, normalize_import_key_formats,
+        normalize_import_key_raw_payload, normalize_imported_wallet_target,
+        seed_imported_oauth_pool_score, validate_imported_system_users_export_version,
+        ImportedProviderKey,
     };
     use crate::admin_api::AdminAppState;
     use crate::data::GatewayDataState;
@@ -3658,14 +3928,117 @@ mod tests {
         assert!(validate_imported_system_users_export_version(Some(&json!("1.3"))).is_ok());
         assert!(validate_imported_system_users_export_version(Some(&json!("1.4"))).is_ok());
         assert!(validate_imported_system_users_export_version(Some(&json!("1.5"))).is_ok());
+        assert!(validate_imported_system_users_export_version(Some(&json!("1.6"))).is_ok());
         assert_eq!(
             validate_imported_system_users_export_version(Some(&json!("2.2"))).unwrap_err(),
-            "不支持的用户数据版本: 2.2，支持的版本: 1.3, 1.4, 1.5"
+            "不支持的用户数据版本: 2.2，支持的版本: 1.3, 1.4, 1.5, 1.6"
         );
         assert_eq!(
             validate_imported_system_users_export_version(Some(&json!(null))).unwrap_err(),
             "version 必须是 x.y 字符串"
         );
+    }
+
+    fn imported_group_record_for_provider_access(
+    ) -> aether_data::repository::users::UpsertUserGroupRecord {
+        aether_data::repository::users::UpsertUserGroupRecord {
+            name: "pro".to_string(),
+            description: None,
+            priority: 0,
+            allowed_providers: Some(vec!["source-provider".to_string()]),
+            allowed_providers_mode: "specific".to_string(),
+            provider_key_policies: BTreeMap::from([(
+                "source-provider".to_string(),
+                vec!["source-key".to_string()],
+            )]),
+            allowed_api_formats: None,
+            allowed_api_formats_mode: "unrestricted".to_string(),
+            allowed_models: None,
+            allowed_models_mode: "unrestricted".to_string(),
+            rate_limit: None,
+            rate_limit_mode: "system".to_string(),
+        }
+    }
+
+    #[test]
+    fn portable_group_access_falls_back_to_unique_provider_and_key_names() {
+        let provider = StoredProviderCatalogProvider::new(
+            "target-provider".to_string(),
+            "tiered-provider".to_string(),
+            None,
+            "custom".to_string(),
+        )
+        .expect("provider should build");
+        let key = StoredProviderCatalogKey::new(
+            "target-key".to_string(),
+            provider.id.clone(),
+            "企业 Pro".to_string(),
+            "api_key".to_string(),
+            None,
+            true,
+        )
+        .expect("key should build");
+        let group = json!({
+            "allowed_provider_refs": [
+                { "id": "source-provider", "name": "tiered-provider" }
+            ],
+            "provider_key_policy_refs": [{
+                "provider": { "id": "source-provider", "name": "tiered-provider" },
+                "keys": [{ "id": "source-key", "name": "企业 Pro" }]
+            }]
+        });
+
+        let record = apply_imported_portable_provider_access(
+            group.as_object().expect("group should be object"),
+            "user_groups[0]",
+            imported_group_record_for_provider_access(),
+            std::slice::from_ref(&provider),
+            std::slice::from_ref(&key),
+        )
+        .expect("portable references should resolve by name");
+
+        assert_eq!(
+            record.allowed_providers,
+            Some(vec!["target-provider".to_string()])
+        );
+        assert_eq!(
+            record.provider_key_policies,
+            BTreeMap::from([(
+                "target-provider".to_string(),
+                vec!["target-key".to_string()],
+            )])
+        );
+    }
+
+    #[test]
+    fn portable_group_access_rejects_unresolved_key_instead_of_widening_access() {
+        let provider = StoredProviderCatalogProvider::new(
+            "target-provider".to_string(),
+            "tiered-provider".to_string(),
+            None,
+            "custom".to_string(),
+        )
+        .expect("provider should build");
+        let group = json!({
+            "allowed_provider_refs": [
+                { "id": "source-provider", "name": "tiered-provider" }
+            ],
+            "provider_key_policy_refs": [{
+                "provider": { "id": "source-provider", "name": "tiered-provider" },
+                "keys": [{ "id": "source-key", "name": "不存在" }]
+            }]
+        });
+
+        let error = apply_imported_portable_provider_access(
+            group.as_object().expect("group should be object"),
+            "user_groups[0]",
+            imported_group_record_for_provider_access(),
+            std::slice::from_ref(&provider),
+            &[],
+        )
+        .expect_err("unresolved references must reject the import");
+
+        assert!(error.contains("Provider Key 不存在"));
     }
 
     #[test]

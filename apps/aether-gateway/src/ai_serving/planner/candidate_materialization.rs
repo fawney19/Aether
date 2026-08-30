@@ -67,6 +67,7 @@ pub(crate) struct LocalExecutionCandidateAttempt {
 
 pub(crate) struct LocalExecutionCandidateAttemptSource<'a> {
     items: VecDeque<LocalExecutionCandidateAttemptSourceItem<'a>>,
+    auth_snapshot: Option<GatewayAuthApiKeySnapshot>,
     skipped_provider_ids: BTreeSet<String>,
     skipped_endpoint_ids: BTreeSet<String>,
     skipped_credential_ids: BTreeSet<String>,
@@ -107,6 +108,7 @@ enum LocalExecutionCandidateAttemptSourceItem<'a> {
 impl<'a> LocalExecutionCandidateAttemptSource<'a> {
     pub(crate) fn from_static_attempts_for_image_bridge(
         attempts: Vec<LocalExecutionCandidateAttempt>,
+        auth_snapshot: Option<&GatewayAuthApiKeySnapshot>,
     ) -> Self {
         let mut items = VecDeque::new();
         if !attempts.is_empty() {
@@ -116,6 +118,7 @@ impl<'a> LocalExecutionCandidateAttemptSource<'a> {
         }
         Self {
             items,
+            auth_snapshot: auth_snapshot.cloned(),
             skipped_provider_ids: BTreeSet::new(),
             skipped_endpoint_ids: BTreeSet::new(),
             skipped_credential_ids: BTreeSet::new(),
@@ -144,6 +147,12 @@ impl<'a> LocalExecutionCandidateAttemptSource<'a> {
                         if dispatch_sequence_exhausted(attempts) {
                             self.items.pop_front();
                         }
+                        if !final_candidate_key_allowed(
+                            self.auth_snapshot.as_ref(),
+                            &attempt.eligible,
+                        ) {
+                            continue;
+                        }
                         return Ok(Some(attempt));
                     }
                     self.items.pop_front();
@@ -169,6 +178,12 @@ impl<'a> LocalExecutionCandidateAttemptSource<'a> {
                         *pending_attempts = DispatchSequence::new(Vec::new());
                     }
                     if let Some(attempt) = next_attempt_from_dispatch_sequence(pending_attempts) {
+                        if !final_candidate_key_allowed(
+                            self.auth_snapshot.as_ref(),
+                            &attempt.eligible,
+                        ) {
+                            continue;
+                        }
                         return Ok(Some(attempt));
                     }
                     let Some(candidate) = cursor.next_key().await else {
@@ -215,6 +230,10 @@ impl<'a> LocalExecutionCandidateAttemptSource<'a> {
                         self.items.pop_front();
                         continue;
                     };
+                    if !final_candidate_key_allowed(self.auth_snapshot.as_ref(), &attempt.eligible)
+                    {
+                        continue;
+                    }
                     return Ok(Some(attempt));
                 }
             }
@@ -438,6 +457,7 @@ where
                 .skipped
                 .record_runtime_miss_diagnostic,
             candidates,
+            self.auth_snapshot,
             self.routing_policy,
             self.client_api_format,
             self.sticky_session_token,
@@ -719,6 +739,7 @@ where
         sticky_session_token,
         requested_model,
         request_auth_channel,
+        auth_snapshot,
         routing_policy,
         Some(PoolGroupExhaustionPersistenceContext::new(
             state.app().clone(),
@@ -732,6 +753,7 @@ where
     (
         LocalExecutionCandidateAttemptSource {
             items,
+            auth_snapshot: auth_snapshot.cloned(),
             skipped_provider_ids: BTreeSet::new(),
             skipped_endpoint_ids: BTreeSet::new(),
             skipped_credential_ids: BTreeSet::new(),
@@ -749,6 +771,7 @@ fn build_logical_candidate_items<'a>(
     sticky_session_token: Option<&str>,
     requested_model: Option<&str>,
     request_auth_channel: Option<&str>,
+    auth_snapshot: Option<&GatewayAuthApiKeySnapshot>,
     routing_policy: Option<&ResolvedRoutingPolicy>,
     pool_exhaustion_persistence: Option<PoolGroupExhaustionPersistenceContext>,
 ) -> (VecDeque<LocalExecutionCandidateAttemptSourceItem<'a>>, u32) {
@@ -759,6 +782,9 @@ fn build_logical_candidate_items<'a>(
         next_candidate_index = next_candidate_index.saturating_add(1);
         match candidate.kind {
             LocalExecutionCandidateKind::SingleKey => {
+                if !final_candidate_key_allowed(auth_snapshot, &candidate) {
+                    continue;
+                }
                 let attempts = build_unpersisted_local_execution_candidate_attempts(
                     candidate,
                     candidate_index,
@@ -770,13 +796,14 @@ fn build_logical_candidate_items<'a>(
                 }
             }
             LocalExecutionCandidateKind::PoolGroup => {
-                let cursor = PoolKeyCursor::new_with_routing_policy(
+                let cursor = PoolKeyCursor::new_with_routing_policy_and_auth(
                     state,
                     candidate,
                     sticky_session_token,
                     requested_model,
                     request_auth_channel,
                     routing_policy,
+                    auth_snapshot,
                 );
                 let cursor = if let Some(trace_id) = trace_id {
                     cursor.with_runtime_miss_diagnostic(trace_id, record_runtime_miss_diagnostic)
@@ -893,6 +920,7 @@ where
     (
         LocalExecutionCandidateAttemptSource {
             items,
+            auth_snapshot: Some(auth_snapshot.clone()),
             skipped_provider_ids: BTreeSet::new(),
             skipped_endpoint_ids: BTreeSet::new(),
             skipped_credential_ids: BTreeSet::new(),
@@ -1043,6 +1071,7 @@ impl<'a> RequestedModelAttemptPageCursor<'a> {
                 self.sticky_session_token.as_deref(),
                 Some(&self.requested_model),
                 self.request_auth_channel.as_deref(),
+                Some(&self.auth_snapshot),
                 self.routing_policy.as_ref(),
                 Some(PoolGroupExhaustionPersistenceContext {
                     app: self.state.app().clone(),
@@ -1465,11 +1494,16 @@ pub(crate) async fn persist_available_local_execution_candidates<F>(
     required_capabilities: Option<&Value>,
     candidates: Vec<EligibleLocalExecutionCandidate>,
     error_context: &'static str,
+    auth_snapshot: Option<&GatewayAuthApiKeySnapshot>,
     build_extra_data: F,
 ) -> Vec<LocalExecutionCandidateAttempt>
 where
     F: Fn(&EligibleLocalExecutionCandidate) -> Option<Value> + Send + Sync,
 {
+    let candidates = candidates
+        .into_iter()
+        .filter(|candidate| final_candidate_key_allowed(auth_snapshot, candidate))
+        .collect();
     let port = GatewayAvailableCandidatePersistencePort {
         state,
         trace_id,
@@ -1492,6 +1526,7 @@ pub(crate) async fn persist_available_local_execution_candidates_with_context<F>
     trace_id: &str,
     context: LocalAvailableCandidatePersistenceContext<'_>,
     candidates: Vec<EligibleLocalExecutionCandidate>,
+    auth_snapshot: Option<&GatewayAuthApiKeySnapshot>,
     build_extra_data: F,
 ) -> Vec<LocalExecutionCandidateAttempt>
 where
@@ -1505,6 +1540,7 @@ where
         context.required_capabilities,
         candidates,
         context.error_context,
+        auth_snapshot,
         build_extra_data,
     )
     .await
@@ -1517,6 +1553,7 @@ async fn materialize_logical_local_execution_candidate_attempts<F>(
     context: LocalAvailableCandidatePersistenceContext<'_>,
     record_runtime_miss_diagnostic: bool,
     candidates: Vec<EligibleLocalExecutionCandidate>,
+    auth_snapshot: Option<&GatewayAuthApiKeySnapshot>,
     routing_policy: Option<&ResolvedRoutingPolicy>,
     client_api_format: &str,
     sticky_session_token: Option<&str>,
@@ -1533,6 +1570,9 @@ where
         let candidate_index = u32::try_from(candidate_index).unwrap_or(u32::MAX);
         match candidate.kind {
             LocalExecutionCandidateKind::SingleKey => {
+                if !final_candidate_key_allowed(auth_snapshot, &candidate) {
+                    continue;
+                }
                 attempts.extend(
                     persist_available_local_execution_candidate_at_index(
                         state,
@@ -1548,13 +1588,14 @@ where
                 );
             }
             LocalExecutionCandidateKind::PoolGroup => {
-                let mut cursor = PoolKeyCursor::new_with_routing_policy(
+                let mut cursor = PoolKeyCursor::new_with_routing_policy_and_auth(
                     state,
                     candidate,
                     sticky_session_token,
                     requested_model,
                     request_auth_channel,
                     routing_policy,
+                    auth_snapshot,
                 )
                 .with_runtime_miss_diagnostic(trace_id, record_runtime_miss_diagnostic);
                 let attempt_count_before_pool = attempts.len();
@@ -1951,6 +1992,18 @@ fn build_unpersisted_local_execution_candidate_attempts(
     attempts
 }
 
+fn final_candidate_key_allowed(
+    auth_snapshot: Option<&GatewayAuthApiKeySnapshot>,
+    candidate: &EligibleLocalExecutionCandidate,
+) -> bool {
+    auth_snapshot.is_none_or(|snapshot| {
+        snapshot.provider_key_allowed(
+            &candidate.candidate.provider_id,
+            &candidate.candidate.key_id,
+        )
+    })
+}
+
 async fn persist_pool_group_exhaustion_skipped_candidate(
     context: Option<&PoolGroupExhaustionPersistenceContext>,
     candidate_index: u32,
@@ -2182,6 +2235,7 @@ mod tests {
             provider_name: "provider-1".to_string(),
             provider_type: "codex".to_string(),
             provider_priority: 10,
+            provider_pool_enabled: false,
             endpoint_id: "endpoint-1".to_string(),
             endpoint_api_format: "openai:chat".to_string(),
             key_id: key_id.to_string(),
@@ -2345,6 +2399,7 @@ mod tests {
                 sample_eligible("normal-key", None),
             ],
             "persist should not fail",
+            None,
             |_| None,
         )
         .await;
@@ -2367,6 +2422,73 @@ mod tests {
                 .and_then(|value| value.get("key_id")),
             Some(&json!("normal-key"))
         );
+    }
+
+    #[tokio::test]
+    async fn final_attempt_guard_drops_disallowed_key() {
+        let mut auth_snapshot = sample_auth_snapshot();
+        auth_snapshot
+            .user_provider_key_policies
+            .insert("provider-1".to_string(), vec!["key-allowed".to_string()]);
+        let mut source = LocalExecutionCandidateAttemptSource {
+            items: VecDeque::from([LocalExecutionCandidateAttemptSourceItem::Static {
+                attempts: dispatch_sequence_from_attempts(
+                    build_unpersisted_local_execution_candidate_attempts(
+                        sample_eligible("key-blocked", None),
+                        0,
+                    )
+                    .into(),
+                ),
+            }]),
+            auth_snapshot: Some(auth_snapshot),
+            skipped_provider_ids: BTreeSet::new(),
+            skipped_endpoint_ids: BTreeSet::new(),
+            skipped_credential_ids: BTreeSet::new(),
+        };
+
+        assert!(source
+            .next_attempt()
+            .await
+            .expect("final guard should complete")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn image_bridge_static_source_rechecks_auth_snapshot() {
+        let mut auth_snapshot = sample_auth_snapshot();
+        auth_snapshot
+            .user_provider_key_policies
+            .insert("provider-1".to_string(), vec!["key-allowed".to_string()]);
+        let mut source =
+            LocalExecutionCandidateAttemptSource::from_static_attempts_for_image_bridge(
+                vec![
+                    LocalExecutionCandidateAttempt {
+                        eligible: sample_eligible("key-blocked", None),
+                        candidate_index: 0,
+                        retry_index: 0,
+                        candidate_id: "blocked".to_string(),
+                    },
+                    LocalExecutionCandidateAttempt {
+                        eligible: sample_eligible("key-allowed", None),
+                        candidate_index: 1,
+                        retry_index: 0,
+                        candidate_id: "allowed".to_string(),
+                    },
+                ],
+                Some(&auth_snapshot),
+            );
+
+        let attempt = source
+            .next_attempt()
+            .await
+            .expect("static source should complete")
+            .expect("the allowed static candidate should remain");
+        assert_eq!(attempt.eligible.candidate.key_id, "key-allowed");
+        assert!(source
+            .next_attempt()
+            .await
+            .expect("static source should be exhausted")
+            .is_none());
     }
 
     #[test]
@@ -2613,6 +2735,7 @@ mod tests {
             false,
             vec![pool_group, sample_eligible("normal-key", None)],
             None,
+            None,
             "openai:chat",
             None,
             Some("gpt-5"),
@@ -2712,6 +2835,7 @@ mod tests {
             None,
             vec![eligible],
             "persist should not fail",
+            None,
             |_| Some(json!({ "existing": "value" })),
         )
         .await;
@@ -2761,6 +2885,7 @@ mod tests {
                     .into(),
                 ),
             }]),
+            auth_snapshot: None,
             skipped_provider_ids: BTreeSet::new(),
             skipped_endpoint_ids: BTreeSet::new(),
             skipped_credential_ids: BTreeSet::new(),
@@ -2806,6 +2931,7 @@ mod tests {
                 static_item(key_b, 1),
                 static_item(key_c, 2),
             ]),
+            auth_snapshot: None,
             skipped_provider_ids: BTreeSet::new(),
             skipped_endpoint_ids: BTreeSet::new(),
             skipped_credential_ids: BTreeSet::new(),
@@ -2871,6 +2997,7 @@ mod tests {
                     attempts: fallback_attempts,
                 },
             ]),
+            auth_snapshot: None,
             skipped_provider_ids: BTreeSet::new(),
             skipped_endpoint_ids: BTreeSet::new(),
             skipped_credential_ids: BTreeSet::new(),
@@ -2920,6 +3047,7 @@ mod tests {
                     attempts: fallback_attempts,
                 },
             ]),
+            auth_snapshot: None,
             skipped_provider_ids: BTreeSet::new(),
             skipped_endpoint_ids: BTreeSet::new(),
             skipped_credential_ids: BTreeSet::new(),
@@ -2988,6 +3116,7 @@ mod tests {
                 pending_attempts: DispatchSequence::new(Vec::new()),
                 pool_exhaustion_persistence: Some(pool_exhaustion_persistence),
             }]),
+            auth_snapshot: None,
             skipped_provider_ids: BTreeSet::new(),
             skipped_endpoint_ids: BTreeSet::new(),
             skipped_credential_ids: BTreeSet::new(),

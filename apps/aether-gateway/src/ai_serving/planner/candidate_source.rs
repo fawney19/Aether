@@ -193,6 +193,7 @@ impl AiCandidatePreselectionPort for GatewayLocalCandidatePreselectionPort<'_> {
         matches_client_format: bool,
     ) -> bool {
         routing_policy_allows_provider(self.routing_policy, candidate)
+            && auth_snapshot_allows_candidate_key(self.auth_snapshot, candidate)
             && (matches_client_format
                 || auth_snapshot_allows_cross_format_candidate(
                     self.auth_snapshot,
@@ -209,6 +210,7 @@ impl AiCandidatePreselectionPort for GatewayLocalCandidatePreselectionPort<'_> {
         matches_client_format: bool,
     ) -> bool {
         routing_policy_allows_provider(self.routing_policy, &skipped_candidate.candidate)
+            && auth_snapshot_allows_candidate_key(self.auth_snapshot, &skipped_candidate.candidate)
             && (matches_client_format
                 || auth_snapshot_allows_cross_format_candidate(
                     self.auth_snapshot,
@@ -1313,6 +1315,7 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
         candidate_api_format: &str,
     ) -> bool {
         routing_policy_allows_provider(self.routing_policy.as_ref(), candidate)
+            && auth_snapshot_allows_candidate_key(&self.auth_snapshot, candidate)
             && (matches_client_api_format(
                 self.use_api_format_alias_match,
                 candidate_api_format,
@@ -1331,6 +1334,7 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
         candidate_api_format: &str,
     ) -> bool {
         routing_policy_allows_provider(self.routing_policy.as_ref(), &skipped_candidate.candidate)
+            && auth_snapshot_allows_candidate_key(&self.auth_snapshot, &skipped_candidate.candidate)
             && (matches_client_api_format(
                 self.use_api_format_alias_match,
                 candidate_api_format,
@@ -1428,6 +1432,9 @@ pub(crate) fn auth_snapshot_allows_cross_format_candidate(
     requested_base_model: Option<&str>,
     candidate: &SchedulerMinimalCandidateSelectionCandidate,
 ) -> bool {
+    if !auth_snapshot_allows_candidate_key(auth_snapshot, candidate) {
+        return false;
+    }
     if let Some(allowed_providers) = auth_snapshot.effective_allowed_providers() {
         let provider_allowed = allowed_providers.iter().any(|value| {
             aether_scheduler_core::provider_matches_allowed_value(
@@ -1454,6 +1461,14 @@ pub(crate) fn auth_snapshot_allows_cross_format_candidate(
     }
 
     true
+}
+
+fn auth_snapshot_allows_candidate_key(
+    auth_snapshot: &GatewayAuthApiKeySnapshot,
+    candidate: &SchedulerMinimalCandidateSelectionCandidate,
+) -> bool {
+    candidate.provider_pool_enabled
+        || auth_snapshot.provider_key_allowed(&candidate.provider_id, &candidate.key_id)
 }
 
 fn routing_policy_allows_provider(
@@ -1677,6 +1692,7 @@ mod tests {
             user_is_deleted: false,
             user_rate_limit: None,
             user_allowed_providers: None,
+            user_provider_key_policies: Default::default(),
             user_allowed_api_formats: None,
             user_allowed_models: None,
             api_key_id: "api-key-1".to_string(),
@@ -2058,6 +2074,7 @@ mod tests {
             provider_type: "custom".to_string(),
             provider_priority: 10,
             provider_is_active: true,
+            provider_pool_enabled: false,
             endpoint_id: "endpoint-openai-responses-mapped-1".to_string(),
             endpoint_api_format: "openai:responses".to_string(),
             endpoint_api_family: Some("openai".to_string()),
@@ -2096,6 +2113,7 @@ mod tests {
             provider_type: "custom".to_string(),
             provider_priority,
             provider_is_active: true,
+            provider_pool_enabled: false,
             endpoint_id: format!("endpoint-{provider_id}"),
             endpoint_api_format: api_format.to_string(),
             endpoint_api_family: api_format.split(':').next().map(ToOwned::to_owned),
@@ -2208,6 +2226,7 @@ mod tests {
             provider_type: "custom".to_string(),
             provider_priority: 1,
             provider_is_active: true,
+            provider_pool_enabled: false,
             endpoint_id: endpoint_id.to_string(),
             endpoint_api_format: api_format.to_string(),
             endpoint_api_family: None,

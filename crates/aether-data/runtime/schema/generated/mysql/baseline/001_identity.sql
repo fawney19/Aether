@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS user_groups (
     `priority` INT NOT NULL DEFAULT 0,
     `allowed_providers` JSON,
     `allowed_providers_mode` VARCHAR(32) NOT NULL DEFAULT 'inherit',
+    `provider_key_policies` JSON,
     `allowed_api_formats` JSON,
     `allowed_api_formats_mode` VARCHAR(32) NOT NULL DEFAULT 'inherit',
     `allowed_models` JSON,

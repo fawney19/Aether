@@ -915,6 +915,7 @@ mod tests {
             priority: 0,
             allowed_providers: None,
             allowed_providers_mode: "unrestricted".to_string(),
+            provider_key_policies: Default::default(),
             allowed_api_formats: None,
             allowed_api_formats_mode: "unrestricted".to_string(),
             allowed_models: allowed_models.map(|values| {

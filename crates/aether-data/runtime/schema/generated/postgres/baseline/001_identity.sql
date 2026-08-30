@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS public.user_groups (
     priority integer DEFAULT 0 NOT NULL,
     allowed_providers jsonb,
     allowed_providers_mode character varying(32) DEFAULT 'inherit' NOT NULL,
+    provider_key_policies jsonb,
     allowed_api_formats jsonb,
     allowed_api_formats_mode character varying(32) DEFAULT 'inherit' NOT NULL,
     allowed_models jsonb,

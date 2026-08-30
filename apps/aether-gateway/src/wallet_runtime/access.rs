@@ -399,6 +399,7 @@ mod tests {
             user_is_deleted: false,
             user_rate_limit: None,
             user_allowed_providers: None,
+            user_provider_key_policies: Default::default(),
             user_allowed_api_formats: None,
             user_allowed_models: None,
             api_key_id: "api-key-1".to_string(),

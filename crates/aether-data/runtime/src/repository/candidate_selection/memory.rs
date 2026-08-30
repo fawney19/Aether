@@ -385,6 +385,7 @@ mod tests {
             provider_type: "custom".to_string(),
             provider_priority,
             provider_is_active: true,
+            provider_pool_enabled: false,
             endpoint_id: format!("endpoint-{provider_id}"),
             endpoint_api_format: api_format.to_string(),
             endpoint_api_family: Some("openai".to_string()),
