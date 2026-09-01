@@ -60,6 +60,9 @@ fn enumerate_minimal_candidate_selection_inner(
         ) {
             continue;
         }
+        if !crate::auth_constraints_allow_candidate_row_key(auth_constraints, &row) {
+            continue;
+        }
         if require_streaming && !row.supports_streaming() {
             continue;
         }
@@ -81,6 +84,7 @@ fn enumerate_minimal_candidate_selection_inner(
             provider_name: row.provider_name,
             provider_type: row.provider_type,
             provider_priority: row.provider_priority,
+            provider_pool_enabled: row.provider_pool_enabled,
             endpoint_id: row.endpoint_id,
             endpoint_api_format: row.endpoint_api_format,
             key_id: row.key_id,
@@ -126,6 +130,9 @@ pub fn collect_global_model_names_for_required_capability(
             &row.provider_name,
             &row.provider_type,
         ) {
+            continue;
+        }
+        if !crate::auth_constraints_allow_candidate_row_key(auth_constraints, &row) {
             continue;
         }
         if !crate::row_supports_required_capability(&row, required_capability) {

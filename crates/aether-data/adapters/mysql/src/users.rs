@@ -153,6 +153,7 @@ SELECT
   priority,
   allowed_providers,
   allowed_providers_mode,
+  provider_key_policies,
   allowed_api_formats,
   allowed_api_formats_mode,
   allowed_models,
@@ -478,11 +479,12 @@ WHERE is_deleted = 0
 INSERT INTO user_groups (
   id, name, normalized_name, description, priority,
   allowed_providers, allowed_providers_mode,
+  provider_key_policies,
   allowed_api_formats, allowed_api_formats_mode,
   allowed_models, allowed_models_mode,
   rate_limit, rate_limit_mode, created_at, updated_at
 )
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 "#,
         )
         .bind(&id)
@@ -494,6 +496,10 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             record.allowed_providers.as_ref(),
         ))
         .bind(record.allowed_providers_mode)
+        .bind(
+            serde_json::to_string(&record.provider_key_policies)
+                .map_err(|err| DataLayerError::UnexpectedValue(err.to_string()))?,
+        )
         .bind(json_string_from_option_vec(
             record.allowed_api_formats.as_ref(),
         ))
@@ -532,6 +538,7 @@ SET name = ?,
     priority = ?,
     allowed_providers = ?,
     allowed_providers_mode = ?,
+    provider_key_policies = ?,
     allowed_api_formats = ?,
     allowed_api_formats_mode = ?,
     allowed_models = ?,
@@ -550,6 +557,10 @@ WHERE id = ?
             record.allowed_providers.as_ref(),
         ))
         .bind(record.allowed_providers_mode)
+        .bind(
+            serde_json::to_string(&record.provider_key_policies)
+                .map_err(|err| DataLayerError::UnexpectedValue(err.to_string()))?,
+        )
         .bind(json_string_from_option_vec(
             record.allowed_api_formats.as_ref(),
         ))
@@ -2021,6 +2032,10 @@ fn map_user_group_row(row: &MySqlRow) -> Result<StoredUserGroup, DataLayerError>
             "user_groups.allowed_providers",
         )?,
         row.try_get("allowed_providers_mode").map_sql_err()?,
+        optional_json_from_string(
+            row.try_get("provider_key_policies").map_sql_err()?,
+            "user_groups.provider_key_policies",
+        )?,
         optional_json_from_string(
             row.try_get("allowed_api_formats").map_sql_err()?,
             "user_groups.allowed_api_formats",

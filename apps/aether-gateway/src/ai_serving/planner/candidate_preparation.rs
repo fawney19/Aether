@@ -157,6 +157,7 @@ mod tests {
             provider_name: "provider".to_string(),
             provider_type: "custom".to_string(),
             provider_priority: 1,
+            provider_pool_enabled: false,
             endpoint_id: "endpoint-1".to_string(),
             endpoint_api_format: "openai:chat".to_string(),
             key_id: "key-1".to_string(),

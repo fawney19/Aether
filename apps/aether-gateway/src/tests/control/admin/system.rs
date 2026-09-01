@@ -891,13 +891,39 @@ async fn gateway_handles_admin_system_users_export_locally_with_trusted_admin_pr
         )
         .expect("user policy modes should build"),
     ]));
+    let provider_id = "provider-tiered";
+    let enterprise_key_id = "key-basic-tier";
+    let professional_key_id = "key-premium-tier";
+    let mut enterprise_key = sample_key(
+        enterprise_key_id,
+        provider_id,
+        "claude:messages",
+        "enterprise-secret",
+    );
+    enterprise_key.name = "基础套餐".to_string();
+    let mut professional_key = sample_key(
+        professional_key_id,
+        provider_id,
+        "claude:messages",
+        "professional-secret",
+    );
+    professional_key.name = "高级套餐".to_string();
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![sample_provider(provider_id, "tiered-provider", 10)],
+        vec![],
+        vec![enterprise_key, professional_key],
+    ));
     let user_group = user_repository
         .create_user_group(UpsertUserGroupRecord {
             name: "Restricted GPT".to_string(),
             description: Some("GPT-only users".to_string()),
             priority: 10,
-            allowed_providers: Some(vec!["openai".to_string()]),
+            allowed_providers: Some(vec![provider_id.to_string()]),
             allowed_providers_mode: "specific".to_string(),
+            provider_key_policies: std::collections::BTreeMap::from([(
+                provider_id.to_string(),
+                vec![enterprise_key_id.to_string()],
+            )]),
             allowed_api_formats: Some(vec!["openai:chat".to_string()]),
             allowed_api_formats_mode: "specific".to_string(),
             allowed_models: Some(vec!["gpt-5".to_string()]),
@@ -1004,6 +1030,7 @@ async fn gateway_handles_admin_system_users_export_locally_with_trusted_admin_pr
     let data_state =
         GatewayDataState::with_auth_and_wallet_for_tests(auth_repository, wallet_repository)
             .with_user_reader(user_repository)
+            .with_provider_catalog_reader(provider_catalog_repository)
             .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY);
 
     let (upstream_url, upstream_handle) = start_server(upstream).await;
@@ -1026,10 +1053,29 @@ async fn gateway_handles_admin_system_users_export_locally_with_trusted_admin_pr
 
     assert_eq!(response.status(), StatusCode::OK);
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
-    assert_eq!(payload["version"], "1.5");
+    assert_eq!(payload["version"], "1.6");
     assert!(payload["exported_at"].as_str().is_some());
     assert_eq!(payload["user_groups"][0]["name"], "Restricted GPT");
     assert!(payload["user_groups"][0].get("priority").is_none());
+    assert_eq!(
+        payload["user_groups"][0]["allowed_providers"],
+        json!([provider_id])
+    );
+    assert_eq!(
+        payload["user_groups"][0]["allowed_provider_refs"],
+        json!([{ "id": provider_id, "name": "tiered-provider" }])
+    );
+    assert_eq!(
+        payload["user_groups"][0]["provider_key_policies"],
+        json!({ (provider_id): [enterprise_key_id] })
+    );
+    assert_eq!(
+        payload["user_groups"][0]["provider_key_policy_refs"],
+        json!([{
+            "provider": { "id": provider_id, "name": "tiered-provider" },
+            "keys": [{ "id": enterprise_key_id, "name": "基础套餐" }],
+        }])
+    );
     assert_eq!(
         payload["user_groups"][0]["allowed_models"],
         json!(["gpt-5"])

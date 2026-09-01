@@ -1061,6 +1061,10 @@ fn map_candidate_selection_row(row: &SqliteRow) -> Result<CandidateSelectionRow,
             provider_type: row.try_get("provider_type").map_sql_err()?,
             provider_priority: row.try_get("provider_priority").map_sql_err()?,
             provider_is_active: row.try_get("provider_is_active").map_sql_err()?,
+            provider_pool_enabled: row
+                .try_get::<i64, _>("provider_pool_enabled")
+                .map_sql_err()?
+                != 0,
             endpoint_id: row.try_get("endpoint_id").map_sql_err()?,
             endpoint_api_format: row.try_get("endpoint_api_format").map_sql_err()?,
             endpoint_api_family: row.try_get("endpoint_api_family").map_sql_err()?,

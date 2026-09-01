@@ -178,6 +178,14 @@ impl MinimalCandidateSelectionRowSource for GatewayDataState {
     ) -> Result<Vec<StoredMinimalCandidateSelectionRow>, DataLayerError> {
         self.list_pool_key_candidate_rows_for_group(query).await
     }
+
+    async fn read_pool_key_candidate_rows_for_group_key_ids(
+        &self,
+        query: &aether_data_contracts::repository::candidate_selection::StoredPoolKeyCandidateRowsByKeyIdsQuery,
+    ) -> Result<Vec<StoredMinimalCandidateSelectionRow>, DataLayerError> {
+        self.list_pool_key_candidate_rows_for_group_key_ids(query)
+            .await
+    }
 }
 
 #[async_trait]

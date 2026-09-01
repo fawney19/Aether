@@ -87,6 +87,7 @@ fn sample_local_openai_candidate_row() -> StoredMinimalCandidateSelectionRow {
         provider_type: "custom".to_string(),
         provider_priority: 10,
         provider_is_active: true,
+        provider_pool_enabled: false,
         endpoint_id: "endpoint-openai-audit-local-1".to_string(),
         endpoint_api_format: "openai:chat".to_string(),
         endpoint_api_family: Some("openai".to_string()),

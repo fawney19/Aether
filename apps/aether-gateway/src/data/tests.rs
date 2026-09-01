@@ -565,6 +565,7 @@ fn sample_minimal_candidate_selection_row(
         provider_type: "custom".to_string(),
         provider_priority,
         provider_is_active: true,
+        provider_pool_enabled: false,
         endpoint_id: format!("endpoint-{provider_id}"),
         endpoint_api_format: "openai:chat".to_string(),
         endpoint_api_family: Some("openai".to_string()),
@@ -896,6 +897,7 @@ async fn data_state_reads_minimal_candidate_selection_with_auth_filters() {
         allowed_providers: auth_snapshot
             .effective_allowed_providers()
             .map(|items| items.to_vec()),
+        provider_key_policies: auth_snapshot.user_provider_key_policies.clone(),
         allowed_api_formats: auth_snapshot
             .effective_allowed_api_formats()
             .map(|items| items.to_vec()),

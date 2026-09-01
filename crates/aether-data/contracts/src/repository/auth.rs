@@ -11,6 +11,8 @@ pub struct StoredAuthApiKeySnapshot {
     pub user_is_deleted: bool,
     pub user_rate_limit: Option<i32>,
     pub user_allowed_providers: Option<Vec<String>>,
+    #[serde(default)]
+    pub user_provider_key_policies: std::collections::BTreeMap<String, Vec<String>>,
     pub user_allowed_api_formats: Option<Vec<String>>,
     pub user_allowed_models: Option<Vec<String>>,
     pub api_key_id: String,
@@ -65,6 +67,7 @@ impl StoredAuthApiKeySnapshot {
                 user_allowed_providers,
                 "users.allowed_providers",
             )?,
+            user_provider_key_policies: std::collections::BTreeMap::new(),
             user_allowed_api_formats: parse_string_list(
                 user_allowed_api_formats,
                 "users.allowed_api_formats",
@@ -145,6 +148,8 @@ pub struct ResolvedAuthApiKeySnapshot {
     pub user_is_deleted: bool,
     pub user_rate_limit: Option<i32>,
     pub user_allowed_providers: Option<Vec<String>>,
+    #[serde(default)]
+    pub user_provider_key_policies: std::collections::BTreeMap<String, Vec<String>>,
     pub user_allowed_api_formats: Option<Vec<String>>,
     pub user_allowed_models: Option<Vec<String>>,
     pub api_key_id: String,
@@ -175,6 +180,7 @@ impl ResolvedAuthApiKeySnapshot {
             user_is_deleted: snapshot.user_is_deleted,
             user_rate_limit: snapshot.user_rate_limit,
             user_allowed_providers: snapshot.user_allowed_providers,
+            user_provider_key_policies: snapshot.user_provider_key_policies,
             user_allowed_api_formats: snapshot.user_allowed_api_formats,
             user_allowed_models: snapshot.user_allowed_models,
             api_key_id: snapshot.api_key_id,
@@ -203,6 +209,24 @@ impl ResolvedAuthApiKeySnapshot {
         self.api_key_allowed_providers
             .as_deref()
             .or(self.user_allowed_providers.as_deref())
+    }
+
+    pub fn provider_key_allowed(&self, provider_id: &str, provider_key_id: &str) -> bool {
+        self.effective_provider_key_allowlist(provider_id)
+            .is_none_or(|key_ids| {
+                key_ids
+                    .iter()
+                    .any(|key_id| key_id == provider_key_id.trim())
+            })
+    }
+
+    pub fn effective_provider_key_allowlist(&self, provider_id: &str) -> Option<&[String]> {
+        if self.api_key_is_standalone {
+            return None;
+        }
+        self.user_provider_key_policies
+            .get(provider_id.trim())
+            .map(Vec::as_slice)
     }
 
     pub fn effective_allowed_api_formats(&self) -> Option<&[String]> {
@@ -1108,6 +1132,110 @@ mod tests {
         assert_eq!(resolved.effective_allowed_providers(), None);
         assert_eq!(resolved.effective_allowed_api_formats(), None);
         assert_eq!(resolved.effective_allowed_models(), None);
+    }
+
+    #[test]
+    fn provider_key_policy_is_enforced_for_user_keys() {
+        let mut snapshot = StoredAuthApiKeySnapshot::new(
+            "user-1".to_string(),
+            "alice".to_string(),
+            None,
+            "user".to_string(),
+            "local".to_string(),
+            true,
+            false,
+            None,
+            None,
+            None,
+            "user-key".to_string(),
+            Some("default".to_string()),
+            true,
+            false,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("snapshot should build");
+        snapshot
+            .user_provider_key_policies
+            .insert("provider-1".to_string(), vec!["key-allowed".to_string()]);
+        let resolved = ResolvedAuthApiKeySnapshot::from_stored(snapshot, 150);
+
+        assert!(resolved.provider_key_allowed("provider-1", "key-allowed"));
+        assert!(!resolved.provider_key_allowed("provider-1", "key-blocked"));
+        assert!(resolved.provider_key_allowed("provider-2", "key-any"));
+    }
+
+    #[test]
+    fn empty_provider_key_policy_denies_all_keys() {
+        let mut snapshot = StoredAuthApiKeySnapshot::new(
+            "user-1".to_string(),
+            "alice".to_string(),
+            None,
+            "user".to_string(),
+            "local".to_string(),
+            true,
+            false,
+            None,
+            None,
+            None,
+            "user-key".to_string(),
+            Some("default".to_string()),
+            true,
+            false,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("snapshot should build");
+        snapshot
+            .user_provider_key_policies
+            .insert("provider-1".to_string(), Vec::new());
+        let resolved = ResolvedAuthApiKeySnapshot::from_stored(snapshot, 150);
+
+        assert!(!resolved.provider_key_allowed("provider-1", "key-any"));
+    }
+
+    #[test]
+    fn standalone_key_ignores_user_group_provider_key_policy() {
+        let mut snapshot = StoredAuthApiKeySnapshot::new(
+            "admin-user".to_string(),
+            "admin".to_string(),
+            None,
+            "admin".to_string(),
+            "local".to_string(),
+            true,
+            false,
+            None,
+            None,
+            None,
+            "standalone-key".to_string(),
+            Some("standalone".to_string()),
+            true,
+            false,
+            true,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("snapshot should build");
+        snapshot
+            .user_provider_key_policies
+            .insert("provider-1".to_string(), Vec::new());
+        let resolved = ResolvedAuthApiKeySnapshot::from_stored(snapshot, 150);
+
+        assert!(resolved.provider_key_allowed("provider-1", "key-any"));
     }
 
     #[test]

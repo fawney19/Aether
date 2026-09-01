@@ -122,6 +122,7 @@ mod tests {
             provider_name: "RightCode".to_string(),
             provider_type: "codex".to_string(),
             provider_priority: 22,
+            provider_pool_enabled: false,
             endpoint_id: "endpoint-1".to_string(),
             endpoint_api_format: "openai:responses".to_string(),
             key_id: "key-1".to_string(),

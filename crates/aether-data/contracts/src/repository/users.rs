@@ -492,6 +492,7 @@ pub struct StoredUserGroup {
     pub priority: i32,
     pub allowed_providers: Option<Vec<String>>,
     pub allowed_providers_mode: String,
+    pub provider_key_policies: std::collections::BTreeMap<String, Vec<String>>,
     pub allowed_api_formats: Option<Vec<String>>,
     pub allowed_api_formats_mode: String,
     pub allowed_models: Option<Vec<String>>,
@@ -512,6 +513,7 @@ impl StoredUserGroup {
         priority: i32,
         allowed_providers: Option<Value>,
         allowed_providers_mode: String,
+        provider_key_policies: Option<Value>,
         allowed_api_formats: Option<Value>,
         allowed_api_formats_mode: String,
         allowed_models: Option<Value>,
@@ -549,6 +551,10 @@ impl StoredUserGroup {
             allowed_providers_mode: normalize_list_policy_mode(
                 &allowed_providers_mode,
                 "user_groups.allowed_providers_mode",
+            )?,
+            provider_key_policies: parse_provider_key_policies(
+                provider_key_policies,
+                "user_groups.provider_key_policies",
             )?,
             allowed_api_formats: parse_string_list(
                 allowed_api_formats,
@@ -602,6 +608,7 @@ pub struct UpsertUserGroupRecord {
     pub priority: i32,
     pub allowed_providers: Option<Vec<String>>,
     pub allowed_providers_mode: String,
+    pub provider_key_policies: std::collections::BTreeMap<String, Vec<String>>,
     pub allowed_api_formats: Option<Vec<String>>,
     pub allowed_api_formats_mode: String,
     pub allowed_models: Option<Vec<String>>,
@@ -1099,6 +1106,64 @@ fn parse_string_list(
     parse_string_list_value(&value, field_name)
 }
 
+fn parse_provider_key_policies(
+    value: Option<Value>,
+    field_name: &str,
+) -> Result<std::collections::BTreeMap<String, Vec<String>>, crate::DataLayerError> {
+    let Some(value) = value else {
+        return Ok(std::collections::BTreeMap::new());
+    };
+    if value.is_null() {
+        return Ok(std::collections::BTreeMap::new());
+    }
+    let value = match value {
+        Value::String(raw) => serde_json::from_str::<Value>(raw.trim()).map_err(|_| {
+            crate::DataLayerError::UnexpectedValue(format!("{field_name} is not a JSON object"))
+        })?,
+        other => other,
+    };
+    let Value::Object(object) = value else {
+        return Err(crate::DataLayerError::UnexpectedValue(format!(
+            "{field_name} is not a JSON object"
+        )));
+    };
+
+    let mut policies = std::collections::BTreeMap::new();
+    for (provider_id, key_values) in object {
+        let provider_id = provider_id.trim();
+        if provider_id.is_empty() {
+            continue;
+        }
+        let Value::Array(key_values) = key_values else {
+            return Err(crate::DataLayerError::UnexpectedValue(format!(
+                "{field_name}.{provider_id} is not a JSON array"
+            )));
+        };
+        let mut key_ids = key_values
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| {
+                        crate::DataLayerError::UnexpectedValue(format!(
+                            "{field_name}.{provider_id} contains a non-string item"
+                        ))
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(ToOwned::to_owned)
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        key_ids.sort();
+        policies.insert(provider_id.to_string(), key_ids);
+    }
+    Ok(policies)
+}
+
 fn parse_string_list_value(
     value: &Value,
     field_name: &str,
@@ -1154,9 +1219,56 @@ mod tests {
     use serde_json::Value;
 
     use super::{
-        legacy_list_policy_mode, StoredUserAuthRecord, StoredUserExportRow,
+        legacy_list_policy_mode, StoredUserAuthRecord, StoredUserExportRow, StoredUserGroup,
         StoredUserPreferenceRecord, StoredUserSessionRecord,
     };
+
+    fn stored_user_group_with_provider_key_policies(
+        value: Option<Value>,
+    ) -> Result<StoredUserGroup, crate::DataLayerError> {
+        StoredUserGroup::new(
+            "group-1".to_string(),
+            "Team".to_string(),
+            "team".to_string(),
+            None,
+            0,
+            Some(serde_json::json!(["provider-1"])),
+            "specific".to_string(),
+            value,
+            None,
+            "unrestricted".to_string(),
+            None,
+            "unrestricted".to_string(),
+            None,
+            "system".to_string(),
+            None,
+            None,
+        )
+    }
+
+    #[test]
+    fn null_provider_key_policies_are_backward_compatible() {
+        let group = stored_user_group_with_provider_key_policies(None)
+            .expect("legacy NULL policy should be accepted");
+
+        assert!(group.provider_key_policies.is_empty());
+    }
+
+    #[test]
+    fn provider_key_policies_are_trimmed_deduplicated_and_sorted() {
+        let group = stored_user_group_with_provider_key_policies(Some(serde_json::json!({
+            " provider-1 ": [" key-b ", "key-a", "key-b"]
+        })))
+        .expect("policy should parse");
+
+        assert_eq!(
+            group.provider_key_policies,
+            std::collections::BTreeMap::from([(
+                "provider-1".to_string(),
+                vec!["key-a".to_string(), "key-b".to_string()],
+            )])
+        );
+    }
 
     #[test]
     fn builds_user_export_row_with_allowed_lists() {

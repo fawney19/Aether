@@ -204,6 +204,11 @@ length = 32
 default = "inherit"
 
 [[table.user_groups.columns]]
+name = "provider_key_policies"
+type = "json"
+nullable = true
+
+[[table.user_groups.columns]]
 name = "allowed_api_formats"
 type = "json"
 nullable = true

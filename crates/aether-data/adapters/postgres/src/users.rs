@@ -604,6 +604,7 @@ SELECT
   priority,
   allowed_providers,
   allowed_providers_mode,
+  provider_key_policies,
   allowed_api_formats,
   allowed_api_formats_mode,
   allowed_models,
@@ -745,11 +746,12 @@ impl SqlxUserReadRepository {
 INSERT INTO user_groups (
   id, name, normalized_name, description, priority,
   allowed_providers, allowed_providers_mode,
+  provider_key_policies,
   allowed_api_formats, allowed_api_formats_mode,
   allowed_models, allowed_models_mode,
   rate_limit, rate_limit_mode
 )
-VALUES ($1, $2, $3, $4, $5, $6::json, $7, $8::json, $9, $10::json, $11, $12, $13)
+VALUES ($1, $2, $3, $4, $5, $6::json, $7, $8::json, $9::json, $10, $11::json, $12, $13, $14)
 "#,
         )
         .bind(&id)
@@ -759,6 +761,10 @@ VALUES ($1, $2, $3, $4, $5, $6::json, $7, $8::json, $9, $10::json, $11, $12, $13
         .bind(record.priority)
         .bind(record.allowed_providers.map(serde_json::Value::from))
         .bind(record.allowed_providers_mode)
+        .bind(
+            serde_json::to_value(record.provider_key_policies)
+                .map_err(|err| DataLayerError::UnexpectedValue(err.to_string()))?,
+        )
         .bind(record.allowed_api_formats.map(serde_json::Value::from))
         .bind(record.allowed_api_formats_mode)
         .bind(record.allowed_models.map(serde_json::Value::from))
@@ -792,12 +798,13 @@ SET name = $2,
     priority = $5,
     allowed_providers = $6::json,
     allowed_providers_mode = $7,
-    allowed_api_formats = $8::json,
-    allowed_api_formats_mode = $9,
-    allowed_models = $10::json,
-    allowed_models_mode = $11,
-    rate_limit = $12,
-    rate_limit_mode = $13,
+    provider_key_policies = $8::json,
+    allowed_api_formats = $9::json,
+    allowed_api_formats_mode = $10,
+    allowed_models = $11::json,
+    allowed_models_mode = $12,
+    rate_limit = $13,
+    rate_limit_mode = $14,
     updated_at = now()
 WHERE id = $1
 "#,
@@ -809,6 +816,10 @@ WHERE id = $1
         .bind(record.priority)
         .bind(record.allowed_providers.map(serde_json::Value::from))
         .bind(record.allowed_providers_mode)
+        .bind(
+            serde_json::to_value(record.provider_key_policies)
+                .map_err(|err| DataLayerError::UnexpectedValue(err.to_string()))?,
+        )
         .bind(record.allowed_api_formats.map(serde_json::Value::from))
         .bind(record.allowed_api_formats_mode)
         .bind(record.allowed_models.map(serde_json::Value::from))
@@ -2276,6 +2287,7 @@ fn map_user_group_row(row: &sqlx::postgres::PgRow) -> Result<StoredUserGroup, Da
         row.try_get("priority").map_postgres_err()?,
         row.try_get("allowed_providers").map_postgres_err()?,
         row.try_get("allowed_providers_mode").map_postgres_err()?,
+        row.try_get("provider_key_policies").map_postgres_err()?,
         row.try_get("allowed_api_formats").map_postgres_err()?,
         row.try_get("allowed_api_formats_mode").map_postgres_err()?,
         row.try_get("allowed_models").map_postgres_err()?,
