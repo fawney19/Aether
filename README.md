@@ -147,6 +147,7 @@ Aether Tunnel 是配套的正向代理节点，部署在海外 VPS 上，为墙�
 
 ## API 文档
 
+- 完整 API 参考手册（Admin API 34 家族 / 客户端 v1 / 数据库 / 运维）: [docs/api-reference/README.md](docs/api-reference/README.md)
 - Embeddings: [OpenAI compatible `POST /v1/embeddings`](docs/api/embeddings.md)
 - Rerank: [OpenAI/Jina compatible `POST /v1/rerank`](docs/api/rerank.md)
 - Responses WebSocket mode: [protocol and Aether behavior](docs/WebSocket-Mode.md)
