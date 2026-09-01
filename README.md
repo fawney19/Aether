@@ -191,4 +191,4 @@ Aether Tunnel 是配套的正向代理节点，部署在海外 VPS 上，为墙�
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=fawney19/Aether&type=date&legend=top-left)](https://www.star-history.com/?repos=fawney19%2FAether&type=date&legend=top-left)
+[![Star History Chart](https://star-history.dera.page/svg?repos=fawney19/Aether&type=date&legend=top-left)](https://star-history.dera.page/#fawney19/Aether&type=date&legend=top-left)
