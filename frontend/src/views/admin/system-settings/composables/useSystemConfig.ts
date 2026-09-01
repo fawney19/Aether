@@ -58,6 +58,8 @@ export interface SystemConfig {
   // 定时任务
   enable_provider_checkin: boolean
   provider_checkin_time: string
+  enable_provider_remote_quota_sync: boolean
+  provider_remote_quota_sync_interval_seconds: number
   enable_oauth_token_refresh: boolean
 }
 
@@ -114,6 +116,8 @@ const CONFIG_KEYS = [
   // 定时任务
   'enable_provider_checkin',
   'provider_checkin_time',
+  'enable_provider_remote_quota_sync',
+  'provider_remote_quota_sync_interval_seconds',
   'enable_oauth_token_refresh',
 ]
 
@@ -172,6 +176,8 @@ function createDefaultConfig(): SystemConfig {
     // 定时任务
     enable_provider_checkin: true,
     provider_checkin_time: '01:05',
+    enable_provider_remote_quota_sync: true,
+    provider_remote_quota_sync_interval_seconds: 5 * 60,
     enable_oauth_token_refresh: true,
   }
 }

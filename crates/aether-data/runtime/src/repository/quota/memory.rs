@@ -4,7 +4,8 @@ use std::sync::RwLock;
 use async_trait::async_trait;
 
 use super::{
-    ProviderQuotaReadRepository, ProviderQuotaWriteRepository, StoredProviderQuotaSnapshot,
+    ApplyRemoteProviderQuotaOutcome, ApplyRemoteProviderQuotaPatch, ProviderQuotaReadRepository,
+    ProviderQuotaWriteRepository, StoredProviderQuotaSnapshot,
 };
 use crate::DataLayerError;
 use aether_wallet::{ProviderBillingType, ProviderQuotaSnapshot};
@@ -79,13 +80,43 @@ impl ProviderQuotaWriteRepository for InMemoryProviderQuotaRepository {
         }
         Ok(count)
     }
+
+    async fn apply_remote_provider_quota(
+        &self,
+        patch: &ApplyRemoteProviderQuotaPatch,
+    ) -> Result<ApplyRemoteProviderQuotaOutcome, DataLayerError> {
+        patch.validate()?;
+        let mut quotas = self.by_provider_id.write().expect("quota repository lock");
+        let Some(quota) = quotas.get_mut(patch.provider_id.trim()) else {
+            return Ok(ApplyRemoteProviderQuotaOutcome::ProviderNotFound);
+        };
+
+        if quota
+            .quota_last_reset_at_unix_secs
+            .is_some_and(|window_start| window_start >= patch.remote_window_end_unix_secs)
+        {
+            return Ok(ApplyRemoteProviderQuotaOutcome::StaleWindow(quota.clone()));
+        }
+        if patch.was_applied_after_observation(quota) {
+            return Ok(ApplyRemoteProviderQuotaOutcome::Applied(quota.clone()));
+        }
+        if patch.usage_changed_after_observation(quota) {
+            return Ok(ApplyRemoteProviderQuotaOutcome::ConcurrentModification(
+                quota.clone(),
+            ));
+        }
+        patch.apply_to_snapshot(quota);
+        Ok(ApplyRemoteProviderQuotaOutcome::Applied(quota.clone()))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::InMemoryProviderQuotaRepository;
     use crate::repository::quota::{
-        ProviderQuotaReadRepository, ProviderQuotaWriteRepository, StoredProviderQuotaSnapshot,
+        ApplyRemoteProviderQuotaOutcome, ApplyRemoteProviderQuotaPatch,
+        ProviderQuotaReadRepository, ProviderQuotaUsageObservation, ProviderQuotaWriteRepository,
+        StoredProviderQuotaSnapshot,
     };
 
     fn sample_quota() -> StoredProviderQuotaSnapshot {
@@ -116,6 +147,123 @@ mod tests {
             .expect("lookup should succeed")
             .expect("quota should exist");
         assert_eq!(stored.monthly_used_usd, 0.0);
+    }
+
+    #[tokio::test]
+    async fn applies_remote_quota_with_window_aware_usage() {
+        let repository = InMemoryProviderQuotaRepository::seed(vec![sample_quota()]);
+        let first = ApplyRemoteProviderQuotaPatch {
+            provider_id: "provider-1".to_string(),
+            billing_type: "monthly_quota".to_string(),
+            monthly_quota_usd: Some(100.0),
+            remote_monthly_used_usd: 4.0,
+            remote_window_start_unix_secs: 2_000,
+            remote_window_end_unix_secs: 8_000,
+            quota_reset_day: Some(30),
+            quota_expires_at_unix_secs: Some(9_000),
+            local_usage_observation: Some(ProviderQuotaUsageObservation {
+                monthly_used_usd: 5.0,
+                quota_last_reset_at_unix_secs: Some(1_000),
+            }),
+            preserve_local_used_usd: false,
+        };
+        assert!(matches!(
+            repository
+                .apply_remote_provider_quota(&first)
+                .await
+                .expect("initial apply should succeed"),
+            ApplyRemoteProviderQuotaOutcome::Applied(_)
+        ));
+        repository
+            .apply_remote_provider_quota(&first)
+            .await
+            .expect("repeating the same observation must be idempotent");
+        assert!(matches!(
+            repository
+                .apply_remote_provider_quota(&ApplyRemoteProviderQuotaPatch {
+                    remote_monthly_used_usd: 5.0,
+                    ..first.clone()
+                })
+                .await
+                .expect("divergent concurrent snapshot should classify"),
+            ApplyRemoteProviderQuotaOutcome::ConcurrentModification(_)
+        ));
+        let stored = repository
+            .find_by_provider_id("provider-1")
+            .await
+            .expect("quota should load")
+            .expect("quota should exist");
+        assert_eq!(stored.monthly_used_usd, 4.0);
+
+        let same_window_lower = ApplyRemoteProviderQuotaPatch {
+            remote_monthly_used_usd: 3.0,
+            local_usage_observation: Some(ProviderQuotaUsageObservation {
+                monthly_used_usd: 4.0,
+                quota_last_reset_at_unix_secs: Some(2_000),
+            }),
+            ..first.clone()
+        };
+        repository
+            .apply_remote_provider_quota(&same_window_lower)
+            .await
+            .expect("same window apply should succeed");
+        let stored = repository
+            .find_by_provider_id("provider-1")
+            .await
+            .expect("quota should load")
+            .expect("quota should exist");
+        assert_eq!(stored.monthly_used_usd, 3.0);
+        assert_eq!(stored.quota_reset_day, Some(30));
+
+        let next_window = ApplyRemoteProviderQuotaPatch {
+            remote_monthly_used_usd: 1.0,
+            remote_window_start_unix_secs: 8_000,
+            remote_window_end_unix_secs: 14_000,
+            local_usage_observation: Some(ProviderQuotaUsageObservation {
+                monthly_used_usd: 3.0,
+                quota_last_reset_at_unix_secs: Some(2_000),
+            }),
+            ..first.clone()
+        };
+        repository
+            .apply_remote_provider_quota(&next_window)
+            .await
+            .expect("new window apply should succeed");
+        let stored = repository
+            .find_by_provider_id("provider-1")
+            .await
+            .expect("quota should load")
+            .expect("quota should exist");
+        assert_eq!(stored.monthly_used_usd, 1.0);
+        assert_eq!(stored.quota_last_reset_at_unix_secs, Some(8_000));
+
+        let preserve_local_usage = ApplyRemoteProviderQuotaPatch {
+            remote_monthly_used_usd: 0.0,
+            remote_window_start_unix_secs: 14_000,
+            remote_window_end_unix_secs: 20_000,
+            local_usage_observation: None,
+            preserve_local_used_usd: true,
+            ..first.clone()
+        };
+        repository
+            .apply_remote_provider_quota(&preserve_local_usage)
+            .await
+            .expect("state-only remote quota update should succeed");
+        let stored = repository
+            .find_by_provider_id("provider-1")
+            .await
+            .expect("quota should load")
+            .expect("quota should exist");
+        assert_eq!(stored.monthly_used_usd, 1.0);
+        assert_eq!(stored.quota_last_reset_at_unix_secs, Some(14_000));
+
+        assert!(matches!(
+            repository
+                .apply_remote_provider_quota(&first)
+                .await
+                .expect("stale apply should classify"),
+            ApplyRemoteProviderQuotaOutcome::StaleWindow(_)
+        ));
     }
 
     #[tokio::test]

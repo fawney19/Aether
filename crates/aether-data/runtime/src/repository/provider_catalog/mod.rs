@@ -2,12 +2,14 @@ mod memory;
 
 #[allow(unused_imports)]
 pub(crate) use aether_data_contracts::repository::provider_catalog::{
+    patch_provider_catalog_runtime_credentials, provider_catalog_runtime_credentials_cas_matches,
     ProviderCatalogKeyAdaptiveState, ProviderCatalogKeyAdaptiveStateUpdate,
     ProviderCatalogKeyAdminCasUpdate, ProviderCatalogKeyHealthStateUpdate,
     ProviderCatalogKeyListOrder, ProviderCatalogKeyListQuery,
     ProviderCatalogKeyOAuthCredentialCasDelete, ProviderCatalogKeyOAuthCredentialFence,
     ProviderCatalogKeyOAuthRuntimeStateCasUpdate, ProviderCatalogKeyRuntimeMetadataUpdate,
-    ProviderCatalogKeyStatusSnapshotUpdate, ProviderCatalogReadRepository, ProviderCatalogSnapshot,
+    ProviderCatalogKeyStatusSnapshotUpdate, ProviderCatalogProviderConfigCasUpdate,
+    ProviderCatalogReadRepository, ProviderCatalogRuntimeCredentialsCas, ProviderCatalogSnapshot,
     ProviderCatalogUpstreamMetadataNamespaceExpectation,
     ProviderCatalogUpstreamMetadataNamespaceUpdate, ProviderCatalogWriteRepository,
     StoredProviderCatalogEndpoint, StoredProviderCatalogKey,

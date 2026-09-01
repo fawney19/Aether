@@ -65,6 +65,7 @@
     <TableCell class="py-3.5">
       <ProviderBalanceCell
         :provider="provider"
+        :remote-quota-group="remoteQuotaGroup"
         :is-balance-loading="isBalanceLoading"
         :get-provider-balance="getProviderBalance"
         :get-provider-balance-breakdown="getProviderBalanceBreakdown"
@@ -210,12 +211,14 @@ import TableRow from '@/components/ui/table-row.vue'
 import TableCell from '@/components/ui/table-cell.vue'
 import ProviderBalanceCell from './ProviderBalanceCell.vue'
 import { type ProviderWithEndpointsSummary, formatApiFormatShort } from '@/api/endpoints'
+import type { Sub2ApiRemoteQuotaGroup } from '@/api/providerOps'
 import { sortEndpoints, isEndpointAvailable, getEndpointDotColor, getEndpointTooltip } from '@/features/providers/composables/useEndpointStatus'
 import type { BalanceExtraItem } from '@/features/providers/auth-templates'
 import { useI18n } from '@/i18n'
 
 const props = defineProps<{
   provider: ProviderWithEndpointsSummary
+  remoteQuotaGroup?: Sub2ApiRemoteQuotaGroup | null
   editingDescriptionId: string | null
   // Balance functions
   isBalanceLoading: (providerId: string) => boolean

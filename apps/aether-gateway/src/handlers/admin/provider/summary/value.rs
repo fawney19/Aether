@@ -32,6 +32,19 @@ fn endpoint_timestamp_or_now(value: Option<u64>, now_unix_secs: u64) -> serde_js
         .unwrap_or(serde_json::Value::Null)
 }
 
+fn provider_ops_feature_enabled(
+    provider_ops_config: Option<&serde_json::Value>,
+    feature: &str,
+) -> bool {
+    provider_ops_config
+        .and_then(serde_json::Value::as_object)
+        .and_then(|config| config.get(feature))
+        .and_then(serde_json::Value::as_object)
+        .and_then(|config| config.get("enabled"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
 pub(crate) fn build_admin_provider_summary_value(
     provider: &StoredProviderCatalogProvider,
     endpoints: &[StoredProviderCatalogEndpoint],
@@ -149,13 +162,9 @@ pub(crate) fn build_admin_provider_summary_value(
         .and_then(|cfg| cfg.get("simulated_cache_enabled"))
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
-    let ops_quota_alert_enabled = provider_ops_config
-        .and_then(serde_json::Value::as_object)
-        .and_then(|cfg| cfg.get("quota_alert"))
-        .and_then(serde_json::Value::as_object)
-        .and_then(|cfg| cfg.get("enabled"))
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false);
+    let ops_quota_alert_enabled = provider_ops_feature_enabled(provider_ops_config, "quota_alert");
+    let ops_remote_quota_enabled =
+        provider_ops_feature_enabled(provider_ops_config, "remote_quota");
     let billing_type = quota_snapshot
         .map(|quota| quota.billing_type.clone())
         .or_else(|| provider.billing_type.clone());
@@ -224,7 +233,26 @@ pub(crate) fn build_admin_provider_summary_value(
         ),
         "responses_websocket_enabled": responses_websocket_adapter(&provider.provider_type, provider.config.as_ref()).is_some(),
         "ops_quota_alert_enabled": ops_quota_alert_enabled,
+        "ops_remote_quota_enabled": ops_remote_quota_enabled,
         "created_at": endpoint_timestamp_or_now(provider.created_at_unix_ms, now_unix_secs),
         "updated_at": endpoint_timestamp_or_now(provider.updated_at_unix_secs, now_unix_secs),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::provider_ops_feature_enabled;
+    use serde_json::json;
+
+    #[test]
+    fn provider_ops_feature_requires_explicit_enabled_bool() {
+        let config = json!({
+            "remote_quota": {"enabled": true},
+            "quota_alert": {"enabled": false},
+        });
+
+        assert!(provider_ops_feature_enabled(Some(&config), "remote_quota"));
+        assert!(!provider_ops_feature_enabled(Some(&config), "quota_alert"));
+        assert!(!provider_ops_feature_enabled(Some(&config), "missing"));
+    }
 }

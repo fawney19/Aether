@@ -12,6 +12,7 @@ use aether_scheduler_core::{
 };
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::admin_api::admin_provider_ops_remote_quota_worker_eligible;
 use crate::data::auth::GatewayAuthApiKeySnapshot;
 use crate::GatewayError;
 
@@ -37,14 +38,20 @@ pub(super) async fn read_candidate_runtime_selection_snapshot(
     now_unix_secs: u64,
 ) -> Result<CandidateRuntimeSelectionSnapshot, GatewayError> {
     let provider_concurrent_limits = read_provider_concurrent_limits(state, candidates).await?;
-    let provider_pool_state = read_provider_pool_state_map(state, candidates).await?;
-    let provider_skip_exhausted_accounts = provider_pool_state
+    let provider_runtime_state = read_provider_runtime_state_map(state, candidates).await?;
+    let provider_skip_exhausted_accounts = provider_runtime_state
         .iter()
         .map(|(provider_id, state)| (provider_id.clone(), state.skip_exhausted_accounts))
         .collect::<BTreeMap<_, _>>();
-    let pool_provider_ids = provider_pool_state
+    let pool_provider_ids = provider_runtime_state
         .iter()
         .filter_map(|(provider_id, state)| state.pool_enabled.then_some(provider_id.clone()))
+        .collect::<BTreeSet<_>>();
+    let remote_quota_provider_ids = provider_runtime_state
+        .iter()
+        .filter_map(|(provider_id, state)| {
+            state.remote_quota_enabled.then_some(provider_id.clone())
+        })
         .collect::<BTreeSet<_>>();
     let provider_key_rpm_states = read_provider_key_rpm_states(state, candidates).await?;
     let recent_candidates = if runtime_snapshot_requires_recent_candidates(
@@ -65,7 +72,8 @@ pub(super) async fn read_candidate_runtime_selection_snapshot(
     let key_oauth_invalid =
         read_key_oauth_invalid_map(candidates, &provider_key_rpm_states, now_unix_secs);
     let provider_quota_blocks_requests =
-        read_provider_quota_block_map(state, candidates, now_unix_secs).await?;
+        read_provider_quota_block_map(state, candidates, &remote_quota_provider_ids, now_unix_secs)
+            .await?;
     let provider_key_rpm_reset_ats =
         read_provider_key_rpm_reset_at_map(state, candidates, now_unix_secs);
 
@@ -265,6 +273,7 @@ pub(super) async fn read_provider_key_rpm_states(
 async fn read_provider_quota_block_map(
     state: &(impl SchedulerRuntimeState + ?Sized),
     candidates: &[SchedulerMinimalCandidateSelectionCandidate],
+    remote_quota_provider_ids: &BTreeSet<String>,
     now_unix_secs: u64,
 ) -> Result<BTreeMap<String, bool>, GatewayError> {
     let provider_ids = candidates
@@ -280,7 +289,13 @@ async fn read_provider_quota_block_map(
             .read_provider_quota_snapshot(&provider_id)
             .await?
             .as_ref()
-            .is_some_and(|quota| should_skip_provider_quota(quota, now_unix_secs));
+            .is_some_and(|quota| {
+                provider_quota_blocks_requests(
+                    quota,
+                    remote_quota_provider_ids.contains(&provider_id),
+                    now_unix_secs,
+                )
+            });
         quota_blocks.insert(provider_id, blocks_requests);
     }
 
@@ -288,15 +303,16 @@ async fn read_provider_quota_block_map(
 }
 
 #[derive(Debug, Clone, Copy, Default)]
-struct ProviderPoolState {
+struct ProviderRuntimeState {
     pool_enabled: bool,
     skip_exhausted_accounts: bool,
+    remote_quota_enabled: bool,
 }
 
-async fn read_provider_pool_state_map(
+async fn read_provider_runtime_state_map(
     state: &(impl SchedulerRuntimeState + ?Sized),
     candidates: &[SchedulerMinimalCandidateSelectionCandidate],
-) -> Result<BTreeMap<String, ProviderPoolState>, GatewayError> {
+) -> Result<BTreeMap<String, ProviderRuntimeState>, GatewayError> {
     let provider_ids = candidates
         .iter()
         .map(|candidate| candidate.provider_id.clone())
@@ -317,20 +333,35 @@ async fn read_provider_pool_state_map(
                 .config
                 .as_ref()
                 .and_then(|value| value.get("pool_advanced"));
+            let pool_enabled = pool_advanced.is_some();
             let skip_exhausted_accounts = pool_advanced
                 .and_then(serde_json::Value::as_object)
                 .and_then(|value| value.get("skip_exhausted_accounts"))
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false);
+            let remote_quota_enabled = admin_provider_ops_remote_quota_worker_eligible(&provider);
             (
                 provider.id,
-                ProviderPoolState {
-                    pool_enabled: pool_advanced.is_some(),
+                ProviderRuntimeState {
+                    pool_enabled,
                     skip_exhausted_accounts,
+                    remote_quota_enabled,
                 },
             )
         })
         .collect())
+}
+
+pub(super) fn provider_quota_blocks_requests(
+    quota: &aether_data_contracts::repository::quota::StoredProviderQuotaSnapshot,
+    remote_quota_enabled: bool,
+    now_unix_secs: u64,
+) -> bool {
+    should_skip_provider_quota(quota, now_unix_secs)
+        || (remote_quota_enabled
+            && quota
+                .quota_expires_at_unix_secs
+                .is_some_and(|expires_at| expires_at <= now_unix_secs))
 }
 
 fn read_key_account_quota_exhaustion_map(

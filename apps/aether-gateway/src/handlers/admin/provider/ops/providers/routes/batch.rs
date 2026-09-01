@@ -4,9 +4,13 @@ use super::super::balance_cache::{
     read_admin_provider_ops_balance_cache, spawn_admin_provider_ops_balance_refresh,
     store_admin_provider_ops_balance_cache, AdminProviderOpsBalanceCacheLookup,
 };
-use super::super::config::admin_provider_ops_config_object;
+use super::super::config::{
+    admin_provider_ops_config_object, admin_provider_ops_remote_quota_worker_eligible,
+};
 use crate::handlers::admin::request::AdminAppState;
+use crate::handlers::shared::system_config_bool;
 use crate::GatewayError;
+use aether_admin::system::ENABLE_PROVIDER_REMOTE_QUOTA_SYNC_CONFIG_KEY;
 use axum::{
     body::{Body, Bytes},
     http,
@@ -61,6 +65,14 @@ pub(super) async fn handle_admin_provider_ops_batch_balance(
         .into_iter()
         .map(|provider| (provider.id.clone(), provider))
         .collect::<HashMap<_, _>>();
+    let remote_quota_sync_enabled = system_config_bool(
+        state
+            .app()
+            .read_system_config_json_value(ENABLE_PROVIDER_REMOTE_QUOTA_SYNC_CONFIG_KEY)
+            .await?
+            .as_ref(),
+        true,
+    );
     let mut endpoints_by_provider = HashMap::<String, Vec<_>>::new();
     for endpoint in endpoints {
         endpoints_by_provider
@@ -76,14 +88,25 @@ pub(super) async fn handle_admin_provider_ops_batch_balance(
             .cloned()
             .unwrap_or_default();
         async move {
+            let remote_quota_refresh_owned_by_worker = remote_quota_sync_enabled
+                && provider
+                    .as_ref()
+                    .is_some_and(admin_provider_ops_remote_quota_worker_eligible);
             let result = if provider
                 .as_ref()
                 .is_some_and(|provider| admin_provider_ops_config_object(provider).is_some())
             {
                 match read_admin_provider_ops_balance_cache(state, &provider_id).await {
                     AdminProviderOpsBalanceCacheLookup::Hit(cached) => {
-                        spawn_admin_provider_ops_balance_refresh(state, &provider_id).await;
+                        if !remote_quota_refresh_owned_by_worker {
+                            spawn_admin_provider_ops_balance_refresh(state, &provider_id).await;
+                        }
                         cached
+                    }
+                    AdminProviderOpsBalanceCacheLookup::Miss
+                        if remote_quota_refresh_owned_by_worker =>
+                    {
+                        admin_provider_ops_pending_balance_response("暂无缓存的余额数据")
                     }
                     AdminProviderOpsBalanceCacheLookup::Miss => {
                         if state.runtime_state().is_memory() {
@@ -105,6 +128,11 @@ pub(super) async fn handle_admin_provider_ops_batch_balance(
                                 "余额数据加载中，请稍后刷新",
                             )
                         }
+                    }
+                    AdminProviderOpsBalanceCacheLookup::Unavailable
+                        if remote_quota_refresh_owned_by_worker =>
+                    {
+                        admin_provider_ops_pending_balance_response("余额缓存不可用")
                     }
                     AdminProviderOpsBalanceCacheLookup::Unavailable => {
                         let payload = admin_provider_ops_local_action_response(

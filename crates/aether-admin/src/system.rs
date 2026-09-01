@@ -46,6 +46,12 @@ pub struct AdminEmailTemplateUpdate {
 pub const ADMIN_SYSTEM_CONFIG_EXPORT_VERSION: &str = "2.3";
 pub const ADMIN_SYSTEM_CONFIG_SUPPORTED_VERSIONS: &[&str] =
     &["2.0", "2.1", "2.2", ADMIN_SYSTEM_CONFIG_EXPORT_VERSION];
+pub const ENABLE_PROVIDER_REMOTE_QUOTA_SYNC_CONFIG_KEY: &str = "enable_provider_remote_quota_sync";
+pub const PROVIDER_REMOTE_QUOTA_SYNC_INTERVAL_CONFIG_KEY: &str =
+    "provider_remote_quota_sync_interval_seconds";
+pub const PROVIDER_REMOTE_QUOTA_SYNC_INTERVAL_DEFAULT_SECONDS: u64 = 5 * 60;
+pub const PROVIDER_REMOTE_QUOTA_SYNC_INTERVAL_MIN_SECONDS: u64 = 60;
+pub const PROVIDER_REMOTE_QUOTA_SYNC_INTERVAL_MAX_SECONDS: u64 = 60 * 60;
 pub const ADMIN_SYSTEM_USERS_EXPORT_VERSION: &str = "1.5";
 pub const ADMIN_SYSTEM_USERS_SUPPORTED_VERSIONS: &[&str] =
     &["1.3", "1.4", ADMIN_SYSTEM_USERS_EXPORT_VERSION];
@@ -1725,6 +1731,10 @@ pub fn admin_system_config_default_value(key: &str) -> Option<serde_json::Value>
         "proxy_node_metrics_cleanup_batch_size" => Some(json!(5000)),
         "enable_provider_checkin" => Some(json!(true)),
         "provider_checkin_time" => Some(json!("01:05")),
+        ENABLE_PROVIDER_REMOTE_QUOTA_SYNC_CONFIG_KEY => Some(json!(true)),
+        PROVIDER_REMOTE_QUOTA_SYNC_INTERVAL_CONFIG_KEY => {
+            Some(json!(PROVIDER_REMOTE_QUOTA_SYNC_INTERVAL_DEFAULT_SECONDS))
+        }
         "provider_priority_mode" => Some(json!("provider")),
         "scheduling_mode" => Some(json!("cache_affinity")),
         "auto_delete_expired_keys" => Some(json!(false)),
@@ -2237,6 +2247,7 @@ pub fn parse_admin_system_config_update(
 
     match normalized_key.as_str() {
         "cyber_continue_failover"
+        | ENABLE_PROVIDER_REMOTE_QUOTA_SYNC_CONFIG_KEY
         | "enable_model_directives"
         | "module.important_notification.enabled"
         | "module.important_notification.email_enabled"
@@ -2365,6 +2376,31 @@ pub fn parse_admin_system_config_update(
                 })?;
             }
         }
+        PROVIDER_REMOTE_QUOTA_SYNC_INTERVAL_CONFIG_KEY => match value.as_u64() {
+            Some(seconds)
+                if (PROVIDER_REMOTE_QUOTA_SYNC_INTERVAL_MIN_SECONDS
+                    ..=PROVIDER_REMOTE_QUOTA_SYNC_INTERVAL_MAX_SECONDS)
+                    .contains(&seconds) =>
+            {
+                value = json!(seconds);
+            }
+            None if value.is_null() => {
+                value = json!(PROVIDER_REMOTE_QUOTA_SYNC_INTERVAL_DEFAULT_SECONDS);
+            }
+            _ => {
+                return Err((
+                    http::StatusCode::BAD_REQUEST,
+                    json!({
+                        "detail": format!(
+                            "{} 必须是 {} 到 {} 之间的整数",
+                            PROVIDER_REMOTE_QUOTA_SYNC_INTERVAL_CONFIG_KEY,
+                            PROVIDER_REMOTE_QUOTA_SYNC_INTERVAL_MIN_SECONDS,
+                            PROVIDER_REMOTE_QUOTA_SYNC_INTERVAL_MAX_SECONDS,
+                        )
+                    }),
+                ));
+            }
+        },
         "module.chat_pii_redaction.cache_ttl_seconds" => match value.as_u64() {
             Some(300 | 3600) => value = json!(value.as_u64().unwrap()),
             Some(_) => {
@@ -3506,6 +3542,79 @@ mod tests {
             admin_system_config_default_value("backup_s3_user_agent"),
             Some(json!("rclone/v1.68.0"))
         );
+    }
+
+    #[test]
+    fn provider_remote_quota_sync_defaults_and_update_bounds_are_stable() {
+        assert_eq!(
+            admin_system_config_default_value(ENABLE_PROVIDER_REMOTE_QUOTA_SYNC_CONFIG_KEY),
+            Some(json!(true))
+        );
+        assert_eq!(
+            admin_system_config_default_value(PROVIDER_REMOTE_QUOTA_SYNC_INTERVAL_CONFIG_KEY),
+            Some(json!(PROVIDER_REMOTE_QUOTA_SYNC_INTERVAL_DEFAULT_SECONDS))
+        );
+
+        for seconds in [
+            PROVIDER_REMOTE_QUOTA_SYNC_INTERVAL_MIN_SECONDS,
+            PROVIDER_REMOTE_QUOTA_SYNC_INTERVAL_DEFAULT_SECONDS,
+            PROVIDER_REMOTE_QUOTA_SYNC_INTERVAL_MAX_SECONDS,
+        ] {
+            let body = serde_json::to_vec(&json!({ "value": seconds })).unwrap();
+            let update = parse_admin_system_config_update(
+                PROVIDER_REMOTE_QUOTA_SYNC_INTERVAL_CONFIG_KEY,
+                &body,
+            )
+            .expect("bounded integer interval should parse");
+            assert_eq!(update.value, json!(seconds));
+        }
+
+        for value in [
+            json!(PROVIDER_REMOTE_QUOTA_SYNC_INTERVAL_MIN_SECONDS - 1),
+            json!(PROVIDER_REMOTE_QUOTA_SYNC_INTERVAL_MAX_SECONDS + 1),
+            json!("300"),
+            json!(300.5),
+        ] {
+            let body = serde_json::to_vec(&json!({ "value": value })).unwrap();
+            assert!(parse_admin_system_config_update(
+                PROVIDER_REMOTE_QUOTA_SYNC_INTERVAL_CONFIG_KEY,
+                &body,
+            )
+            .is_err());
+        }
+
+        let reset = parse_admin_system_config_update(
+            PROVIDER_REMOTE_QUOTA_SYNC_INTERVAL_CONFIG_KEY,
+            br#"{"value":null}"#,
+        )
+        .expect("null interval should restore the default");
+        assert_eq!(
+            reset.value,
+            json!(PROVIDER_REMOTE_QUOTA_SYNC_INTERVAL_DEFAULT_SECONDS)
+        );
+    }
+
+    #[test]
+    fn provider_remote_quota_sync_toggle_requires_a_boolean() {
+        let update = parse_admin_system_config_update(
+            ENABLE_PROVIDER_REMOTE_QUOTA_SYNC_CONFIG_KEY,
+            br#"{"value":false}"#,
+        )
+        .expect("boolean remote quota sync setting should parse");
+        assert_eq!(update.value, json!(false));
+
+        let reset = parse_admin_system_config_update(
+            ENABLE_PROVIDER_REMOTE_QUOTA_SYNC_CONFIG_KEY,
+            br#"{"value":null}"#,
+        )
+        .expect("null remote quota sync toggle should restore the default");
+        assert_eq!(reset.value, json!(true));
+
+        assert!(parse_admin_system_config_update(
+            ENABLE_PROVIDER_REMOTE_QUOTA_SYNC_CONFIG_KEY,
+            br#"{"value":"false"}"#,
+        )
+        .is_err());
     }
 
     #[test]

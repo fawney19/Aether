@@ -1161,6 +1161,21 @@ impl GatewayDataState {
         }
     }
 
+    pub(crate) async fn apply_remote_provider_quota(
+        &self,
+        patch: &aether_data_contracts::repository::quota::ApplyRemoteProviderQuotaPatch,
+    ) -> Result<
+        aether_data_contracts::repository::quota::ApplyRemoteProviderQuotaOutcome,
+        DataLayerError,
+    > {
+        match &self.provider_quota_writer {
+            Some(repository) => repository.apply_remote_provider_quota(patch).await,
+            None => Err(DataLayerError::InvalidConfiguration(
+                "provider quota writer is unavailable".to_string(),
+            )),
+        }
+    }
+
     pub(crate) async fn find_provider_quota_by_provider_id(
         &self,
         provider_id: &str,

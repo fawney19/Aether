@@ -4,7 +4,8 @@ use super::{
     ProviderCatalogKeyAdminCasUpdate, ProviderCatalogKeyHealthStateUpdate,
     ProviderCatalogKeyListQuery, ProviderCatalogKeyOAuthCredentialCasDelete,
     ProviderCatalogKeyOAuthRuntimeStateCasUpdate, ProviderCatalogKeyRuntimeMetadataUpdate,
-    ProviderCatalogKeyStatusSnapshotUpdate, PublicHealthStatusCount, PublicHealthTimelineBucket,
+    ProviderCatalogKeyStatusSnapshotUpdate, ProviderCatalogProviderConfigCasUpdate,
+    ProviderCatalogRuntimeCredentialsCas, PublicHealthStatusCount, PublicHealthTimelineBucket,
     StoredGeminiFileMapping, StoredGeminiFileMappingListPage, StoredProviderCatalogEndpoint,
     StoredProviderCatalogKey, StoredProviderCatalogKeyMaintenanceSummary,
     StoredProviderCatalogKeyPage, StoredProviderCatalogKeyStats, StoredProviderCatalogProvider,
@@ -473,6 +474,40 @@ impl GatewayDataState {
             self.clear_provider_catalog_cache();
         }
         Ok(updated)
+    }
+
+    pub(crate) async fn compare_and_update_provider_catalog_config(
+        &self,
+        update: &ProviderCatalogProviderConfigCasUpdate,
+    ) -> Result<Option<bool>, DataLayerError> {
+        let updated = match &self.provider_catalog_writer {
+            Some(repository) => repository
+                .compare_and_update_provider_config(update)
+                .await
+                .map(Some),
+            None => Ok(None),
+        }?;
+        if updated == Some(true) {
+            self.clear_provider_catalog_cache();
+        }
+        Ok(updated)
+    }
+
+    pub(crate) async fn compare_and_patch_provider_ops_runtime_credentials(
+        &self,
+        update: &ProviderCatalogRuntimeCredentialsCas,
+    ) -> Result<Option<bool>, DataLayerError> {
+        let patched = match &self.provider_catalog_writer {
+            Some(repository) => repository
+                .compare_and_patch_provider_ops_runtime_credentials(update)
+                .await
+                .map(Some),
+            None => Ok(None),
+        }?;
+        if patched == Some(true) {
+            self.clear_provider_catalog_cache();
+        }
+        Ok(patched)
     }
 
     pub(crate) async fn delete_provider_catalog_provider(

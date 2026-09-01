@@ -2,6 +2,12 @@ use std::collections::{HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use aether_admin::system::{
+    PROVIDER_REMOTE_QUOTA_SYNC_INTERVAL_CONFIG_KEY,
+    PROVIDER_REMOTE_QUOTA_SYNC_INTERVAL_DEFAULT_SECONDS,
+    PROVIDER_REMOTE_QUOTA_SYNC_INTERVAL_MAX_SECONDS,
+    PROVIDER_REMOTE_QUOTA_SYNC_INTERVAL_MIN_SECONDS,
+};
 use aether_data::repository::proxy_nodes::{
     bucket_start_unix_secs, InMemoryProxyNodeRepository, ProxyNodeHeartbeatMutation,
     ProxyNodeMetricsStep, ProxyNodeReadRepository, ProxyNodeWriteRepository, StoredProxyNode,
@@ -19,6 +25,7 @@ use super::{
     next_daily_run_after, next_db_maintenance_run_after, next_stats_aggregation_run_after,
     next_stats_hourly_aggregation_run_after, pending_cleanup_batch_size,
     pending_cleanup_timeout_minutes, plan_pending_cleanup_batch, provider_checkin_schedule,
+    provider_remote_quota_sync_interval, provider_remote_quota_worker_sleep_duration,
     proxy_node_metrics_cleanup_settings, record_proxy_upgrade_traffic_success,
     run_db_maintenance_with, run_proxy_upgrade_rollout_once, spawn_account_self_check_worker,
     spawn_audit_cleanup_worker, spawn_db_maintenance_worker,
@@ -696,6 +703,66 @@ async fn pending_cleanup_settings_use_timeout_and_cap_batch_size() {
 
     assert_eq!(timeout_minutes, 25);
     assert_eq!(batch_size, 200);
+}
+
+#[tokio::test]
+async fn provider_remote_quota_sync_interval_defaults_and_clamps_legacy_values() {
+    let default_interval = provider_remote_quota_sync_interval(&GatewayDataState::disabled())
+        .await
+        .expect("default interval should resolve");
+    assert_eq!(
+        default_interval,
+        Duration::from_secs(PROVIDER_REMOTE_QUOTA_SYNC_INTERVAL_DEFAULT_SECONDS)
+    );
+
+    for (configured, expected) in [
+        (1, PROVIDER_REMOTE_QUOTA_SYNC_INTERVAL_MIN_SECONDS),
+        (60, 60),
+        (900, 900),
+        (10_000, PROVIDER_REMOTE_QUOTA_SYNC_INTERVAL_MAX_SECONDS),
+    ] {
+        let data = GatewayDataState::disabled().with_system_config_values_for_tests([(
+            PROVIDER_REMOTE_QUOTA_SYNC_INTERVAL_CONFIG_KEY.to_string(),
+            json!(configured),
+        )]);
+        let interval = provider_remote_quota_sync_interval(&data)
+            .await
+            .expect("configured interval should resolve");
+        assert_eq!(interval, Duration::from_secs(expected));
+    }
+}
+
+#[test]
+fn provider_remote_quota_worker_reloads_shorter_intervals_without_catch_up_loops() {
+    let last_finished = tokio::time::Instant::now();
+    let forty_seconds_later = last_finished + Duration::from_secs(40);
+
+    assert_eq!(
+        provider_remote_quota_worker_sleep_duration(
+            last_finished,
+            forty_seconds_later,
+            Duration::from_secs(60),
+        ),
+        Some(Duration::from_secs(20))
+    );
+    assert_eq!(
+        provider_remote_quota_worker_sleep_duration(
+            last_finished,
+            forty_seconds_later,
+            Duration::from_secs(30),
+        ),
+        None
+    );
+
+    let slow_run_finished = last_finished + Duration::from_secs(90);
+    assert_eq!(
+        provider_remote_quota_worker_sleep_duration(
+            slow_run_finished,
+            slow_run_finished,
+            Duration::from_secs(60),
+        ),
+        Some(Duration::from_secs(30))
+    );
 }
 
 #[test]

@@ -4,7 +4,7 @@
     title="用户认证"
     description="配置提供商的用户认证信息，用于余额查询、签到等操作"
     :icon="KeyRound"
-    size="md"
+    :size="selectedArchitectureId === 'sub2api' ? '2xl' : 'md'"
     @update:open="$emit('update:open', $event)"
   >
     <form
@@ -240,6 +240,165 @@
           </template>
         </template>
 
+        <div
+          v-if="selectedArchitectureId === 'sub2api'"
+          class="rounded-lg border border-border bg-muted/20 px-4 py-3"
+        >
+          <div class="flex items-center justify-between gap-4">
+            <div>
+              <Label class="text-sm font-medium">
+                远程套餐额度同步
+              </Label>
+              <p class="mt-1 text-xs text-muted-foreground">
+                一个 Provider 同步一个 Sub2API 订阅套餐；余额分组不使用此功能
+              </p>
+            </div>
+            <Switch v-model="remoteQuota.enabled" />
+          </div>
+
+          <div
+            v-if="remoteQuota.enabled"
+            class="mt-4 space-y-4"
+          >
+            <div class="space-y-2">
+              <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <Label>订阅套餐</Label>
+                  <p class="mt-1 text-xs text-muted-foreground">
+                    读取当前账号的有效订阅，并选择这个 Provider 使用的套餐
+                  </p>
+                </div>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  class="w-full shrink-0 sm:w-auto"
+                  :disabled="isLoadingSub2ApiGroups || !canVerify"
+                  @click="handleDiscoverSub2ApiGroups"
+                >
+                  <RefreshCw
+                    class="mr-1 h-3.5 w-3.5"
+                    :class="{ 'animate-spin': isLoadingSub2ApiGroups }"
+                  />
+                  {{ isLoadingSub2ApiGroups ? '读取中...' : '读取套餐列表' }}
+                </Button>
+              </div>
+              <Select v-model="selectedSub2ApiGroupId">
+                <SelectTrigger class="h-auto min-h-11 py-3">
+                  <SelectValue placeholder="请先读取套餐列表" />
+                </SelectTrigger>
+                <SelectContent class="w-[var(--radix-select-trigger-width)] max-w-[calc(100vw-2rem)]">
+                  <SelectItem
+                    v-if="selectedSub2ApiGroupMissing && remoteQuota.group_id"
+                    :value="remoteQuota.group_id"
+                  >
+                    已保存套餐（当前列表中不可用）
+                  </SelectItem>
+                  <SelectItem
+                    v-for="group in sub2ApiGroups"
+                    :key="group.group_id"
+                    :value="group.group_id"
+                    :text-value="formatSub2ApiGroupOption(group)"
+                    class="py-2.5"
+                  >
+                    {{ formatSub2ApiGroupOption(group) }}
+                  </SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div
+              v-if="selectedSub2ApiGroup"
+              class="rounded-lg border border-border/70 bg-background/70 p-3"
+            >
+              <div class="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <p class="font-medium text-foreground">
+                    {{ selectedSub2ApiGroup.group_name || '未命名套餐' }}
+                  </p>
+                </div>
+                <span class="rounded-full bg-primary/10 px-2.5 py-1 text-xs font-medium text-primary">
+                  {{ localSyncWindowText(selectedSub2ApiGroup.local_sync_window) }}
+                </span>
+              </div>
+              <div class="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
+                <div
+                  v-for="window in sub2ApiQuotaWindows"
+                  :key="window.key"
+                  class="rounded-md border border-border/60 bg-muted/30 px-3 py-2"
+                >
+                  <p class="text-xs text-muted-foreground">
+                    {{ window.label }}额度
+                  </p>
+                  <p class="mt-1 text-sm font-medium tabular-nums">
+                    {{ formatSub2ApiWindow(selectedSub2ApiGroup, window.key) }}
+                  </p>
+                </div>
+              </div>
+              <p class="mt-3 text-xs text-muted-foreground">
+                Aether 按“日 → 周 → 月”的顺序采用第一个有限额度作为调度上限；其他额度仅用于展示。
+              </p>
+            </div>
+            <div
+              v-else-if="remoteQuota.group_id"
+              class="rounded-lg border border-dashed border-border bg-muted/20 px-4 py-3"
+            >
+              <p class="text-sm font-medium">
+                已保存套餐
+              </p>
+              <p class="mt-1 text-xs text-muted-foreground">
+                套餐额度不会在打开弹窗时自动联网读取。点击“读取套餐列表”即可查看最新的日、周、月额度。
+              </p>
+            </div>
+
+            <div class="space-y-2">
+              <Label>套餐进度端点</Label>
+              <Input
+                v-model="remoteQuota.progress_endpoint"
+                placeholder="/api/v1/subscriptions/progress"
+              />
+              <p
+                v-if="!remoteQuotaProgressEndpointValid"
+                class="text-xs text-destructive"
+              >
+                必须填写同源、以 / 开头且不含 //、# 或反斜杠的相对路径
+              </p>
+            </div>
+
+            <div class="flex flex-col gap-2 rounded-md border border-border/70 bg-background/70 p-3 sm:flex-row sm:items-center sm:justify-between">
+              <p class="text-xs text-muted-foreground">
+                使用已保存配置读取远程套餐，并立即校准 Provider 本地调度额度。
+              </p>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                class="w-full shrink-0 sm:w-auto"
+                :disabled="isSyncingRemoteQuota || remoteQuotaChanged || !remoteQuota.group_id"
+                @click="handleSyncRemoteQuota"
+              >
+                <RefreshCw
+                  class="mr-1 h-3.5 w-3.5"
+                  :class="{ 'animate-spin': isSyncingRemoteQuota }"
+                />
+                {{ isSyncingRemoteQuota ? '同步中...' : '立即同步本地额度' }}
+              </Button>
+            </div>
+            <p
+              v-if="remoteQuotaChanged"
+              class="text-xs text-muted-foreground"
+            >
+              请先保存远程额度配置，再执行同步。
+            </p>
+          </div>
+          <p
+            v-if="remoteQuota.enabled"
+            class="mt-3 text-xs text-muted-foreground"
+          >
+            所选套餐不存在或已失效时会将本地额度标记为耗尽；网络、认证或解析失败不会修改本地额度。单个额度为 0 表示该周期不限额，日、周、月均不限时才视为无限套餐。
+          </p>
+        </div>
+
         <div class="rounded-lg border border-border bg-muted/20 px-4 py-3">
           <div class="flex items-center justify-between gap-4">
             <div>
@@ -325,7 +484,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch, nextTick } from 'vue'
-import { KeyRound } from 'lucide-vue-next'
+import { KeyRound, RefreshCw } from 'lucide-vue-next'
 import {
   Dialog,
   Button,
@@ -343,10 +502,16 @@ import {
   getArchitectures,
   saveProviderOpsConfig,
   verifyProviderAuth,
+  discoverSub2ApiGroups,
+  refreshBalance,
   getProviderOpsConfig,
   deleteProviderOpsConfig,
   type ArchitectureInfo,
   type QuotaAlertConfig,
+  type RemoteQuotaConfig,
+  type Sub2ApiRemoteQuotaGroup,
+  type VerifyAuthRequest,
+  type VerifyAuthResponse,
 } from '@/api/providerOps'
 import { parseApiError } from '@/utils/errorParser'
 import { useToast } from '@/composables/useToast'
@@ -363,6 +528,12 @@ import {
 } from '../auth-templates/schema-utils'
 import ProxyNodeSelect from './ProxyNodeSelect.vue'
 import { useProxyNodesStore } from '@/stores/proxy-nodes'
+import {
+  formatSub2ApiGroupOption,
+  formatSub2ApiWindow,
+  localSyncWindowText,
+  sub2ApiQuotaWindows,
+} from '../utils/sub2ApiQuota'
 
 const props = defineProps<{
   open: boolean
@@ -383,7 +554,7 @@ function isSensitiveField(key: string): boolean {
   return prop?.['x-sensitive'] === true
 }
 
-const { success: showSuccess, error: showError } = useToast()
+const { success: showSuccess, error: showError, showToast } = useToast()
 const { confirmDanger } = useConfirm()
 const proxyNodeSelectRef = ref<InstanceType<typeof ProxyNodeSelect> | null>(null)
 const proxyNodesStore = useProxyNodesStore()
@@ -399,6 +570,8 @@ function handleProxyToggle(toggleKey: string, value: boolean) {
 // State
 const isSaving = ref(false)
 const isVerifying = ref(false)
+const isLoadingSub2ApiGroups = ref(false)
+const isSyncingRemoteQuota = ref(false)
 const isLoadingConfig = ref(false)
 const isClearing = ref(false)
 const verifyStatus = ref<'success' | 'error' | null>(null)
@@ -423,6 +596,27 @@ const quotaAlert = ref<QuotaAlertConfig>({
   fetch_interval_seconds: 30,
 })
 const savedQuotaAlertSignature = ref(quotaAlertSignature(quotaAlert.value))
+const remoteQuota = ref<RemoteQuotaConfig>({
+  enabled: false,
+  group_id: null,
+  progress_endpoint: '/api/v1/subscriptions/progress',
+})
+const savedRemoteQuotaSignature = ref(remoteQuotaSignature(remoteQuota.value))
+const sub2ApiGroups = ref<Sub2ApiRemoteQuotaGroup[]>([])
+const selectedSub2ApiGroupId = computed<string | undefined>({
+  get: () => remoteQuota.value.group_id ?? undefined,
+  set: (value) => {
+    remoteQuota.value.group_id = value?.trim() || null
+  },
+})
+const selectedSub2ApiGroup = computed(() => {
+  const groupId = remoteQuota.value.group_id
+  return sub2ApiGroups.value.find((group) => group.group_id === groupId) ?? null
+})
+const selectedSub2ApiGroupMissing = computed(() => {
+  const groupId = remoteQuota.value.group_id
+  return !!groupId && !sub2ApiGroups.value.some((group) => group.group_id === groupId)
+})
 
 // 当前架构支持的认证方式
 const currentAuthTypes = computed(() => {
@@ -472,11 +666,34 @@ const canVerify = computed(() => {
 const quotaAlertChanged = computed(() => {
   return quotaAlertSignature(quotaAlert.value) !== savedQuotaAlertSignature.value
 })
+const remoteQuotaChanged = computed(() => {
+  return remoteQuotaSignature(remoteQuota.value) !== savedRemoteQuotaSignature.value
+})
+const remoteQuotaProgressEndpointValid = computed(() => {
+  const endpoint = normalizeRemoteQuota(remoteQuota.value).progress_endpoint
+  return endpoint.startsWith('/')
+    && !endpoint.startsWith('//')
+    && !endpoint.includes('#')
+    && !endpoint.includes('\\')
+})
+const remoteQuotaValid = computed(() => {
+  const normalized = normalizeRemoteQuota(remoteQuota.value)
+  return !normalized.enabled
+    || (
+      selectedArchitectureId.value === 'sub2api'
+      && normalized.group_id !== null
+      && remoteQuotaProgressEndpointValid.value
+    )
+})
 
 const canSave = computed(() => {
-  return (
+  return remoteQuotaValid.value && (
     (verifyStatus.value === 'success' && !formChanged.value)
-    || (hasExistingConfig.value && quotaAlertChanged.value && !formChanged.value)
+    || (
+      hasExistingConfig.value
+      && (quotaAlertChanged.value || remoteQuotaChanged.value)
+      && !formChanged.value
+    )
   )
 })
 
@@ -488,6 +705,10 @@ const fieldGroups = computed<AuthTemplateFieldGroup[]>(() => {
 
 // Methods
 function handleArchitectureChange() {
+  sub2ApiGroups.value = []
+  if (selectedArchitectureId.value !== 'sub2api') {
+    remoteQuota.value.enabled = false
+  }
   // 切换架构时，默认选中第一个认证方式
   const authTypes = currentAuthTypes.value
   selectedAuthType.value = authTypes.length > 0 ? authTypes[0].type : ''
@@ -497,6 +718,7 @@ function handleArchitectureChange() {
 }
 
 function handleAuthTypeChange() {
+  sub2ApiGroups.value = []
   resetFormData()
   verifyStatus.value = null
   formChanged.value = true
@@ -504,6 +726,7 @@ function handleAuthTypeChange() {
 
 function handleFieldChange(fieldKey: string, value: unknown) {
   formChanged.value = true
+  sub2ApiGroups.value = []
 
   // 执行 schema 定义的字段钩子
   const schema = currentSchema.value
@@ -555,11 +778,10 @@ function finiteNumber(value: unknown): number | null {
   return Number.isFinite(numberValue) ? numberValue : null
 }
 
-async function handleVerify() {
+function buildVerifyRequest(): VerifyAuthRequest | null {
   const schema = currentSchema.value
-  if (!schema) return
+  if (!schema) return null
 
-  // 验证表单（编辑模式下敏感字段可以为空）
   let dataToValidate = formData.value
   if (hasExistingConfig.value) {
     dataToValidate = { ...formData.value }
@@ -572,28 +794,121 @@ async function handleVerify() {
   const error = validateFromSchema(schema, dataToValidate)
   if (error) {
     showError(error)
-    return
+    return null
   }
 
   const effectiveBaseUrl = formData.value.base_url || props.providerWebsite
   if (!effectiveBaseUrl) {
     showError('请填写 API 地址')
-    return
+    return null
   }
+  const request = buildRequestFromSchema(
+    schema,
+    selectedArchitectureId.value,
+    formData.value,
+    props.providerWebsite,
+  )
+  return {
+    ...request,
+    base_url: request.base_url || String(effectiveBaseUrl),
+  }
+}
+
+function applyUpdatedCredentials(result: VerifyAuthResponse, keepSaveable: boolean) {
+  if (!result.updated_credentials) return
+  for (const [key, value] of Object.entries(result.updated_credentials)) {
+    formData.value[key] = value
+  }
+  if (keepSaveable) {
+    nextTick(() => {
+      formChanged.value = false
+    })
+  }
+}
+
+async function handleDiscoverSub2ApiGroups() {
+  const verifyRequest = buildVerifyRequest()
+  if (!verifyRequest) return
+
+  isLoadingSub2ApiGroups.value = true
+  try {
+    const result = await discoverSub2ApiGroups(props.providerId, verifyRequest)
+    const username = result.data?.username?.trim() || result.data?.display_name?.trim()
+    const quota = result.data?.quota
+    const accountVerified = result.success && !!username && quota !== undefined && quota !== null
+    applyUpdatedCredentials(result, accountVerified)
+    if (!accountVerified) {
+      verifyStatus.value = 'error'
+      const fallbackMessage = result.success
+        ? '读取套餐成功，但 Sub2API 账号验证响应不完整'
+        : '读取 Sub2API 套餐列表失败'
+      showError(result.message || fallbackMessage)
+      return
+    }
+
+    verifyStatus.value = 'success'
+    formChanged.value = false
+    const groups = result.data?.extra?.sub2api_groups ?? []
+    sub2ApiGroups.value = groups
+    const selectedExists = groups.some((group) => group.group_id === remoteQuota.value.group_id)
+    if (!selectedExists) {
+      remoteQuota.value.group_id = groups.length === 1 ? groups[0].group_id : null
+    }
+    if (groups.length === 0) {
+      showError('当前 Sub2API 账号没有活跃套餐')
+    } else if (groups.length === 1) {
+      showSuccess(`已读取并选择套餐：${groups[0].group_name || '未命名套餐'}`, '读取成功')
+    } else {
+      showSuccess(`已读取 ${groups.length} 个有效订阅，请选择套餐`, '读取成功')
+    }
+  } catch (error: unknown) {
+    verifyStatus.value = 'error'
+    showError(parseApiError(error, '读取 Sub2API 套餐列表失败'))
+  } finally {
+    isLoadingSub2ApiGroups.value = false
+  }
+}
+
+async function handleSyncRemoteQuota() {
+  if (remoteQuotaChanged.value || !remoteQuota.value.group_id) return
+
+  isSyncingRemoteQuota.value = true
+  try {
+    const result = await refreshBalance(props.providerId)
+    const data = result.data as {
+      extra?: {
+        remote_quota_sync?: {
+          status?: string
+          message?: string
+        }
+      }
+    } | null
+    const sync = data?.extra?.remote_quota_sync
+    if (sync?.status === 'applied') {
+      showSuccess('远程套餐已同步到 Provider 本地额度', '同步成功')
+      emit('saved')
+      return
+    }
+    showToast({
+      title: '本地额度未修改',
+      message: sync?.message || result.message || '远程额度同步未应用，请检查上游响应后重试。',
+      variant: 'error',
+      duration: 10_000,
+    })
+  } catch (error: unknown) {
+    showError(parseApiError(error, '同步远程额度失败'), '同步失败')
+  } finally {
+    isSyncingRemoteQuota.value = false
+  }
+}
+
+async function handleVerify() {
+  const verifyRequest = buildVerifyRequest()
+  if (!verifyRequest) return
 
   isVerifying.value = true
 
   try {
-    const request = buildRequestFromSchema(
-      schema,
-      selectedArchitectureId.value,
-      formData.value,
-      props.providerWebsite,
-    )
-    const verifyRequest = {
-      ...request,
-      base_url: request.base_url || effectiveBaseUrl,
-    }
     const result = await verifyProviderAuth(props.providerId, verifyRequest)
 
     if (result.success) {
@@ -602,6 +917,7 @@ async function handleVerify() {
 
       if (!username || quota === undefined || quota === null) {
         verifyStatus.value = 'error'
+        applyUpdatedCredentials(result, false)
         const missing: string[] = []
         if (!username) missing.push('用户信息')
         if (quota === undefined || quota === null) missing.push('余额')
@@ -612,15 +928,7 @@ async function handleVerify() {
 
         // Token Rotation: 验证过程中 refresh_token 可能已被轮换，用新值更新表单
         // 必须在 formChanged=false 之后执行，避免 watch 将 formChanged 重新设为 true
-        if (result.updated_credentials) {
-          for (const [key, value] of Object.entries(result.updated_credentials)) {
-            formData.value[key] = value
-          }
-          // 凭据更新不算用户修改，保持可保存状态
-          nextTick(() => {
-            formChanged.value = false
-          })
-        }
+        applyUpdatedCredentials(result, true)
 
         const displayName = result.data?.display_name || result.data?.username
         const extra = result.data?.extra
@@ -636,11 +944,7 @@ async function handleVerify() {
       verifyStatus.value = 'error'
 
       // Token Rotation: 即使验证失败，refresh_token 可能已被轮换（旧 token 已失效）
-      if (result.updated_credentials) {
-        for (const [key, value] of Object.entries(result.updated_credentials)) {
-          formData.value[key] = value
-        }
-      }
+      applyUpdatedCredentials(result, false)
 
       showError(result.message || '验证失败')
     }
@@ -687,9 +991,11 @@ async function handleSave() {
       props.providerWebsite,
     )
     request.quota_alert = normalizedQuotaAlert()
+    request.remote_quota = normalizedRemoteQuota()
     const result = await saveProviderOpsConfig(props.providerId, request)
     if (result.success) {
       savedQuotaAlertSignature.value = quotaAlertSignature(quotaAlert.value)
+      savedRemoteQuotaSignature.value = remoteQuotaSignature(remoteQuota.value)
       showSuccess(result.message || '配置已保存', '保存成功')
       emit('saved')
       emit('update:open', false)
@@ -724,7 +1030,9 @@ async function handleClear() {
       formChanged.value = false
       selectedArchitectureId.value = 'new_api'
       selectedAuthType.value = ''
+      sub2ApiGroups.value = []
       loadQuotaAlert(null)
+      loadRemoteQuota(null)
       resetFormData()
       emit('saved')
       emit('update:open', false)
@@ -785,6 +1093,55 @@ function loadFromConfig(config: Record<string, unknown>) {
     formData.value = parsedData
   }
   loadQuotaAlert(config.quota_alert)
+  loadRemoteQuota(config.remote_quota)
+}
+
+function defaultRemoteQuota(): RemoteQuotaConfig {
+  return {
+    enabled: false,
+    group_id: null,
+    progress_endpoint: '/api/v1/subscriptions/progress',
+  }
+}
+
+function normalizeRemoteQuota(value: unknown): RemoteQuotaConfig {
+  if (!isRecord(value)) return defaultRemoteQuota()
+  const groupId = typeof value.group_id === 'string'
+    ? value.group_id.trim()
+    : typeof value.group_id === 'number'
+      ? String(value.group_id)
+      : ''
+  const progressEndpoint = typeof value.progress_endpoint === 'string'
+    ? value.progress_endpoint.trim()
+    : ''
+  return {
+    enabled: value.enabled === true,
+    group_id: groupId || null,
+    progress_endpoint: progressEndpoint || '/api/v1/subscriptions/progress',
+  }
+}
+
+function normalizedRemoteQuota(): RemoteQuotaConfig {
+  const normalized = normalizeRemoteQuota(remoteQuota.value)
+  if (selectedArchitectureId.value !== 'sub2api') {
+    normalized.enabled = false
+  }
+  return normalized
+}
+
+function remoteQuotaSignature(value: RemoteQuotaConfig): string {
+  const normalized = normalizeRemoteQuota(value)
+  return JSON.stringify([
+    normalized.enabled,
+    normalized.group_id,
+    normalized.progress_endpoint,
+  ])
+}
+
+function loadRemoteQuota(value: unknown) {
+  const normalized = normalizeRemoteQuota(value)
+  remoteQuota.value = normalized
+  savedRemoteQuotaSignature.value = remoteQuotaSignature(normalized)
 }
 
 function defaultQuotaAlert(): QuotaAlertConfig {
@@ -844,6 +1201,7 @@ watch(
     if (newVal) {
       verifyStatus.value = null
       formChanged.value = false
+      sub2ApiGroups.value = []
 
       // 确保架构列表已加载
       await ensureArchitecturesLoaded()
@@ -865,12 +1223,14 @@ watch(
               base_url: config.base_url,
               connector: config.connector,
               quota_alert: config.quota_alert,
+              remote_quota: config.remote_quota,
             }
             loadFromConfig(configData)
           } else {
             hasExistingConfig.value = false
             sensitivePlaceholders.value = {}
             loadQuotaAlert(null)
+            loadRemoteQuota(null)
             selectedArchitectureId.value = 'new_api'
             selectedAuthType.value = ''
             resetFormData()
@@ -879,6 +1239,7 @@ watch(
           hasExistingConfig.value = false
           sensitivePlaceholders.value = {}
           loadQuotaAlert(null)
+          loadRemoteQuota(null)
           selectedArchitectureId.value = 'new_api'
           selectedAuthType.value = ''
           resetFormData()
@@ -889,6 +1250,7 @@ watch(
         hasExistingConfig.value = false
         sensitivePlaceholders.value = {}
         loadQuotaAlert(null)
+        loadRemoteQuota(null)
         selectedArchitectureId.value = 'new_api'
         selectedAuthType.value = ''
         resetFormData()

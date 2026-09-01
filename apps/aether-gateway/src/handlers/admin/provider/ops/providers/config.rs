@@ -1,15 +1,15 @@
 use super::support::{
-    AdminProviderOpsQuotaAlertConfigRequest, AdminProviderOpsSaveConfigRequest,
-    ADMIN_PROVIDER_OPS_SENSITIVE_FIELDS,
+    AdminProviderOpsQuotaAlertConfigRequest, AdminProviderOpsRemoteQuotaConfigRequest,
+    AdminProviderOpsSaveConfigRequest, ADMIN_PROVIDER_OPS_SENSITIVE_FIELDS,
 };
 use crate::handlers::admin::request::AdminAppState;
 use crate::GatewayError;
 use aether_admin::provider::ops as admin_provider_ops_pure;
 use aether_data_contracts::repository::provider_catalog::{
-    StoredProviderCatalogEndpoint, StoredProviderCatalogProvider,
+    ProviderCatalogRuntimeCredentialsCas, StoredProviderCatalogEndpoint,
+    StoredProviderCatalogProvider,
 };
 use serde_json::json;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 const PROVIDER_OPS_QUOTA_ALERT_DEFAULT_FETCH_INTERVAL_SECS: u64 = 30;
 const PROVIDER_OPS_QUOTA_ALERT_MIN_FETCH_INTERVAL_SECS: u64 = 30;
@@ -19,6 +19,22 @@ pub(super) fn admin_provider_ops_config_object(
     provider: &StoredProviderCatalogProvider,
 ) -> Option<&serde_json::Map<String, serde_json::Value>> {
     admin_provider_ops_pure::admin_provider_ops_config_object(provider)
+}
+
+pub(crate) fn admin_provider_ops_remote_quota_worker_eligible(
+    provider: &StoredProviderCatalogProvider,
+) -> bool {
+    let Some(provider_ops) = admin_provider_ops_config_object(provider) else {
+        return false;
+    };
+    provider_ops
+        .get("architecture_id")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|architecture_id| architecture_id.eq_ignore_ascii_case("sub2api"))
+        && admin_provider_ops_pure::parse_sub2api_remote_quota_config(provider_ops)
+            .ok()
+            .flatten()
+            .is_some()
 }
 
 pub(super) fn admin_provider_ops_connector_object(
@@ -189,67 +205,41 @@ pub(super) async fn persist_admin_provider_ops_runtime_credentials(
     state: &AdminAppState<'_>,
     provider: &StoredProviderCatalogProvider,
     updated_credentials: &serde_json::Map<String, serde_json::Value>,
-) -> Result<Option<StoredProviderCatalogProvider>, GatewayError> {
+) -> Result<bool, GatewayError> {
     if updated_credentials.is_empty() || !state.has_provider_catalog_data_writer() {
-        return Ok(None);
+        return Ok(false);
     }
 
-    let mut updated_provider = provider.clone();
-    let mut provider_config = updated_provider
-        .config
-        .as_ref()
-        .and_then(serde_json::Value::as_object)
-        .cloned()
-        .unwrap_or_default();
-    let Some(provider_ops_config) = provider_config
-        .get("provider_ops")
-        .and_then(serde_json::Value::as_object)
-        .cloned()
-    else {
-        return Ok(None);
-    };
-    let Some(connector_config) = provider_ops_config
-        .get("connector")
-        .and_then(serde_json::Value::as_object)
-        .cloned()
-    else {
-        return Ok(None);
-    };
-
-    let mut decrypted_credentials =
-        admin_provider_ops_decrypted_credentials(state, connector_config.get("credentials"));
-    for (key, value) in updated_credentials {
-        decrypted_credentials.insert(key.clone(), value.clone());
+    let rotating_credentials = [
+        "refresh_token",
+        "_cached_access_token",
+        "_cached_token_expires_at",
+    ]
+    .into_iter()
+    .filter_map(|key| {
+        updated_credentials
+            .get(key)
+            .cloned()
+            .map(|value| (key.to_string(), value))
+    })
+    .collect();
+    let encrypted_credentials = admin_provider_ops_encrypt_credentials(state, rotating_credentials)
+        .map_err(GatewayError::Internal)?;
+    if encrypted_credentials.is_empty() {
+        return Ok(false);
     }
-    let encrypted_credentials =
-        admin_provider_ops_encrypt_credentials(state, decrypted_credentials)
-            .map_err(GatewayError::Internal)?;
 
-    let mut updated_connector = connector_config.clone();
-    updated_connector.insert(
-        "credentials".to_string(),
-        serde_json::Value::Object(encrypted_credentials),
-    );
-
-    let mut updated_provider_ops = provider_ops_config.clone();
-    updated_provider_ops.insert(
-        "connector".to_string(),
-        serde_json::Value::Object(updated_connector),
-    );
-
-    provider_config.insert(
-        "provider_ops".to_string(),
-        serde_json::Value::Object(updated_provider_ops),
-    );
-    updated_provider.config = Some(serde_json::Value::Object(provider_config));
-    updated_provider.updated_at_unix_secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .map(|duration| duration.as_secs());
-
-    state
-        .update_provider_catalog_provider(&updated_provider)
-        .await
+    let update = ProviderCatalogRuntimeCredentialsCas {
+        provider_id: provider.id.clone(),
+        expected_provider_config: provider.config.clone(),
+        expected_provider_website: provider.website.clone(),
+        expected_provider_proxy: provider.proxy.clone(),
+        encrypted_credentials,
+    };
+    Ok(state
+        .compare_and_patch_provider_ops_runtime_credentials(&update)
+        .await?
+        .unwrap_or(false))
 }
 
 pub(super) fn build_admin_provider_ops_saved_config_value(
@@ -284,6 +274,18 @@ pub(super) fn build_admin_provider_ops_saved_config_value(
         })
         .collect::<serde_json::Map<String, serde_json::Value>>();
     let quota_alert = normalize_admin_provider_ops_quota_alert(payload.quota_alert)?;
+    let existing_remote_quota = provider
+        .config
+        .as_ref()
+        .and_then(serde_json::Value::as_object)
+        .and_then(|config| config.get("provider_ops"))
+        .and_then(serde_json::Value::as_object)
+        .and_then(|provider_ops| provider_ops.get("remote_quota"));
+    let remote_quota = normalize_admin_provider_ops_remote_quota(
+        payload.architecture_id.as_str(),
+        payload.remote_quota,
+        existing_remote_quota,
+    )?;
 
     Ok(json!({
         "architecture_id": payload.architecture_id,
@@ -296,7 +298,79 @@ pub(super) fn build_admin_provider_ops_saved_config_value(
         "actions": actions,
         "schedule": payload.schedule,
         "quota_alert": quota_alert,
+        "remote_quota": remote_quota,
     }))
+}
+
+fn normalize_admin_provider_ops_remote_quota(
+    architecture_id: &str,
+    request: Option<AdminProviderOpsRemoteQuotaConfigRequest>,
+    existing: Option<&serde_json::Value>,
+) -> Result<serde_json::Value, String> {
+    let request = request.or_else(|| {
+        existing.and_then(|value| {
+            serde_json::from_value::<AdminProviderOpsRemoteQuotaConfigRequest>(value.clone()).ok()
+        })
+    });
+    let Some(request) = request else {
+        return Ok(default_admin_provider_ops_remote_quota());
+    };
+    if request.enabled && architecture_id != "sub2api" {
+        return Err("remote_quota 仅支持 Sub2API Provider".to_string());
+    }
+    let group_id = request.group_id.and_then(|value| match value {
+        serde_json::Value::String(value) => {
+            let value = value.trim();
+            (!value.is_empty()).then(|| value.to_string())
+        }
+        serde_json::Value::Number(value) => Some(value.to_string()),
+        _ => None,
+    });
+    if request.enabled && group_id.is_none() {
+        return Err("remote_quota.group_id 不能为空".to_string());
+    }
+    let progress_endpoint = request
+        .progress_endpoint
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("/api/v1/subscriptions/progress");
+    admin_provider_ops_pure::validate_sub2api_same_origin_endpoint(progress_endpoint)?;
+    Ok(json!({
+        "enabled": request.enabled,
+        "group_id": group_id,
+        "progress_endpoint": progress_endpoint,
+    }))
+}
+
+fn default_admin_provider_ops_remote_quota() -> serde_json::Value {
+    json!({
+        "enabled": false,
+        "group_id": null,
+        "progress_endpoint": "/api/v1/subscriptions/progress",
+    })
+}
+
+fn safe_admin_provider_ops_remote_quota(
+    provider_ops_config: &serde_json::Map<String, serde_json::Value>,
+) -> serde_json::Value {
+    let remote_quota = provider_ops_config
+        .get("remote_quota")
+        .and_then(serde_json::Value::as_object);
+    json!({
+        "enabled": remote_quota
+            .and_then(|config| config.get("enabled"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        "group_id": remote_quota
+            .and_then(|config| config.get("group_id"))
+            .filter(|value| value.is_string() || value.is_number())
+            .cloned(),
+        "progress_endpoint": remote_quota
+            .and_then(|config| config.get("progress_endpoint"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("/api/v1/subscriptions/progress"),
+    })
 }
 
 fn normalize_admin_provider_ops_quota_alert(
@@ -408,5 +482,6 @@ pub(super) fn build_admin_provider_ops_config_payload(
             .filter(|value| value.is_object())
             .cloned()
             .unwrap_or_else(default_admin_provider_ops_quota_alert),
+        "remote_quota": safe_admin_provider_ops_remote_quota(provider_ops_config),
     })
 }

@@ -26,6 +26,7 @@ pub(super) async fn admin_provider_ops_run_query_balance_action(
     headers: &reqwest::header::HeaderMap,
     credentials: &serde_json::Map<String, serde_json::Value>,
     proxy_snapshot: Option<&ProxySnapshot>,
+    remote_quota_config: Option<&aether_admin::provider::ops::Sub2ApiRemoteQuotaConfig>,
 ) -> serde_json::Value {
     match architecture.balance_mode {
         ProviderOpsBalanceMode::YescodeCombined => {
@@ -47,6 +48,7 @@ pub(super) async fn admin_provider_ops_run_query_balance_action(
                 action_config,
                 credentials,
                 proxy_snapshot,
+                remote_quota_config,
             )
             .await;
         }

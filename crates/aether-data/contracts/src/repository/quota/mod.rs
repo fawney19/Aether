@@ -1,6 +1,7 @@
 mod types;
 
 pub use types::{
-    ProviderQuotaReadRepository, ProviderQuotaRepository, ProviderQuotaWriteRepository,
+    ApplyRemoteProviderQuotaOutcome, ApplyRemoteProviderQuotaPatch, ProviderQuotaReadRepository,
+    ProviderQuotaRepository, ProviderQuotaUsageObservation, ProviderQuotaWriteRepository,
     StoredProviderQuotaSnapshot,
 };

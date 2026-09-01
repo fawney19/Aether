@@ -64,6 +64,7 @@ use crate::maintenance::spawn_pool_quota_probe_worker;
 use crate::maintenance::spawn_pool_score_rebuild_worker;
 use crate::maintenance::spawn_provider_checkin_worker;
 use crate::maintenance::spawn_provider_quota_alert_worker;
+use crate::maintenance::spawn_provider_remote_quota_sync_worker;
 use crate::maintenance::spawn_proxy_node_metrics_cleanup_worker;
 use crate::maintenance::spawn_proxy_node_stale_cleanup_worker;
 use crate::maintenance::spawn_proxy_upgrade_rollout_worker;
@@ -2149,6 +2150,10 @@ impl AppState {
         supervise_worker(
             crate::task_runtime::TASK_KEY_PROVIDER_QUOTA_ALERT,
             spawn_provider_quota_alert_worker(background_state.clone()),
+        );
+        supervise_worker(
+            crate::task_runtime::TASK_KEY_PROVIDER_REMOTE_QUOTA_SYNC,
+            spawn_provider_remote_quota_sync_worker(background_state.clone()),
         );
         supervise_worker(
             crate::task_runtime::TASK_KEY_OAUTH_TOKEN_REFRESH,

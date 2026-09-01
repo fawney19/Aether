@@ -1677,6 +1677,21 @@ impl GatewayDataState {
     }
 
     #[cfg(test)]
+    pub(crate) fn attach_provider_quota_repository_for_tests<T>(
+        mut self,
+        repository: Arc<T>,
+    ) -> Self
+    where
+        T: ProviderQuotaRepository + 'static,
+    {
+        let provider_quota_reader: Arc<dyn ProviderQuotaReadRepository> = repository.clone();
+        let provider_quota_writer: Arc<dyn ProviderQuotaWriteRepository> = repository;
+        self.provider_quota_reader = Some(provider_quota_reader);
+        self.provider_quota_writer = Some(provider_quota_writer);
+        self
+    }
+
+    #[cfg(test)]
     pub(crate) fn attach_proxy_node_repository_for_tests<T>(mut self, repository: Arc<T>) -> Self
     where
         T: aether_data::repository::proxy_nodes::ProxyNodeReadRepository

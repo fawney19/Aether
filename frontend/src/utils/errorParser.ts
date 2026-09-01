@@ -42,7 +42,7 @@ const fieldNameMap: Record<string, string> = {
   'provider_priority': '提供商优先级',
   'billing_type': '计费类型',
   'monthly_quota_usd': '月度配额',
-  'quota_reset_day': '配额重置日',
+  'quota_reset_day': '配额重置周期（天）',
   'quota_expires_at': '配额过期时间',
   'cache_ttl_minutes': '缓存 TTL',
   'max_probe_interval_minutes': '最大探测间隔',

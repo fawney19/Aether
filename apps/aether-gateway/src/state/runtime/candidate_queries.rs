@@ -81,12 +81,28 @@ impl AppState {
         let cache_key = provider_id.to_string();
         self.provider_quota_snapshot_cache
             .get_or_load(cache_key, PROVIDER_QUOTA_RUNTIME_CACHE_TTL, || async move {
-                self.data
-                    .find_provider_quota_by_provider_id(provider_id)
-                    .await
-                    .map_err(|err| GatewayError::Internal(err.to_string()))
+                self.read_provider_quota_snapshot_strong(provider_id).await
             })
             .await
+    }
+
+    /// Read the persisted quota without the scheduler cache.
+    ///
+    /// Remote quota reconciliation uses this as an observation fence: a stale
+    /// cached value would misclassify usage written before the upstream fetch
+    /// as concurrent usage and add it to the remote absolute value twice.
+    pub(crate) async fn read_provider_quota_snapshot_strong(
+        &self,
+        provider_id: &str,
+    ) -> Result<Option<quota::StoredProviderQuotaSnapshot>, GatewayError> {
+        let provider_id = provider_id.trim();
+        if provider_id.is_empty() {
+            return Ok(None);
+        }
+        self.data
+            .find_provider_quota_by_provider_id(provider_id)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
     }
 
     pub(crate) async fn read_provider_quota_snapshots(
@@ -97,6 +113,19 @@ impl AppState {
             .find_provider_quotas_by_provider_ids(provider_ids)
             .await
             .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
+    pub(crate) async fn apply_remote_provider_quota(
+        &self,
+        patch: &quota::ApplyRemoteProviderQuotaPatch,
+    ) -> Result<quota::ApplyRemoteProviderQuotaOutcome, GatewayError> {
+        let outcome = self
+            .data
+            .apply_remote_provider_quota(patch)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        self.provider_quota_snapshot_cache.clear();
+        Ok(outcome)
     }
 
     pub(crate) async fn read_recent_request_candidates(

@@ -68,7 +68,7 @@
                 {{ legacyT('提供商信息') }}
               </TableHead>
               <TableHead class="w-[20%] min-w-[180px]">
-                {{ legacyT('余额监控') }}
+                {{ legacyT('额度监控') }}
               </TableHead>
               <SortableTableHead
                 class="w-[12%] min-w-[100px] text-center"
@@ -133,6 +133,7 @@
               v-for="provider in displayedProviders"
               :key="provider.id"
               :provider="provider"
+              :remote-quota-group="getProviderRemoteQuotaGroup(provider.id)"
               :editing-description-id="editingDescriptionId"
               :is-balance-loading="isBalanceLoading"
               :get-provider-balance="getProviderBalance"
@@ -168,6 +169,7 @@
           v-for="provider in displayedProviders"
           :key="provider.id"
           :provider="provider"
+          :remote-quota-group="getProviderRemoteQuotaGroup(provider.id)"
           :editing-description-id="editingDescriptionId"
           :is-balance-loading="isBalanceLoading"
           :get-provider-balance="getProviderBalance"
@@ -225,6 +227,7 @@
     :open="providerDrawerOpen"
     :provider-id="selectedProviderId"
     :initial-provider="selectedProvider"
+    :remote-quota-group="getProviderRemoteQuotaGroup(selectedProviderId)"
     @update:open="providerDrawerOpen = $event"
     @edit="openEditProviderDialog"
     @toggle-status="toggleProviderStatus"
@@ -454,6 +457,7 @@ const {
   loadBalances,
   getProviderBalance,
   getProviderBalanceBreakdown,
+  getProviderRemoteQuotaGroup,
   getProviderBalanceError,
   isBalanceLoading,
   getProviderCheckin,
