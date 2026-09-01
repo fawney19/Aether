@@ -31,6 +31,8 @@ use crate::provider_transport::ProviderTransportSnapshotSource;
 
 const REQUEST_RECORD_LEVEL_KEY: &str = "request_record_level";
 const LEGACY_REQUEST_LOG_LEVEL_KEY: &str = "request_log_level";
+const REQUEST_RECORD_COMPACT_BASE64_IMAGES_KEY: &str = "request_record_compact_base64_images";
+const REQUEST_RECORD_MAX_BODY_SIZE_KB_KEY: &str = "request_record_max_body_size_kb";
 
 fn usage_request_record_level_from_value(value: Option<&Value>) -> UsageRequestRecordLevel {
     let Some(value) = value.and_then(Value::as_str).map(str::trim) else {
@@ -47,6 +49,14 @@ fn usage_request_record_level_from_value(value: Option<&Value>) -> UsageRequestR
     } else {
         UsageRequestRecordLevel::Full
     }
+}
+
+fn usage_body_capture_limit_bytes_from_value(value: Option<&Value>) -> Option<usize> {
+    value
+        .and_then(Value::as_u64)
+        .filter(|kilobytes| *kilobytes > 0)
+        .and_then(|kilobytes| kilobytes.checked_mul(1024))
+        .and_then(|bytes| usize::try_from(bytes).ok())
 }
 
 #[async_trait]
@@ -270,8 +280,23 @@ impl UsageRuntimeAccess for GatewayDataState {
                     .await?
             }
         };
+        let compact_base64_images = GatewayDataState::find_system_config_value(
+            self,
+            REQUEST_RECORD_COMPACT_BASE64_IMAGES_KEY,
+        )
+        .await?
+        .as_ref()
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+        let max_body_bytes =
+            GatewayDataState::find_system_config_value(self, REQUEST_RECORD_MAX_BODY_SIZE_KB_KEY)
+                .await?
+                .as_ref()
+                .and_then(|value| usage_body_capture_limit_bytes_from_value(Some(value)));
         Ok(UsageBodyCapturePolicy {
             record_level: usage_request_record_level_from_value(value.as_ref()),
+            compact_base64_images,
+            max_body_bytes,
         })
     }
 }
@@ -489,5 +514,38 @@ mod tests {
             .expect("body capture policy should read");
 
         assert_eq!(policy.record_level, UsageRequestRecordLevel::Full);
+        assert_eq!(policy.max_body_bytes, None);
+    }
+
+    #[tokio::test]
+    async fn usage_runtime_access_reads_body_capture_storage_controls() {
+        let state = GatewayDataState::disabled().with_system_config_values_for_tests([
+            (
+                "request_record_compact_base64_images".to_string(),
+                json!(true),
+            ),
+            ("request_record_max_body_size_kb".to_string(), json!(512)),
+        ]);
+
+        let policy = UsageRuntimeAccess::body_capture_policy(&state)
+            .await
+            .expect("body capture policy should read");
+
+        assert!(policy.compact_base64_images);
+        assert_eq!(policy.max_body_bytes, Some(512 * 1024));
+    }
+
+    #[tokio::test]
+    async fn usage_runtime_access_treats_zero_body_capture_limit_as_unlimited() {
+        let state = GatewayDataState::disabled().with_system_config_values_for_tests([(
+            "request_record_max_body_size_kb".to_string(),
+            json!(0),
+        )]);
+
+        let policy = UsageRuntimeAccess::body_capture_policy(&state)
+            .await
+            .expect("body capture policy should read");
+
+        assert_eq!(policy.max_body_bytes, None);
     }
 }

@@ -117,11 +117,15 @@
             id="section-request-log"
             :request-record-level="systemConfig.request_record_level"
             :sensitive-headers-str="sensitiveHeadersStr"
+            :compact-base64-images="systemConfig.request_record_compact_base64_images"
+            :max-body-size-kb="systemConfig.request_record_max_body_size_kb"
             :loading="systemConfigLoading || logConfigLoading"
             :has-changes="hasLogConfigChanges"
             @save="saveLogConfig"
             @update:request-record-level="systemConfig.request_record_level = $event"
             @update:sensitive-headers-str="sensitiveHeadersStr = $event"
+            @update:compact-base64-images="systemConfig.request_record_compact_base64_images = $event"
+            @update:max-body-size-kb="systemConfig.request_record_max_body_size_kb = $event"
           />
 
           <!-- 请求记录清理策略 -->

@@ -1228,6 +1228,7 @@ mod tests {
         apply_usage_body_capture_policy_to_event(
             UsageBodyCapturePolicy {
                 record_level: UsageRequestRecordLevel::Basic,
+                ..UsageBodyCapturePolicy::default()
             },
             &mut event,
         );
