@@ -21,7 +21,7 @@
 
 ## 简介
 
-Aether 是一个自托管的 AI API 网关，为团队和个人提供多租户管理、智能负载均衡、成本配额控制和健康监控能力。通过统一的 API 入口，可以无缝对接 Claude、OpenAI、Gemini 等主流 AI 服务及其 CLI 工具。
+Aether 是一个自托管的 AI API 网关，为团队和个人提供多租户管理、智能负载均衡、成本配额控制和健康监控能力。通过统一的 API 入口，可以无缝对接 Claude、OpenAI、Gemini、[OrcaRouter](https://www.orcarouter.ai) 等主流 AI 服务及其 CLI 工具。
 
 <p align="center">
   <picture>
