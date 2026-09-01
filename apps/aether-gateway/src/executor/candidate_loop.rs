@@ -1418,6 +1418,10 @@ where
     let outcome = match execution_result {
         Some(result) => result.map(StreamCandidateWatchdogOutcome::Executed),
         None => {
+            // The abandoned attempt is dropped when this function returns.
+            // Claim its settlement before that so its cancellation guard does
+            // not race the watchdog rows written just below.
+            watchdog_progress.mark_abandoned();
             let finished_at_unix_ms = current_unix_ms();
             let request_id = short_request_id(plan.request_id.as_str());
             let provider_name = plan.provider_name.as_deref().unwrap_or("-");

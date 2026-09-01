@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 pub(crate) mod admission;
+pub(crate) mod attempt_cancellation;
 pub(crate) mod attempt_lifecycle;
 mod chatgpt_web_image;
 mod constants;

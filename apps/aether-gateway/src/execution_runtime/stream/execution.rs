@@ -78,6 +78,7 @@ use crate::api::response::{
 use crate::clock::current_unix_ms as current_request_candidate_unix_ms;
 use crate::constants::{CONTROL_CANDIDATE_ID_HEADER, CONTROL_REQUEST_ID_HEADER};
 use crate::control::GatewayControlDecision;
+use crate::execution_runtime::attempt_cancellation::AttemptCancellationGuard;
 use crate::execution_runtime::build_direct_execution_frame_stream;
 use crate::execution_runtime::chatgpt_web_image::maybe_execute_chatgpt_web_image_stream;
 use crate::execution_runtime::grok::maybe_execute_grok_stream;
@@ -148,6 +149,11 @@ use crate::usage::{GatewayStreamReportRequest, GatewaySyncReportRequest};
 use crate::{
     AppState, GatewayError, GEMINI_FILES_DOWNLOAD_PLAN_KIND, OPENAI_VIDEO_CONTENT_PLAN_KIND,
 };
+
+/// Settlement labels for a stream attempt whose future is dropped before the
+/// transport reaches a terminal state.
+const STREAM_ATTEMPT_CANCELLED_ERROR_TYPE: &str = "local_stream_attempt_cancelled";
+const STREAM_ATTEMPT_CANCELLED_ERROR_MESSAGE: &str = "Local stream attempt was dropped before terminal finalization, usually because the client disconnected or the request task was cancelled.";
 
 const SSE_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 const SSE_KEEPALIVE_BYTES: &[u8] = b": aether-keepalive\n\n";
@@ -3655,17 +3661,30 @@ pub(crate) fn execute_execution_runtime_stream<'a>(
     report_kind: Option<String>,
     report_context: Option<serde_json::Value>,
 ) -> Pin<Box<dyn Future<Output = Result<Option<Response<Body>>, GatewayError>> + Send + 'a>> {
-    Box::pin(execute_execution_runtime_stream_inner(
-        state,
-        plan,
-        trace_id,
-        decision,
-        plan_kind,
-        report_kind,
-        report_context,
-        None,
-        None,
-    ))
+    Box::pin(async move {
+        let mut cancellation_guard = AttemptCancellationGuard::disarmed(
+            state,
+            STREAM_ATTEMPT_CANCELLED_ERROR_TYPE,
+            STREAM_ATTEMPT_CANCELLED_ERROR_MESSAGE,
+        );
+        let result = execute_execution_runtime_stream_inner(
+            state,
+            plan,
+            trace_id,
+            decision,
+            plan_kind,
+            report_kind,
+            report_context,
+            None,
+            None,
+            &mut cancellation_guard,
+        )
+        .await;
+        // The attempt reached its own terminal path, or handed settlement to the
+        // stream finalizer that now lives in the response body.
+        cancellation_guard.disarm();
+        result
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3687,7 +3706,12 @@ pub(crate) fn execute_execution_runtime_stream_with_retry_scope<'a>(
     Box::pin(async move {
         let mut retry_scope = AiAttemptRetryScope::Candidate;
         let mut fallback_response = None;
-        let response = execute_execution_runtime_stream_inner(
+        let mut cancellation_guard = AttemptCancellationGuard::disarmed(
+            state,
+            STREAM_ATTEMPT_CANCELLED_ERROR_TYPE,
+            STREAM_ATTEMPT_CANCELLED_ERROR_MESSAGE,
+        );
+        let result = execute_execution_runtime_stream_inner(
             state,
             plan,
             trace_id,
@@ -3697,8 +3721,13 @@ pub(crate) fn execute_execution_runtime_stream_with_retry_scope<'a>(
             report_context,
             Some(&mut retry_scope),
             Some(&mut fallback_response),
+            &mut cancellation_guard,
         )
-        .await?;
+        .await;
+        // The attempt reached its own terminal path, or handed settlement to the
+        // stream finalizer that now lives in the response body.
+        cancellation_guard.disarm();
+        let response = result?;
         Ok(match response {
             Some(response) => AiAttemptExecutionOutcome::Responded(response),
             None => AiAttemptExecutionOutcome::Retry {
@@ -3744,6 +3773,7 @@ async fn maybe_build_stream_transport_error_stop_response(
     .map(Some)
 }
 
+#[allow(clippy::too_many_arguments)] // internal function, grouping would add unnecessary indirection
 async fn execute_execution_runtime_stream_inner(
     state: &AppState,
     mut plan: ExecutionPlan,
@@ -3754,6 +3784,7 @@ async fn execute_execution_runtime_stream_inner(
     mut report_context: Option<serde_json::Value>,
     mut retry_scope_out: Option<&mut AiAttemptRetryScope>,
     mut retry_fallback_out: Option<&mut Option<Response<Body>>>,
+    cancellation_guard: &mut AttemptCancellationGuard,
 ) -> Result<Option<Response<Body>>, GatewayError> {
     let stream_started_at = Instant::now();
     let mut stage_trace = RequestStageTrace::from_env();
@@ -3837,6 +3868,16 @@ async fn execute_execution_runtime_stream_inner(
         )
         .await;
     }
+    // From here the attempt owns non-terminal rows, and everything that could
+    // settle them runs inside the downstream request future. Arm the guard so a
+    // client disconnect before the stream finalizer exists still settles them.
+    cancellation_guard.arm(
+        &plan,
+        report_context.as_ref(),
+        request_candidate_status_snapshot.as_ref(),
+        candidate_started_unix_secs,
+        stream_started_at,
+    );
     let plan_request_id_for_log = short_request_id(plan.request_id.as_str());
     let provider_name = plan
         .provider_name
