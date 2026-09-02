@@ -1,0 +1,1019 @@
+## Remote Deploy Update (2026-04-11)
+
+### Tencent `aether-zbs` image refresh
+
+- Goal:
+  - update remote Tencent `aether-zbs` only, without touching the upstream `aether` stack
+- Completed:
+  - confirmed target stack path is `/home/ubuntu/zbs/Aether-zbs`
+  - confirmed target compose file is `/home/ubuntu/zbs/Aether-zbs/docker-compose.build.zbs.yml`
+  - confirmed target app container before change:
+    - `aether-zbs-app -> ghcr.io/zbsdsb/aether:4c74e98`
+  - confirmed upstream container remained separate:
+    - `aether-app -> ghcr.io/fawney19/aether:latest`
+  - backed up remote env file before mutation:
+    - `/home/ubuntu/zbs/Aether-zbs/.env.bak-<timestamp>-image-update`
+  - updated remote `/home/ubuntu/zbs/Aether-zbs/.env`:
+    - `APP_IMAGE=ghcr.io/zbsdsb/aether:4c74e98`
+    - `APP_IMAGE=ghcr.io/zbsdsb/aether:079b695`
+  - executed targeted refresh for `aether-zbs` app only:
+    - `docker compose -f docker-compose.build.zbs.yml pull app`
+    - `docker compose -f docker-compose.build.zbs.yml up -d app`
+- Verification:
+  - `docker compose -f /home/ubuntu/zbs/Aether-zbs/docker-compose.build.zbs.yml ps app`
+    - `aether-zbs-app` now uses `ghcr.io/zbsdsb/aether:079b695`
+    - container reached `healthy`
+  - `docker ps` confirms only target container image changed:
+    - `aether-zbs-app|ghcr.io/zbsdsb/aether:079b695|Up ... (healthy)|0.0.0.0:8084->80/tcp`
+    - `aether-app` remains on upstream image/port mapping
+  - `curl http://127.0.0.1:8084/health`
+    - returned `200`
+    - body status `healthy`
+
+## Request Log Settings Fix (2026-04-11)
+
+### Goal
+
+- fix the admin `系统设置 -> 请求记录` section where changing `记录详细程度` could leave Save disabled and later reopen still showed `basic`
+
+### Completed
+
+- traced the issue to frontend system-settings initialization:
+  - `useSystemConfig.loadSystemConfig()` previously fetched config keys one by one and mutated the live form state during page initialization
+  - the request-log section stayed interactive during that initialization window, so late config responses could overwrite the user's selection back to backend/default `basic`
+  - once overwritten, the form snapshot and current state matched again, which left the Save button disabled and prevented the selected level from being persisted
+- changed frontend config loading to use a single bulk `getAllSystemConfigs()` fetch, then apply the full snapshot in one commit
+- exposed `configLoading` from `useSystemConfig()` and wired it into the request-log section
+- request-log inputs/select/save are now disabled while initial config loading is in progress, preventing pre-load edits from being silently overwritten
+- added targeted frontend regression coverage in:
+  - `frontend/src/views/admin/system-settings/composables/__tests__/useSystemConfig.spec.ts`
+  - verifies bulk loading path, request-log dirty detection, and request-log save snapshot refresh
+
+### Verification
+
+- `cd frontend && npm run test:run -- src/views/admin/system-settings/composables/__tests__/useSystemConfig.spec.ts`
+  - passed: `3` tests
+- `cd frontend && npm run type-check`
+  - passed with exit code `0`
+
+### Key Files Changed
+
+- `frontend/src/views/admin/system-settings/composables/useSystemConfig.ts`
+- `frontend/src/views/admin/SystemSettings.vue`
+- `frontend/src/views/admin/system-settings/RequestLogSection.vue`
+- `frontend/src/views/admin/system-settings/composables/__tests__/useSystemConfig.spec.ts`
+
+## Remote Ops Update (2026-04-10)
+
+### Tencent Aether Port Swap
+
+- Goal:
+  - swap the public ports of Tencent remote `aether-zbs` and upstream `aether` after `aether-zbs` verification
+- Completed:
+  - installed local `python3` user-site `paramiko` so `ssh-skill` could execute remote commands again
+  - confirmed remote host alias `tencent` -> `81.70.7.182`, and verified two running app stacks:
+    - `aether-zbs-app` (`ghcr.io/zbsdsb/aether:4c74e98`) originally on `18084`
+    - `aether-app` (`ghcr.io/fawney19/aether:latest`) originally on `8084`
+  - updated remote `/home/ubuntu/zbs/Aether/.env`:
+    - `APP_PORT=8084` -> `APP_PORT=18084`
+  - updated remote `/home/ubuntu/zbs/Aether-zbs/docker-compose.build.zbs.yml`:
+    - app port mapping `"18084:80"` -> `"8084:80"`
+  - executed swap sequence:
+    - stopped `aether-zbs-app`
+    - recreated upstream `aether-app` on `18084`
+    - recreated `aether-zbs-app` on `8084`
+- Verification:
+  - `docker ps` on remote now shows:
+    - `aether-zbs-app` -> `0.0.0.0:8084->80/tcp`
+    - `aether-app` -> `0.0.0.0:18084->80/tcp`
+  - `ss -ltn` confirms both `8084` and `18084` are listening
+  - `curl -I http://127.0.0.1:8084/` -> `HTTP/1.1 200 OK`
+  - `curl -I http://127.0.0.1:18084/` -> `HTTP/1.1 200 OK`
+  - final health check:
+    - `aether-zbs-app` -> `healthy`
+    - `aether-app` -> `healthy`
+- Notes:
+  - remote backups were created before mutation:
+    - `/home/ubuntu/zbs/Aether/.env.bak-<timestamp>-port-swap`
+    - `/home/ubuntu/zbs/Aether-zbs/docker-compose.build.zbs.yml.bak-<timestamp>-port-swap`
+
+## Current Task Goal
+
+Continue session `019d6710-36e1-73b3-80b1-544750b4aa8d` and finish the pending All-in-Hub importer follow-up work in this repo, plus the 2026-04-08 UI/observability follow-up:
+
+- generate endpoint candidates from offline protocol/model hints during import
+- expose imported auth/task credentials as a prefill draft in Provider detail
+- re-verify backend and frontend changes after the interrupted session
+- simplify the GlobalModel -> Provider candidate picker back to two fuzzy-search inputs
+- expose background progress for imported upstream-model fetch and proxy probe in the Provider import flow
+- fix ProviderManagement import reminder not clearing after actionable import tasks are resolved
+- add ProviderManagement proxy-enabled filter and per-browser visible-filter configuration
+- add upstream-model refresh-and-sync flows that can semi-automatically create missing Endpoints and sync Provider/Key API formats without deleting existing Endpoints
+- phase 1 unified async task center: move provider import / refresh / adapt / sync into unified async tasks and notify completion/failure from top-right notification center
+- align import-time upstream-model failure semantics so importer disables the current Provider instead of disabling the imported Key
+- model management candidate dialog should hide inactive providers; provider management ordering should keep inactive providers at the end
+- refresh-and-sync should add API formats to each key based on that key's own upstream models, not the provider-level union of all keys
+- ignore local `proofshot-artifacts/` so proofshot evidence stays out of git status by default
+
+## Completed
+
+- Added local proofshot artifact ignore on 2026-04-10:
+  - root `.gitignore` now ignores `proofshot-artifacts/`
+  - this keeps proofshot acceptance artifacts out of normal git status / commit scope unless explicitly force-added
+- Fixed provider refresh/sync key-format propagation on 2026-04-10:
+  - `src/api/admin/provider_query.py` now keeps per-key upstream model results during refresh-and-sync
+  - endpoint auto-create still uses the Provider-level union of refreshed models
+  - key `api_formats` sync now only merges formats inferred from that specific key's own models, avoiding accidental Gemini/Claude format propagation to unrelated keys
+  - added regression coverage in `tests/api/test_provider_query_capability_sync.py` for a two-key mixed-capability case
+- Adjusted model management provider-candidate visibility on 2026-04-10:
+  - `frontend/src/features/models/utils/global-model-provider-candidates.ts` now filters out `provider_active=false` candidates, so the GlobalModel -> Provider candidate dialog only shows enabled providers
+  - `frontend/src/views/admin/ModelManagement.vue` refresh action now also limits fallback refresh targets to enabled candidates, avoiding refresh on hidden inactive providers
+  - added frontend regression coverage in `frontend/src/features/models/utils/__tests__/global-model-provider-candidates.spec.ts`
+- Re-verified provider management ordering on 2026-04-10:
+  - backend `src/api/admin/providers/summary.py` already sorts providers as `active first -> provider_priority asc -> created_at asc`
+  - frontend `frontend/src/views/admin/ProviderManagement.vue` keeps the same `active first` ordering locally before rendering
+  - existing backend regression `tests/services/test_provider_summary_ordering.py` still passes, so “停用排最后” is already the current behavior
+- Adjusted importer failure semantics on 2026-04-10:
+  - `src/services/provider_import/all_in_hub.py` background upstream-model fetch now disables `Provider.is_active` when verification returns non-success or raises, and leaves the imported key active
+  - `src/services/provider_import/reissue.py` pending reissue and plaintext submission flows now follow the same rule: disable the current Provider on model verification failure instead of disabling the created/reused key
+  - added shared helper `src/services/provider_import/failure_state.py` to centralize the Provider disable mutation
+  - added regression coverage in `tests/services/test_all_in_hub_import.py` and updated `tests/services/test_all_in_hub_reissue.py` expectations to lock this behavior
+- Investigated remote Tencent Aether `POOLTIMEOUT` behavior for request `13696631` on 2026-04-10:
+  - confirmed `POOLTIMEOUT` is Aether's own classification around `httpx.PoolTimeout`, not a literal upstream OpenAI error
+  - confirmed the app container currently runs behind `HTTP_PROXY/HTTPS_PROXY/ALL_PROXY=http://172.0.0.1:7890`
+  - confirmed the app container has no direct outbound route to `api.openai.com`; direct access fails with `ConnectError: [Errno 101] Network is unreachable`
+  - confirmed proxy-backed access from inside `aether-app` to `https://api.openai.com/v1/models` returns `401` in about `1s`, so the proxy path is reachable
+  - confirmed the exact request `13696631` finally completed successfully in DB as `status=completed`, `status_code=200`, `provider_name=octops`, `response_time_ms=77898`
+  - confirmed the same request created `33` candidate rows, of which the first `7` failed with `PoolTimeout('')` at roughly `10s` each before candidate `5` finally succeeded
+  - confirmed PostgreSQL pool was healthy around the incident window (`checked_out=0`, `pool_size=15`, `max_capacity=30`), so this was not a DB pool exhaustion issue
+  - confirmed `openai 官方 5.4` / `gyc1` / `公司` / `octops` all had `provider.proxy = null`, so they do not use isolated provider-level proxy configs
+  - confirmed `get_system_proxy_config()` also returned `None`; the actual proxying currently comes from container env vars plus `httpx.AsyncClient(trust_env=True)` default behavior
+  - confirmed the `openai:cli` stream path currently reuses pooled upstream clients (`HTTPClientPool.get_upstream_client`) instead of creating per-stream transient clients, even though `HTTPClientPool.create_upstream_stream_client()` already exists
+  - confirmed there was another long request `e59e6fa0` overlapping the same window; counting `RequestCandidate.finished_at >= 00:07:20` and `created_at <= 00:08:50` yields `59` overlapping candidate rows across `e59e6fa0` and `13696631`
+  - confirmed the first failed candidate hosts for `13696631` were `chatgpt.com`, `9985678.xyz`, and `api.codewithai.store`, while the eventual success was provider `octops` via `http://81.70.7.182:8080`
+- Distinguish remote runtimes on 2026-04-10:
+  - legacy investigation target `aether-app` (`ghcr.io/fawney19/aether:latest`) still existed and was the container exhibiting the `PoolTimeout -> octops` pattern
+  - actual deployed target `aether-zbs-app` (`ghcr.io/zbsdsb/aether:4c74e98`) has been up for ~5 hours and does **not** carry `HTTP_PROXY/HTTPS_PROXY/ALL_PROXY/AETHER_*` env vars in `docker inspect`
+  - `aether-zbs-app` tail logs currently show startup / scheduler / pool-health logs only; no `PoolTimeout` / `openai:cli gpt-5.4` matches were found in the sampled container logs
+- Remote Tencent default Clash fallback was re-applied and verified on 2026-04-10:
+  - `mixin.yaml` now explicitly overrides `PROXY` as `fallback`
+  - current `PROXY` members are `USA-1 -> USA-2 -> DIRECT`
+  - controller verification now returns `type: Fallback`
+  - `mihomo.service` is active and listening on `*:7890` and `*:9090`
+  - repeated `7890` egress verification returned `38.246.245.146 code:200` three times
+- Remote Tencent default Clash flow was narrowed again on 2026-04-10:
+  - user explicitly chose the simpler model: keep multiple subscriptions in `clashsub`, but switch them one-by-one instead of aggregating them into one default runtime
+  - the experimental merged `profile 4` was cleaned back out of `profiles.yaml`
+  - current retained subscription ids are `1 / 2 / 3`
+  - current active subscription is back to `use: 1`
+  - default `7890` now means: subscription-level manual switching + current subscription internal node fallback
+- Remote Tencent current default failover state on 2026-04-10:
+  - `PROXY` is `type: Fallback`
+  - current members are `USA-1 -> USA-2 -> DIRECT`
+  - controller confirms `type = Fallback`, `fixed = USA-1`, `now = USA-1`
+  - repeated `7890` egress verification returned `38.246.245.146` three times
+- Remote Tencent proxy port layout was reworked again on 2026-04-09 to match the user's preferred default:
+  - `clash-for-linux-install` / `mihomo` reclaimed `81.70.7.182:7890` as the default proxy entry
+  - `mihomo` still uses selector `PROXY -> USA-1`, so the default `7890` path stays on a fixed egress IP
+  - EasyProxies hybrid listener moved from `7890` to `7891`
+  - EasyProxies management panel stayed on `9888`
+  - EasyProxies fixed per-node ports (`28000+`) remained available
+- Remote Tencent proxy split finalized on 2026-04-09:
+  - `81.70.7.182:7890` remains the shared EasyProxies pool entry
+  - pool scheduling was changed from `sequential` to `balance`
+  - `81.70.7.182:7900` remains the dedicated fixed-exit port via legacy `mihomo`
+  - `mihomo` selector `PROXY` was explicitly pinned to `USA-1`, so repeated `7900` egress now stays on the same public IP unless the selector is changed later
+- Remote Tencent EasyProxies was upgraded to `hybrid` mode on 2026-04-09:
+  - `7890` continues to serve as the shared pool entry
+  - EasyProxies now also exposes per-node fixed ports (`28000+`) directly from the same runtime
+  - verified stable fixed-port examples:
+    - `28000` -> `USA-1` -> egress `38.246.245.146`
+    - `28001` -> `USA-2` -> egress `38.246.245.221`
+    - `28003` -> `🇳🇱 江江荷兰 01` -> egress `94.131.105.125`
+    - `28475` -> `🇺🇲 美国W01 | IEPL | x1.5` -> egress `142.249.36.91`
+  - this gives the user both behaviors from the same EasyProxies stack:
+    - shared failover pool via `7890`
+    - fixed-exit per-node ports via `28000+`
+- Verified a real pool failover edge case on 2026-04-09:
+  - the merged subscription still contains pseudo metadata nodes such as `流量剩余 ≫ 888 PB`
+  - EasyProxies currently treats that entry as a normal upstream, so the first request may hit it, fail on `127.0.0.1:443`, then auto-blacklist it for `30m`
+  - after blacklist, pool traffic continued on a real node without manual intervention
+- Fixed the Provider detail proxy-probe CTA gating on 2026-04-09:
+  - the proxy-probe button is no longer hard-disabled solely because `ops_configured=false`
+  - when Provider Ops is already configured, the button still runs the existing single-provider proxy probe
+  - when Provider Ops is missing, clicking the button now shows a warning and opens the Provider auth / ops-config dialog instead of doing nothing
+  - the same interaction path is now wired in both `ProviderManagement` and `ProviderImportTasks` detail drawers
+- Fixed two Provider UI interaction gaps found on 2026-04-09:
+  - Provider detail header `Globe` action now uses a direct Popover trigger, so the Provider-level proxy selector opens reliably when clicked
+  - import reminder card now supports persistent local dismissal (`永久关闭提醒`) keyed by the actionable overview signature, while still auto-resetting when the actionable counts change
+- Added frontend regression coverage for the persistent import-reminder dismissal signature logic
+- Fixed the ProviderManagement import reminder persistence gap found on 2026-04-09:
+  - manual Provider key creation now auto-resolves a single matching `waiting_plaintext` all-in-hub import task for the same Provider
+  - this keeps the existing user flow (`手工补钥`) and clears the reminder without requiring a separate hidden API call from the frontend
+  - safety boundary: when the same Provider still has multiple `waiting_plaintext` tasks, the backend does **not** guess which task to consume
+- Added targeted regression coverage for the above:
+  - `test_create_provider_key_response_resolves_single_waiting_plaintext_task`
+  - `test_create_provider_key_response_skips_auto_resolution_when_multiple_waiting_tasks`
+- Recovered the interrupted session from `~/.codex/history.jsonl` and `~/.codex/sessions/...`.
+- Confirmed the unfinished work is local code already present in this checkout, not a remote Aether failover task.
+- Verified importer candidate generation changes:
+  - default candidates: `openai:chat`, `openai:cli`, `openai:compact`
+  - append `claude:*` when offline hints mention `claude` / `anthropic`
+  - append `gemini:*` when offline hints mention `gemini` / `google` / `vertex`
+- Verified imported auth prefill flow:
+  - backend route builds prefill payload from latest `ProviderImportTask`
+  - Provider detail drawer exposes an action to open auth config with imported draft
+  - auth dialog accepts `prefillDraft` and hydrates architecture/auth fields from it
+- Fixed importer behavior for mixed sources:
+  - if the same account has both snapshot/direct keys and `access_token` account auth data, importer now keeps both
+  - result: direct keys still import, and auth prefill source is no longer dropped
+- Added/confirmed automated tests for both backend and frontend utility behavior.
+- Confirmed real backup `/Users/zbs/Downloads/all-api-hub-backup-2026-04-07 (4).json` contains `Sub2API` refresh tokens under `sub2apiAuth.refreshToken`; importer now reads them instead of dropping them.
+- Extended importer task generation semantics:
+  - `new_api` / `sub2api` access-token records now keep their original async task and also create an auth-setup task for automatic Provider auth configuration.
+  - cookie-based known site types (`anyrouter` / `nekocode` / `cubence` / `yescode`) can now enter auth-setup flow directly instead of always falling back to manual-only handling.
+- Extended imported-auth prefill payload building:
+  - `sub2api` now returns `refresh_token`
+  - cookie-based architectures now return their schema-aligned credential field names
+- Reused the existing all-in-hub task executor to process auth-setup tasks:
+  - auto-save `provider_ops` config when source credentials are sufficient
+  - probe direct connectivity first
+  - if direct probe fails and system default proxy exists, retry via system proxy and persist `proxy_node_id`
+- Confirmed remote Tencent production Aether at `tencent:/home/ubuntu/zbs/Aether` injects container-level proxy env vars:
+  - `AETHER_HTTP_PROXY=http://172.0.0.1:7890`
+  - `AETHER_HTTPS_PROXY=http://172.0.0.1:7890`
+  - `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` mirror the same value
+- Added explicit anti-leak controls for provider auth probing:
+  - `httpx.AsyncClient(..., trust_env=False)` on provider auth verification and relevant architecture preflight calls
+  - resolver support for disabling system-proxy fallback during direct-probe phase
+- Updated admin import flow so the frontend always triggers one execution pass after import, allowing auth-setup-only tasks to run automatically without waiting for `pending_sources` stats.
+- Added first-stage true async all-in-hub import jobs:
+  - submit endpoint returns `task_id` immediately
+  - backend runs import + task execution in background and stores state in Redis
+  - frontend now polls job status instead of blocking on the full import request
+- Proxy probing has now been decoupled from import:
+  - import-time auth setup only persists deterministic credentials/config
+  - proxy probing moved to independent service `src/services/provider_ops/proxy_probe.py`
+  - supports manual trigger via provider-ops API
+  - supports scheduled batch execution via maintenance scheduler
+- Completed provider-level proxy truth convergence:
+  - independent `proxy probe` now writes the detected default proxy to `provider.proxy`
+  - `provider_ops.connector.config.proxy_node_id` is no longer used as the auto-detected site default during probe persistence
+  - direct-success probe results explicitly keep the Provider at default direct mode (`provider.proxy = null`)
+- Added challenge/manual-review handling for proxy probe:
+  - challenge-like failures (`Cloudflare`, `arg1`, `acw_sc__v2`, etc.) now stop auto proxy persistence
+  - probe result is persisted as `manual_review/challenge` instead of auto-writing a proxy decision
+- Exposed probe result metadata to Provider summary/detail:
+  - backend summary payload now includes `proxy_probe_status`, `proxy_probe_mode`, `proxy_probe_message`
+  - Provider detail drawer shows a manual-review warning when the probe hits a challenge page
+- Fixed live-only single-provider proxy-probe API regression:
+  - `POST /api/admin/provider-ops/providers/{provider_id}/proxy-probe` crashed because `probe_provider_proxy()` returned `result.__dict__` for a `slots=True` dataclass
+  - now uses `asdict(result)` and returns a normal JSON payload again
+- Rebuilt the local verify `app` container with the latest code after the above fix, preserving the existing verify DB/Redis state
+- Simplified the GlobalModel Provider candidate dialog back to the user's preferred interaction:
+  - removed the extra provider/model view-mode toggle and regex mode from the dialog flow
+  - kept only two left-side inputs: `搜索渠道商或站点` and `搜索模型`
+  - model search now uses fuzzy variant matching, so `gpt-5.4` can hit names like `gpt-5.4-2026-03-05` and `gpt-5.4(xhigh)`
+- Added explicit All-in-Hub import background-task visibility:
+  - import job status now carries `background_tasks`
+  - current visible tasks are `异步抓取上游模型` and `代理检测`
+  - Provider import dialog renders their status/count/message
+  - Provider import completion toast now summarizes these follow-up phases and warns when failures remain
+- Added targeted async follow-up execution helpers:
+  - importer now reports touched Provider IDs and created Key IDs to the async job coordinator
+  - async job runs imported-key model fetch with progress callbacks instead of fire-and-forget only
+  - async job runs targeted proxy probe for touched imported Providers and records its progress into the same job payload
+- Added a dedicated admin import-task page instead of continuing to overload the existing video-task page:
+  - new route: `/admin/provider-import-tasks`
+  - left navigation now exposes `导入任务`
+  - page lists recent All-in-Hub import jobs, their stage, background task progress, manual-review items, and provider-level issues
+  - provider-level issues can jump straight into the existing Provider detail drawer for remediation
+- Closed the two immediate UX gaps found during manual verify:
+  - import dialog now disables `确认导入` while a job is already pending/running, avoiding accidental duplicate submissions
+  - import dialog and Provider-page reminder now provide a direct jump into the new import-task page
+- Finalized importer sync semantics for matched existing Providers:
+  - if the backup marks the matched account set as disabled, local `provider.is_active` is now set to `false`
+  - local API keys with `note = Imported from all-in-hub` are now pruned when they are missing from the matched backup's plaintext key set
+  - manual keys are never deleted by this sync path
+  - if the backup only contains masked/desensitized key values, prune is skipped entirely to avoid accidental deletion
+
+## Verification Snapshot
+
+Verified on 2026-04-09 in `/Users/zbs/projectwork/zbs/Aether`:
+
+- Model-management candidate visibility and provider ordering re-verified on 2026-04-10:
+  - `cd frontend && npm run test:run -- src/features/models/utils/__tests__/global-model-provider-candidates.spec.ts`
+    - result: `10 passed`
+  - `cd frontend && npm run type-check`
+    - result: `vue-tsc --noEmit` passed
+  - `uv run pytest tests/services/test_provider_summary_ordering.py -q`
+    - result: `1 passed`
+- Provider refresh/sync key-format propagation re-verified on 2026-04-10:
+  - `uv run pytest tests/api/test_provider_query_capability_sync.py -q`
+    - result: `5 passed`
+  - `python3 -m py_compile src/api/admin/provider_query.py`
+    - result: passed
+- Proofshot ignore rule re-verified on 2026-04-10:
+  - `git status --short`
+    - expected result: `proofshot-artifacts/` no longer appears as untracked
+- Import failure semantic change re-verified on 2026-04-10:
+  - `uv run pytest tests/services/test_all_in_hub_import.py -q`
+    - result: `19 passed`
+  - `uv run pytest tests/services/test_all_in_hub_reissue.py -q`
+    - result: `24 passed`
+- Remote Tencent Aether `POOLTIMEOUT` investigation on 2026-04-10:
+  - `ssh_execute tencent "cd /home/ubuntu/zbs/Aether && docker compose exec -T app env | sort | grep -E '^(HTTP_|HTTPS_|ALL_PROXY|NO_PROXY|AETHER_)' || true"`
+    - result:
+      - `HTTP_PROXY=http://172.0.0.1:7890`
+      - `HTTPS_PROXY=http://172.0.0.1:7890`
+      - `ALL_PROXY=http://172.0.0.1:7890`
+      - `AETHER_HTTP_PROXY=http://172.0.0.1:7890`
+      - `AETHER_HTTPS_PROXY=http://172.0.0.1:7890`
+  - `ssh_execute tencent "cd /home/ubuntu/zbs/Aether && docker compose exec -T app python - <<'PY' ... print(config.http_pool_timeout/http_max_connections/keepalive) ... PY"`
+    - result:
+      - `HTTP_POOL_TIMEOUT=10.0`
+      - `HTTP_MAX_CONNECTIONS=50`
+      - `HTTP_KEEPALIVE_CONNECTIONS=15`
+      - `ENABLE_HTTP2=True`
+  - `ssh_execute tencent "cd /home/ubuntu/zbs/Aether && docker compose logs --since='2026-04-10T00:06:30' app | sed -n '1,260p'"`
+    - result:
+      - request `13696631` logged repeated `PoolTimeout` warnings from `attempt=1/29` through `attempt=7/29`
+      - the same request later logged `[OK] 13696631 | gpt-5.4 | octops | TTFB: 76988ms | Total: 77898ms`
+  - `ssh_execute tencent "cd /home/ubuntu/zbs/Aether && docker compose exec -T app python - <<'PY' ... httpx.Client(trust_env=True/False) GET https://api.openai.com/v1/models ... PY"`
+    - result:
+      - `trust_env=True` -> `401` in about `1050ms`
+      - `trust_env=False` -> `ConnectError: [Errno 101] Network is unreachable`
+  - `ssh_execute tencent "cd /home/ubuntu/zbs/Aether && docker compose exec -T app python - <<'PY' ... query Usage + RequestCandidate where request_id='13696631' ... PY"`
+    - result:
+      - `Usage.status=completed`
+      - `Usage.status_code=200`
+      - `Usage.provider_name=octops`
+      - `33` candidate rows total
+      - first `7` candidate attempts failed with `PoolTimeout('')`
+      - candidate `5` succeeded with `status=success`, `status_code=200`, `latency_ms=77898`
+  - `ssh_execute tencent "cd /home/ubuntu/zbs/Aether && docker compose exec -T app python - <<'PY' ... get_system_proxy_config_async + build_proxy_url_async + compute_proxy_cache_key ... PY"`
+    - result:
+      - `system_proxy_config = None`
+      - `proxy_url = None`
+      - `cache_key = '__no_proxy__'`
+  - `ssh_execute tencent "cd /home/ubuntu/zbs/Aether && docker compose exec -T app python - <<'PY' import httpx; print(httpx.AsyncClient()._trust_env) ... PY"`
+    - result:
+      - `trust_env_default = True`
+  - `ssh_execute tencent "cd /home/ubuntu/zbs/Aether && docker compose exec -T app python - <<'PY' ... query overlapping RequestCandidate rows in [00:07:20, 00:08:50] ... PY"`
+    - result:
+      - `59` overlapping candidate rows
+      - request distribution:
+        - `13696631` -> `33`
+        - `e59e6fa0` -> `26`
+  - `ssh_execute tencent "cd /home/ubuntu/zbs/Aether && docker compose exec -T app python - <<'PY' ... join RequestCandidate + ProviderEndpoint + Provider for request_id=13696631 ... PY"`
+    - result:
+      - `candidate 0` (`openai 官方 5.4`) -> `https://chatgpt.com/backend-api/codex`
+      - `candidate 1/3` (`gyc1`) -> `https://9985678.xyz`
+      - `candidate 2/4` (`公司`) -> `https://api.codewithai.store`
+      - `candidate 5` (`octops`) -> `http://81.70.7.182:8080`
+  - `ssh_execute tencent "docker ps --format '{{.Names}}\t{{.Image}}\t{{.Status}}' | grep -E 'aether|zbs' || true"`
+    - result:
+      - `aether-zbs-app -> ghcr.io/zbsdsb/aether:4c74e98 -> Up 5 hours (healthy)`
+      - legacy `aether-app -> ghcr.io/fawney19/aether:latest -> Up`
+  - `ssh_execute tencent "docker inspect aether-zbs-app --format '{{json .Config.Env}}'"`
+    - result:
+      - no `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` / `AETHER_HTTP_PROXY` / `AETHER_HTTPS_PROXY`
+  - `ssh_execute tencent "docker exec aether-zbs-app sh -lc 'env | sort | grep -E \"^(HTTP_|HTTPS_|ALL_PROXY|NO_PROXY|AETHER_)\" || true'"`
+    - result:
+      - empty output
+
+- Remote Tencent proxy runtime verify on 2026-04-09:
+  - `ssh_execute tencent "curl -s -H 'Authorization: Bearer 37NKNQ' http://127.0.0.1:9090/proxies/PROXY"`
+    - latest result after fallback re-apply:
+      - `type: Fallback`
+      - `all: [USA-1, USA-2, DIRECT]`
+      - `now: USA-1`
+      - `fixed: USA-1`
+  - `ssh_execute tencent "systemctl is-active mihomo.service && ss -ltn | grep -E ':(7890|9090)\\s' || true"`
+    - latest result:
+      - `mihomo.service = active`
+      - `*:7890` listening
+      - `*:9090` listening
+  - `ssh_execute tencent "for n in 1 2 3; do curl -sS --max-time 12 --proxy http://127.0.0.1:7890 https://api.ipify.org -w ' code:%{http_code}\n'; done"`
+    - latest result: `38.246.245.146 code:200` on all 3 requests
+  - `ssh_execute tencent "bash -lc 'source /home/ubuntu/opt/clashctl-master-live/scripts/cmd/clashctl.sh >/dev/null 2>&1; clashsub list'"`
+    - final result after cleanup:
+      - `use: 1`
+      - retained subscription ids: `1 / 2 / 3`
+      - experimental `4` removed
+  - `ssh_execute tencent "curl -s -H 'Authorization: Bearer 37NKNQ' http://127.0.0.1:9090/proxies/PROXY"`
+    - final result:
+      - `type: Fallback`
+      - `all: [USA-1, USA-2, DIRECT]`
+      - `now: USA-1`
+  - `ssh_execute tencent "for i in 1 2 3; do curl -sS --max-time 12 --proxy http://127.0.0.1:7890 https://api.ipify.org -w ' code:%{http_code}\n'; done"`
+    - final result: `38.246.245.146 code:200` on all 3 requests
+  - final port layout verify:
+    - `ssh_execute tencent "ss -ltn | grep -E ':(7890|7891|7900|9888|9090|28000|28003)\\s' | sort -n"`
+    - result:
+      - `*:7890` listening (default `mihomo`)
+      - `0.0.0.0:7891` listening (EasyProxies pool)
+      - `*:9888` listening (EasyProxies panel)
+      - `0.0.0.0:28000` / `28003` listening (EasyProxies fixed ports sample)
+  - `ssh_execute tencent "sed -n '1,220p' /home/ubuntu/opt/easyproxies/config.yaml"`
+    - result: EasyProxies listener later moved to `7891`, management on `9888`, `mode = hybrid`, `pool.mode = balance`, `multi_port.base_port = 28000`
+  - `ssh_execute tencent "curl -s -H 'Authorization: Bearer 37NKNQ' http://127.0.0.1:9090/proxies/PROXY"`
+    - result: legacy `mihomo` selector currently `now = USA-1`
+  - `ssh_execute tencent "curl -s --proxy http://127.0.0.1:7890 https://api.ipify.org"` repeated 3 times
+    - result after port restore: `38.246.245.146` on all 3 requests
+  - `ssh_execute tencent "curl -sS --max-time 12 --proxy http://127.0.0.1:7891 https://api.ipify.org -w ' code:%{http_code}\n'"`
+    - result after EasyProxies listener move: `38.246.245.146 code:200` on the sampled pool request
+  - `ssh_execute tencent "curl -sS --max-time 12 --proxy http://127.0.0.1:7890 https://api.ipify.org -w ' code:%{http_code}\n'"` repeated 3 times
+    - result from the earlier EasyProxies-on-7890 phase, after automatic blacklist stabilized: `94.131.105.125 code:200` on all 3 requests
+  - `ssh_execute tencent "sudo journalctl -u easyproxies.service --since '2 min ago' --no-pager | grep 'outbound/pool\\[proxy-pool\\]' | tail -n 20"`
+    - result:
+      - pool first hit pseudo node `流量剩余 ≫ 888 PB` and failed on `dial tcp 127.0.0.1:443`
+      - EasyProxies auto-blacklisted that node for `30m`
+      - subsequent pool requests went through `🇳🇱 江江荷兰 01`
+  - `ssh_execute tencent "ss -ltn | grep -E ':(28000|28001|28003|28265|28475|28476)\\s' | sort -n"`
+    - result: EasyProxies hybrid fixed ports are listening on those sample ports
+  - `ssh_execute tencent "curl -sS --max-time 12 --proxy http://127.0.0.1:28000 https://api.ipify.org"` repeated 3 times
+    - result: `38.246.245.146` on all 3 requests
+  - `ssh_execute tencent "curl -sS --max-time 12 --proxy http://127.0.0.1:28003 https://api.ipify.org"` repeated 3 times
+    - result: `94.131.105.125` on all 3 requests
+  - `ssh_execute tencent "curl -sS --max-time 12 --proxy http://127.0.0.1:28001 https://api.ipify.org -w ' code:%{http_code}\n'"`
+    - result: `38.246.245.221 code:200`
+  - `ssh_execute tencent "curl -sS --max-time 12 --proxy http://127.0.0.1:28475 https://api.ipify.org -w ' code:%{http_code}\n'"`
+    - result: `142.249.36.91 code:200`
+- `cd frontend && npm exec --yes vue-tsc -- --noEmit`
+  - result after proxy-probe CTA change: passed
+- `cd frontend && npm run test:run -- src/features/providers/utils/__tests__/import-task-overview.spec.ts`
+  - result after proxy-probe CTA change: `3 passed`
+- `cd frontend && npm run test:run -- src/features/providers/utils/__tests__/import-task-overview.spec.ts`
+  - result: `3 passed`
+- `cd frontend && npm exec --yes vue-tsc -- --noEmit`
+  - result: passed
+- `UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/services/test_provider_keys_key_command_service.py -k 'create_provider_key_response_resolves_single_waiting_plaintext_task or create_provider_key_response_skips_auto_resolution_when_multiple_waiting_tasks'`
+  - result: `2 passed`
+- `UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/services/test_provider_keys_key_command_service.py tests/services/test_provider_summary_import_tasks.py`
+  - result: `17 passed`
+
+Verified on 2026-04-07 in `/Users/zbs/projectwork/zbs/Aether`:
+
+- `uv run python -m pytest tests/services/test_all_in_hub_import.py tests/services/test_all_in_hub_endpoint_candidates.py tests/api/test_admin_provider_ops_import_prefill.py`
+  - result: `17 passed`
+- `npm run test:run -- src/features/providers/utils/__tests__/imported-auth-prefill.spec.ts`
+  - result: `2 passed`
+- `npm run type-check`
+  - result: passed
+- `uv run python - <<'PY' ... preview_all_in_hub_import(...) ... PY`
+  - input: `/Users/zbs/Downloads/all-api-hub-backup-2026-04-05.json`
+  - result:
+    - `providers_total = 54`
+    - `providers_to_create = 54`
+    - `endpoints_to_create = 170`
+    - `direct_keys_ready = 1`
+    - `pending_sources = 53`
+    - `pending_tasks_to_create = 53`
+- `uv run python -m pytest tests/services/test_all_in_hub_import.py tests/services/test_all_in_hub_endpoint_candidates.py tests/api/test_admin_provider_ops_import_prefill.py`
+  - result after mixed-source fix: `17 passed`
+- Verify env re-import with `/Users/zbs/Downloads/all-api-hub-backup-2026-04-07 (4).json`
+  - result:
+    - `providers_total = 48`
+    - `keys_skipped = 100`
+    - `pending_sources = 46`
+    - `pending_tasks_created = 45`
+    - `KFC API` imported auth prefill now returns `available=true`, `api_key=8qrStfC50vI0TopYeAzVA5SMxF/dojo=`, `user_id=8555`
+- `uv run python -m pytest tests/services/test_all_in_hub_import.py tests/services/test_all_in_hub_reissue.py tests/api/test_admin_provider_ops_import_prefill.py`
+  - result: `41 passed`
+- `uv run python -m pytest tests/api/test_admin_all_in_hub_import_routes.py`
+  - result: `7 passed`
+- `uv run python -m pytest tests/services/test_provider_proxy_probe.py tests/services/test_all_in_hub_reissue.py tests/api/test_admin_provider_ops_import_prefill.py tests/api/test_admin_all_in_hub_import_routes.py`
+  - result: `37 passed`
+- `npm run type-check` (in `frontend/`)
+  - result: passed
+- Local docker verify run on 2026-04-08 (`aether-verify-*`):
+  - DB was reset with `docker compose --env-file .env.verify -f docker-compose.verify.yml down -v`
+  - app was rebuilt with latest code via `docker compose --env-file .env.verify -f docker-compose.verify.yml up -d --build`
+  - async submit endpoint returned `task_id` immediately (`406cf6fa9b3c4b0d` / later rebuilt run `24f651b61b444082`)
+  - first verify run completed and proved auth auto-configuration worked for sampled providers:
+    - `Acmi` -> `sub2api + refresh_token`
+    - `Jia4u` -> `sub2api + refresh_token`
+    - `KFC API` -> `new_api + api_key + user_id`
+    - `Anyrouter` -> `anyrouter + session_cookie`
+  - sampled DB result after completed run:
+    - `configured provider_ops = 41`
+    - `with proxy_node_id = 0`
+  - local verify env has `proxy_nodes = 0` and no `system_proxy_node_id`, so automatic proxy-persistence branch could not be exercised locally
+  - second verify run with the post-fix image confirmed immediate async submission still works, but import stage remained in `importing providers/endpoints/keys` for >90s because direct-key model fetch still runs inside the import phase
+- Additional proxy-governance verify on 2026-04-08:
+  - `uv run python -m pytest tests/services/test_provider_proxy_probe.py`
+    - result: `5 passed`
+  - `uv run python -m pytest tests/services/test_provider_proxy_probe.py tests/services/test_provider_summary_import_tasks.py tests/api/test_admin_provider_ops_import_prefill.py`
+    - result: `11 passed`
+  - `npm run type-check` (in `frontend/`)
+    - result: passed
+- Live verify on 2026-04-08 after rebuilding `aether-verify-app`:
+  - `docker compose --env-file .env.verify -f docker-compose.verify.yml up -d --build app`
+    - result: latest local code rebuilt and `aether-verify-app` returned to `healthy`
+  - admin login to verify env with `X-Client-Device-Id: codex-verify-20260408`
+    - result: success, admin API usable
+  - single-provider probe:
+    - `POST /api/admin/provider-ops/providers/d89e4099-9ffe-454d-af03-427b602ffd47/proxy-probe`
+    - provider: `Anyrouter`
+    - result: returned 정상 JSON `completed/direct/direct probe succeeded`
+  - batch pending-probe:
+    - `POST /api/admin/provider-ops/proxy-probe/run {"limit":20}`
+    - result: `total_selected=10`, `completed=0`, `failed=10`, `skipped=0`
+    - failed sample reasons:
+      - `invalid refresh token` (`Acmi`, `Bwen`, `Jia4u`, `Dmid`, `GGBOOM公益站`, `Jlypx`)
+      - `认证失败：权限不足` (`香草API`, `Elysiver`, `NihaoAPI`)
+      - `无权进行此操作，access token 无效` (`990924`)
+  - verify DB after rebuilt live probe:
+    - `system_proxy_node_id` still configured
+    - `provider.proxy is not null` count remains `0`
+    - conclusion: this real backup currently does not contain a live sample that reaches the new `proxy success -> persist provider.proxy` branch
+  - summary API field verify:
+    - `Anyrouter` summary returns `proxy_probe_status=completed`, `proxy_probe_mode=direct`, `proxy_probe_message=direct probe succeeded`
+    - `Acmi` summary returns `proxy_probe_status=failed`, `proxy_probe_mode=system_proxy`, `proxy_probe_message=invalid refresh token`
+  - browser/proof evidence:
+    - `08-login-ready.png`: verify env admin login form filled
+    - `09-provider-search-anyrouter.png`: Provider list filtered to `Anyrouter`
+    - `10-anyrouter-manual-review.png`: synthetic verify record used to prove the new detail-drawer manual-review warning branch renders in the real UI
+    - `11-anyrouter-direct-restored.png`: after restore, real `Anyrouter completed/direct` detail view no longer shows the manual-review warning
+    - text capture confirms warning copy: `代理探测需要人工判断` + `Cloudflare challenge page detected (synthetic verify record)`
+    - proofshot artifact path: `proofshot-artifacts/2026-04-08-provider-proxy-probe/...`
+    - tool note: `proofshot stop` still failed with `No active session found`; workaround `agent-browser record stop` successfully saved `session.webm`
+- UI/observability verify on 2026-04-08:
+  - `npm run test:run -- src/features/models/utils/__tests__/global-model-provider-candidates.spec.ts`
+    - result: `9 passed`
+  - `npm exec --yes vue-tsc -- --noEmit` (in `frontend/`)
+    - result: passed
+  - `uv run python -m pytest tests/api/test_admin_all_in_hub_import_routes.py tests/api/test_global_model_provider_candidates.py tests/services/test_provider_proxy_probe.py`
+    - result: `17 passed`
+  - `python3 -m py_compile src/services/provider_import/async_job.py src/services/provider_import/all_in_hub.py src/services/provider_ops/proxy_probe.py src/models/provider_import.py`
+    - result: passed
+- Import-task page verify on 2026-04-08:
+  - `uv run python -m pytest tests/api/test_admin_all_in_hub_import_routes.py`
+    - result: `8 passed`
+  - `npm exec --yes vue-tsc -- --noEmit` (in `frontend/`)
+    - result: passed after adding `ProviderImportTasks.vue`
+  - verify app rebuild:
+    - `docker compose --env-file .env.verify -f docker-compose.verify.yml up -d --build app`
+    - result: `aether-verify-app` recreated and returned `healthy`
+  - route reachability:
+    - `curl -I http://127.0.0.1:18084/admin/provider-import-tasks`
+    - result: `HTTP/1.1 200 OK`
+- Importer sync verify on 2026-04-08:
+  - `python3 -m py_compile src/services/provider_import/all_in_hub.py tests/services/test_all_in_hub_import.py`
+    - result: passed
+  - `uv run python -m pytest tests/services/test_all_in_hub_import.py`
+    - result: `17 passed`
+  - newly locked behaviors:
+    - matched existing Provider can be disabled from backup state
+    - missing imported plaintext key is pruned
+    - masked backup key does not trigger prune
+- Release workflow fork-compatibility follow-up on 2026-04-08:
+  - confirmed current remote is `https://github.com/zbsdsb/Aether.git`
+  - confirmed local repo has no tags yet, so tag-triggered package/release workflows have never naturally fired
+  - updated `.github/workflows/docker-publish.yml` to publish GHCR images under the current repository owner instead of hard-coded `fawney19/*`
+  - removed the mandatory Docker Hub dependency from app/proxy publish workflows so fork users can publish to GitHub Packages without extra secrets
+  - updated `.github/workflows/build-proxy.yml` release-link generation to point to `${{ github.repository }}` instead of the upstream repo
+  - updated `aether-proxy/README.md` release wording to reflect GHCR publication to the current repo owner namespace
+  - documented that the current proxy download table is only a pre-release example and will be rewritten to the fork's own Releases after the first `proxy-v*` publish
+  - workflow/static verification:
+    - `ruby -e 'require "yaml"; [".github/workflows/docker-publish.yml", ".github/workflows/build-proxy.yml"].each { |f| YAML.load_file(f); puts "OK #{f}" }'`
+      - result: both workflow files parsed successfully
+    - `rg -n "fawney19" .github/workflows/docker-publish.yml .github/workflows/build-proxy.yml aether-proxy/README.md`
+      - result: no upstream owner remains in the modified workflow targets; only the historical example links inside the proxy README download table still reference upstream artifacts by design
+- Public-facing README rewrite on 2026-04-08:
+  - rewrote `README.md` around fork positioning instead of retaining the upstream-oriented homepage copy
+  - added explicit upstream references:
+    - `https://github.com/fawney19/Aether`
+    - `https://github.com/fawney19/Aether/blob/master/README.md`
+  - added a dedicated `与原 Aether 的不同点` section explaining fork-specific release namespace and maintenance scope
+  - rewrote deployment docs to use `zbsdsb/Aether` clone commands and `ghcr.io/zbsdsb/aether` image references
+  - added public-reader-oriented `注意事项`, including release dependency on `hub-v*`, key generation, backup requirements, and upstream/downstream image namespace distinction
+  - lightweight verification:
+    - `rg -n "fawney19/Aether|zbsdsb/Aether|ghcr.io/zbsdsb|与原 Aether 的不同点|注意事项" README.md`
+      - result: README contains the expected upstream links, fork links, fork image namespace, and the new structural sections
+    - `sed -n '1,240p' README.md`
+      - result: manual readback confirmed the new public-facing structure and deployment instructions
+    - `git diff -- README.md`
+      - result: README changed from upstream-oriented introduction/deploy notes to fork-oriented introduction, deployment, and caveats
+- ProviderManagement / import reminder / upstream model sync follow-up on 2026-04-08:
+  - import reminder:
+    - `submit_all_in_hub_task_plaintext()` now resolves same-provider same-source actionable sibling tasks when one plaintext submission succeeds
+    - goal: historical failed/waiting_plaintext sibling tasks from the same source no longer keep the overview reminder pinned
+  - provider filters:
+    - added `proxy_enabled` three-state query support to `/api/admin/providers/summary`
+    - frontend `useProviderFilters()` now tracks `filterProxyEnabled`
+    - added per-browser visible-filter config persisted in `localStorage`
+    - hiding a filter now clears its active value immediately to avoid invisible active filters
+  - upstream model refresh + semi-auto endpoint sync:
+    - added provider-query sync helpers that derive supported `api_formats` from upstream model results
+    - sync policy only creates missing Endpoints for custom Providers and never deletes existing Endpoints
+    - sync policy also unions fetched formats into Key `api_formats` when the Key is explicitly scoped
+    - added `POST /api/admin/provider-query/models/refresh-sync`
+    - added `POST /api/admin/provider-query/models/refresh-sync-all`
+    - Provider detail action text changed from `刷新上游模型` to `刷新并适配`
+    - ProviderManagement header now exposes a batch `刷新全部上游模型并适配` action
+- Upstream refresh UX / verify follow-up on 2026-04-09:
+  - fixed frontend bug where single-provider `refresh-sync` responses were incorrectly read as `result.models` instead of `result.data.models`
+  - result: providers like `CCLL.xyz` that actually returned models no longer fall into the false `上游模型未更新` branch
+  - manual refresh now preserves the previous `上游可用模型` display when the current refresh returns no new models
+  - bulk/single refresh warnings are now summarized for humans instead of dumping raw `Key xxx: skip/...` internals
+  - provider capability refresh API timeout in frontend was extended from the global 30s default to a dedicated 10-minute request timeout as a temporary stopgap; next planned step is to move bulk refresh/adapt into the unified async task center
+- Verification on 2026-04-09:
+  - `cd frontend && npm run test:run -- src/features/providers/utils/__tests__/upstream-refresh.spec.ts src/features/providers/composables/__tests__/useProviderFilters.spec.ts`
+    - result: `5 passed`
+  - `cd frontend && npm exec --yes vue-tsc -- --noEmit`
+    - result: passed
+  - `uv run python -m pytest tests/api/test_provider_query_capability_sync.py tests/services/test_all_in_hub_reissue.py -k 'same_source_failed_sibling_tasks or submit_plaintext_creates_provider_api_key_and_completes_task or test_sync_provider_capabilities'`
+    - result: `4 passed`
+  - direct API spot-checks against local verify env:
+    - `CCLL.xyz` `POST /api/admin/provider-query/models` returned 24 models from cache
+    - `CCLL.xyz` `POST /api/admin/provider-query/models/refresh-sync` returned 24 models with `key_error_count=0`
+    - `restrain公益站` `POST /api/admin/provider-query/models/refresh-sync` returned `models=[]`, `error=null`, meaning this provider currently refreshes successfully but its upstream does not provide a model list
+- Verification on 2026-04-08 22:31 +0800:
+  - `uv run python -m pytest tests/services/test_all_in_hub_reissue.py -k 'same_source_failed_sibling_tasks or submit_plaintext_creates_provider_api_key_and_completes_task'`
+    - result: `2 passed`
+  - `uv run python -m pytest tests/api/test_provider_query_capability_sync.py`
+    - result: `2 passed`
+  - `cd frontend && npm run test:run -- src/features/providers/composables/__tests__/useProviderFilters.spec.ts`
+    - result: `3 passed`
+  - `python3 -m py_compile src/services/provider_import/reissue.py src/api/admin/providers/summary.py src/api/admin/provider_query.py`
+    - result: passed
+  - `cd frontend && npm exec --yes vue-tsc -- --noEmit`
+    - result: passed
+
+## Next Step Plan
+
+- Run a broader regression pass around provider-query/provider-management flows if needed.
+- Decide whether to refine semi-auto endpoint sync further (for example, richer endpoint template inheritance) after live feedback.
+- Design and implement phase 1 unified async task center for provider import / refresh / adapt / sync flows, reusing the existing AsyncTasks page and adding a lightweight top-right notification entry.
+
+## Key File Changes
+
+- `src/services/provider_import/all_in_hub.py`
+- `src/services/provider_import/reissue.py`
+- `src/services/provider_import/endpoint_candidates.py`
+- `src/api/admin/provider_ops/routes.py`
+- `tests/services/test_all_in_hub_import.py`
+- `tests/services/test_all_in_hub_reissue.py`
+- `tests/services/test_all_in_hub_endpoint_candidates.py`
+- `tests/api/test_admin_provider_ops_import_prefill.py`
+- `tests/api/test_provider_query_capability_sync.py`
+- `frontend/src/api/providerOps.ts`
+- `frontend/src/api/admin.ts`
+- `frontend/src/api/endpoints/providers.ts`
+- `frontend/src/features/providers/components/ProviderAuthDialog.vue`
+- `frontend/src/features/providers/components/ProviderDetailDrawer.vue`
+- `frontend/src/features/providers/components/ProviderTableHeader.vue`
+- `frontend/src/features/providers/components/AllInHubImportDialog.vue`
+- `frontend/src/features/providers/composables/useProviderFilters.ts`
+- `frontend/src/features/providers/composables/__tests__/useProviderFilters.spec.ts`
+- `frontend/src/views/admin/ProviderManagement.vue`
+- `src/api/admin/providers/summary.py`
+- `src/api/admin/provider_query.py`
+- `frontend/src/features/providers/components/ImportTaskOverviewCard.vue`
+- `frontend/src/features/providers/utils/imported-auth-prefill.ts`
+- `frontend/src/features/providers/utils/__tests__/imported-auth-prefill.spec.ts`
+- `frontend/src/views/admin/ProviderImportTasks.vue`
+- `frontend/src/views/admin/ProviderManagement.vue`
+- `frontend/src/layouts/MainLayout.vue`
+- `frontend/src/router/index.ts`
+- `frontend/src/api/endpoints/providers.ts`
+- `tests/services/test_all_in_hub_import.py`
+- `src/services/provider_ops/service.py`
+- `src/services/provider_ops/architectures/base.py`
+- `src/services/provider_ops/architectures/anyrouter.py`
+- `src/services/provider_ops/architectures/nekocode.py`
+- `src/services/provider_ops/architectures/yescode.py`
+- `src/services/provider_ops/architectures/sub2api.py`
+- `src/services/proxy_node/resolver.py`
+- `src/models/provider_import.py`
+- `src/services/provider_import/async_job.py`
+- `src/services/provider_ops/proxy_probe.py`
+- `frontend/src/features/models/utils/global-model-provider-candidates.ts`
+- `frontend/src/features/models/utils/__tests__/global-model-provider-candidates.spec.ts`
+- `frontend/src/views/admin/ModelManagement.vue`
+- `src/models/endpoint_models.py`
+- `src/api/admin/providers/summary.py`
+- `src/api/admin/providers/routes.py`
+- `frontend/src/api/endpoints/types/provider.ts`
+- `tests/api/test_admin_all_in_hub_import_routes.py`
+- `tests/api/test_global_model_provider_candidates.py`
+- `tests/services/test_provider_proxy_probe.py`
+- `08-login-ready.png`
+- `09-provider-search-anyrouter.png`
+- `10-anyrouter-manual-review.png`
+- `11-anyrouter-direct-restored.png`
+
+## Next Step
+
+- Re-import `/Users/zbs/Downloads/all-api-hub-backup-2026-04-07 (4).json` in local verify env and confirm:
+  - submit returns `task_id` immediately and `确认导入` becomes unavailable while the job is still active
+  - dialog shows the new `异步抓取上游模型` / `代理检测` background task status and can jump to `/admin/provider-import-tasks`
+  - matched existing Provider is disabled when backup account set is disabled
+  - missing `Imported from all-in-hub` plaintext keys are pruned, while manual keys remain
+  - masked backup keys do not trigger imported-key prune
+  - `Sub2API` sites open with `Refresh Token` already filled
+  - auth-setup tasks auto-run in background after import
+  - proxy probe follows the new post-import background phase and its UI counts/messages stay correct during polling
+  - add at least one local/system proxy node plus `system_proxy_node_id` and verify the new independent probe path end-to-end
+- Browser-verify the dedicated import-task page against a fresh import:
+  - recent job appears in list
+  - stage/background task counts update while job is running
+  - failed provider rows can open the Provider detail drawer
+- Browser-verify the simplified GlobalModel Provider candidate dialog against a real `gpt-5.4` / variant dataset and confirm it no longer requires view-mode switching or regex.
+- Browser-verify one direct-success site and one proxy-required site after the new async auth-setup flow.
+- Commit and push are not done yet in this recovery turn.
+
+## Follow-up Findings (2026-04-07 Night)
+
+- Real backup `/Users/zbs/Downloads/all-api-hub-backup-2026-04-07 (4).json` does contain Sub2API refresh tokens under `sub2apiAuth.refreshToken`; current importer only reads `account_info.access_token` / `cookieAuth.sessionCookie`, so imported auth is incomplete for Sub2API sites.
+- Remote Tencent production Aether at `tencent:/home/ubuntu/zbs/Aether` injects container-wide proxy env vars into `aether-app`:
+  - `AETHER_HTTP_PROXY=http://172.0.0.1:7890`
+  - `AETHER_HTTPS_PROXY=http://172.0.0.1:7890`
+  - `HTTP_PROXY/HTTPS_PROXY/ALL_PROXY` mirror the same value
+  - `NO_PROXY` / `AETHER_NO_PROXY` are limited to localhost/postgres/redis
+- Current production setup therefore already has a system-level proxy path, but the importer/auth-prefill flow does not project that into per-provider UI/config decisions.
+- Design decision settled in this turn: when async detection finds “direct failed, proxy succeeded”, Aether should automatically persist the Provider to use the system default proxy node.
+
+## Proxy Decisions (2026-04-08)
+
+- 代理配置的长期单一真相应收敛到 `provider.proxy`，而不是继续让：
+  - `provider.proxy / key.proxy`（模型抓取、请求路由）
+  - `provider_ops.connector.config.proxy_node_id`（用户认证/余额查询）
+  分别演化成两套“这个站点要不要代理”的判断来源。
+- 目标语义已经明确：
+  - 默认直连
+  - 只有独立 `proxy probe` 任务确认“直连失败、代理成功”时，才为该站点写入 Provider 级代理
+  - 如果命中挑战页/反爬页（如 Anyrouter 的 `arg1` / `acw_sc__v2` 场景），不要自动落代理，改为人工通知/人工判断
+- 当前代码状态：
+  - 导入时不再自动执行代理探测
+  - 独立 `proxy probe` service 已存在，支持手动触发和定时调度
+  - 但 probe 结果目前只写在 `provider.config.provider_ops._proxy_probe_*` 元数据上，尚未统一回写到 `provider.proxy`
+  - 因此模型抓取链路与 provider_ops 链路的代理来源仍未完全统一，这是下轮要继续完成的核心收口点
+
+## Latest Local Verify Snapshot (2026-04-08)
+
+- 最新 verify 镜像已用当前代码重建，数据库已清空并重跑真实备份 `/Users/zbs/Downloads/all-api-hub-backup-2026-04-07 (4).json`
+- 本机 verify 容器可通过 `http://host.docker.internal:7890` 使用宿主机代理；该地址已成功创建为手动代理节点，并设置为 `system_proxy_node_id`
+- 关键验证结果：
+  - async import submit 会立即返回 `task_id`
+  - import job 现在能很快完成，不再长时间卡在 `importing`
+  - 导入后自动认证配置能落到 `provider_ops`
+  - 独立 proxy probe 已能跑出结果，并区分：
+    - `completed/direct`
+    - `failed/system_proxy`
+- `Anyrouter` 的进一步人工复验表明：
+  - 裸访问首页或 `/api/user/self` 时，直连和代理都先撞上挑战页 HTML
+  - 系统当前之所以判成 `direct`，是因为它走的是“先算 `acw_sc__v2` 再打认证 API”的完整链路
+  - 这和人工用裸 `curl` 看首页是否打开，不是同一个判断口径
+
+## Next Step After Context Reset
+
+- 代理治理本轮已完成的收口：
+  1. 独立 `proxy probe` 的成功结果已经写入 `provider.proxy`
+  2. 模型抓取、provider request 路径原本就优先读取 `provider.proxy`，这条链路无需额外改造
+  3. `provider_ops.connector.config.proxy_node_id` 在 probe 持久化路径中已降为非默认站点真相
+  4. 命中挑战页/反爬页的站点现在会落为 `manual_review/challenge`，并在 Provider 详情里显示人工判断提示
+- 下一步如果继续这个主题，应做 live verify：
+  1. 已完成：在本地 verify 环境重跑 `Anyrouter`，确认真实 `completed/direct` 情况下 `provider.proxy` 仍为空
+  2. 未完成：当前真实备份中没有跑出“直连失败但代理成功”的样本，因此尚未拿到真实 `provider.proxy.node_id` 自动落库证据
+  3. 已完成（synthetic UI verify）：对 `Anyrouter` 临时写入 `manual_review/challenge` 状态，确认详情抽屉提示文案和 UI 渲染正确，随后已恢复原状态
+  4. 如需继续完成“真实 proxy-success 站点”验收，下一步要么换一份包含可代理成功样本的备份，要么在 verify 环境构造一个受代理影响但凭据有效的站点样本
+
+## Model Management Follow-up (2026-04-08)
+
+- 新任务范围：
+  - 只改“模型管理页 -> 给某个 GlobalModel 关联 Provider”的流程
+  - 不改 Provider 侧批量关联模型弹窗
+- 设计已收口为：
+  - 默认只用缓存判断支持情况
+  - 提供 `按渠道商 / 按模型` 双视角
+  - Provider 行支持展开查看缓存上游模型
+  - 支持普通搜索 + 可选正则搜索
+  - 提供 `刷新支持情况` 按钮和“全选当前结果”
+- 已完成代码：
+  - backend:
+    - `src/api/admin/models/global_models.py`
+    - `src/models/pydantic_models.py`
+    - 新增 GlobalModel Provider candidate response / refresh request
+    - 新增 candidate match helper（精确名 + `config.model_mappings` 正则）
+    - 新增 `GET /api/admin/models/global/{global_model_id}/provider-candidates`
+    - 新增 `POST /api/admin/models/global/{global_model_id}/provider-candidates/refresh`
+  - frontend:
+    - `frontend/src/api/endpoints/global-models.ts`
+    - `frontend/src/api/endpoints/types/model.ts`
+    - `frontend/src/features/models/utils/global-model-provider-candidates.ts`
+    - `frontend/src/features/models/utils/__tests__/global-model-provider-candidates.spec.ts`
+    - `frontend/src/views/admin/ModelManagement.vue`
+    - 旧“纯 Provider 勾选列表”已切换为缓存候选器视图
+- 已完成验证：
+  - `uv run python -m pytest tests/api/test_global_model_provider_candidates.py tests/services/test_provider_summary_import_tasks.py`
+    - result: `7 passed`
+  - `npm run test:run -- src/features/models/utils/__tests__/global-model-provider-candidates.spec.ts`
+    - result: `6 passed`
+  - `npm run type-check` (in `frontend/`)
+    - result: passed
+- 最新补充修复与验证（2026-04-08，本轮 recovery）：
+  - 浏览器人工验收在 verify 环境里抓到一个真实交互 bug：
+    - 路径：`模型管理 -> 查看详情 -> 链路控制 -> 关联提供商`
+    - 现象：先搜 `claude` 再切到“按模型”时，会把命中的 Provider 的全部 cached models 都摊开分组，导致大量无关 `gpt/*` 分组混入
+    - 根因：`filterProviderCandidates()` 只在 Provider 层过滤；`groupCandidatesByModel()` 继续消费这些 Provider 的全部 `cached_models`
+  - 已完成修复：
+    - `frontend/src/features/models/utils/global-model-provider-candidates.ts`
+      - 新增搜索匹配元数据判断
+      - 当查询命中的是模型名时，“按模型”视图只保留命中的 cached model 分组
+      - 当查询命中 Provider 名 / URL 时，仍保留该 Provider 的全部 cached models，避免把“按渠道商找 Provider”误收窄
+    - `frontend/src/features/models/utils/__tests__/global-model-provider-candidates.spec.ts`
+      - 新增回归用例覆盖“模型名命中只保留匹配分组”
+      - 新增回归用例覆盖“Provider 字段命中时保留全部分组”
+    - `frontend/src/views/admin/ModelManagement.vue`
+      - `按模型` 视图改为按当前查询语义生成分组，不再直接摊平所有 filtered Provider 的全部模型
+  - 本轮 fresh verification：
+    - `npm run test:run -- src/features/models/utils/__tests__/global-model-provider-candidates.spec.ts`
+      - result: `8 passed`
+    - `npm run type-check` (in `frontend/`)
+      - result: passed
+    - `docker compose --env-file .env.verify -f docker-compose.verify.yml up -d --build app`
+      - result: rebuilt latest verify frontend/backend image, `aether-verify-app` back to `healthy`
+    - ProofShot browser regression:
+      - pre-fix artifact: `proofshot-artifacts/2026-04-08_02-02-11_model-management-provider/`
+      - post-fix artifact: `proofshot-artifacts/2026-04-08_02-15-37_model-management-provider-candidate/`
+      - same query path `claude + 按模型`:
+        - before fix: DOM group-action buttons `选择这一组` = `392`
+        - after fix: DOM group-action buttons `选择这一组` = `31`
+        - post-fix DOM spot check: grouped `p.font-mono` headings no longer contain `gpt*`
+- 第二轮补充修复与验证（2026-04-08，用户截图反馈后）：
+  - 用户现场截图确认了另一个更核心的语义问题：
+    - 即使不输入查询词，`按模型` 视图仍会把命中 Provider 的全部缓存模型拿出来分组
+    - 对 `GPT-5.4` 这类模型会表现成 `缓存模型 (702)` 这类噪声很高的结果，视觉上看起来像“没有变化”
+  - 已完成修复：
+    - `frontend/src/features/models/utils/global-model-provider-candidates.ts`
+      - `groupCandidatesByModel()` 现在带 `globalModelName + modelMappings` 上下文
+      - `按模型` 视图只展示与当前 GlobalModel 真正命中的缓存模型分组，不再摊平所有缓存模型
+      - 搜索命中 Provider 字段时，也只保留该 Provider 下“命中当前 GlobalModel”的模型分组
+    - `frontend/src/views/admin/ModelManagement.vue`
+      - `按模型` 分组现在传入当前 `selectedModel.name` 与 `config.model_mappings`
+      - `按渠道商` 视图新增 `全部展开 / 全部收起` 按钮，作用范围限制为当前过滤结果
+    - `frontend/src/features/models/utils/__tests__/global-model-provider-candidates.spec.ts`
+      - 新增默认按当前 GlobalModel 收口分组的回归用例
+      - 新增 Provider 字段搜索时仍只保留命中分组的回归用例
+  - 本轮 fresh verification：
+    - `npm run test:run -- src/features/models/utils/__tests__/global-model-provider-candidates.spec.ts`
+      - result: `9 passed`
+    - `npm run type-check` (in `frontend/`)
+      - result: passed
+    - `docker compose --env-file .env.verify -f docker-compose.verify.yml up -d --build app`
+      - result: verify app rebuilt with latest frontend bundle (`ModelManagement-DekQXpYd.js` / `ModelManagement-CWtwWIJW.css`)
+- 第三轮补充修复与验证（2026-04-08，继续根据用户截图收口）：
+  - 用户继续确认了两个交互缺口：
+    - 现有模型标签只是展示，不能直接选择并写入映射
+    - 搜索 `gpt-5.4` 后，渠道商展开区仍展示一堆无关模型，导致“全选后补映射”不可用
+  - 已完成修复：
+    - `frontend/src/features/models/utils/global-model-provider-candidates.ts`
+      - 新增 `searchMode` 语义：区分“搜渠道商”与“搜模型名”
+      - 新增 `getVisibleCandidateModelNames()`：渠道商视图在模型搜索模式下只显示当前筛选命中的模型
+      - `groupCandidatesByModel()` 继续只按当前 GlobalModel 命中的缓存模型分组，不受 Provider 搜索模式污染
+    - `frontend/src/views/admin/ModelManagement.vue`
+      - 新增 `搜渠道商 / 搜模型名` 切换
+      - 渠道商展开区的模型标签改为可点击选择；选择模型会自动选中对应 Provider
+      - `全选` 在“搜模型名”模式下会同时选中当前结果里的 Provider 与当前可见模型标签
+      - `按渠道商` 视图保留 `全部展开 / 全部收起`
+      - 保存时会：
+        - 先为未关联 Provider 创建当前 GlobalModel 关联
+        - 再把选中的“不同名模型”去重写入 `provider_model_mappings`
+        - 不改 `provider_model_name` 主名称
+        - 取消选择 Provider 时同步清掉该 Provider 的待写入模型映射选择
+  - 本轮 fresh verification：
+    - `npm run test:run -- src/features/models/utils/__tests__/global-model-provider-candidates.spec.ts`
+      - result: `12 passed`
+    - `npm run type-check` (in `frontend/`)
+      - result: passed
+    - `docker compose --env-file .env.verify -f docker-compose.verify.yml up -d --build app`
+      - result: verify app rebuilt with latest frontend bundle (`ModelManagement-CZYJOoKb.js` / `ModelManagement-DbXX-fvB.css`)
+    - `curl -I http://127.0.0.1:18084`
+      - result: `HTTP/1.1 200 OK`, `Last-Modified: Wed, 08 Apr 2026 03:01:43 GMT`
+- 剩余边界：
+  - 本轮后端测试主要覆盖 helper / contract 级逻辑；`provider-candidates` 路由仍可继续补更完整的 API 集成测试
+  - 最新截图反馈触发的这轮修复已做源码级 + 容器重建验证，但还没再补一轮新的 proofshot 截图留证
+  - `刷新支持情况` 按钮在最新产物上未重复做完整人工闭环
+  - 如果后续要继续打磨，可视情况把候选弹窗从 `ModelManagement.vue` 进一步拆成独立组件
+  - commit / push 仍未执行
+
+## Unified Async Task Center Follow-up (2026-04-09)
+
+- 本轮完成范围：
+  - 新增 phase 1 管理端统一异步任务中心后端聚合层：
+    - 新路由 `src/api/admin/async_tasks/routes.py`
+    - 新模型 `src/models/admin_async_tasks.py`
+    - 聚合来源：
+      - `video_tasks`
+      - All-in-Hub import Redis jobs
+      - Provider refresh/sync Redis jobs
+  - 新增 Provider refresh/sync 后台任务能力：
+    - 新服务 `src/services/provider_query/async_job.py`
+    - 新接口：
+      - `POST /api/admin/provider-query/models/refresh-sync/submit`
+      - `POST /api/admin/provider-query/models/refresh-sync-all/submit`
+      - `GET /api/admin/provider-query/models/refresh-sync/tasks`
+      - `GET /api/admin/provider-query/models/refresh-sync/tasks/{task_id}`
+  - 管理端统一任务页已切到新聚合 API：
+    - `frontend/src/api/async-tasks.ts` 改为请求 `/api/admin/async-tasks*`
+    - `frontend/src/views/admin/AsyncTasks.vue` 现在按 `task_type` 识别视频任务 / 导入任务 / 刷新并适配任务
+    - 对视频任务保留“查看使用记录 / 取消任务”入口
+    - 对 provider 任务提供来源页跳转与 JSON detail 查看
+  - 右上角新增轻量任务通知入口：
+    - `frontend/src/layouts/MainLayout.vue`
+    - 只聚合 provider 导入 / 刷新并适配任务的 `running/failed` 项
+    - 可直接跳转到 `/admin/provider-import-tasks` 或 `/admin/async-tasks`
+  - Provider 入口已从阻塞式改为 submit 式：
+    - `ProviderDetailDrawer.vue` 的 `刷新并适配`
+    - `ProviderManagement.vue` 的 `刷新全部渠道能力`
+    - 当前行为：提交后台任务并提示去右上角通知/异步任务页查看，不再阻塞等待整个 refresh-sync 完成
+- 本轮新增测试：
+  - backend:
+    - `tests/api/test_admin_provider_query_async_tasks.py`
+    - `tests/api/test_admin_async_tasks_routes.py`
+  - frontend:
+    - `frontend/src/views/admin/__tests__/async-task-center.spec.ts`
+- 本轮验证：
+  - `uv run python -m pytest tests/api/test_admin_provider_query_async_tasks.py -q`
+    - result: `4 passed`
+  - `uv run python -m pytest tests/api/test_admin_async_tasks_routes.py -q`
+    - result: `3 passed`
+  - `uv run python -m pytest tests/api/test_admin_all_in_hub_import_routes.py tests/api/test_admin_provider_query_async_tasks.py tests/api/test_admin_async_tasks_routes.py tests/services/test_provider_summary_import_tasks.py -q`
+    - result: `17 passed`
+  - `python3 -m py_compile src/services/provider_query/async_job.py src/api/admin/async_tasks/routes.py src/api/admin/provider_query.py src/models/admin_async_tasks.py`
+    - result: passed
+  - `cd frontend && npm run test:run -- src/views/admin/__tests__/async-task-center.spec.ts src/features/providers/utils/__tests__/upstream-refresh.spec.ts`
+    - result: `5 passed`
+  - `cd frontend && npm exec --yes vue-tsc -- --noEmit`
+    - result: passed
+- 当前剩余边界：
+  - 这还是 phase 1 聚合层，没有把视频任务底层数据结构与 provider 任务统一进同一张数据库表
+  - `AsyncTasks.vue` 已支持 provider 任务，但视频任务详情页相比旧版更偏“通用任务明细”，未保留原先完整的视频预览面板
+  - Provider refresh/sync 现在是 submit 模式；若后续要做更强闭环，可补“任务完成后自动刷新当前 Provider/列表”的局部 polling
+  - 本轮没有补 proofshot 浏览器留证；当前验收证据以 pytest / vitest / vue-tsc / py_compile 为主
+  - `proofshot-artifacts/` 仍是未提交本地产物，commit / push 仍未执行
+
+## Contributor Guide Update (2026-04-09)
+
+- 新增仓库级 `AGENTS.md`，标题为 `Repository Guidelines`。
+- 文档内容基于当前仓库真实结构与命令整理：
+  - 后端：`src/` + `pyproject.toml` + `uv`
+  - 前端：`frontend/src/` + `frontend/package.json`
+  - 代理子项目：`aether-proxy/` + `Cargo.toml`
+  - 迁移：`alembic/versions/`
+  - 测试：`tests/api`、`tests/services`、`tests/unit`、`tests/e2e`
+- 已写入的关键约定：
+  - 本地开发命令：`uv sync`、`./dev.sh`、`uv run pytest`
+  - 前端命令：`npm run dev`、`npm run type-check`、`npm run test:run`
+  - Rust 代理命令：`cargo test`
+  - 风格约定：Python Black/isort 100 列、Vue `<script setup>`、PascalCase 组件
+  - 提交约定：沿用本仓库现有 emoji conventional commit 风格
+- 本轮未执行额外测试；该任务为仓库文档补充，依据已核对的 `README.md`、`pyproject.toml`、`frontend/package.json`、`aether-proxy/Cargo.toml` 与 `git log` 生成。
+
+## JD Server Memory Incident Follow-up (2026-04-13)
+
+- 当前任务目标：
+  - 处理 `jd` 服务器“几乎没部署业务但内存占用仍偏高”的现场问题，并与 `tencent` 做真实内存结构对比
+- 已完成：
+  - 复核 `jd` 重启前基线：
+    - boot time = `2026-03-22 21:43:30`
+    - `MemAvailable = 1802724 kB`
+    - `Slab = 1699972 kB`
+    - `SUnreclaim = 1677492 kB`
+  - 确认 `jd` 的异常不是容器或业务进程：
+    - `docker ps` 为空
+    - 用户态最大进程不大，之前异常主要来自京东云 `MonitorPlugin`
+    - 但当下真正拖高内存观感的是 kernel slab，而不是业务 RSS
+  - 确认 DNS 修复后 `jd` 的 libc resolver 已恢复：
+    - `/etc/resolv.conf` 从 `stub-resolv.conf` 切到 `/run/systemd/resolve/resolv.conf`
+    - `getent ahostsv4 monitor.internal.cn-north-1.jdcloud-api.com` 与 `socket.getaddrinfo()` 均恢复正常
+  - 对 `jd` 执行整机重启并复核：
+    - reboot 后 boot time = `2026-04-13 01:27:43`
+    - `MemAvailable = 3376204 kB`
+    - `Slab = 72488 kB`
+    - `SUnreclaim = 49868 kB`
+    - `free -h` 结果回到：
+      - `used = 614Mi`
+      - `free = 2.7Gi`
+      - `buff/cache = 738Mi`
+      - `available = 3.2Gi`
+  - 继续观察后确认 `jd` 未回到故障态：
+    - `jcs-agent-core.service` 正常
+    - `MonitorPlugin` 重新拉起后仅约 `19MiB` RSS，未再出现 `1.2GiB` 级别异常
+  - 与 `tencent` 做当前结构对比：
+    - `tencent` 当前 `available ≈ 1.7GiB`
+    - 但其内存主要由正常业务进程和文件缓存构成：
+      - `Cached ≈ 1.56GiB`
+      - `Slab ≈ 424MiB`
+      - `aether-zbs-app ≈ 432MiB`
+      - `aether-zbs-postgres ≈ 302MiB`
+    - 说明 `tencent` 是“服务多但结构健康”，而 `jd` 原先是“业务少但 kernel slab 异常”
+- 关键结论：
+  - `jd` 之前看起来“没部署啥却也占很多内存”，核心不是业务负载，而是异常遗留的 kernel slab / unreclaimable slab
+  - 这次整机重启已经把这部分历史遗留清掉，当前 `jd` 的真实可用内存约 `3.2GiB`
+- 下一步计划：
+  - 若用户继续关注 `jd`，优先做一轮延时复查，确认 `Slab/SUnreclaim` 不会再次持续爬升
+  - 若用户只关心当前止血效果，本轮可视为已完成
