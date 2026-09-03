@@ -196,6 +196,9 @@ pyrightconfig.json
 .vscode/
 .idea/
 
+# Local project configuration
+.config/
+
 # Captured requests (debugging data)
 captured_requests/
 
