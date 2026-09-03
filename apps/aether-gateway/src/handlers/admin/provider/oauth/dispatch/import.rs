@@ -460,6 +460,9 @@ fn apply_single_import_hints(
                 .or_insert_with(|| json!(project_id));
         }
         for (target, keys) in [
+            // Antigravity 的 token 响应不带账号邮箱，只能从导入 JSON 里取，
+            // 否则账号名会退化成 antigravity_<timestamp>。
+            ("email", &["email", "oauth_email"][..]),
             (
                 "client_version",
                 &[
@@ -1461,7 +1464,8 @@ mod tests {
             },
             "clientVersion": "1.99.0",
             "sessionId": "session-antigravity-1",
-            "userAgent": "antigravity"
+            "userAgent": "antigravity",
+            "email": "anti@example.com"
         })
         .as_object()
         .cloned()
@@ -1470,6 +1474,7 @@ mod tests {
 
         apply_single_import_hints("antigravity", &payload, &mut auth_config);
 
+        assert_eq!(auth_config.get("email"), Some(&json!("anti@example.com")));
         assert_eq!(
             auth_config.get("project_id"),
             Some(&json!("project-antigravity-1"))
