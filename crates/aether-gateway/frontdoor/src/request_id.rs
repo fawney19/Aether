@@ -25,26 +25,7 @@ pub fn short_request_id(value: &str) -> String {
 }
 
 fn looks_like_uuid(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    if bytes.len() != 36 {
-        return false;
-    }
-
-    for (index, byte) in bytes.iter().enumerate() {
-        let is_hyphen = matches!(index, 8 | 13 | 18 | 23);
-        if is_hyphen {
-            if *byte != b'-' {
-                return false;
-            }
-            continue;
-        }
-
-        if !byte.is_ascii_hexdigit() {
-            return false;
-        }
-    }
-
-    true
+    value.len() == 36 && uuid::Uuid::parse_str(value).is_ok()
 }
 
 #[cfg(test)]

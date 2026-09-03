@@ -581,12 +581,7 @@ pub fn normalize_kiro_machine_id(raw: &str) -> Option<String> {
     if raw.len() == 64 && raw.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Some(raw.to_ascii_lowercase());
     }
-    if raw.len() == 36
-        && raw.chars().enumerate().all(|(idx, ch)| match idx {
-            8 | 13 | 18 | 23 => ch == '-',
-            _ => ch.is_ascii_hexdigit(),
-        })
-    {
+    if raw.len() == 36 && uuid::Uuid::parse_str(raw).is_ok() {
         let normalized = raw.replace('-', "").to_ascii_lowercase();
         return Some(format!("{normalized}{normalized}"));
     }
