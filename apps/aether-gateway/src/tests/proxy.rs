@@ -26,6 +26,24 @@ fn hash_api_key(value: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+fn system_default_scheduler_affinity_cache_key(
+    api_key_id: &str,
+    api_format: &str,
+    global_model_name: &str,
+) -> String {
+    aether_scheduler_core::build_scheduler_affinity_cache_key_for_api_key_id_with_client_session_and_scope(
+        api_key_id,
+        api_format,
+        global_model_name,
+        None,
+        Some(&aether_scheduler_core::SchedulerAffinityScope::new(
+            "system-default",
+            Some(1),
+        )),
+    )
+    .expect("system default affinity cache key should build")
+}
+
 fn sample_auth_snapshot(
     api_key_id: &str,
     user_id: &str,
@@ -626,6 +644,7 @@ async fn gateway_forwards_public_request_to_remote_tunnel_owner_before_fallback_
         "development-key",
     )
     .with_auth_api_key_reader(auth_repository)
+    .with_system_default_routing_group_for_tests()
     .with_system_config_values_for_tests(vec![(
         tunnel_attachment_key("node-owner"),
         serde_json::to_value(crate::tunnel::TunnelAttachmentRecord {
@@ -648,7 +667,11 @@ async fn gateway_forwards_public_request_to_remote_tunnel_owner_before_fallback_
     state.client = short_timeout_client.clone();
     state.owner_forward_client = short_timeout_client;
     state.remember_scheduler_affinity_target(
-        "scheduler_affinity:api-key-affinity-1:openai:chat:gpt-4.1",
+        &system_default_scheduler_affinity_cache_key(
+            "api-key-affinity-1",
+            "openai:chat",
+            "gpt-4.1",
+        ),
         crate::cache::SchedulerAffinityTarget {
             provider_id: "provider-owner".to_string(),
             endpoint_id: "endpoint-owner".to_string(),
@@ -853,6 +876,7 @@ async fn gateway_aggregates_sync_sse_from_remote_tunnel_owner_before_returning_t
         "development-key",
     )
     .with_auth_api_key_reader(auth_repository)
+    .with_system_default_routing_group_for_tests()
     .with_system_config_values_for_tests(vec![(
         tunnel_attachment_key("node-cli-owner"),
         serde_json::to_value(crate::tunnel::TunnelAttachmentRecord {
@@ -869,7 +893,11 @@ async fn gateway_aggregates_sync_sse_from_remote_tunnel_owner_before_returning_t
         .with_data_state_for_tests(data_state)
         .with_tunnel_identity_for_tests("gateway-a", Some("http://gateway-a:8080"));
     state.remember_scheduler_affinity_target(
-        "scheduler_affinity:api-key-affinity-cli-1:openai:responses:gpt-5.4",
+        &system_default_scheduler_affinity_cache_key(
+            "api-key-affinity-cli-1",
+            "openai:responses",
+            "gpt-5.4",
+        ),
         crate::cache::SchedulerAffinityTarget {
             provider_id: "provider-cli-owner".to_string(),
             endpoint_id: "endpoint-cli-owner".to_string(),
@@ -1100,6 +1128,7 @@ async fn gateway_streamifies_sync_json_from_remote_tunnel_owner_before_returning
         "development-key",
     )
     .with_auth_api_key_reader(auth_repository)
+    .with_system_default_routing_group_for_tests()
     .with_system_config_values_for_tests(vec![(
         tunnel_attachment_key("node-cli-owner"),
         serde_json::to_value(crate::tunnel::TunnelAttachmentRecord {
@@ -1120,7 +1149,11 @@ async fn gateway_streamifies_sync_json_from_remote_tunnel_owner_before_returning
         .build()
         .expect("short shared client should build");
     state.remember_scheduler_affinity_target(
-        "scheduler_affinity:api-key-affinity-cli-1:openai:responses:gpt-5.4",
+        &system_default_scheduler_affinity_cache_key(
+            "api-key-affinity-cli-1",
+            "openai:responses",
+            "gpt-5.4",
+        ),
         crate::cache::SchedulerAffinityTarget {
             provider_id: "provider-cli-owner".to_string(),
             endpoint_id: "endpoint-cli-owner".to_string(),

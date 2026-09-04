@@ -718,6 +718,7 @@ fn ai_serving_crate_api_is_confined_to_root_seams() {
             || relative == "apps/aether-gateway/src/ai_serving/transport.rs"
             || relative == "apps/aether-gateway/src/ai_serving/api.rs"
             || relative.ends_with("/tests.rs")
+            || relative.ends_with("/tests_sync.rs")
             || relative.contains("/tests/")
             || relative.starts_with("apps/aether-gateway/src/tests/")
         {

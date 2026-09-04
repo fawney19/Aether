@@ -1963,8 +1963,8 @@ fn admin_provider_oauth_quota_mod_stays_thin() {
         "handlers/admin/provider/oauth/quota/antigravity.rs should import common quota helpers from shared.rs"
     );
     assert!(
-        quota_antigravity
-            .contains("use aether_provider_pool::build_antigravity_pool_quota_request;"),
+        quota_antigravity.contains("use aether_provider_pool")
+            && quota_antigravity.contains("build_antigravity_pool_quota_request"),
         "handlers/admin/provider/oauth/quota/antigravity.rs should delegate antigravity quota request construction to aether-provider-pool"
     );
     let quota_chatgpt_web = read_workspace_file(
