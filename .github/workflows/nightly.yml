@@ -25,7 +25,6 @@ env:
   CARGO_PROFILE_TEST_DEBUG: '0'
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: '1'
-  GHCR_IMAGE: ghcr.io/fawney19/aether
 
 jobs:
   source:
@@ -36,6 +35,7 @@ jobs:
       sha: ${{ steps.snapshot.outputs.sha }}
       short_sha: ${{ steps.snapshot.outputs.short_sha }}
       date: ${{ steps.snapshot.outputs.date }}
+      ghcr_image: ${{ steps.snapshot.outputs.ghcr_image }}
     steps:
       - name: Require main branch
         id: snapshot
@@ -49,9 +49,13 @@ jobs:
           fi
 
           sha="${GITHUB_SHA}"
+          # Docker 镜像仓库名必须全小写；GitHub owner 可能保留大写，先统一规范化。
+          repository_owner="${GITHUB_REPOSITORY%%/*}"
+          repository_owner="${repository_owner,,}"
           echo "sha=${sha}" >> "${GITHUB_OUTPUT}"
           echo "short_sha=${sha:0:7}" >> "${GITHUB_OUTPUT}"
           echo "date=$(date -u +'%Y-%m-%d')" >> "${GITHUB_OUTPUT}"
+          echo "ghcr_image=ghcr.io/${repository_owner}/aether" >> "${GITHUB_OUTPUT}"
           echo "Building main at ${sha}."
 
   # Keep the scheduled backend coverage in one place so it cannot drift from PR CI.
@@ -308,6 +312,8 @@ jobs:
     needs: [source, checks, build]
     if: ${{ needs.checks.result == 'success' && needs.build.result == 'success' }}
     runs-on: ubuntu-latest
+    env:
+      GHCR_IMAGE: ${{ needs.source.outputs.ghcr_image }}
     permissions:
       actions: read
       contents: read
@@ -466,6 +472,7 @@ jobs:
           SOURCE_SHA: ${{ needs.source.outputs.sha }}
           SOURCE_SHORT_SHA: ${{ needs.source.outputs.short_sha }}
           RELEASE_DATE: ${{ needs.source.outputs.date }}
+          GHCR_IMAGE: ${{ needs.source.outputs.ghcr_image }}
         run: |
           set -euo pipefail
 
