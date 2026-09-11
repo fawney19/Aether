@@ -66,6 +66,9 @@
                   <SelectItem value="windsurf">
                     Windsurf
                   </SelectItem>
+                  <SelectItem value="orcarouter">
+                    OrcaRouter
+                  </SelectItem>
                   <SelectItem value="antigravity">
                     Antigravity
                   </SelectItem>
@@ -98,6 +101,9 @@
                   </SelectItem>
                   <SelectItem value="windsurf">
                     Windsurf
+                  </SelectItem>
+                  <SelectItem value="orcarouter">
+                    OrcaRouter
                   </SelectItem>
                   <SelectItem value="antigravity">
                     Antigravity
