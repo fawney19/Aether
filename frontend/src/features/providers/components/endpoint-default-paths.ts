@@ -182,6 +182,11 @@ export function getDefaultEndpointPath(params: {
       return '/v1internal:{action}'
     }
   }
+  if (providerType === 'antigravity') {
+    if (normalizedApiFormat === 'gemini:generate_content') {
+      return '/v1internal:{action}'
+    }
+  }
   if (providerType === 'vertex_ai') {
     if (normalizedApiFormat === 'gemini:generate_content') {
       return '/v1/projects/{project_id}/locations/{region}/publishers/google/models/{model}:{action}'
