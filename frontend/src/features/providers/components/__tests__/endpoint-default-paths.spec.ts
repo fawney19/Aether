@@ -69,6 +69,14 @@ describe('endpoint default paths', () => {
       apiFormats,
     })).toBe('/v1internal:{action}')
   })
+  it('uses Anti Gravity v1internal paths for fixed Anti Gravity endpoints', () => {
+    expect(getDefaultEndpointPath({
+      apiFormat: 'gemini:generate_content',
+      providerType: 'antigravity',
+      baseUrl: 'https://daily-cloudcode-pa.googleapis.com',
+      apiFormats,
+    })).toBe('/v1internal:{action}')
+  })
 
   it('keeps Codex Responses root path without duplicating /v1', () => {
     expect(getDefaultEndpointPath({
