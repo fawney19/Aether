@@ -1,8 +1,45 @@
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SchedulerAuthConstraints {
     pub allowed_providers: Option<Vec<String>>,
+    pub provider_key_policies: std::collections::BTreeMap<String, Vec<String>>,
     pub allowed_api_formats: Option<Vec<String>>,
     pub allowed_models: Option<Vec<String>>,
+}
+
+pub fn auth_constraints_allow_provider_key(
+    constraints: Option<&SchedulerAuthConstraints>,
+    provider_id: &str,
+    provider_key_id: &str,
+) -> bool {
+    constraints
+        .and_then(|constraints| constraints.provider_key_policies.get(provider_id.trim()))
+        .is_none_or(|key_ids| {
+            key_ids
+                .iter()
+                .any(|key_id| key_id == provider_key_id.trim())
+        })
+}
+
+/// Pool rows represent the provider/model group, not the concrete key that
+/// will execute the request. Their key policy is enforced after pool expansion.
+pub fn auth_constraints_allow_candidate_key(
+    constraints: Option<&SchedulerAuthConstraints>,
+    candidate: &crate::SchedulerMinimalCandidateSelectionCandidate,
+) -> bool {
+    candidate.provider_pool_enabled
+        || auth_constraints_allow_provider_key(
+            constraints,
+            &candidate.provider_id,
+            &candidate.key_id,
+        )
+}
+
+pub fn auth_constraints_allow_candidate_row_key(
+    constraints: Option<&SchedulerAuthConstraints>,
+    row: &aether_data_contracts::repository::candidate_selection::StoredMinimalCandidateSelectionRow,
+) -> bool {
+    row.provider_pool_enabled
+        || auth_constraints_allow_provider_key(constraints, &row.provider_id, &row.key_id)
 }
 
 pub fn provider_matches_allowed_value(
@@ -100,12 +137,14 @@ mod tests {
     use super::{
         api_format_matches_allowed_value, auth_constraints_allow_api_format,
         auth_constraints_allow_model, auth_constraints_allow_model_with_model_directives,
-        auth_constraints_allow_provider, provider_matches_allowed_value, SchedulerAuthConstraints,
+        auth_constraints_allow_provider, auth_constraints_allow_provider_key,
+        provider_matches_allowed_value, SchedulerAuthConstraints,
     };
 
     fn sample_constraints() -> SchedulerAuthConstraints {
         SchedulerAuthConstraints {
             allowed_providers: Some(vec!["provider-1".to_string(), "OpenAI".to_string()]),
+            provider_key_policies: Default::default(),
             allowed_api_formats: Some(vec!["OPENAI:CHAT".to_string()]),
             allowed_models: Some(vec!["gpt-5".to_string()]),
         }
@@ -137,6 +176,50 @@ mod tests {
             "other",
             "other",
             "other",
+        ));
+    }
+
+    #[test]
+    fn provider_key_policy_defaults_to_allows_all_keys() {
+        let constraints = sample_constraints();
+
+        assert!(auth_constraints_allow_provider_key(
+            Some(&constraints),
+            "provider-1",
+            "key-any",
+        ));
+    }
+
+    #[test]
+    fn provider_key_policy_allows_only_listed_keys() {
+        let mut constraints = sample_constraints();
+        constraints
+            .provider_key_policies
+            .insert("provider-1".to_string(), vec!["key-allowed".to_string()]);
+
+        assert!(auth_constraints_allow_provider_key(
+            Some(&constraints),
+            "provider-1",
+            "key-allowed",
+        ));
+        assert!(!auth_constraints_allow_provider_key(
+            Some(&constraints),
+            "provider-1",
+            "key-blocked",
+        ));
+    }
+
+    #[test]
+    fn empty_provider_key_policy_denies_every_key() {
+        let mut constraints = sample_constraints();
+        constraints
+            .provider_key_policies
+            .insert("provider-1".to_string(), Vec::new());
+
+        assert!(!auth_constraints_allow_provider_key(
+            Some(&constraints),
+            "provider-1",
+            "key-any",
         ));
     }
 

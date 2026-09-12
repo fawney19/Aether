@@ -583,6 +583,7 @@ fn candidate_row(case: &RedactionFormatCase) -> StoredMinimalCandidateSelectionR
         provider_type: "custom".to_string(),
         provider_priority: 10,
         provider_is_active: true,
+        provider_pool_enabled: false,
         endpoint_id: format!("endpoint-{}", case.test_id),
         endpoint_api_format: case.provider_format.api_format().to_string(),
         endpoint_api_family: Some(case.provider_format.provider_name().to_string()),

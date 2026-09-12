@@ -145,6 +145,7 @@ fn provider_query_admin_model_selection_row(
         provider_type: String::new(),
         provider_priority: 0,
         provider_is_active: true,
+        provider_pool_enabled: false,
         endpoint_id: endpoint.id.clone(),
         endpoint_api_format: endpoint.api_format.clone(),
         endpoint_api_family: endpoint.api_family.clone(),

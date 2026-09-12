@@ -13,6 +13,7 @@ pub struct SchedulerMinimalCandidateSelectionCandidate {
     pub provider_name: String,
     pub provider_type: String,
     pub provider_priority: i32,
+    pub provider_pool_enabled: bool,
     pub endpoint_id: String,
     pub endpoint_api_format: String,
     pub key_id: String,

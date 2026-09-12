@@ -203,6 +203,9 @@ async function selectGroup(groupId: string): Promise<void> {
     allowed_api_formats_mode: normalizeListMode(group.allowed_api_formats_mode),
     allowed_models_mode: normalizeListMode(group.allowed_models_mode),
     allowed_providers: group.allowed_providers ? [...group.allowed_providers] : [],
+    provider_key_policies: group.provider_key_policies
+      ? Object.fromEntries(Object.entries(group.provider_key_policies).map(([providerId, keyIds]) => [providerId, [...keyIds]]))
+      : {},
     allowed_api_formats: group.allowed_api_formats ? [...group.allowed_api_formats] : [],
     allowed_models: group.allowed_models ? [...group.allowed_models] : [],
     rate_limit_mode: normalizeRateMode(group.rate_limit_mode),
@@ -232,6 +235,7 @@ function createEmptyForm(): UserGroupFormState {
     allowed_api_formats_mode: 'unrestricted',
     allowed_models_mode: 'unrestricted',
     allowed_providers: [],
+    provider_key_policies: {},
     allowed_api_formats: [],
     allowed_models: [],
     rate_limit_mode: 'system',
@@ -277,6 +281,9 @@ function buildPayload(): UpsertUserGroupRequest {
     allowed_providers: form.value.allowed_providers_mode === 'specific'
       ? [...form.value.allowed_providers]
       : null,
+    provider_key_policies: form.value.allowed_providers_mode === 'specific'
+      ? Object.fromEntries(Object.entries(form.value.provider_key_policies).map(([providerId, keyIds]) => [providerId, [...keyIds]]))
+      : {},
     allowed_api_formats: form.value.allowed_api_formats_mode === 'specific'
       ? [...form.value.allowed_api_formats]
       : null,

@@ -169,6 +169,7 @@ export interface UserGroup {
   description?: string | null
   allowed_providers?: string[] | null
   allowed_providers_mode: ListPolicyMode
+  provider_key_policies?: Record<string, string[]>
   allowed_api_formats?: string[] | null
   allowed_api_formats_mode: ListPolicyMode
   allowed_models?: string[] | null
@@ -185,6 +186,7 @@ export interface UpsertUserGroupRequest {
   description?: string | null
   allowed_providers?: string[] | null
   allowed_providers_mode?: ListPolicyMode
+  provider_key_policies?: Record<string, string[]>
   allowed_api_formats?: string[] | null
   allowed_api_formats_mode?: ListPolicyMode
   allowed_models?: string[] | null

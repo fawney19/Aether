@@ -12,7 +12,10 @@ mod models_shared;
 pub(crate) use self::models_responses::build_models_auth_error_response;
 #[cfg(test)]
 pub(crate) use self::models_shared::filter_eligible_model_rows;
-pub(crate) use self::models_shared::{matches_model_mapping_for_models, models_api_format};
+pub(crate) use self::models_shared::{
+    filter_eligible_model_rows_for_constraints, filter_eligible_model_rows_for_state,
+    matches_model_mapping_for_models, models_api_format,
+};
 
 pub(super) async fn maybe_build_local_models_response(
     state: &AppState,

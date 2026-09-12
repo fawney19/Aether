@@ -735,6 +735,7 @@ impl AuthApiKeyWriteRepository for InMemoryAuthApiKeySnapshotRepository {
             api_key_allowed_api_formats: record.allowed_api_formats.clone(),
             api_key_allowed_models: record.allowed_models.clone(),
             api_key_ip_rules: record.ip_rules.clone(),
+            user_provider_key_policies: std::collections::BTreeMap::new(),
         };
 
         let now_unix_secs = current_unix_secs() as i64;
@@ -831,6 +832,7 @@ impl AuthApiKeyWriteRepository for InMemoryAuthApiKeySnapshotRepository {
                 api_key_allowed_api_formats: record.allowed_api_formats.clone(),
                 api_key_allowed_models: record.allowed_models.clone(),
                 api_key_ip_rules: record.ip_rules.clone(),
+                user_provider_key_policies: std::collections::BTreeMap::new(),
                 ..template
             }
         } else {

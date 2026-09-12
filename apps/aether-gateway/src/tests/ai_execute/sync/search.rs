@@ -94,6 +94,7 @@ async fn gateway_executes_codex_search_with_responses_permission_and_search_cont
             provider_type: "codex".to_string(),
             provider_priority: 10,
             provider_is_active: true,
+            provider_pool_enabled: false,
             endpoint_id: "endpoint-codex-search-1".to_string(),
             endpoint_api_format: "openai:search".to_string(),
             endpoint_api_family: Some("openai".to_string()),

@@ -221,6 +221,14 @@ async fn postgres_policy_null_migration_repairs_legacy_upgrade_before_auth_reads
             .await
             .expect("previous PostgreSQL migrations should apply");
     }
+    // Current group reads require this column even while legacy policy nulls remain unrepaired.
+    let group_key_policy_migration = POSTGRES_MIGRATOR
+        .iter()
+        .find(|migration| migration.version == 20260912000000)
+        .expect("user group key policy migration should be embedded");
+    connection.apply(group_key_policy_migration).await.expect(
+        "current group read schema should be available before testing legacy policy decoding",
+    );
     drop(connection);
 
     let pool = PgPool::connect(server.database_url())

@@ -46,6 +46,7 @@ mod tests {
             provider_type: "custom".to_string(),
             provider_priority: 10,
             provider_is_active: true,
+            provider_pool_enabled: false,
             endpoint_id: format!("endpoint-{id}"),
             endpoint_api_format: "openai:chat".to_string(),
             endpoint_api_family: Some("openai".to_string()),
@@ -87,6 +88,7 @@ mod tests {
             provider_name: format!("Provider {id}"),
             provider_type: "openai".to_string(),
             provider_priority: 0,
+            provider_pool_enabled: false,
             endpoint_id: format!("endpoint-{id}"),
             endpoint_api_format: "openai:chat".to_string(),
             key_id: format!("key-{id}"),
@@ -193,6 +195,7 @@ mod tests {
 
         let constraints = SchedulerAuthConstraints {
             allowed_providers: Some(vec!["provider-1".to_string()]),
+            provider_key_policies: Default::default(),
             allowed_api_formats: Some(vec!["OPENAI:CHAT".to_string()]),
             allowed_models: Some(vec!["gpt-5".to_string()]),
         };
@@ -237,6 +240,7 @@ mod tests {
 
         let constraints = SchedulerAuthConstraints {
             allowed_providers: Some(vec!["codex".to_string()]),
+            provider_key_policies: Default::default(),
             allowed_api_formats: Some(vec!["codex:live".to_string()]),
             allowed_models: Some(vec!["live-future-alias".to_string()]),
         };
@@ -277,6 +281,105 @@ mod tests {
             .expect("non-Codex Live candidate enumeration should build");
             assert!(candidates.is_empty());
         }
+    }
+
+    #[test]
+    fn enumeration_excludes_provider_keys_outside_the_group_policy() {
+        let mut allowed = sample_row("allowed");
+        allowed.provider_id = "provider-1".to_string();
+        allowed.provider_name = "Provider 1".to_string();
+        allowed.key_id = "key-allowed".to_string();
+
+        let mut blocked = allowed.clone();
+        blocked.key_id = "key-blocked".to_string();
+
+        let constraints = SchedulerAuthConstraints {
+            allowed_providers: Some(vec!["provider-1".to_string()]),
+            provider_key_policies: BTreeMap::from([(
+                "provider-1".to_string(),
+                vec!["key-allowed".to_string()],
+            )]),
+            allowed_api_formats: Some(vec!["openai:chat".to_string()]),
+            allowed_models: Some(vec!["gpt-5".to_string()]),
+        };
+        let candidates =
+            super::enumerate_minimal_candidate_selection(EnumerateMinimalCandidateSelectionInput {
+                rows: vec![blocked, allowed],
+                normalized_api_format: "openai:chat",
+                request_operation: None,
+                requested_model_name: "gpt-5",
+                resolved_global_model_name: "gpt-5",
+                require_streaming: false,
+                required_capabilities: None,
+                auth_constraints: Some(&constraints),
+            })
+            .expect("candidate selection should build");
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].key_id, "key-allowed");
+    }
+
+    #[test]
+    fn enumeration_keeps_pool_representative_until_pool_expansion() {
+        let mut representative = sample_row("1");
+        representative.provider_pool_enabled = true;
+        representative.key_id = "key-representative".to_string();
+        let constraints = SchedulerAuthConstraints {
+            allowed_providers: None,
+            provider_key_policies: BTreeMap::from([(
+                representative.provider_id.clone(),
+                vec!["key-later".to_string()],
+            )]),
+            allowed_api_formats: None,
+            allowed_models: None,
+        };
+
+        let candidates =
+            super::enumerate_minimal_candidate_selection(EnumerateMinimalCandidateSelectionInput {
+                rows: vec![representative],
+                normalized_api_format: "openai:chat",
+                request_operation: None,
+                requested_model_name: "gpt-5",
+                resolved_global_model_name: "gpt-5",
+                require_streaming: false,
+                required_capabilities: None,
+                auth_constraints: Some(&constraints),
+            })
+            .expect("pool representative should enumerate");
+
+        assert_eq!(candidates.len(), 1);
+        assert!(candidates[0].provider_pool_enabled);
+        assert_eq!(candidates[0].key_id, "key-representative");
+    }
+
+    #[test]
+    fn enumeration_still_rejects_disallowed_non_pool_key() {
+        let mut row = sample_row("1");
+        row.key_id = "key-representative".to_string();
+        let constraints = SchedulerAuthConstraints {
+            allowed_providers: None,
+            provider_key_policies: BTreeMap::from([(
+                row.provider_id.clone(),
+                vec!["key-later".to_string()],
+            )]),
+            allowed_api_formats: None,
+            allowed_models: None,
+        };
+
+        let candidates =
+            super::enumerate_minimal_candidate_selection(EnumerateMinimalCandidateSelectionInput {
+                rows: vec![row],
+                normalized_api_format: "openai:chat",
+                request_operation: None,
+                requested_model_name: "gpt-5",
+                resolved_global_model_name: "gpt-5",
+                require_streaming: false,
+                required_capabilities: None,
+                auth_constraints: Some(&constraints),
+            })
+            .expect("non-pool enumeration should complete");
+
+        assert!(candidates.is_empty());
     }
 
     #[test]
@@ -335,6 +438,7 @@ mod tests {
 
         let constraints = SchedulerAuthConstraints {
             allowed_providers: Some(vec!["provider-1".to_string()]),
+            provider_key_policies: Default::default(),
             allowed_api_formats: Some(vec!["openai:chat".to_string()]),
             allowed_models: Some(vec!["gpt-5".to_string()]),
         };
