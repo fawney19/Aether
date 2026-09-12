@@ -103,10 +103,11 @@ pub(crate) async fn maybe_build_local_admin_provider_reads_response(
                 .build_admin_provider_summary_payload(&provider_id)
                 .await
             {
-                Some(payload) => Json(payload).into_response(),
-                None => build_admin_provider_not_found_response(format!(
+                Ok(Some(payload)) => Json(payload).into_response(),
+                Ok(None) => build_admin_provider_not_found_response(format!(
                     "Provider {provider_id} 不存在"
                 )),
+                Err(_) => build_admin_providers_data_unavailable_response(),
             },
         ));
     }

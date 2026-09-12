@@ -68,11 +68,11 @@ fn classifies_admin_provider_oauth_batch_import_task_status_as_admin_proxy_route
     );
     assert_eq!(
         decision.auth_endpoint_signature.as_deref(),
-        Some("admin:pool")
+        Some("admin:provider_oauth")
     );
     assert_eq!(
         management_token_required_permission(&http::Method::GET, &decision).as_deref(),
-        Some("admin:pool:read")
+        Some("admin:provider_oauth:read")
     );
     assert!(!decision.is_execution_runtime_candidate());
 }
@@ -86,42 +86,42 @@ fn classifies_admin_provider_oauth_maintenance_routes_as_admin_proxy_route() {
             "/api/admin/provider-oauth/keys/key-123/complete",
             "complete_key_oauth",
             "admin:provider_oauth",
-            "admin:provider_oauth:write",
+            "admin:provider_oauth:admin",
         ),
         (
             http::Method::POST,
             "/api/admin/provider-oauth/keys/key-123/refresh",
             "refresh_key_oauth",
             "admin:provider_oauth",
-            "admin:provider_oauth:write",
+            "admin:provider_oauth:admin",
         ),
         (
             http::Method::POST,
             "/api/admin/provider-oauth/providers/provider-123/complete",
             "complete_provider_oauth",
             "admin:provider_oauth",
-            "admin:provider_oauth:write",
+            "admin:provider_oauth:admin",
         ),
         (
             http::Method::POST,
             "/api/admin/provider-oauth/providers/provider-123/import-refresh-token",
             "import_refresh_token",
             "admin:provider_oauth",
-            "admin:provider_oauth:write",
+            "admin:provider_oauth:admin",
         ),
         (
             http::Method::POST,
             "/api/admin/provider-oauth/providers/provider-123/cookie-authorize",
             "cookie_authorize",
             "admin:provider_oauth",
-            "admin:provider_oauth:write",
+            "admin:provider_oauth:admin",
         ),
         (
             http::Method::POST,
             "/api/admin/provider-oauth/providers/provider-123/cookie-authorize/tasks",
             "start_cookie_authorize_task",
             "admin:provider_oauth",
-            "admin:provider_oauth:write",
+            "admin:provider_oauth:admin",
         ),
         (
             http::Method::GET,
@@ -135,7 +135,7 @@ fn classifies_admin_provider_oauth_maintenance_routes_as_admin_proxy_route() {
             "/api/admin/provider-oauth/providers/provider-123/agent-identity-import/tasks",
             "start_agent_identity_import_task",
             "admin:provider_oauth",
-            "admin:provider_oauth:write",
+            "admin:provider_oauth:admin",
         ),
         (
             http::Method::GET,
@@ -148,22 +148,22 @@ fn classifies_admin_provider_oauth_maintenance_routes_as_admin_proxy_route() {
             http::Method::POST,
             "/api/admin/provider-oauth/providers/provider-123/batch-import",
             "batch_import_oauth",
-            "admin:pool",
-            "admin:pool:write",
+            "admin:provider_oauth",
+            "admin:provider_oauth:admin",
         ),
         (
             http::Method::POST,
             "/api/admin/provider-oauth/providers/provider-123/batch-import/tasks",
             "start_batch_import_oauth_task",
-            "admin:pool",
-            "admin:pool:write",
+            "admin:provider_oauth",
+            "admin:provider_oauth:admin",
         ),
         (
             http::Method::GET,
             "/api/admin/provider-oauth/providers/provider-123/batch-import/tasks/task-123",
             "get_batch_import_task_status",
-            "admin:pool",
-            "admin:pool:read",
+            "admin:provider_oauth",
+            "admin:provider_oauth:read",
         ),
         (
             http::Method::POST,
@@ -177,7 +177,7 @@ fn classifies_admin_provider_oauth_maintenance_routes_as_admin_proxy_route() {
             "/api/admin/provider-oauth/providers/provider-123/device-poll",
             "device_poll",
             "admin:provider_oauth",
-            "admin:provider_oauth:write",
+            "admin:provider_oauth:admin",
         ),
     ] {
         let uri: Uri = path.parse().expect("uri should parse");

@@ -552,6 +552,10 @@ fn rejection(
 fn admission_error_status(error: &GatewayError) -> StatusCode {
     match error {
         GatewayError::AdmissionTimeout { .. } => StatusCode::TOO_MANY_REQUESTS,
+        GatewayError::PlanUsageLimited(_) => StatusCode::TOO_MANY_REQUESTS,
+        GatewayError::LastActiveAdminUpdateDenied | GatewayError::LastActiveAdminDeleteDenied => {
+            StatusCode::BAD_REQUEST
+        }
         GatewayError::Client { status, .. } => *status,
         GatewayError::LocalExecutionPlanningTimeout { .. } => StatusCode::GATEWAY_TIMEOUT,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
@@ -564,6 +568,9 @@ fn gateway_error_kind(error: &GatewayError) -> &'static str {
         GatewayError::ControlUnavailable { .. } => "control_unavailable",
         GatewayError::LocalExecutionPlanningTimeout { .. } => "planning_timeout",
         GatewayError::AdmissionTimeout { .. } => "admission_timeout",
+        GatewayError::PlanUsageLimited(_) => "plan_usage_limited",
+        GatewayError::LastActiveAdminUpdateDenied => "last_admin_update_denied",
+        GatewayError::LastActiveAdminDeleteDenied => "last_admin_delete_denied",
         GatewayError::Client { .. } => "client_error",
         GatewayError::Internal(_) => "internal_error",
     }

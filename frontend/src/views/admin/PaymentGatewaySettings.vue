@@ -419,6 +419,7 @@
 </template>
 
 <script setup lang="ts">
+import { getI18nLocale } from '@/i18n'
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { CircleHelp, PlugZap, Plus, Save, Trash2 } from 'lucide-vue-next'
 import { epayGatewayApi, type EpayChannelConfig, type PaymentGatewayProvider } from '@/api/billing'
@@ -544,7 +545,7 @@ const visibleFields = computed(() => activeProviderMeta.value.fields)
 
 const updatedAtText = computed(() => {
   if (!updatedAt.value) return ''
-  return new Date(updatedAt.value * 1000).toLocaleString('zh-CN')
+  return new Date(updatedAt.value * 1000).toLocaleString(getI18nLocale())
 })
 
 const defaultCallbackBaseUrl = computed(() => {

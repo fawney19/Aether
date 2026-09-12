@@ -582,8 +582,8 @@ describe('OAuthAccountDialog authorization and import', () => {
       '批量授权完成：成功 0 个（新增 0 个，替换 0 个），失败 4 个；#2 invalid cookie；#3 expired cookie',
       '错误',
     )
-    expect(toastMocks.error.mock.calls.at(-1)?.[0]).not.toContain('must-not-leak')
-    expect(toastMocks.error.mock.calls.at(-1)?.[0]).not.toContain('third safe reason')
+    expect(toastMocks.error.mock.calls[toastMocks.error.mock.calls.length - 1]?.[0]).not.toContain('must-not-leak')
+    expect(toastMocks.error.mock.calls[toastMocks.error.mock.calls.length - 1]?.[0]).not.toContain('third safe reason')
     expect(toastMocks.warning).not.toHaveBeenCalled()
   })
 

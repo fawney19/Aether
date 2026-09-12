@@ -379,7 +379,8 @@ async function handleEdit(node: ProxyNode) {
       name: detail.name,
       proxy_url: detail.proxy_url || '',
       username: detail.proxy_username || '',
-      password: detail.proxy_password || '',
+      // 密码是 write-only；留空时更新接口会保留已存密码。
+      password: '',
       region: detail.region || '',
     }
     addMode.value = 'manual'

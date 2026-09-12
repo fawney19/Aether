@@ -4,13 +4,11 @@ use aether_contracts::{
     ExecutionPlan, ExecutionResult, ExecutionTimeouts, ProxySnapshot, RequestBody,
     EXECUTION_REQUEST_FOLLOW_REDIRECTS_HEADER, EXECUTION_REQUEST_HTTP1_ONLY_HEADER,
 };
-use base64::{engine::general_purpose::STANDARD, Engine as _};
-use flate2::read::{DeflateDecoder, GzDecoder};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
-use std::io::Read;
 
 const ADMIN_PROVIDER_OPS_VERIFY_TIMEOUT_MS: u64 = 30_000;
+const ADMIN_PROVIDER_OPS_RESPONSE_BODY_LIMIT_BYTES: usize = 4 * 1024 * 1024;
 
 pub(super) struct AdminProviderOpsTextResponse {
     pub(super) body: String,
@@ -170,7 +168,9 @@ async fn admin_provider_ops_execute_request(
         key_id: String::new(),
         method: method.as_str().to_string(),
         url: url.to_string(),
-        headers: admin_provider_ops_execution_headers(headers),
+        headers: admin_provider_ops_execution_headers(
+            &admin_provider_ops_headers_with_transport_controls(headers, Some(false), false),
+        ),
         content_type: has_json_body.then(|| "application/json".to_string()),
         content_encoding: None,
         body,
@@ -189,8 +189,12 @@ async fn admin_provider_ops_execute_request(
             ..ExecutionTimeouts::default()
         }),
     };
+    let bounded_plan = crate::execution_runtime::transport::with_upstream_response_body_limit(
+        &plan,
+        ADMIN_PROVIDER_OPS_RESPONSE_BODY_LIMIT_BYTES,
+    );
     state
-        .execute_execution_runtime_sync_plan(None, &plan)
+        .execute_execution_runtime_sync_plan(None, &bounded_plan)
         .await
         .map_err(admin_provider_ops_gateway_error_message)
 }
@@ -254,9 +258,9 @@ fn admin_provider_ops_execution_json_response(
     match serde_json::from_slice::<Value>(&bytes) {
         Ok(value) => Ok((status, value)),
         Err(_) if status != http::StatusCode::OK => Ok((status, json!({}))),
-        Err(err) => Err(AdminProviderOpsExecuteJsonError::InvalidJson(format!(
-            "upstream response is not valid JSON: {err}"
-        ))),
+        Err(_) => Err(AdminProviderOpsExecuteJsonError::InvalidJson(
+            "upstream response is not valid JSON".to_string(),
+        )),
     }
 }
 
@@ -264,49 +268,28 @@ fn admin_provider_ops_execution_body_bytes(
     headers: &BTreeMap<String, String>,
     body: &aether_contracts::ResponseBody,
 ) -> Option<Vec<u8>> {
-    let bytes = body
-        .body_bytes_b64
-        .as_deref()
-        .and_then(|value| STANDARD.decode(value).ok())?;
-    admin_provider_ops_decode_response_bytes(
+    let bytes = body.body_bytes_b64.as_deref().and_then(|value| {
+        crate::execution_runtime::transport::decode_base64_body_with_limit(
+            value,
+            ADMIN_PROVIDER_OPS_RESPONSE_BODY_LIMIT_BYTES,
+        )
+        .ok()
+    })?;
+    crate::execution_runtime::transport::decode_response_body_bytes_with_limit(
+        headers,
         &bytes,
-        headers.get("content-encoding").map(String::as_str),
+        ADMIN_PROVIDER_OPS_RESPONSE_BODY_LIMIT_BYTES,
     )
-    .or(Some(bytes))
-}
-
-fn admin_provider_ops_decode_response_bytes(
-    bytes: &[u8],
-    content_encoding: Option<&str>,
-) -> Option<Vec<u8>> {
-    let encoding = content_encoding
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|value| value.to_ascii_lowercase());
-    match encoding.as_deref() {
-        Some("gzip") => {
-            let mut decoder = GzDecoder::new(bytes);
-            let mut out = Vec::new();
-            decoder.read_to_end(&mut out).ok()?;
-            Some(out)
-        }
-        Some("deflate") => {
-            let mut decoder = DeflateDecoder::new(bytes);
-            let mut out = Vec::new();
-            decoder.read_to_end(&mut out).ok()?;
-            Some(out)
-        }
-        _ => None,
-    }
+    .ok()
+    .map(std::borrow::Cow::into_owned)
 }
 
 fn admin_provider_ops_gateway_error_message(error: GatewayError) -> String {
-    error.into_message()
+    admin_provider_ops_verify_execution_error_message(&error.into_message())
 }
 
 pub(super) fn admin_provider_ops_verify_execution_error_message(error: &str) -> String {
-    let normalized = error.trim();
-    let lower = normalized.to_ascii_lowercase();
+    let lower = error.trim().to_ascii_lowercase();
     if lower.contains("timeout") || lower.contains("timed out") {
         return "连接超时".to_string();
     }
@@ -316,7 +299,22 @@ pub(super) fn admin_provider_ops_verify_execution_error_message(error: &str) -> 
         || lower.contains("proxy")
         || lower.contains("relay")
     {
-        return format!("连接失败: {normalized}");
+        return "连接失败".to_string();
     }
-    format!("验证失败: {normalized}")
+    "验证失败".to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::admin_provider_ops_verify_execution_error_message;
+
+    #[test]
+    fn provider_ops_transport_errors_do_not_echo_urls_or_credentials() {
+        let raw = "connection failed for https://user:password@api.example.test/path?token=secret";
+        let projected = admin_provider_ops_verify_execution_error_message(raw);
+        assert_eq!(projected, "连接失败");
+        for secret in ["user", "password", "token", "secret", "api.example.test"] {
+            assert!(!projected.contains(secret), "leaked {secret}");
+        }
+    }
 }

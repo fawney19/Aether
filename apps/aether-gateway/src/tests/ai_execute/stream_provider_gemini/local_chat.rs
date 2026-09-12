@@ -350,7 +350,7 @@ async fn gateway_executes_gemini_chat_stream_via_local_decision_gate_with_local_
                     });
                     let frames = concat!(
                         "{\"type\":\"headers\",\"payload\":{\"kind\":\"headers\",\"status_code\":200,\"headers\":{\"content-type\":\"text/event-stream\"}}}\n",
-                        "{\"type\":\"data\",\"payload\":{\"kind\":\"data\",\"text\":\"data: {\\\"candidates\\\":[]}\\n\\n\"}}\n",
+                        "{\"type\":\"data\",\"payload\":{\"kind\":\"data\",\"text\":\"data: {\\\"candidates\\\":[{\\\"content\\\":{\\\"parts\\\":[{\\\"text\\\":\\\"ok\\\"}]},\\\"finishReason\\\":\\\"STOP\\\"}]}\\n\\n\"}}\n",
                         "{\"type\":\"telemetry\",\"payload\":{\"kind\":\"telemetry\",\"telemetry\":{\"elapsed_ms\":33,\"upstream_bytes\":26}}}\n",
                         "{\"type\":\"eof\",\"payload\":{\"kind\":\"eof\"}}\n"
                     );
@@ -394,6 +394,11 @@ async fn gateway_executes_gemini_chat_stream_via_local_decision_gate_with_local_
             provider_catalog_repository,
             Arc::clone(&request_candidate_repository),
             DEVELOPMENT_ENCRYPTION_KEY,
+        )
+        .attach_proxy_node_repository_for_tests(
+            crate::tests::ai_execute::ai_execute_proxy_node_repository([
+                "proxy-node-gemini-chat-stream",
+            ]),
         ),
     );
     let gateway = build_router_with_state(gateway_state);
@@ -415,7 +420,7 @@ async fn gateway_executes_gemini_chat_stream_via_local_decision_gate_with_local_
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
         strip_sse_keepalive_comments(&response.text().await.expect("body should read")),
-        "data: {\"candidates\":[]}\n\n"
+        "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"ok\"}]},\"finishReason\":\"STOP\"}]}\n\n"
     );
 
     let seen_execution_runtime_request = seen_execution_runtime

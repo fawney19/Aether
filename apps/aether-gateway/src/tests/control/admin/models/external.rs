@@ -1,6 +1,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use aether_crypto::DEVELOPMENT_ENCRYPTION_KEY;
 use aether_data::repository::proxy_nodes::{InMemoryProxyNodeRepository, StoredProxyNode};
 use axum::body::Body;
 use axum::extract::ws::Message;
@@ -11,7 +12,10 @@ use http::StatusCode;
 use serde_json::json;
 use tokio::sync::watch;
 
-use super::super::super::{build_router_with_state, sample_proxy_node, start_server, AppState};
+use super::super::super::{
+    build_router_with_state, sample_proxy_node, start_server, with_tunnel_control_plane_key,
+    AppState, TUNNEL_CONTROL_PLANE_TEST_GENERATION, TUNNEL_CONTROL_PLANE_TEST_PSK,
+};
 use crate::constants::{
     GATEWAY_HEADER, TRUSTED_ADMIN_SESSION_ID_HEADER, TRUSTED_ADMIN_USER_ID_HEADER,
     TRUSTED_ADMIN_USER_ROLE_HEADER,
@@ -314,7 +318,10 @@ async fn gateway_fetches_external_models_through_connected_tunnel_node() {
     let source_url = "https://models.dev.test/api.json";
     let _guard = set_admin_external_models_source_url_for_tests(source_url);
 
-    let mut tunnel_node = sample_proxy_node("tunnel-node");
+    let mut tunnel_node = with_tunnel_control_plane_key(
+        sample_proxy_node("tunnel-node"),
+        TUNNEL_CONTROL_PLANE_TEST_PSK,
+    );
     tunnel_node.name = "Tunnel Node".to_string();
     tunnel_node.status = "online".to_string();
     tunnel_node.tunnel_mode = true;
@@ -322,6 +329,7 @@ async fn gateway_fetches_external_models_through_connected_tunnel_node() {
     tunnel_node.remote_config = None;
     let repository = Arc::new(InMemoryProxyNodeRepository::seed(vec![tunnel_node]));
     let data_state = GatewayDataState::with_proxy_node_repository_for_tests(repository)
+        .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY)
         .with_system_config_values_for_tests([(
             "external_models_proxy_node_id".to_string(),
             json!("tunnel-node"),
@@ -332,9 +340,8 @@ async fn gateway_fetches_external_models_through_connected_tunnel_node() {
     let tunnel_state = state.tunnel.app_state();
     let (proxy_tx, mut proxy_rx) = aether_runtime::bounded_queue(8);
     let (proxy_close_tx, _) = watch::channel(false);
-    tunnel_state
-        .hub
-        .register_proxy(Arc::new(TunnelProxyConn::new(
+    tunnel_state.hub.register_proxy(Arc::new(
+        TunnelProxyConn::new(
             700,
             "tunnel-node".to_string(),
             "Tunnel Node".to_string(),
@@ -342,7 +349,10 @@ async fn gateway_fetches_external_models_through_connected_tunnel_node() {
             proxy_close_tx,
             16,
             2,
-        )));
+        )
+        .with_tunnel_generation(TUNNEL_CONTROL_PLANE_TEST_GENERATION.to_string())
+        .with_authenticated_key(TUNNEL_CONTROL_PLANE_TEST_PSK.to_string()),
+    ));
 
     let gateway = build_router_with_state(state);
     let (gateway_url, gateway_handle) = start_server(gateway).await;
@@ -371,7 +381,7 @@ async fn gateway_fetches_external_models_through_connected_tunnel_node() {
         serde_json::from_slice(&meta_payload).expect("request meta should parse");
     assert_eq!(meta.method, "GET");
     assert_eq!(meta.url, source_url);
-    assert_eq!(meta.follow_redirects, Some(true));
+    assert_eq!(meta.follow_redirects, Some(false));
     assert_eq!(
         meta.headers.get("accept").map(String::as_str),
         Some("application/json")

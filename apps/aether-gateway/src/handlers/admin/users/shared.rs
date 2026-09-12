@@ -66,7 +66,7 @@ pub(super) struct AdminToggleUserApiKeyLockRequest {
     pub(super) locked: Option<bool>,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(serde::Deserialize)]
 pub(super) struct AdminCreateUserRequest {
     pub(super) username: String,
     pub(super) password: String,
@@ -84,7 +84,7 @@ pub(super) struct AdminCreateUserRequest {
     pub(super) feature_settings: Option<Value>,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(serde::Deserialize)]
 pub(super) struct AdminUpdateUserRequest {
     #[serde(default)]
     pub(super) email: Option<String>,
@@ -155,6 +155,41 @@ pub(super) fn build_admin_users_bad_request_response(detail: impl Into<String>) 
         Json(json!({ "detail": detail.into() })),
     )
         .into_response()
+}
+
+pub(super) fn management_token_may_administer_user_accounts(
+    request_context: &crate::handlers::admin::request::AdminRequestContext<'_>,
+) -> bool {
+    request_context.decision().is_some_and(|decision| {
+        crate::control::management_token_principal_has_permission(decision, "admin:users:admin")
+    })
+}
+
+pub(super) fn build_admin_users_permission_denied_response(
+    request_context: &crate::handlers::admin::request::AdminRequestContext<'_>,
+) -> Response<Body> {
+    let actor_id = request_context
+        .decision()
+        .and_then(|decision| decision.admin_principal.as_ref())
+        .and_then(|principal| principal.management_token_id.as_deref())
+        .unwrap_or("unknown");
+    crate::handlers::admin::shared::attach_admin_audit_response(
+        (
+            http::StatusCode::FORBIDDEN,
+            Json(json!({
+                "detail": "management token permission denied",
+                "required_permission": "admin:users:admin",
+                "route_family": request_context.route_family(),
+                "route_kind": request_context.route_kind(),
+                "request_path": request_context.path(),
+            })),
+        )
+            .into_response(),
+        "admin_user_account_permission_denied",
+        "permission_denied",
+        "admin_user_account",
+        actor_id,
+    )
 }
 
 pub(super) fn normalize_admin_optional_user_email(

@@ -17,7 +17,8 @@ use aether_contracts::{
 };
 use aether_data_contracts::repository::candidates::RequestCandidateStatus;
 use aether_data_contracts::repository::usage::{
-    UsageBodyCaptureState, WEBSOCKET_MODE_METADATA_KEY, WEBSOCKET_TRANSPORT_METADATA_KEY,
+    UsageBodyCaptureState, PLAN_USAGE_RESERVATION_DEFERRED_METADATA_KEY,
+    WEBSOCKET_MODE_METADATA_KEY, WEBSOCKET_TRANSPORT_METADATA_KEY,
 };
 use aether_scheduler_core::SchedulerRequestCandidateStatusUpdate;
 use aether_usage_runtime::{
@@ -51,6 +52,7 @@ use crate::orchestration::{
     release_local_pool_key_lease, release_pool_key_lease_from_report_context,
     LocalExecutionEffectContext, LocalStreamFailureEffect,
 };
+use crate::plan_usage_policy::PlanUsagePolicySnapshot;
 use crate::request_candidate_runtime::{
     ensure_execution_request_candidate_slot, record_local_request_candidate_status,
 };
@@ -146,6 +148,10 @@ impl ResponsesWebSocketTurnOutcome {
     }
 
     pub(super) const fn connection_admission_lost() -> Self {
+        // This gateway-owned cancellation is also used when a logical turn's
+        // subscription-plan permit becomes unhealthy. Keeping it Cancelled
+        // prevents the settlement layer from projecting a provider failure;
+        // the client-visible 503 is emitted separately by plan_admission.
         Self::Cancelled {
             reason: "gateway WebSocket connection admission became unhealthy",
         }
@@ -250,16 +256,226 @@ pub(super) struct ResponsesProviderAttempt {
     first_event_timeout: Duration,
     terminal_timeout: Duration,
     admission: Option<ResponsesWebSocketTurnAdmission>,
+    /// A provider attempt gets its own server-issued cost reservation. The
+    /// trusted token also lives in the lifecycle report context so the normal
+    /// terminal usage path can reconcile actual cost. We retain the control
+    /// snapshot here only for the quota-retry path, which must release the old
+    /// attempt synchronously before reserving the replacement.
+    plan_usage_cost_reservation: Option<ResponsesPlanUsageCostReservation>,
     terminal_error_body: Option<String>,
     /// 观察到的 provider 终态事实，与「为什么现在结算」这个信号分开保存。
     /// 客户端投递失败不会把它擦掉。
     provider_outcome: Option<AttemptProviderOutcome>,
     /// 这一个 attempt 的内容是否完整交付给了客户端。与 provider 终态正交。
     client_delivery: AttemptClientDelivery,
-    /// True only after `response.create` has been accepted by the upstream
-    /// socket writer. Cancellation before this point must not be projected as
-    /// provider failure or billed usage.
-    upstream_request_sent: bool,
+    /// Tracks the irreversible transport handoff separately from flush
+    /// confirmation. Once start_send succeeds, a later cancellation cannot
+    /// prove the provider did not receive or execute response.create.
+    upstream_request_state: UpstreamRequestState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum UpstreamRequestState {
+    NotStarted,
+    PossiblySent,
+    Sent,
+}
+
+impl UpstreamRequestState {
+    const fn may_have_reached_provider(self) -> bool {
+        !matches!(self, Self::NotStarted)
+    }
+}
+
+struct ResponsesPlanUsageCostReservation {
+    control_decision: GatewayControlDecision,
+    reservation_token: String,
+}
+
+struct OwnedResponsesPlanUsageCostReservation {
+    control_decision: GatewayControlDecision,
+    plan: ExecutionPlan,
+    reservation_token: String,
+}
+
+/// Owns a successful durable reservation until an attempt lifecycle owns the
+/// trusted report context. If startup is cancelled anywhere in between, Drop
+/// releases the reservation instead of leaving a false 429 until its TTL.
+struct ResponsesPlanUsageCostReservationGuard {
+    state: AppState,
+    reservation: Option<OwnedResponsesPlanUsageCostReservation>,
+}
+
+impl ResponsesPlanUsageCostReservationGuard {
+    fn new(
+        state: &AppState,
+        control_decision: GatewayControlDecision,
+        plan: ExecutionPlan,
+        reservation_token: String,
+    ) -> Self {
+        Self {
+            state: state.clone(),
+            reservation: Some(OwnedResponsesPlanUsageCostReservation {
+                control_decision,
+                plan,
+                reservation_token,
+            }),
+        }
+    }
+
+    fn reservation_token(&self) -> &str {
+        self.reservation
+            .as_ref()
+            .expect("an armed plan cost reservation guard owns its reservation")
+            .reservation_token
+            .as_str()
+    }
+
+    fn disarm(mut self) -> ResponsesPlanUsageCostReservation {
+        let reservation = self
+            .reservation
+            .take()
+            .expect("an armed plan cost reservation guard owns its reservation");
+        ResponsesPlanUsageCostReservation {
+            control_decision: reservation.control_decision,
+            reservation_token: reservation.reservation_token,
+        }
+    }
+}
+
+impl Drop for ResponsesPlanUsageCostReservationGuard {
+    fn drop(&mut self) {
+        let Some(reservation) = self.reservation.take() else {
+            return;
+        };
+        let state = self.state.clone();
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                release_responses_plan_usage_cost_best_effort(
+                    &state,
+                    &reservation.control_decision,
+                    &reservation.plan,
+                    reservation.reservation_token.as_str(),
+                    "turn_start_cancelled",
+                )
+                .await;
+            });
+        }
+    }
+}
+
+enum ResponsesPlanUsageCostReservationStart {
+    NotRequired,
+    Reserved(ResponsesPlanUsageCostReservationGuard),
+    Rejected(crate::plan_usage_policy::PlanUsagePolicyRejection),
+}
+
+async fn reserve_responses_plan_usage_cost_owned(
+    state: &AppState,
+    control_decision: &GatewayControlDecision,
+    plan: &ExecutionPlan,
+    report_context: Option<&Value>,
+    plan_usage_policy_snapshot: Option<&PlanUsagePolicySnapshot>,
+    reservation_token: String,
+) -> Result<ResponsesPlanUsageCostReservationStart, GatewayError> {
+    let outcome = crate::plan_usage_policy::reserve_admitted_plan_usage_policy_cost(
+        state,
+        control_decision,
+        plan,
+        report_context,
+        plan_usage_policy_snapshot,
+        reservation_token.as_str(),
+    )
+    .await?;
+    match outcome {
+        crate::plan_usage_policy::PlanUsageCostReservationOutcome::NotRequired => {
+            Ok(ResponsesPlanUsageCostReservationStart::NotRequired)
+        }
+        crate::plan_usage_policy::PlanUsageCostReservationOutcome::Reserved => {
+            Ok(ResponsesPlanUsageCostReservationStart::Reserved(
+                ResponsesPlanUsageCostReservationGuard::new(
+                    state,
+                    control_decision.clone(),
+                    plan.clone(),
+                    reservation_token,
+                ),
+            ))
+        }
+        crate::plan_usage_policy::PlanUsageCostReservationOutcome::Rejected(rejection) => {
+            Ok(ResponsesPlanUsageCostReservationStart::Rejected(rejection))
+        }
+    }
+}
+
+fn attach_plan_usage_reservation_token(
+    report_context: Option<Value>,
+    reservation_token: &str,
+) -> Option<Value> {
+    let mut object = match report_context {
+        Some(Value::Object(object)) => object,
+        Some(other) => Map::from_iter([("seed".to_string(), other)]),
+        None => Map::new(),
+    };
+    // Always overwrite a client-derived/seed value with the server-issued
+    // token. Terminal reconciliation must never trust caller-controlled JSON.
+    object.insert(
+        "plan_usage_reservation_token".to_string(),
+        Value::String(reservation_token.to_string()),
+    );
+    // The token and its reconciliation controls are server-owned. A seed or
+    // client event must never be able to defer reconciliation on its own.
+    object.insert(
+        PLAN_USAGE_RESERVATION_DEFERRED_METADATA_KEY.to_string(),
+        Value::Bool(false),
+    );
+    Some(Value::Object(object))
+}
+
+fn websocket_plan_usage_rejection_error(
+    rejection: &crate::plan_usage_policy::PlanUsagePolicyRejection,
+) -> GatewayError {
+    GatewayError::PlanUsageLimited(rejection.clone())
+}
+
+async fn release_responses_plan_usage_cost(
+    state: &AppState,
+    control_decision: &GatewayControlDecision,
+    plan: &ExecutionPlan,
+    reservation_token: &str,
+    _reason: &'static str,
+) -> Result<(), GatewayError> {
+    crate::plan_usage_policy::release_plan_usage_policy_cost(
+        state,
+        control_decision,
+        plan,
+        reservation_token,
+        current_unix_ms() / 1_000,
+    )
+    .await
+}
+
+async fn release_responses_plan_usage_cost_best_effort(
+    state: &AppState,
+    control_decision: &GatewayControlDecision,
+    plan: &ExecutionPlan,
+    reservation_token: &str,
+    reason: &'static str,
+) {
+    if let Err(error) =
+        release_responses_plan_usage_cost(state, control_decision, plan, reservation_token, reason)
+            .await
+    {
+        warn!(
+            event_name = "responses_websocket_plan_usage_cost_release_failed",
+            log_type = "ops",
+            request_id = %plan.request_id,
+            candidate_id = ?plan.candidate_id,
+            reservation_token,
+            reason,
+            error = ?error,
+            "gateway failed to release a Responses WebSocket plan cost reservation"
+        );
+    }
 }
 
 /// 组装一轮 turn 的 decision。
@@ -307,6 +523,7 @@ pub(super) async fn begin_unowned_responses_websocket_turn(
     control_decision: &GatewayControlDecision,
     decision: AiExecutionDecision,
     client_event: &Value,
+    plan_usage_policy_snapshot: Option<PlanUsagePolicySnapshot>,
 ) -> Result<ResponsesProviderAttempt, GatewayError> {
     let planned_report_context = decision.report_context.clone();
     let attempt = match build_openai_responses_stream_plan_from_decision(
@@ -415,6 +632,68 @@ pub(super) async fn begin_unowned_responses_websocket_turn(
         }
     };
 
+    let reservation_token = uuid::Uuid::new_v4().to_string();
+    let cost_reservation = match reserve_responses_plan_usage_cost_owned(
+        state,
+        control_decision,
+        &plan,
+        report_context.as_ref(),
+        plan_usage_policy_snapshot.as_ref(),
+        reservation_token,
+    )
+    .await
+    {
+        Ok(ResponsesPlanUsageCostReservationStart::NotRequired) => None,
+        Ok(ResponsesPlanUsageCostReservationStart::Reserved(guard)) => {
+            report_context =
+                attach_plan_usage_reservation_token(report_context, guard.reservation_token());
+            Some(guard)
+        }
+        Ok(ResponsesPlanUsageCostReservationStart::Rejected(rejection)) => {
+            let error = websocket_plan_usage_rejection_error(&rejection);
+            admission.release().await;
+            release_then_record_responses_websocket_admission_failure(
+                release_local_pool_key_lease(
+                    state,
+                    LocalExecutionEffectContext {
+                        plan: &plan,
+                        report_context: report_context.as_ref(),
+                    },
+                ),
+                record_responses_websocket_admission_failure(
+                    state,
+                    &plan,
+                    report_context.as_ref(),
+                    candidate_started_at_unix_ms,
+                    &error,
+                ),
+            )
+            .await;
+            return Err(error);
+        }
+        Err(error) => {
+            admission.release().await;
+            release_then_record_responses_websocket_admission_failure(
+                release_local_pool_key_lease(
+                    state,
+                    LocalExecutionEffectContext {
+                        plan: &plan,
+                        report_context: report_context.as_ref(),
+                    },
+                ),
+                record_responses_websocket_admission_failure(
+                    state,
+                    &plan,
+                    report_context.as_ref(),
+                    candidate_started_at_unix_ms,
+                    &error,
+                ),
+            )
+            .await;
+            return Err(error);
+        }
+    };
+
     let lifecycle = ExecutionAttemptLifecycle::begin(
         state,
         AttemptLifecycleSeed {
@@ -427,6 +706,7 @@ pub(super) async fn begin_unowned_responses_websocket_turn(
         },
     )
     .await;
+    let plan_usage_cost_reservation = cost_reservation.map(|guard| guard.disarm());
 
     Ok(ResponsesProviderAttempt {
         lifecycle,
@@ -442,10 +722,11 @@ pub(super) async fn begin_unowned_responses_websocket_turn(
         first_event_timeout,
         terminal_timeout,
         admission: Some(admission),
+        plan_usage_cost_reservation,
         terminal_error_body: None,
         provider_outcome: None,
         client_delivery: AttemptClientDelivery::Complete,
-        upstream_request_sent: false,
+        upstream_request_state: UpstreamRequestState::NotStarted,
     })
 }
 
@@ -495,6 +776,11 @@ fn responses_websocket_admission_failure_update(
             StatusCode::TOO_MANY_REQUESTS.as_u16(),
             "gateway_admission_timeout",
             format!("gateway admission gate {gate} timed out after {queue_budget_ms}ms"),
+        ),
+        GatewayError::PlanUsageLimited(_) => (
+            StatusCode::TOO_MANY_REQUESTS.as_u16(),
+            "plan_usage_limit_exceeded",
+            "subscription plan usage limit exceeded".to_string(),
         ),
         other => (
             StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
@@ -559,6 +845,13 @@ fn websocket_auth_rejection_error(rejection: GatewayLocalAuthRejection) -> Gatew
 }
 
 impl ResponsesProviderAttempt {
+    pub(super) fn cancel_on_client_disconnect(&self) -> bool {
+        crate::orchestration::routing_execution_policy_from_report_context(
+            self.lifecycle.report_context(),
+        )
+        .is_some_and(|policy| policy.cancel_on_client_disconnect)
+    }
+
     /// Releases all per-turn capacity before terminal persistence starts.
     /// Provider-pool runtime tokens normally use an awaited removal. The
     /// bounded wait prevents a broken runtime backend from stalling the relay;
@@ -577,6 +870,64 @@ impl ResponsesProviderAttempt {
         }
     }
 
+    /// Releases this attempt's reserved cost before a transparent retry. The
+    /// terminal usage write that follows may reconcile the same token again;
+    /// repository reconciliation is idempotent, so the first Released state
+    /// wins and the replacement attempt can reserve independently.
+    pub(super) async fn release_plan_usage_cost_for_retry(
+        &mut self,
+        state: &AppState,
+    ) -> Result<(), GatewayError> {
+        if self.upstream_request_state.may_have_reached_provider()
+            && self.provider_outcome.is_none()
+        {
+            return Err(GatewayError::Internal(
+                "cannot release an unresolved plan cost reservation after the upstream request may have been sent"
+                    .to_string(),
+            ));
+        }
+        let Some(reservation) = self.plan_usage_cost_reservation.take() else {
+            return Ok(());
+        };
+        let release = release_responses_plan_usage_cost(
+            state,
+            &reservation.control_decision,
+            self.lifecycle.plan(),
+            reservation.reservation_token.as_str(),
+            "transparent_retry",
+        )
+        .await;
+        if release.is_err() {
+            self.plan_usage_cost_reservation = Some(reservation);
+        }
+        release
+    }
+
+    /// A transparent replacement failed before its request reached an
+    /// upstream. No terminal usage event can safely own the still-reserved
+    /// estimate, so release it explicitly before the orphan attempt is
+    /// finalized or dropped.
+    pub(super) async fn release_plan_usage_cost_before_upstream_send(
+        &mut self,
+        state: &AppState,
+        reason: &'static str,
+    ) {
+        if self.upstream_request_state.may_have_reached_provider() {
+            return;
+        }
+        let Some(reservation) = self.plan_usage_cost_reservation.take() else {
+            return;
+        };
+        release_responses_plan_usage_cost_best_effort(
+            state,
+            &reservation.control_decision,
+            self.lifecycle.plan(),
+            reservation.reservation_token.as_str(),
+            reason,
+        )
+        .await;
+    }
+
     pub(super) fn set_provider_response_headers(&mut self, headers: BTreeMap<String, String>) {
         let observed_at_unix_ms = current_unix_ms();
         let report_context = attach_provider_response_headers_to_report_context(
@@ -592,12 +943,33 @@ impl ResponsesProviderAttempt {
 
     /// Starts the per-turn response deadlines only after the corresponding
     /// `response.create` has been accepted by the upstream socket writer.
-    pub(super) fn mark_upstream_request_sent(&mut self) {
-        self.upstream_request_sent = true;
-        self.started_at = Instant::now();
-        self.provider_request_started_at_unix_ms = current_unix_ms();
-        self.provider_request_order_id = uuid::Uuid::now_v7().to_string();
-        self.first_event_elapsed_ms = None;
+    pub(super) fn record_upstream_request_state(&mut self, state: UpstreamRequestState) {
+        match state {
+            UpstreamRequestState::NotStarted => {
+                debug_assert!(
+                    false,
+                    "upstream request state cannot move back to not started"
+                );
+            }
+            UpstreamRequestState::PossiblySent => {
+                debug_assert_eq!(
+                    self.upstream_request_state,
+                    UpstreamRequestState::NotStarted
+                );
+                self.upstream_request_state = state;
+                self.started_at = Instant::now();
+                self.provider_request_started_at_unix_ms = current_unix_ms();
+                self.provider_request_order_id = uuid::Uuid::now_v7().to_string();
+                self.first_event_elapsed_ms = None;
+            }
+            UpstreamRequestState::Sent => {
+                debug_assert_eq!(
+                    self.upstream_request_state,
+                    UpstreamRequestState::PossiblySent
+                );
+                self.upstream_request_state = state;
+            }
+        }
     }
 
     /// Selects a cancellation-safe fallback for an attempt whose owner task
@@ -605,7 +977,9 @@ impl ResponsesProviderAttempt {
     /// after the write it remains a gateway relay failure because provider
     /// work may already have started.
     pub(super) const fn abandonment_outcome(&self) -> ResponsesWebSocketTurnOutcome {
-        ResponsesWebSocketTurnOutcome::relay_task_abandonment(self.upstream_request_sent)
+        ResponsesWebSocketTurnOutcome::relay_task_abandonment(
+            self.upstream_request_state.may_have_reached_provider(),
+        )
     }
 
     pub(super) fn deadline(&self) -> ResponsesWebSocketTurnDeadline {
@@ -734,6 +1108,14 @@ impl ResponsesProviderAttempt {
     /// 这里只提供 WS 观察到的终态事实。
     async fn settle(mut self, state: &AppState, outcome: ResponsesWebSocketTurnOutcome) {
         let facts = attempt_facts_for_outcome(self.provider_outcome, self.client_delivery, outcome);
+        if self.upstream_request_state.may_have_reached_provider()
+            && !facts.provider.is_terminal()
+            && self.plan_usage_cost_reservation.is_some()
+        {
+            let report_context =
+                attach_plan_usage_reservation_deferred(self.lifecycle.take_report_context());
+            self.lifecycle.set_report_context(report_context);
+        }
         if let Some(reason) = facts.delivery.aborted_reason() {
             let report_context = attach_client_delivery_to_report_context(
                 self.lifecycle.take_report_context(),
@@ -951,6 +1333,19 @@ fn attach_client_delivery_to_report_context(
     Some(Value::Object(object))
 }
 
+fn attach_plan_usage_reservation_deferred(report_context: Option<Value>) -> Option<Value> {
+    let mut object = match report_context {
+        Some(Value::Object(object)) => object,
+        Some(other) => Map::from_iter([("seed".to_string(), other)]),
+        None => Map::new(),
+    };
+    object.insert(
+        PLAN_USAGE_RESERVATION_DEFERRED_METADATA_KEY.to_string(),
+        Value::Bool(true),
+    );
+    Some(Value::Object(object))
+}
+
 fn provider_terminal_outcome(
     frame: &ParsedResponsesWebSocketFrame<'_>,
 ) -> Option<ResponsesWebSocketTurnOutcome> {
@@ -1016,7 +1411,8 @@ mod tests {
         attempt_facts_for_outcome, settle_signal_for_client_delivery_failure,
     };
     use super::{
-        attach_client_delivery_to_report_context, prepare_websocket_report_context,
+        attach_client_delivery_to_report_context, attach_plan_usage_reservation_deferred,
+        attach_plan_usage_reservation_token, prepare_websocket_report_context,
         provider_terminal_outcome, release_then_record_responses_websocket_admission_failure,
         resolve_responses_websocket_turn_timeouts, responses_websocket_admission_failure_update,
         websocket_event_as_sse_line, ResponsesWebSocketTurnDeadline, ResponsesWebSocketTurnOutcome,
@@ -1027,6 +1423,36 @@ mod tests {
         AttemptClientDelivery, AttemptProviderEffect, AttemptSettlementInputs,
     };
     use crate::GatewayError;
+
+    #[test]
+    fn server_plan_usage_reservation_token_overrides_seed_value() {
+        let context = attach_plan_usage_reservation_token(
+            Some(json!({
+                "candidate_index": 2,
+                "plan_usage_reservation_token": "client-controlled-token"
+            })),
+            "server-reservation-token",
+        )
+        .expect("reservation context");
+
+        assert_eq!(context["candidate_index"], 2);
+        assert_eq!(
+            context["plan_usage_reservation_token"],
+            "server-reservation-token"
+        );
+        assert_eq!(context["plan_usage_reservation_deferred"], false);
+    }
+
+    #[test]
+    fn gateway_can_defer_a_server_owned_reservation_after_transport_handoff() {
+        let context = attach_plan_usage_reservation_deferred(Some(json!({
+            "plan_usage_reservation_token": "server-reservation-token",
+            "plan_usage_reservation_deferred": false
+        })))
+        .expect("reservation context");
+
+        assert_eq!(context["plan_usage_reservation_deferred"], true);
+    }
 
     #[tokio::test]
     async fn admission_failure_releases_pool_lease_before_recording_candidate_terminal() {

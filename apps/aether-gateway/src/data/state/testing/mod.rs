@@ -1,10 +1,15 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 
+use aether_data::repository::routing_profiles::InMemoryRoutingGroupRepository;
 use aether_data_contracts::repository::candidates::RequestCandidateRepository;
 use aether_data_contracts::repository::pool_scores::PoolMemberScoreRepository;
 use aether_data_contracts::repository::quota::ProviderQuotaRepository;
+use aether_data_contracts::repository::routing_profiles::{
+    StoredRoutingGroup, StoredRoutingGroupBinding, StoredRoutingGroupVersion,
+};
 use aether_data_contracts::repository::usage::UsageRepository;
+use aether_routing_core::RoutingGroupConfig;
 
 use super::{
     AnnouncementReadRepository, AnnouncementWriteRepository, AuthApiKeyReadRepository,
@@ -210,6 +215,21 @@ impl GatewayDataState {
         repository: Arc<dyn ProviderCatalogReadRepository>,
     ) -> Self {
         self.provider_catalog_reader = Some(repository);
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_cached_provider_catalog_reader_for_tests<T>(
+        mut self,
+        repository: Arc<T>,
+    ) -> Self
+    where
+        T: ProviderCatalogReadRepository + 'static,
+    {
+        let inner: Arc<dyn ProviderCatalogReadRepository> = repository;
+        self.provider_catalog_reader = Some(Arc::new(
+            super::provider_catalog_cache::CachedProviderCatalogReadRepository::new(inner),
+        ));
         self
     }
 
@@ -875,6 +895,30 @@ impl GatewayDataState {
         self.routing_group_reader = Some(repository.clone());
         self.routing_group_writer = Some(repository);
         self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_system_default_routing_group_for_tests(self) -> Self {
+        let now = 1;
+        let repository = Arc::new(InMemoryRoutingGroupRepository::seed(
+            [StoredRoutingGroup {
+                id: "system-default".to_string(),
+                name: "system-default".to_string(),
+                description: Some("test system default routing strategy".to_string()),
+                enabled: true,
+                is_system_default: true,
+                sort_order: 0,
+                config_json: serde_json::to_value(RoutingGroupConfig::default())
+                    .expect("default routing config should serialize"),
+                version: 1,
+                created_at: now,
+                updated_at: now,
+                published_at: Some(now),
+            }],
+            std::iter::empty::<StoredRoutingGroupBinding>(),
+            std::iter::empty::<StoredRoutingGroupVersion>(),
+        ));
+        self.with_routing_group_repository_for_tests(repository)
     }
 
     #[cfg(test)]
@@ -1747,6 +1791,18 @@ impl GatewayDataState {
     }
 
     #[cfg(test)]
+    pub(crate) fn attach_auth_api_key_repository_for_tests<T>(mut self, repository: Arc<T>) -> Self
+    where
+        T: aether_data::repository::auth::AuthRepository + 'static,
+    {
+        let auth_api_key_reader: Arc<dyn AuthApiKeyReadRepository> = repository.clone();
+        let auth_api_key_writer: Arc<dyn AuthApiKeyWriteRepository> = repository;
+        self.auth_api_key_reader = Some(auth_api_key_reader);
+        self.auth_api_key_writer = Some(auth_api_key_writer);
+        self
+    }
+
+    #[cfg(test)]
     pub(crate) fn with_decision_trace_readers_for_tests(
         request_candidate_repository: Arc<dyn RequestCandidateReadRepository>,
         provider_catalog_repository: Arc<dyn ProviderCatalogReadRepository>,
@@ -2333,6 +2389,36 @@ impl GatewayDataState {
             system_config_value_cache: Default::default(),
             billing_model_context_cache: Default::default(),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_auth_candidate_selection_provider_catalog_request_candidate_and_gemini_file_mapping_repositories_for_tests<
+        T,
+        U,
+        V,
+    >(
+        auth_api_key_repository: Arc<dyn AuthApiKeyReadRepository>,
+        candidate_selection_repository: Arc<dyn MinimalCandidateSelectionReadRepository>,
+        provider_catalog_repository: Arc<U>,
+        request_candidate_repository: Arc<T>,
+        gemini_file_mapping_repository: Arc<V>,
+        encryption_key: impl Into<String>,
+    ) -> Self
+    where
+        T: RequestCandidateRepository + 'static,
+        U: ProviderCatalogReadRepository + ProviderCatalogWriteRepository + 'static,
+        V: aether_data::repository::gemini_file_mappings::GeminiFileMappingRepository + 'static,
+    {
+        let mut state = Self::with_auth_candidate_selection_provider_catalog_and_request_candidate_repository_for_tests(
+            auth_api_key_repository,
+            candidate_selection_repository,
+            provider_catalog_repository,
+            request_candidate_repository,
+            encryption_key,
+        );
+        state.gemini_file_mapping_reader = Some(gemini_file_mapping_repository.clone());
+        state.gemini_file_mapping_writer = Some(gemini_file_mapping_repository);
+        state
     }
 
     #[cfg(test)]

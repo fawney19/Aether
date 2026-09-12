@@ -4,6 +4,7 @@ CREATE TABLE IF NOT EXISTS public.routing_groups (
     description text,
     enabled boolean DEFAULT true NOT NULL,
     is_system_default boolean DEFAULT false NOT NULL,
+    sort_order bigint DEFAULT 0 NOT NULL,
     config_json jsonb NOT NULL,
     version bigint DEFAULT 1 NOT NULL,
     created_at bigint NOT NULL,
@@ -31,6 +32,8 @@ CREATE INDEX IF NOT EXISTS routing_groups_system_default_idx
 CREATE UNIQUE INDEX IF NOT EXISTS routing_groups_one_system_default_key
     ON public.routing_groups (is_system_default)
     WHERE is_system_default = TRUE;
+CREATE INDEX IF NOT EXISTS routing_groups_enabled_sort_idx
+    ON public.routing_groups (enabled DESC, sort_order, name, id);
 
 CREATE TABLE IF NOT EXISTS public.routing_group_bindings (
     id character varying(64) NOT NULL,

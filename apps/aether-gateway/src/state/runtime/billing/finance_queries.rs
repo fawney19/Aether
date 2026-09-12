@@ -74,7 +74,7 @@ impl AppState {
                             let effective_status = if order.status == "pending"
                                 && order
                                     .expires_at_unix_secs
-                                    .is_some_and(|value| value < now_unix_secs)
+                                    .is_some_and(|value| value <= now_unix_secs)
                             {
                                 "expired"
                             } else {

@@ -5,6 +5,7 @@ use super::{
     InMemoryVideoTaskRepository, StoredAuthApiKeySnapshot, UpsertVideoTask, VideoTaskLookupKey,
     VideoTaskReadRepository, VideoTaskStatus, VideoTaskWriteRepository, DEVELOPMENT_ENCRYPTION_KEY,
 };
+use crate::data::GatewayDataState;
 use crate::image_capabilities::openai_image_gateway_max_generation_count;
 use crate::tests::{
     any, build_router_with_state, build_state_with_execution_runtime_override, json, start_server,
@@ -234,6 +235,12 @@ fn codex_catalog_key(
     key_id: &str,
     allowed_models: &[&str],
 ) -> StoredProviderCatalogKey {
+    let bootstrap = AppState::new()
+        .expect("bootstrap state should build")
+        .with_data_state_for_tests(
+            crate::data::GatewayDataState::disabled()
+                .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+        );
     let mut key = StoredProviderCatalogKey::new(
         key_id.to_string(),
         provider_id.to_string(),
@@ -245,7 +252,8 @@ fn codex_catalog_key(
     .expect("Codex key should build")
     .with_transport_fields(
         Some(json!(["openai:responses"])),
-        encrypt_python_fernet_plaintext(DEVELOPMENT_ENCRYPTION_KEY, "oauth-upstream-secret")
+        bootstrap
+            .seal_provider_catalog_key_api_key(provider_id, key_id, "oauth-upstream-secret")
             .expect("Codex test token should encrypt"),
         None,
         None,
@@ -409,6 +417,84 @@ fn sample_gemini_video_task(
             }
         })),
     }
+}
+
+fn gemini_video_catalog_repository() -> Arc<InMemoryProviderCatalogReadRepository> {
+    const PROVIDER_ID: &str = "provider-gemini-video-local-1";
+    const ENDPOINT_ID: &str = "endpoint-gemini-video-local-1";
+    const KEY_ID: &str = "key-gemini-video-local-1";
+    let bootstrap = AppState::new()
+        .expect("bootstrap state should build")
+        .with_data_state_for_tests(
+            crate::data::GatewayDataState::disabled()
+                .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+        );
+    let provider = StoredProviderCatalogProvider::new(
+        PROVIDER_ID.to_string(),
+        "gemini-video".to_string(),
+        Some("https://generativelanguage.googleapis.com".to_string()),
+        "gemini".to_string(),
+    )
+    .expect("Gemini video provider should build")
+    .with_transport_fields(
+        true,
+        false,
+        false,
+        None,
+        Some(2),
+        None,
+        Some(20.0),
+        None,
+        None,
+    );
+    let endpoint = StoredProviderCatalogEndpoint::new(
+        ENDPOINT_ID.to_string(),
+        PROVIDER_ID.to_string(),
+        "gemini:video".to_string(),
+        Some("gemini".to_string()),
+        Some("video".to_string()),
+        true,
+    )
+    .expect("Gemini video endpoint should build")
+    .with_transport_fields(
+        "https://generativelanguage.googleapis.com".to_string(),
+        None,
+        None,
+        Some(2),
+        None,
+        None,
+        None,
+        None,
+    )
+    .expect("Gemini video endpoint transport should build");
+    let key = StoredProviderCatalogKey::new(
+        KEY_ID.to_string(),
+        PROVIDER_ID.to_string(),
+        "prod".to_string(),
+        "api_key".to_string(),
+        None,
+        true,
+    )
+    .expect("Gemini video key should build")
+    .with_transport_fields(
+        Some(json!(["gemini:video"])),
+        bootstrap
+            .seal_provider_catalog_key_api_key(PROVIDER_ID, KEY_ID, "sk-upstream-gemini-video")
+            .expect("Gemini video api key should encrypt"),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .expect("Gemini video key transport should build");
+    Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        vec![endpoint],
+        vec![key],
+    ))
 }
 
 struct PendingMinimalCandidateSelectionReadRepository;
@@ -657,13 +743,19 @@ fn gateway_versioned_models_fail_closed_when_cached_auth_becomes_unusable_or_mis
 }
 
 async fn run_versioned_models_auth_race_scenario() {
+    let mut auth_race_snapshot = codex_models_snapshot(
+        "key-codex-models-auth-race",
+        "user-codex-models-auth-race",
+        &["future-alias"],
+    );
+    // This scenario exercises API-key cache invalidation, not provider
+    // allowlist resolution. Keep the catalog dependency absent so the warm
+    // request remains on the local models route while the key is usable.
+    auth_race_snapshot.user_allowed_providers = None;
+    auth_race_snapshot.api_key_allowed_providers = None;
     let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
         Some(hash_api_key("sk-codex-models-auth-race")),
-        codex_models_snapshot(
-            "key-codex-models-auth-race",
-            "user-codex-models-auth-race",
-            &["future-alias"],
-        ),
+        auth_race_snapshot,
     )]));
     let candidate_repository = Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(
         Vec::new(),
@@ -3477,7 +3569,10 @@ async fn gateway_does_not_locally_reject_image_model_name_on_chat_completions() 
     let gateway = build_router_with_state(
         AppState::new()
             .expect("gateway should build")
-            .with_auth_api_key_data_reader_for_tests(auth_repository),
+            .with_data_state_for_tests(
+                GatewayDataState::with_auth_api_key_reader_for_tests(auth_repository)
+                    .with_system_default_routing_group_for_tests(),
+            ),
     );
     let (gateway_url, gateway_handle) = start_server(gateway).await;
 
@@ -3705,6 +3800,231 @@ async fn gateway_handles_gemini_operation_detail_without_hitting_fallback_probe(
 }
 
 #[tokio::test]
+async fn gateway_hides_gemini_operation_detail_and_cancel_from_non_owner() {
+    let fallback_probe_hits = Arc::new(Mutex::new(0usize));
+    let fallback_probe_hits_clone = Arc::clone(&fallback_probe_hits);
+    let fallback_probe = Router::new().route(
+        "/{*path}",
+        any(move |_request: Request| {
+            let fallback_probe_hits_inner = Arc::clone(&fallback_probe_hits_clone);
+            async move {
+                *fallback_probe_hits_inner.lock().expect("mutex should lock") += 1;
+                (StatusCode::OK, Json(json!({"proxied": true}))).into_response()
+            }
+        }),
+    );
+
+    let execution_runtime_hits = Arc::new(Mutex::new(0usize));
+    let execution_runtime_hits_clone = Arc::clone(&execution_runtime_hits);
+    let execution_runtime = Router::new().route(
+        "/v1/execute/sync",
+        any(move |_request: Request| {
+            let execution_runtime_hits_inner = Arc::clone(&execution_runtime_hits_clone);
+            async move {
+                *execution_runtime_hits_inner
+                    .lock()
+                    .expect("mutex should lock") += 1;
+                Json(json!({
+                    "request_id": "unexpected-cross-user-cancel",
+                    "status_code": 200,
+                    "headers": {},
+                    "body": { "json_body": {} }
+                }))
+            }
+        }),
+    );
+
+    let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+        Some(hash_api_key("sk-gemini-operation-non-owner")),
+        unrestricted_models_snapshot(
+            "key-gemini-operation-non-owner",
+            "user-gemini-operation-non-owner",
+        ),
+    )]));
+    let repository = Arc::new(InMemoryVideoTaskRepository::default());
+    repository
+        .upsert(sample_gemini_video_task(
+            "task-gemini-operation-owner",
+            "opshort-owner-only",
+            "user-gemini-operation-owner",
+            "key-gemini-operation-owner",
+            "operations/ext-owner-only",
+            VideoTaskStatus::Submitted,
+        ))
+        .await
+        .expect("upsert should succeed");
+
+    let (_fallback_probe_url, fallback_probe_handle) = start_server(fallback_probe).await;
+    let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
+    let gateway = build_router_with_state(
+        build_state_with_execution_runtime_override(execution_runtime_url)
+            .with_data_state_for_tests(
+                crate::data::GatewayDataState::with_auth_and_video_task_repository_for_tests(
+                    auth_repository,
+                    Arc::clone(&repository),
+                ),
+            ),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+    let client = reqwest::Client::new();
+
+    let detail_response = client
+        .get(format!(
+            "{gateway_url}/v1beta/operations/opshort-owner-only?key=sk-gemini-operation-non-owner"
+        ))
+        .send()
+        .await
+        .expect("cross-user detail request should complete");
+    assert_eq!(detail_response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        detail_response
+            .json::<serde_json::Value>()
+            .await
+            .expect("json body should parse"),
+        json!({ "detail": "Video task not found" })
+    );
+
+    let cancel_response = client
+        .post(format!(
+            "{gateway_url}/v1beta/operations/opshort-owner-only:cancel"
+        ))
+        .header("x-goog-api-key", "sk-gemini-operation-non-owner")
+        .header(http::header::CONTENT_TYPE, "application/json")
+        .body("{}")
+        .send()
+        .await
+        .expect("cross-user cancel request should complete");
+    assert_eq!(cancel_response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        cancel_response
+            .json::<serde_json::Value>()
+            .await
+            .expect("json body should parse"),
+        json!({ "detail": "Video task not found" })
+    );
+
+    let stored = repository
+        .find(VideoTaskLookupKey::Id("task-gemini-operation-owner"))
+        .await
+        .expect("task lookup should succeed")
+        .expect("task should exist");
+    assert_eq!(stored.status, VideoTaskStatus::Submitted);
+    assert_eq!(
+        *execution_runtime_hits.lock().expect("mutex should lock"),
+        0
+    );
+    assert_eq!(*fallback_probe_hits.lock().expect("mutex should lock"), 0);
+
+    gateway_handle.abort();
+    execution_runtime_handle.abort();
+    fallback_probe_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_hides_gemini_video_file_from_non_owner_and_allows_owner_rotated_key() {
+    let fallback_probe_hits = Arc::new(Mutex::new(0usize));
+    let fallback_probe_hits_clone = Arc::clone(&fallback_probe_hits);
+    let fallback_probe = Router::new().route(
+        "/{*path}",
+        any(move |_request: Request| {
+            let fallback_probe_hits_inner = Arc::clone(&fallback_probe_hits_clone);
+            async move {
+                *fallback_probe_hits_inner.lock().expect("mutex should lock") += 1;
+                (StatusCode::OK, Json(json!({"proxied": true}))).into_response()
+            }
+        }),
+    );
+
+    let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![
+        (
+            Some(hash_api_key("sk-gemini-video-file-foreign")),
+            unrestricted_models_snapshot(
+                "key-gemini-video-file-foreign",
+                "user-gemini-video-file-foreign",
+            ),
+        ),
+        (
+            Some(hash_api_key("sk-gemini-video-file-owner")),
+            unrestricted_models_snapshot(
+                "key-gemini-video-file-owner-rotated",
+                "user-gemini-video-file-owner",
+            ),
+        ),
+    ]));
+    let repository = Arc::new(InMemoryVideoTaskRepository::default());
+    let mut task = sample_gemini_video_task(
+        "task-gemini-video-file-owner",
+        "opshort-file-owner",
+        "user-gemini-video-file-owner",
+        "key-gemini-video-file-original",
+        "operations/ext-file-owner",
+        VideoTaskStatus::Completed,
+    );
+    task.provider_api_format = None;
+    task.video_url = Some("https://8.8.8.8/video-owner.mp4".to_string());
+    repository
+        .upsert(task)
+        .await
+        .expect("upsert should succeed");
+
+    let (_unused_fallback_probe_url, fallback_probe_handle) = start_server(fallback_probe).await;
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(
+                crate::data::GatewayDataState::with_auth_and_video_task_repository_for_tests(
+                    auth_repository,
+                    repository,
+                ),
+            ),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("client should build");
+
+    let foreign_response = client
+        .get(format!(
+            "{gateway_url}/v1beta/files/aev_opshort-file-owner:download?alt=media&key=sk-gemini-video-file-foreign"
+        ))
+        .send()
+        .await
+        .expect("foreign request should complete");
+    assert_eq!(foreign_response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        foreign_response
+            .json::<serde_json::Value>()
+            .await
+            .expect("json body should parse"),
+        json!({"detail": "File not found"})
+    );
+    assert_eq!(*fallback_probe_hits.lock().expect("mutex should lock"), 0);
+
+    let owner_response = client
+        .get(format!(
+            "{gateway_url}/v1beta/files/aev_opshort-file-owner:download?alt=media&key=sk-gemini-video-file-owner"
+        ))
+        .send()
+        .await
+        .expect("owner request should complete");
+    assert_ne!(owner_response.status(), StatusCode::NOT_FOUND);
+    assert_ne!(owner_response.status(), StatusCode::TEMPORARY_REDIRECT);
+    assert_eq!(owner_response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(
+        owner_response
+            .json::<serde_json::Value>()
+            .await
+            .expect("json body should parse"),
+        json!({"detail": "Service temporarily unavailable"})
+    );
+    assert_eq!(*fallback_probe_hits.lock().expect("mutex should lock"), 0);
+
+    gateway_handle.abort();
+    fallback_probe_handle.abort();
+}
+
+#[tokio::test]
 async fn gateway_lists_gemini_operations_without_hitting_fallback_probe() {
     let fallback_probe_hits = Arc::new(Mutex::new(0usize));
     let fallback_probe_hits_clone = Arc::clone(&fallback_probe_hits);
@@ -3906,13 +4226,16 @@ async fn gateway_cancels_gemini_operation_without_hitting_fallback_probe() {
 
     let (fallback_probe_url, fallback_probe_handle) = start_server(fallback_probe).await;
     let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
+    let provider_catalog_repository = gemini_video_catalog_repository();
     let gateway = build_router_with_state(
         build_state_with_execution_runtime_override(execution_runtime_url)
             .with_data_state_for_tests(
-                crate::data::GatewayDataState::with_auth_and_video_task_repository_for_tests(
-                    auth_repository,
+                crate::data::GatewayDataState::with_video_task_repository_and_provider_transport_for_tests(
                     Arc::clone(&repository),
-                ),
+                    provider_catalog_repository,
+                    DEVELOPMENT_ENCRYPTION_KEY,
+                )
+                .with_auth_api_key_reader(auth_repository),
             ),
     );
     let (gateway_url, gateway_handle) = start_server(gateway).await;

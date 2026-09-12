@@ -26,6 +26,7 @@ pub enum AdminSystemUsageAggregateImportMode {
     Skip,
     Overwrite,
     Error,
+    ValidateError,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]

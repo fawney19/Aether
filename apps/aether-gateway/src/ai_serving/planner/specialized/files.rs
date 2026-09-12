@@ -17,6 +17,7 @@ use crate::ai_serving::{
     resolve_gemini_files_sync_spec as resolve_sync_spec, LocalGeminiFilesSpec,
 };
 use crate::{AiExecutionDecision, AppState, GatewayError};
+use aether_routing_core::RoutingExecutionPolicy;
 
 use self::decision::maybe_build_local_gemini_files_decision_payload_for_candidate;
 use self::support::{
@@ -174,6 +175,13 @@ pub(crate) async fn build_local_gemini_files_stream_attempt_source_for_kind<'a>(
 
 #[async_trait]
 impl LocalExecutionAttemptSource<AiSyncAttempt> for LocalGeminiFilesSyncAttemptSource<'_> {
+    fn routing_execution_policy(&self) -> Option<RoutingExecutionPolicy> {
+        self.input
+            .routing_policy
+            .as_ref()
+            .map(|policy| policy.execution_policy.clone())
+    }
+
     async fn next_execution_attempt(&mut self) -> Result<Option<AiSyncAttempt>, GatewayError> {
         while let Some(attempt) = self.candidates.next_attempt().await? {
             match self.build_sync_attempt(attempt).await? {
@@ -212,6 +220,13 @@ impl LocalExecutionAttemptSource<AiSyncAttempt> for LocalGeminiFilesSyncAttemptS
 
 #[async_trait]
 impl LocalExecutionAttemptSource<AiStreamAttempt> for LocalGeminiFilesStreamAttemptSource<'_> {
+    fn routing_execution_policy(&self) -> Option<RoutingExecutionPolicy> {
+        self.input
+            .routing_policy
+            .as_ref()
+            .map(|policy| policy.execution_policy.clone())
+    }
+
     async fn next_execution_attempt(&mut self) -> Result<Option<AiStreamAttempt>, GatewayError> {
         while let Some(attempt) = self.candidates.next_attempt().await? {
             match self.build_stream_attempt(attempt).await? {

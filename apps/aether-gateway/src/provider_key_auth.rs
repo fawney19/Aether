@@ -90,11 +90,15 @@ pub(crate) fn provider_key_can_refresh_oauth(
 ) -> bool {
     auth_semantics.can_refresh_oauth()
         && (provider_key_auth_config_is_agent_identity(provider_type, auth_config)
-            || auth_config
-                .and_then(|config| config.get("refresh_token"))
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .is_some_and(|value| !value.is_empty()))
+            || auth_config.is_some_and(|config| {
+                ["refresh_token", "refreshToken"].iter().any(|field| {
+                    config
+                        .get(*field)
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .is_some_and(|value| !value.is_empty())
+                })
+            }))
 }
 
 pub(crate) fn provider_key_can_export_oauth(
@@ -424,6 +428,11 @@ mod tests {
             semantics,
             "codex",
             json!({ "refresh_token": "refresh-token" }).as_object()
+        ));
+        assert!(provider_key_can_refresh_oauth(
+            provider_key_auth_semantics(&sample_key("oauth"), "antigravity"),
+            "antigravity",
+            json!({ "refreshToken": "legacy-refresh-token" }).as_object()
         ));
         assert!(provider_key_can_refresh_oauth(
             semantics,

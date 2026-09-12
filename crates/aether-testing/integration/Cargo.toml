@@ -13,6 +13,7 @@ aether-crypto.workspace = true
 aether-data.workspace = true
 aether-data-contracts.workspace = true
 aether-gateway = { workspace = true, features = ["testkit"] }
+aether-runtime.workspace = true
 aether-runtime-state.workspace = true
 aether-testkit = { workspace = true, features = ["gateway", "postgres"] }
 axum.workspace = true

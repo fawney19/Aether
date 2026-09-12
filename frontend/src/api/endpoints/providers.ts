@@ -14,6 +14,7 @@ import {
   normalizePoolAdvancedConfig as normalizePoolAdvanced,
 } from './types'
 
+export type { ProviderWithEndpointsSummary } from './types'
 interface ProviderRequestOptions {
   timeout?: number
 }
@@ -140,7 +141,7 @@ export async function updateProvider(
   }>,
   requestOptions?: ProviderRequestOptions,
 ): Promise<ProviderWithEndpointsSummary> {
-  const response = await client.patch(`/api/admin/providers/${providerId}`, data, requestOptions)
+  const response = await client.patch<ProviderWithEndpointsSummary>(`/api/admin/providers/${providerId}`, data, requestOptions)
   return normalizeProviderSummary(response.data)
 }
 
@@ -175,7 +176,7 @@ export async function createProvider(
     config?: ProviderConfig | null
   }
 ): Promise<{ id: string; name: string; message?: string }> {
-  const response = await client.post('/api/admin/providers/', data)
+  const response = await client.post<{ id: string; name: string; message?: string }>('/api/admin/providers/', data)
   return response.data
 }
 
@@ -261,7 +262,7 @@ export async function testModel(
   data: TestModelRequest,
   options: { signal?: AbortSignal } = {},
 ): Promise<TestModelResponse> {
-  const response = await client.post('/api/admin/provider-query/test-model', data, {
+  const response = await client.post<TestModelResponse>('/api/admin/provider-query/test-model', data, {
     timeout: 10 * 60 * 1000,
     signal: options.signal,
   })
@@ -350,7 +351,7 @@ export async function testModelFailover(
   const failoverModels = Array.isArray(data.failover_models) && data.failover_models.length > 0
     ? data.failover_models
     : (normalizedModelName ? [normalizedModelName] : undefined)
-  const response = await client.post('/api/admin/provider-query/test-model-failover', {
+  const response = await client.post<TestModelFailoverResponse>('/api/admin/provider-query/test-model-failover', {
     ...data,
     ...(failoverModels ? { failover_models: failoverModels } : {}),
   }, {

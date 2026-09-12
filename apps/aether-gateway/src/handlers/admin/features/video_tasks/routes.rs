@@ -15,9 +15,10 @@ use axum::{
 use serde_json::json;
 
 use super::builders::{
-    admin_video_task_detail_id_from_path, admin_video_task_nested_id_from_path,
-    admin_video_task_status_name, admin_video_task_timestamp, build_admin_video_task_list_item,
-    build_admin_video_task_provider_names, current_admin_video_task_unix_secs,
+    admin_video_task_detail_id_from_path, admin_video_task_error_projection,
+    admin_video_task_nested_id_from_path, admin_video_task_status_name, admin_video_task_timestamp,
+    build_admin_video_task_list_item, build_admin_video_task_provider_names,
+    current_admin_video_task_unix_secs,
 };
 
 pub(super) async fn maybe_build_local_admin_video_tasks_response(
@@ -259,7 +260,10 @@ pub(super) async fn maybe_build_local_admin_video_tasks_response(
             payload.insert("stored_video_path".to_string(), serde_json::Value::Null);
             payload.insert("storage_provider".to_string(), serde_json::Value::Null);
             payload.insert("error_code".to_string(), json!(task.error_code));
-            payload.insert("error_message".to_string(), json!(task.error_message));
+            payload.insert(
+                "error_message".to_string(),
+                json!(admin_video_task_error_projection(&task)),
+            );
             payload.insert("retry_count".to_string(), json!(task.retry_count));
             payload.insert("max_retries".to_string(), serde_json::Value::Null);
             payload.insert(

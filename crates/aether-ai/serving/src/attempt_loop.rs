@@ -13,7 +13,22 @@ pub trait AiExecutionAttempt {
     fn report_context_ref(&self) -> Option<&serde_json::Value> {
         None
     }
+
+    /// Re-issue this attempt against the same key as a fresh attempt with the
+    /// given retry index and candidate id. Attempt types that cannot be
+    /// re-issued return `None`, which disables same-key retries for them.
+    fn with_same_key_retry(&self, _retry_index: u32, _candidate_id: String) -> Option<Self>
+    where
+        Self: Sized,
+    {
+        None
+    }
 }
+
+/// Report-context field carrying the routing policy's sticky-key attempt
+/// budget for the request, so the attempt loop can derive same-key retries
+/// lazily instead of pre-materializing them.
+pub const STICKY_KEY_ATTEMPTS_REPORT_FIELD: &str = "sticky_key_attempts";
 
 #[derive(Debug)]
 pub enum AiAttemptLoopOutcome<Response, Exhaustion> {
@@ -83,6 +98,17 @@ where
         Ok(())
     }
 
+    /// After `attempt` failed with candidate scope, return the next attempt on
+    /// the same key, or `None` once the sticky-key budget is used up. Retries
+    /// are derived here on demand so no attempt is materialized before it is
+    /// actually needed.
+    async fn next_same_key_retry(
+        &self,
+        _attempt: &Attempt,
+    ) -> Result<Option<Attempt>, Self::Error> {
+        Ok(None)
+    }
+
     async fn mark_unused_attempts(&self, attempts: Vec<Attempt>) -> Result<(), Self::Error>;
 
     async fn build_exhaustion(
@@ -101,11 +127,15 @@ where
     Attempt: AiExecutionAttempt + Send + Sync + 'static,
 {
     let mut remaining = attempts.into_iter();
+    let mut pending_same_key_retry: Option<Attempt> = None;
     let mut last_attempted = None;
     let mut retry_filters: Vec<AiAttemptRetryFilter> = Vec::new();
     let mut fallback_response = None;
 
-    while let Some(attempt) = remaining.next() {
+    loop {
+        let Some(attempt) = pending_same_key_retry.take().or_else(|| remaining.next()) else {
+            break;
+        };
         if retry_filters.iter().any(|filter| filter.matches(&attempt))
             || port.should_skip_attempt(&attempt).await?
         {
@@ -133,7 +163,9 @@ where
                 if attempt_fallback_response.is_some() {
                     fallback_response = attempt_fallback_response;
                 }
-                if scope != AiAttemptRetryScope::Candidate {
+                if scope == AiAttemptRetryScope::Candidate {
+                    pending_same_key_retry = port.next_same_key_retry(&attempt).await?;
+                } else {
                     retry_filters.push(AiAttemptRetryFilter::new(&attempt, scope));
                 }
             }
@@ -188,6 +220,32 @@ impl AiAttemptRetryFilter {
     }
 }
 
+/// Clone `plan`/`report_context` for a same-key retry: only the candidate id
+/// and retry index change, everything else (url, headers, body) is reused.
+fn same_key_retry_parts(
+    plan: &aether_contracts::ExecutionPlan,
+    report_context: Option<&serde_json::Value>,
+    retry_index: u32,
+    candidate_id: String,
+) -> (aether_contracts::ExecutionPlan, Option<serde_json::Value>) {
+    let mut plan = plan.clone();
+    plan.candidate_id = Some(candidate_id.clone());
+    let report_context = report_context.cloned().map(|mut value| {
+        if let Some(object) = value.as_object_mut() {
+            object.insert(
+                "candidate_id".to_string(),
+                serde_json::Value::String(candidate_id),
+            );
+            object.insert(
+                "retry_index".to_string(),
+                serde_json::Value::Number(retry_index.into()),
+            );
+        }
+        value
+    });
+    (plan, report_context)
+}
+
 impl AiExecutionAttempt for crate::dto::AiSyncAttempt {
     fn execution_plan(&self) -> &aether_contracts::ExecutionPlan {
         &self.plan
@@ -203,6 +261,20 @@ impl AiExecutionAttempt for crate::dto::AiSyncAttempt {
 
     fn report_context_ref(&self) -> Option<&serde_json::Value> {
         self.report_context.as_ref()
+    }
+
+    fn with_same_key_retry(&self, retry_index: u32, candidate_id: String) -> Option<Self> {
+        let (plan, report_context) = same_key_retry_parts(
+            &self.plan,
+            self.report_context.as_ref(),
+            retry_index,
+            candidate_id,
+        );
+        Some(Self {
+            plan,
+            report_kind: self.report_kind.clone(),
+            report_context,
+        })
     }
 }
 
@@ -221,6 +293,20 @@ impl AiExecutionAttempt for crate::dto::AiStreamAttempt {
 
     fn report_context_ref(&self) -> Option<&serde_json::Value> {
         self.report_context.as_ref()
+    }
+
+    fn with_same_key_retry(&self, retry_index: u32, candidate_id: String) -> Option<Self> {
+        let (plan, report_context) = same_key_retry_parts(
+            &self.plan,
+            self.report_context.as_ref(),
+            retry_index,
+            candidate_id,
+        );
+        Some(Self {
+            plan,
+            report_kind: self.report_kind.clone(),
+            report_context,
+        })
     }
 }
 

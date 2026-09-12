@@ -19,7 +19,7 @@ export async function getProviderModels(
     limit?: number
   }
 ): Promise<Model[]> {
-  const response = await client.get(`/api/admin/providers/${providerId}/models`, { params })
+  const response = await client.get<Model[]>(`/api/admin/providers/${providerId}/models`, { params })
   return response.data
 }
 
@@ -30,7 +30,7 @@ export async function createModel(
   providerId: string,
   data: ModelCreate
 ): Promise<Model> {
-  const response = await client.post(`/api/admin/providers/${providerId}/models`, data)
+  const response = await client.post<Model>(`/api/admin/providers/${providerId}/models`, data)
   return response.data
 }
 
@@ -41,7 +41,7 @@ export async function getModel(
   providerId: string,
   modelId: string
 ): Promise<Model> {
-  const response = await client.get(`/api/admin/providers/${providerId}/models/${modelId}`)
+  const response = await client.get<Model>(`/api/admin/providers/${providerId}/models/${modelId}`)
   return response.data
 }
 
@@ -53,7 +53,7 @@ export async function updateModel(
   modelId: string,
   data: ModelUpdate
 ): Promise<Model> {
-  const response = await client.patch(`/api/admin/providers/${providerId}/models/${modelId}`, data)
+  const response = await client.patch<Model>(`/api/admin/providers/${providerId}/models/${modelId}`, data)
   return response.data
 }
 
@@ -64,7 +64,7 @@ export async function deleteModel(
   providerId: string,
   modelId: string
 ): Promise<{ message: string }> {
-  const response = await client.delete(`/api/admin/providers/${providerId}/models/${modelId}`)
+  const response = await client.delete<{ message: string }>(`/api/admin/providers/${providerId}/models/${modelId}`)
   return response.data
 }
 
@@ -75,7 +75,7 @@ export async function batchCreateModels(
   providerId: string,
   modelsData: ModelCreate[]
 ): Promise<Model[]> {
-  const response = await client.post(`/api/admin/providers/${providerId}/models/batch`, modelsData)
+  const response = await client.post<Model[]>(`/api/admin/providers/${providerId}/models/batch`, modelsData)
   return response.data
 }
 
@@ -83,7 +83,7 @@ export async function batchCreateModels(
  * 获取统一模型目录
  */
 export async function getModelCatalog(): Promise<ModelCatalogResponse> {
-  const response = await client.get('/api/admin/models/catalog')
+  const response = await client.get<ModelCatalogResponse>('/api/admin/models/catalog')
   return response.data
 }
 
@@ -93,7 +93,7 @@ export async function getModelCatalog(): Promise<ModelCatalogResponse> {
 export async function getProviderAvailableSourceModels(
   providerId: string
 ): Promise<ProviderAvailableSourceModelsResponse> {
-  const response = await client.get(`/api/admin/providers/${providerId}/available-source-models`)
+  const response = await client.get<ProviderAvailableSourceModelsResponse>(`/api/admin/providers/${providerId}/available-source-models`)
   return response.data
 }
 
@@ -114,7 +114,17 @@ export async function batchAssignModelsToProvider(
     error: string
   }>
 }> {
-  const response = await client.post(
+  const response = await client.post<{
+  success: Array<{
+    global_model_id: string
+    global_model_name: string
+    model_id: string
+  }>
+  errors: Array<{
+    global_model_id: string
+    error: string
+  }>
+}>(
     `/api/admin/providers/${providerId}/assign-global-models`,
     { global_model_ids: globalModelIds }
   )
@@ -137,7 +147,7 @@ export async function importModelsFromUpstream(
     price_per_request?: number
   }
 ): Promise<ImportFromUpstreamResponse> {
-  const response = await client.post(
+  const response = await client.post<ImportFromUpstreamResponse>(
     `/api/admin/providers/${providerId}/import-from-upstream`,
     {
       model_ids: modelIds,

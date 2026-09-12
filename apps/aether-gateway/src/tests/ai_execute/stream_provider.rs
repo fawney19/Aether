@@ -509,6 +509,11 @@ async fn gateway_executes_kiro_claude_cli_stream_via_local_provider_catalog_cand
             provider_catalog_repository,
             Arc::clone(&request_candidate_repository),
             DEVELOPMENT_ENCRYPTION_KEY,
+        )
+        .attach_proxy_node_repository_for_tests(
+            crate::tests::ai_execute::ai_execute_proxy_node_repository([
+                "proxy-node-kiro-cli-local-stream",
+            ]),
         ),
     );
     let gateway = build_router_with_state(gateway_state);
@@ -978,6 +983,11 @@ async fn gateway_executes_claude_cli_stream_via_local_decision_gate_without_wait
             provider_catalog_repository,
             Arc::clone(&request_candidate_repository),
             DEVELOPMENT_ENCRYPTION_KEY,
+        )
+        .attach_proxy_node_repository_for_tests(
+            crate::tests::ai_execute::ai_execute_proxy_node_repository([
+                "proxy-node-claude-cli-local",
+            ]),
         ),
     );
     let gateway = build_router_with_state(gateway_state);
@@ -1491,6 +1501,11 @@ async fn gateway_executes_claude_code_cli_stream_via_local_decision_gate_with_lo
             provider_catalog_repository,
             Arc::clone(&request_candidate_repository),
             DEVELOPMENT_ENCRYPTION_KEY,
+        )
+        .attach_proxy_node_repository_for_tests(
+            crate::tests::ai_execute::ai_execute_proxy_node_repository([
+                "proxy-node-claude-code-cli-local",
+            ]),
         ),
     );
     let gateway = build_router_with_state(gateway_state);
@@ -1983,6 +1998,11 @@ async fn gateway_executes_claude_chat_stream_via_local_decision_gate_with_local_
             provider_catalog_repository,
             Arc::clone(&request_candidate_repository),
             DEVELOPMENT_ENCRYPTION_KEY,
+        )
+        .attach_proxy_node_repository_for_tests(
+            crate::tests::ai_execute::ai_execute_proxy_node_repository([
+                "proxy-node-claude-chat-stream",
+            ]),
         ),
     );
     let gateway = build_router_with_state(gateway_state);

@@ -1,7 +1,7 @@
 use aether_ai_formats::formats::matrix::{
     request_conversion_kind, request_conversion_requires_enable_flag,
 };
-use aether_contracts::ProxySnapshot;
+use aether_contracts::{ProxySnapshot, ResolvedTransportProfile};
 use serde_json::{json, Map, Value};
 
 use crate::conversion::{
@@ -71,25 +71,24 @@ pub fn build_transport_diagnostics(
 ) -> Value {
     let resolved_transport_profile_id = resolve_transport_profile_id(transport);
     let resolved_transport_profile = resolve_transport_profile(transport)
-        .and_then(|profile| serde_json::to_value(profile).ok())
+        .as_ref()
+        .map(summarize_transport_profile)
         .unwrap_or(Value::Null);
-    let configured_key_transport_profile = transport
+    let key_transport_profile_configured = transport
         .key
         .fingerprint
         .as_ref()
         .and_then(Value::as_object)
         .and_then(|value| value.get("transport_profile"))
-        .cloned()
-        .unwrap_or(Value::Null);
-    let configured_provider_transport_profile = transport
+        .is_some_and(|value| !value.is_null());
+    let provider_transport_profile_configured = transport
         .provider
         .config
         .as_ref()
         .and_then(|value| value.get("fingerprint"))
         .and_then(Value::as_object)
         .and_then(|value| value.get("transport_profile"))
-        .cloned()
-        .unwrap_or(Value::Null);
+        .is_some_and(|value| !value.is_null());
     let configured_legacy_grok_transport_profile = if transport
         .provider
         .provider_type
@@ -109,7 +108,8 @@ pub fn build_transport_diagnostics(
                     &auth_config,
                     "grok_auth_config",
                 )
-                .and_then(|profile| serde_json::to_value(profile).ok())
+                .as_ref()
+                .map(summarize_transport_profile)
             })
             .unwrap_or(Value::Null)
     } else {
@@ -132,11 +132,14 @@ pub fn build_transport_diagnostics(
         "key_is_active": transport.key.is_active,
         "provider_enable_format_conversion": transport.provider.enable_format_conversion,
         "provider_keep_priority_on_conversion": transport.provider.keep_priority_on_conversion,
-        "endpoint_format_acceptance_config": transport.endpoint.format_acceptance_config,
-        "endpoint_custom_path": transport.endpoint.custom_path,
-        "header_rules": transport.endpoint.header_rules,
+        "endpoint_format_acceptance": summarize_format_acceptance_config(
+            transport.endpoint.format_acceptance_config.as_ref()
+        ),
+        "endpoint_has_custom_path": transport.endpoint.custom_path.as_deref()
+            .is_some_and(|value| !value.trim().is_empty()),
+        "header_rules_count": json_array_len(transport.endpoint.header_rules.as_ref()),
         "header_rules_supported": header_rules_are_locally_supported(transport.endpoint.header_rules.as_ref()),
-        "body_rules": transport.endpoint.body_rules,
+        "body_rules_count": json_array_len(transport.endpoint.body_rules.as_ref()),
         "body_rules_supported": body_rules_are_locally_supported(transport.endpoint.body_rules.as_ref()),
         "proxy": {
             "locally_supported": transport_proxy_is_locally_supported(transport),
@@ -149,9 +152,10 @@ pub fn build_transport_diagnostics(
             "has_oauth_config": has_oauth_config,
             "oauth_request_auth_resolution_supported": oauth_resolution_supported,
         },
-        "fingerprint": transport.key.fingerprint,
-        "configured_key_transport_profile": configured_key_transport_profile,
-        "configured_provider_transport_profile": configured_provider_transport_profile,
+        "key_fingerprint_configured": transport.key.fingerprint.as_ref()
+            .is_some_and(|value| !value.is_null()),
+        "key_transport_profile_configured": key_transport_profile_configured,
+        "provider_transport_profile_configured": provider_transport_profile_configured,
         "configured_legacy_grok_transport_profile": configured_legacy_grok_transport_profile,
         "resolved_transport_profile_id": resolved_transport_profile_id,
         "resolved_transport_profile": resolved_transport_profile,
@@ -177,6 +181,34 @@ pub fn build_transport_diagnostics(
     })
 }
 
+fn json_array_len(value: Option<&Value>) -> usize {
+    value.and_then(Value::as_array).map_or(0, Vec::len)
+}
+
+fn summarize_format_acceptance_config(value: Option<&Value>) -> Value {
+    let Some(object) = value.and_then(Value::as_object) else {
+        return json!({ "configured": false });
+    };
+    json!({
+        "configured": true,
+        "enabled": object.get("enabled").and_then(Value::as_bool),
+        "accept_formats_count": json_array_len(object.get("accept_formats")),
+        "reject_formats_count": json_array_len(object.get("reject_formats")),
+    })
+}
+
+fn summarize_transport_profile(profile: &ResolvedTransportProfile) -> Value {
+    json!({
+        "profile_id": profile.profile_id,
+        "backend": profile.backend,
+        "http_mode": profile.http_mode,
+        "pool_scope": profile.pool_scope,
+        "has_header_fingerprint": profile.header_fingerprint.as_ref()
+            .is_some_and(|value| !value.is_null()),
+        "has_extra": profile.extra.as_ref().is_some_and(|value| !value.is_null()),
+    })
+}
+
 fn summarize_proxy_config(proxy: Option<&Value>) -> Value {
     let Some(object) = proxy.and_then(Value::as_object) else {
         return Value::Null;
@@ -187,11 +219,16 @@ fn summarize_proxy_config(proxy: Option<&Value>) -> Value {
         .and_then(Value::as_str)
         .is_some_and(|value| !value.trim().is_empty());
     json!({
+        "configured": true,
         "enabled": object.get("enabled").cloned().unwrap_or(Value::Null),
-        "mode": object.get("mode").cloned().unwrap_or(Value::Null),
-        "node_id": object.get("node_id").cloned().unwrap_or(Value::Null),
-        "label": object.get("label").cloned().unwrap_or(Value::Null),
+        "has_mode": object.get("mode").and_then(Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty()),
+        "has_node_id": object.get("node_id").and_then(Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty()),
+        "has_label": object.get("label").and_then(Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty()),
         "has_url": has_url,
+        "has_extra": object.get("extra").is_some_and(|value| !value.is_null()),
     })
 }
 
@@ -426,11 +463,13 @@ mod tests {
             build_transport_diagnostics(&sample_transport(), "claude:messages", "openai:responses");
 
         assert_eq!(diagnostics["provider_type"], "codex");
+        assert_eq!(diagnostics["key_fingerprint_configured"], true);
+        assert_eq!(diagnostics["key_transport_profile_configured"], true);
+        assert_eq!(diagnostics["resolved_transport_profile_id"], "chrome_136");
         assert_eq!(
-            diagnostics["fingerprint"]["transport_profile"]["profile_id"],
+            diagnostics["resolved_transport_profile"]["profile_id"],
             "chrome_136"
         );
-        assert_eq!(diagnostics["resolved_transport_profile_id"], "chrome_136");
         assert_eq!(
             diagnostics["request_pair"]["conversion_enabled"],
             Value::Bool(true)
@@ -487,6 +526,86 @@ mod tests {
             diagnostics["resolved_transport_profile"]["backend"],
             "browser_wreq"
         );
+    }
+
+    #[test]
+    fn transport_diagnostics_do_not_serialize_configured_secrets() {
+        let mut transport = sample_transport();
+        transport.provider.proxy = Some(json!({
+            "enabled": true,
+            "mode": "secret-proxy-mode",
+            "node_id": "secret-proxy-node",
+            "label": "secret-proxy-label",
+            "url": "https://secret-user:secret-pass@proxy.example/secret-path",
+            "extra": {"token": "secret-proxy-extra"}
+        }));
+        transport.provider.config = Some(json!({
+            "secret": "secret-provider-config",
+            "fingerprint": {
+                "transport_profile": {
+                    "profile_id": "safe-profile",
+                    "header_fingerprint": {"authorization": "secret-profile-header"},
+                    "extra": {"token": "secret-profile-extra"}
+                }
+            }
+        }));
+        transport.endpoint.custom_path = Some("/secret-custom-path".to_string());
+        transport.endpoint.header_rules = Some(json!([
+            {"op": "set", "key": "authorization", "value": "secret-header-rule"}
+        ]));
+        transport.endpoint.body_rules = Some(json!([
+            {"op": "set", "path": "auth.token", "value": "secret-body-rule"}
+        ]));
+        transport.endpoint.format_acceptance_config = Some(json!({
+            "enabled": true,
+            "accept_formats": ["secret-accepted-format"],
+            "reject_formats": ["secret-rejected-format"],
+            "token": "secret-format-config"
+        }));
+        transport.key.fingerprint = Some(json!({
+            "secret": "secret-key-fingerprint",
+            "transport_profile": {
+                "profile_id": "safe-key-profile",
+                "header_fingerprint": {"authorization": "secret-key-profile-header"},
+                "extra": {"token": "secret-key-profile-extra"}
+            }
+        }));
+
+        let diagnostics =
+            build_transport_diagnostics(&transport, "claude:messages", "openai:responses");
+        let serialized = serde_json::to_string(&diagnostics).unwrap();
+
+        for secret in [
+            "secret-proxy-mode",
+            "secret-proxy-node",
+            "secret-proxy-label",
+            "secret-user",
+            "secret-pass",
+            "secret-path",
+            "secret-proxy-extra",
+            "secret-provider-config",
+            "secret-profile-header",
+            "secret-profile-extra",
+            "secret-custom-path",
+            "secret-header-rule",
+            "secret-body-rule",
+            "secret-accepted-format",
+            "secret-rejected-format",
+            "secret-format-config",
+            "secret-key-fingerprint",
+            "secret-key-profile-header",
+            "secret-key-profile-extra",
+        ] {
+            assert!(!serialized.contains(secret), "leaked {secret}");
+        }
+        assert_eq!(diagnostics["header_rules_count"], 1);
+        assert_eq!(diagnostics["body_rules_count"], 1);
+        assert_eq!(diagnostics["proxy"]["provider"]["has_node_id"], true);
+        assert_eq!(
+            diagnostics["resolved_transport_profile"]["has_header_fingerprint"],
+            true
+        );
+        assert_eq!(diagnostics["resolved_transport_profile"]["has_extra"], true);
     }
 
     #[test]

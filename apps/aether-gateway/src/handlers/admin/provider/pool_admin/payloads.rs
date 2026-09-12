@@ -10,6 +10,11 @@ use crate::provider_key_auth::{
 };
 use aether_admin::provider::pool as admin_provider_pool_pure;
 use aether_admin::provider::quota as admin_provider_quota_pure;
+use aether_admin::provider::redaction::{
+    admin_provider_metadata_bucket_safe_json, admin_provider_oauth_invalid_reason_safe_text,
+    admin_provider_status_snapshot_safe_json, admin_provider_upstream_metadata_safe_json,
+    admin_secret_safe_json, admin_secret_safe_proxy,
+};
 use aether_data_contracts::repository::pool_scores::StoredPoolMemberScore;
 use aether_data_contracts::repository::provider_catalog::{
     StoredProviderCatalogEndpoint, StoredProviderCatalogKey,
@@ -44,6 +49,14 @@ fn admin_pool_json_object(
         .and_then(serde_json::Value::as_object)
         .cloned()
         .filter(|value| !value.is_empty())
+}
+
+fn admin_pool_secret_safe_json_object(value: Option<&serde_json::Value>) -> serde_json::Value {
+    admin_pool_json_object(value)
+        .map(serde_json::Value::Object)
+        .as_ref()
+        .map(|value| admin_secret_safe_json(Some(value)))
+        .unwrap_or(serde_json::Value::Null)
 }
 
 fn admin_pool_json_to_f64(value: Option<&serde_json::Value>) -> Option<f64> {
@@ -1087,7 +1100,10 @@ pub(super) fn build_admin_pool_key_payload(
     codex_cycle_usage_by_code: Option<&BTreeMap<String, StoredProviderApiKeyWindowUsageSummary>>,
     now_unix_secs: u64,
 ) -> serde_json::Value {
-    let cooldown_reason = runtime.cooldown_reason_by_key.get(&key.id).cloned();
+    let cooldown_reason = runtime
+        .cooldown_reason_by_key
+        .get(&key.id)
+        .map(|_| "Provider key is cooling down".to_string());
     let cooldown_ttl_seconds = cooldown_reason
         .as_ref()
         .and_then(|_| runtime.cooldown_ttl_by_key.get(&key.id).copied());
@@ -1251,7 +1267,9 @@ pub(super) fn build_admin_pool_key_payload(
         "oauth_invalid_reason".to_string(),
         json!(auth_semantics
             .can_show_oauth_metadata()
-            .then_some(key.oauth_invalid_reason.clone())
+            .then(|| {
+                admin_provider_oauth_invalid_reason_safe_text(key.oauth_invalid_reason.as_deref())
+            })
             .flatten()),
     );
     payload.insert("oauth_plan_type".to_string(), json!(oauth_plan_type));
@@ -1290,7 +1308,10 @@ pub(super) fn build_admin_pool_key_payload(
         "account_status_source".to_string(),
         json!(account_status_source),
     );
-    payload.insert("status_snapshot".to_string(), status_snapshot);
+    payload.insert(
+        "status_snapshot".to_string(),
+        admin_provider_status_snapshot_safe_json(Some(&status_snapshot)),
+    );
     payload.insert("quota_updated_at".to_string(), json!(quota_updated_at));
     payload.insert("health_score".to_string(), json!(health_score));
     payload.insert(
@@ -1305,7 +1326,10 @@ pub(super) fn build_admin_pool_key_payload(
                     "score": score.score,
                     "hard_state": score.hard_state.as_database(),
                     "score_version": score.score_version,
-                    "score_reason": score.score_reason.clone(),
+                    "score_reason": admin_provider_metadata_bucket_safe_json(
+                        "pool_score",
+                        Some(&score.score_reason),
+                    ),
                     "last_ranked_at": score.last_ranked_at,
                     "last_scheduled_at": score.last_scheduled_at,
                     "last_success_at": score.last_success_at,
@@ -1335,13 +1359,14 @@ pub(super) fn build_admin_pool_key_payload(
     );
     payload.insert(
         "rate_multipliers".to_string(),
-        json!(admin_pool_json_object(key.rate_multipliers.as_ref())),
+        admin_pool_secret_safe_json_object(key.rate_multipliers.as_ref()),
     );
     payload.insert(
         "internal_priority".to_string(),
         json!(key.internal_priority),
     );
     payload.insert("rpm_limit".to_string(), json!(key.rpm_limit));
+    payload.insert("concurrent_limit".to_string(), json!(key.concurrent_limit));
     payload.insert(
         "cache_ttl_minutes".to_string(),
         json!(key.cache_ttl_minutes),
@@ -1357,7 +1382,7 @@ pub(super) fn build_admin_pool_key_payload(
     );
     payload.insert(
         "capabilities".to_string(),
-        json!(admin_pool_json_object(key.capabilities.as_ref())),
+        admin_pool_secret_safe_json_object(key.capabilities.as_ref()),
     );
     payload.insert(
         "auto_fetch_models".to_string(),
@@ -1377,10 +1402,16 @@ pub(super) fn build_admin_pool_key_payload(
     );
     payload.insert(
         "upstream_metadata".to_string(),
-        json!(key.upstream_metadata.clone()),
+        admin_provider_upstream_metadata_safe_json(key.upstream_metadata.as_ref()),
     );
-    payload.insert("proxy".to_string(), json!(key.proxy.clone()));
-    payload.insert("fingerprint".to_string(), json!(key.fingerprint.clone()));
+    payload.insert(
+        "proxy".to_string(),
+        admin_secret_safe_proxy(key.proxy.as_ref()),
+    );
+    payload.insert(
+        "fingerprint".to_string(),
+        admin_secret_safe_json(key.fingerprint.as_ref()),
+    );
     payload.insert("account_quota".to_string(), json!(account_quota));
     payload.insert("cooldown_reason".to_string(), json!(cooldown_reason));
     payload.insert(

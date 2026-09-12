@@ -1,3 +1,4 @@
+use aether_contracts::redact_url_for_debug;
 use aether_data_contracts::repository::provider_catalog::{
     StoredProviderCatalogEndpoint, StoredProviderCatalogKey, StoredProviderCatalogProvider,
 };
@@ -18,7 +19,7 @@ pub struct GatewayProviderTransportSnapshot {
     pub key: GatewayProviderTransportKey,
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[derive(Clone, PartialEq, serde::Serialize)]
 pub struct GatewayProviderTransportProvider {
     pub id: String,
     pub name: String,
@@ -29,13 +30,45 @@ pub struct GatewayProviderTransportProvider {
     pub enable_format_conversion: bool,
     pub concurrent_limit: Option<i32>,
     pub max_retries: Option<i32>,
+    #[serde(skip_serializing)]
     pub proxy: Option<serde_json::Value>,
     pub request_timeout_secs: Option<f64>,
     pub stream_first_byte_timeout_secs: Option<f64>,
+    #[serde(skip_serializing)]
     pub config: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+impl std::fmt::Debug for GatewayProviderTransportProvider {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("GatewayProviderTransportProvider")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .field("provider_type", &self.provider_type)
+            .field(
+                "website",
+                &self.website.as_deref().map(redact_url_for_debug),
+            )
+            .field("is_active", &self.is_active)
+            .field(
+                "keep_priority_on_conversion",
+                &self.keep_priority_on_conversion,
+            )
+            .field("enable_format_conversion", &self.enable_format_conversion)
+            .field("concurrent_limit", &self.concurrent_limit)
+            .field("max_retries", &self.max_retries)
+            .field("has_proxy", &self.proxy.is_some())
+            .field("request_timeout_secs", &self.request_timeout_secs)
+            .field(
+                "stream_first_byte_timeout_secs",
+                &self.stream_first_byte_timeout_secs,
+            )
+            .field("has_config", &self.config.is_some())
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, serde::Serialize)]
 pub struct GatewayProviderTransportEndpoint {
     pub id: String,
     pub provider_id: String,
@@ -44,16 +77,49 @@ pub struct GatewayProviderTransportEndpoint {
     pub endpoint_kind: Option<String>,
     pub is_active: bool,
     pub base_url: String,
+    #[serde(skip_serializing)]
     pub header_rules: Option<serde_json::Value>,
+    #[serde(skip_serializing)]
     pub body_rules: Option<serde_json::Value>,
     pub max_retries: Option<i32>,
     pub custom_path: Option<String>,
+    #[serde(skip_serializing)]
     pub config: Option<serde_json::Value>,
+    #[serde(skip_serializing)]
     pub format_acceptance_config: Option<serde_json::Value>,
+    #[serde(skip_serializing)]
     pub proxy: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+impl std::fmt::Debug for GatewayProviderTransportEndpoint {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("GatewayProviderTransportEndpoint")
+            .field("id", &self.id)
+            .field("provider_id", &self.provider_id)
+            .field("api_format", &self.api_format)
+            .field("api_family", &self.api_family)
+            .field("endpoint_kind", &self.endpoint_kind)
+            .field("is_active", &self.is_active)
+            .field("base_url", &redact_url_for_debug(&self.base_url))
+            .field("has_header_rules", &self.header_rules.is_some())
+            .field("has_body_rules", &self.body_rules.is_some())
+            .field("max_retries", &self.max_retries)
+            .field(
+                "custom_path_len",
+                &self.custom_path.as_ref().map(String::len),
+            )
+            .field("has_config", &self.config.is_some())
+            .field(
+                "has_format_acceptance_config",
+                &self.format_acceptance_config.is_some(),
+            )
+            .field("has_proxy", &self.proxy.is_some())
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, serde::Serialize)]
 pub struct GatewayProviderTransportKey {
     pub id: String,
     pub provider_id: String,
@@ -68,11 +134,40 @@ pub struct GatewayProviderTransportKey {
     pub rate_multipliers: Option<serde_json::Value>,
     pub global_priority_by_format: Option<serde_json::Value>,
     pub expires_at_unix_secs: Option<u64>,
+    #[serde(skip_serializing)]
     pub proxy: Option<serde_json::Value>,
+    #[serde(skip_serializing)]
     pub fingerprint: Option<serde_json::Value>,
+    #[serde(skip_serializing)]
     pub upstream_metadata: Option<serde_json::Value>,
+    #[serde(skip_serializing)]
     pub decrypted_api_key: String,
+    #[serde(skip_serializing)]
     pub decrypted_auth_config: Option<String>,
+}
+
+impl std::fmt::Debug for GatewayProviderTransportKey {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("GatewayProviderTransportKey")
+            .field("id", &self.id)
+            .field("provider_id", &self.provider_id)
+            .field("name", &self.name)
+            .field("auth_type", &self.auth_type)
+            .field("is_active", &self.is_active)
+            .field("api_formats", &self.api_formats)
+            .field("allowed_models", &self.allowed_models)
+            .field("expires_at_unix_secs", &self.expires_at_unix_secs)
+            .field("has_proxy", &self.proxy.is_some())
+            .field("has_fingerprint", &self.fingerprint.is_some())
+            .field("has_upstream_metadata", &self.upstream_metadata.is_some())
+            .field("decrypted_api_key", &"[REDACTED]")
+            .field(
+                "decrypted_auth_config",
+                &self.decrypted_auth_config.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish_non_exhaustive()
+    }
 }
 
 #[async_trait]
@@ -335,6 +430,23 @@ mod tests {
         )
     }
 
+    fn seal_bound_provider_credential(
+        provider_id: &str,
+        key_id: &str,
+        field: &str,
+        plaintext: &str,
+    ) -> String {
+        let purpose = format!(
+            "provider-catalog-credential-bound-v2\0provider-id-bytes={}\0{provider_id}\0key-id-bytes={}\0{key_id}\0field={field}",
+            provider_id.len(),
+            key_id.len(),
+        );
+        let protected = format!("{purpose}\0{plaintext}");
+        let ciphertext = encrypt_python_fernet_plaintext(DEVELOPMENT_ENCRYPTION_KEY, &protected)
+            .expect("bound credential should encrypt");
+        format!("aether-provider-catalog-credential-v2:aether-runtime-secret-v1:{ciphertext}")
+    }
+
     #[tokio::test]
     async fn reads_decrypted_provider_transport_snapshot() {
         let state = read_state();
@@ -409,6 +521,56 @@ mod tests {
                 },
             }
         );
+    }
+
+    #[tokio::test]
+    async fn transport_snapshot_debug_and_serialization_exclude_credentials() {
+        let state = read_state();
+        let mut snapshot =
+            read_provider_transport_snapshot(&state, "provider-1", "endpoint-1", "key-1")
+                .await
+                .expect("snapshot should read")
+                .expect("snapshot should exist");
+        snapshot.provider.proxy = Some(serde_json::json!({"password": "provider-proxy-canary"}));
+        snapshot.provider.config =
+            Some(serde_json::json!({"authorization": "provider-config-canary"}));
+        snapshot.endpoint.header_rules =
+            Some(serde_json::json!({"authorization": "endpoint-header-canary"}));
+        snapshot.endpoint.body_rules = Some(serde_json::json!({"token": "endpoint-body-canary"}));
+        snapshot.endpoint.config = Some(serde_json::json!({"secret": "endpoint-config-canary"}));
+        snapshot.endpoint.format_acceptance_config =
+            Some(serde_json::json!({"secret": "endpoint-acceptance-canary"}));
+        snapshot.endpoint.proxy = Some(serde_json::json!({"password": "endpoint-proxy-canary"}));
+        snapshot.key.proxy = Some(serde_json::json!({"password": "key-proxy-canary"}));
+        snapshot.key.fingerprint = Some(serde_json::json!({"cookie": "key-fingerprint-canary"}));
+        snapshot.key.upstream_metadata =
+            Some(serde_json::json!({"access_token": "key-metadata-canary"}));
+
+        let debug = format!("{snapshot:?}");
+        let serialized = serde_json::to_string(&snapshot).expect("snapshot should serialize");
+        for secret in [
+            "sk-live-openai",
+            "rt-1",
+            "provider-proxy-canary",
+            "provider-config-canary",
+            "endpoint-header-canary",
+            "endpoint-body-canary",
+            "endpoint-config-canary",
+            "endpoint-acceptance-canary",
+            "endpoint-proxy-canary",
+            "key-proxy-canary",
+            "key-fingerprint-canary",
+            "key-metadata-canary",
+        ] {
+            assert!(!debug.contains(secret), "debug leaked {secret}");
+            assert!(
+                !serialized.contains(secret),
+                "serialization leaked {secret}"
+            );
+        }
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!serialized.contains("decrypted_api_key"));
+        assert!(!serialized.contains("decrypted_auth_config"));
     }
 
     #[tokio::test]
@@ -534,7 +696,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn accepts_plaintext_legacy_key_material() {
+    async fn rejects_plaintext_legacy_key_material() {
         let provider = sample_provider();
         let endpoint = StoredProviderCatalogEndpoint::new(
             "endpoint-legacy-1".to_string(),
@@ -584,25 +746,45 @@ mod tests {
             Some(DEVELOPMENT_ENCRYPTION_KEY.to_string()),
         );
 
-        let snapshot = read_provider_transport_snapshot(
+        let error = read_provider_transport_snapshot(
             &state,
             "provider-1",
             "endpoint-legacy-1",
             "key-legacy-1",
         )
         .await
-        .expect("snapshot read should succeed")
-        .expect("snapshot should exist");
+        .expect_err("plaintext credentials must be rejected");
 
-        assert_eq!(snapshot.key.decrypted_api_key, "sk-plaintext-openai");
-        assert_eq!(snapshot.key.decrypted_auth_config, None);
+        assert!(matches!(error, DataLayerError::UnexpectedValue(message)
+            if message.contains("provider_api_keys.api_key is not an authenticated ciphertext")));
+    }
+
+    #[test]
+    fn decrypts_record_bound_v2_credentials_and_rejects_copying() {
+        let mut key = sample_key();
+        key.encrypted_api_key = Some(seal_bound_provider_credential(
+            "provider-1",
+            "key-1",
+            "api-key",
+            "bound-api-key",
+        ));
+        key.encrypted_auth_config = Some(seal_bound_provider_credential(
+            "provider-1",
+            "key-1",
+            "auth-config",
+            r#"{"refresh_token":"bound-refresh"}"#,
+        ));
+
+        let mapped = map_key(key.clone(), DEVELOPMENT_ENCRYPTION_KEY, &[])
+            .expect("matching record binding should decrypt");
+        assert_eq!(mapped.decrypted_api_key, "bound-api-key");
         assert_eq!(
-            snapshot.endpoint.header_rules,
-            Some(serde_json::json!([
-                {"action":"set","key":"x-test","value":"1"},
-                {"action":"set","key":"x-account-id","value":"acc-legacy"}
-            ]))
+            mapped.decrypted_auth_config.as_deref(),
+            Some(r#"{"refresh_token":"bound-refresh"}"#)
         );
+
+        key.id = "key-2".to_string();
+        assert!(map_key(key, DEVELOPMENT_ENCRYPTION_KEY, &[]).is_err());
     }
 
     #[tokio::test]

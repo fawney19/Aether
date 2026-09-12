@@ -1,9 +1,15 @@
+use aether_contracts::tunnel_security::TUNNEL_SECURITY_NON_TLS_REQUIRED;
 use async_trait::async_trait;
 use serde_json::Value;
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+const PROXY_NODE_BOUND_TUNNEL_SECRET_PREFIX: &str =
+    "aether-proxy-node-secret-v2:aether-runtime-secret-v1:";
+
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct StoredProxyNode {
     pub id: String,
+    #[serde(default = "new_proxy_node_tunnel_generation")]
+    pub tunnel_generation: String,
     pub name: String,
     pub ip: String,
     pub port: i32,
@@ -32,6 +38,42 @@ pub struct StoredProxyNode {
     pub config_version: i32,
     pub created_at_unix_ms: Option<u64>,
     pub updated_at_unix_secs: Option<u64>,
+}
+
+impl std::fmt::Debug for StoredProxyNode {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("StoredProxyNode")
+            .field("id", &self.id)
+            .field("tunnel_generation", &self.tunnel_generation)
+            .field("name", &self.name)
+            .field("ip", &self.ip)
+            .field("port", &self.port)
+            .field("region", &self.region)
+            .field("is_manual", &self.is_manual)
+            .field("proxy_url", &self.proxy_url.as_ref().map(|_| "[REDACTED]"))
+            .field("proxy_username", &self.proxy_username)
+            .field(
+                "proxy_password",
+                &self.proxy_password.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("status", &self.status)
+            .field("tunnel_mode", &self.tunnel_mode)
+            .field("tunnel_connected", &self.tunnel_connected)
+            .field(
+                "proxy_metadata",
+                &self.proxy_metadata.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "hardware_info",
+                &self.hardware_info.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "remote_config",
+                &self.remote_config.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish_non_exhaustive()
+    }
 }
 
 impl StoredProxyNode {
@@ -76,6 +118,7 @@ impl StoredProxyNode {
 
         Ok(Self {
             id,
+            tunnel_generation: new_proxy_node_tunnel_generation(),
             name,
             ip,
             port,
@@ -147,11 +190,22 @@ impl StoredProxyNode {
         self.proxy_password = proxy_password;
         self
     }
+
+    pub fn with_tunnel_generation(mut self, tunnel_generation: String) -> Self {
+        self.tunnel_generation = tunnel_generation;
+        self
+    }
+}
+
+pub fn new_proxy_node_tunnel_generation() -> String {
+    uuid::Uuid::new_v4().to_string()
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ProxyNodeHeartbeatMutation {
     pub node_id: String,
+    #[serde(default)]
+    pub expected_tunnel_generation: Option<String>,
     pub heartbeat_interval: Option<i32>,
     pub active_connections: Option<i32>,
     pub total_requests_delta: Option<i64>,
@@ -166,6 +220,11 @@ pub struct ProxyNodeHeartbeatMutation {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ProxyNodeTrafficMutation {
     pub node_id: String,
+    /// Incarnation fence captured when the request plan selected this node.
+    /// Missing fences are rejected by the gateway path so a stale plan cannot
+    /// update a node recreated under the same id.
+    #[serde(default)]
+    pub expected_tunnel_generation: Option<String>,
     pub total_requests_delta: i64,
     pub failed_requests_delta: i64,
     pub dns_failures_delta: i64,
@@ -174,6 +233,11 @@ pub struct ProxyNodeTrafficMutation {
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ProxyNodeRegistrationMutation {
+    /// The stable identity selected by the caller before any secret is
+    /// protected. Re-registration of an existing endpoint must use its
+    /// existing id; repositories reject attempts to replace it.
+    #[serde(default)]
+    pub node_id: Option<String>,
     pub name: String,
     pub ip: String,
     pub port: i32,
@@ -190,8 +254,13 @@ pub struct ProxyNodeRegistrationMutation {
     pub tunnel_mode: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ProxyNodeManualCreateMutation {
+    /// Optional caller-selected id used to bind credentials before the row is
+    /// inserted. Repositories generate one only for legacy callers that do
+    /// not provide it.
+    #[serde(default)]
+    pub node_id: Option<String>,
     pub name: String,
     pub ip: String,
     pub port: i32,
@@ -202,7 +271,27 @@ pub struct ProxyNodeManualCreateMutation {
     pub registered_by: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+impl std::fmt::Debug for ProxyNodeManualCreateMutation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProxyNodeManualCreateMutation")
+            .field("node_id", &self.node_id)
+            .field("name", &self.name)
+            .field("ip", &self.ip)
+            .field("port", &self.port)
+            .field("region", &self.region)
+            .field("proxy_url", &"[REDACTED]")
+            .field("proxy_username", &self.proxy_username)
+            .field(
+                "proxy_password",
+                &self.proxy_password.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("registered_by", &self.registered_by)
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ProxyNodeManualUpdateMutation {
     pub node_id: String,
     pub name: Option<String>,
@@ -214,9 +303,30 @@ pub struct ProxyNodeManualUpdateMutation {
     pub proxy_password: Option<String>,
 }
 
+impl std::fmt::Debug for ProxyNodeManualUpdateMutation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProxyNodeManualUpdateMutation")
+            .field("node_id", &self.node_id)
+            .field("name", &self.name)
+            .field("ip", &self.ip)
+            .field("port", &self.port)
+            .field("region", &self.region)
+            .field("proxy_url", &self.proxy_url.as_ref().map(|_| "[REDACTED]"))
+            .field("proxy_username", &self.proxy_username)
+            .field(
+                "proxy_password",
+                &self.proxy_password.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ProxyNodeTunnelStatusMutation {
     pub node_id: String,
+    #[serde(default)]
+    pub expected_tunnel_generation: Option<String>,
     pub connected: bool,
     pub conn_count: i32,
     pub detail: Option<String>,
@@ -226,6 +336,8 @@ pub struct ProxyNodeTunnelStatusMutation {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ProxyNodeRemoteConfigMutation {
     pub node_id: String,
+    #[serde(default)]
+    pub expected_tunnel_generation: Option<String>,
     pub node_name: Option<String>,
     pub allowed_ports: Option<Vec<u16>>,
     pub log_level: Option<String>,
@@ -463,6 +575,31 @@ pub fn normalize_proxy_metadata(
     }
 }
 
+pub fn normalize_heartbeat_proxy_metadata(
+    previous_proxy_metadata: Option<&Value>,
+    proxy_metadata: Option<&Value>,
+    proxy_version: Option<&str>,
+) -> Option<Value> {
+    let Some(Value::Object(mut normalized)) =
+        normalize_proxy_metadata(proxy_metadata, proxy_version)
+    else {
+        return None;
+    };
+
+    // Tunnel security is control-plane state. A heartbeat may refresh runtime
+    // metadata, but it must never introduce or replace this trusted field.
+    normalized.remove("tunnel_security");
+    let merged = preserve_proxy_metadata_tunnel_security(
+        previous_proxy_metadata,
+        Some(Value::Object(normalized)),
+    );
+    merged.filter(|value| {
+        value
+            .as_object()
+            .is_some_and(|metadata| !metadata.is_empty())
+    })
+}
+
 pub fn preserve_proxy_metadata_tunnel_security(
     previous_proxy_metadata: Option<&Value>,
     next_proxy_metadata: Option<Value>,
@@ -477,9 +614,7 @@ pub fn preserve_proxy_metadata_tunnel_security(
 
     match next_proxy_metadata {
         Some(Value::Object(mut metadata)) => {
-            metadata
-                .entry("tunnel_security".to_string())
-                .or_insert(tunnel_security);
+            metadata.insert("tunnel_security".to_string(), tunnel_security);
             Some(Value::Object(metadata))
         }
         Some(value) => Some(value),
@@ -489,6 +624,70 @@ pub fn preserve_proxy_metadata_tunnel_security(
             Some(Value::Object(metadata))
         }
     }
+}
+
+/// Merge metadata received during a trusted registration/re-registration.
+///
+/// Registration is the control-plane path that may rotate a tunnel PSK.  A
+/// registration payload that omits `tunnel_security` is therefore a partial
+/// metadata refresh and must not clear the previously trusted security state.
+/// Only a non-empty, gateway-bound v2 ciphertext proves that the registration
+/// passed through the gateway credential-binding path, and that ciphertext is
+/// accepted only with the required non-TLS security mode. Mode-only,
+/// plaintext, malformed, null, scalar, empty, and disabled security values are
+/// treated as omission and cannot clear a previously trusted object.
+pub fn merge_proxy_metadata_for_registration(
+    previous_proxy_metadata: Option<&Value>,
+    next_proxy_metadata: Option<Value>,
+) -> Option<Value> {
+    let Some(next_proxy_metadata) = next_proxy_metadata else {
+        return previous_proxy_metadata.cloned();
+    };
+    let incoming_security_is_explicit =
+        proxy_metadata_has_explicit_tunnel_security(Some(&next_proxy_metadata));
+
+    let Value::Object(mut metadata) = next_proxy_metadata else {
+        // `normalize_proxy_metadata` normally prevents this branch.  Keep a
+        // malformed replacement from erasing trusted control-plane state.
+        return previous_proxy_metadata.cloned();
+    };
+
+    if incoming_security_is_explicit {
+        return Some(Value::Object(metadata));
+    }
+
+    // Null, scalar, and empty security objects are not valid replacements.
+    // Remove them before restoring the previous trusted object so malformed
+    // input cannot mask or downgrade the registered security policy.
+    metadata.remove("tunnel_security");
+    if let Some(previous_security) = previous_proxy_metadata
+        .and_then(|value| value.get("tunnel_security"))
+        .filter(|value| value.is_object())
+        .cloned()
+    {
+        metadata.insert("tunnel_security".to_string(), previous_security);
+    }
+
+    (!metadata.is_empty()).then_some(Value::Object(metadata))
+}
+
+/// Return whether metadata contains a complete gateway-bound tunnel security
+/// replacement that a trusted registration may persist.
+pub fn proxy_metadata_has_explicit_tunnel_security(proxy_metadata: Option<&Value>) -> bool {
+    proxy_metadata
+        .and_then(Value::as_object)
+        .and_then(|metadata| metadata.get("tunnel_security"))
+        .and_then(Value::as_object)
+        .is_some_and(|security| {
+            security.get("mode").and_then(Value::as_str) == Some(TUNNEL_SECURITY_NON_TLS_REQUIRED)
+                && security
+                    .get("encryption_key_encrypted")
+                    .and_then(Value::as_str)
+                    .and_then(|encrypted| {
+                        encrypted.strip_prefix(PROXY_NODE_BOUND_TUNNEL_SECRET_PREFIX)
+                    })
+                    .is_some_and(|ciphertext| !ciphertext.is_empty())
+        })
 }
 
 fn extract_tunnel_metrics_counters(
@@ -712,6 +911,20 @@ pub trait ProxyNodeReadRepository: Send + Sync {
 pub trait ProxyNodeWriteRepository: Send + Sync {
     async fn reset_stale_tunnel_statuses(&self) -> Result<usize, crate::DataLayerError>;
 
+    async fn compare_and_set_proxy_password(
+        &self,
+        node_id: &str,
+        expected: &str,
+        replacement: &str,
+    ) -> Result<bool, crate::DataLayerError>;
+
+    async fn compare_and_set_proxy_metadata(
+        &self,
+        node_id: &str,
+        expected: &serde_json::Value,
+        replacement: &serde_json::Value,
+    ) -> Result<bool, crate::DataLayerError>;
+
     async fn create_manual_node(
         &self,
         mutation: &ProxyNodeManualCreateMutation,
@@ -779,11 +992,76 @@ mod tests {
 
     use super::{
         bucket_start_unix_secs, build_tunnel_error_event_detail, build_tunnel_metrics_sample,
+        merge_proxy_metadata_for_registration, normalize_heartbeat_proxy_metadata,
         normalize_proxy_node_scheduling_state, preserve_proxy_metadata_tunnel_security,
         proxy_node_accepts_new_tunnels, proxy_reported_version,
         reconcile_remote_config_after_heartbeat, remote_config_scheduling_state,
-        remote_config_upgrade_target, ProxyNodeMetricsStep, StoredProxyNode,
+        remote_config_upgrade_target, ProxyNodeManualCreateMutation, ProxyNodeManualUpdateMutation,
+        ProxyNodeMetricsStep, StoredProxyNode,
     };
+
+    #[test]
+    fn proxy_node_debug_output_redacts_credentials_and_untrusted_metadata() {
+        let password = "debug-secret-proxy-password";
+        let proxy_url = "https://user:debug-secret-url@example.com";
+        let metadata_secret = "debug-secret-proxy-metadata";
+        let mut stored = StoredProxyNode::new(
+            "node-1".to_string(),
+            "node".to_string(),
+            "127.0.0.1".to_string(),
+            8080,
+            true,
+            "online".to_string(),
+            30,
+            0,
+            0,
+            0,
+            0,
+            0,
+            false,
+            false,
+            1,
+        )
+        .expect("proxy node should build")
+        .with_manual_proxy_fields(
+            Some(proxy_url.to_string()),
+            Some("user".to_string()),
+            Some(password.to_string()),
+        );
+        stored.proxy_metadata = Some(json!({"secret": metadata_secret}));
+        let create = ProxyNodeManualCreateMutation {
+            node_id: Some("node-1".to_string()),
+            name: "node".to_string(),
+            ip: "127.0.0.1".to_string(),
+            port: 8080,
+            region: None,
+            proxy_url: proxy_url.to_string(),
+            proxy_username: Some("user".to_string()),
+            proxy_password: Some(password.to_string()),
+            registered_by: None,
+        };
+        let update = ProxyNodeManualUpdateMutation {
+            node_id: "node-1".to_string(),
+            name: None,
+            ip: None,
+            port: None,
+            region: None,
+            proxy_url: Some(proxy_url.to_string()),
+            proxy_username: Some("user".to_string()),
+            proxy_password: Some(password.to_string()),
+        };
+
+        for rendered in [
+            format!("{stored:?}"),
+            format!("{create:?}"),
+            format!("{update:?}"),
+        ] {
+            for secret in [password, proxy_url, metadata_secret] {
+                assert!(!rendered.contains(secret), "Debug output leaked {secret}");
+            }
+            assert!(rendered.contains("[REDACTED]"));
+        }
+    }
 
     #[test]
     fn normalizes_reported_versions_and_clears_completed_upgrade_targets() {
@@ -985,7 +1263,11 @@ mod tests {
         });
         let next = json!({
             "version": "1.0.1",
-            "tunnel_metrics": {"connect_successes": 1}
+            "tunnel_metrics": {"connect_successes": 1},
+            "tunnel_security": {
+                "mode": "disabled",
+                "encryption_key": "attacker-controlled"
+            }
         });
 
         let merged = preserve_proxy_metadata_tunnel_security(Some(&previous), Some(next))
@@ -1006,6 +1288,202 @@ mod tests {
             merged.pointer("/tunnel_metrics/connect_successes"),
             Some(&json!(1))
         );
+    }
+
+    #[test]
+    fn registration_metadata_preserves_omitted_tunnel_security() {
+        let previous = json!({
+            "version": "1.0.0",
+            "tunnel_security": {
+                "mode": "non_tls_required",
+                "encryption_key_encrypted": "aether-proxy-node-secret-v2:aether-runtime-secret-v1:sealed-old"
+            }
+        });
+        let next = json!({
+            "version": "1.1.0",
+            "tunnel_metrics": {"connect_successes": 2}
+        });
+
+        let merged = merge_proxy_metadata_for_registration(Some(&previous), Some(next))
+            .expect("registration metadata should remain present");
+        assert_eq!(merged.get("version"), Some(&json!("1.1.0")));
+        assert_eq!(
+            merged.pointer("/tunnel_security/encryption_key_encrypted"),
+            Some(&json!(
+                "aether-proxy-node-secret-v2:aether-runtime-secret-v1:sealed-old"
+            ))
+        );
+        assert_eq!(
+            merged.pointer("/tunnel_metrics/connect_successes"),
+            Some(&json!(2))
+        );
+    }
+
+    #[test]
+    fn registration_metadata_accepts_explicit_tunnel_security_rotation() {
+        let previous = json!({
+            "tunnel_security": {
+                "mode": "non_tls_required",
+                "encryption_key_encrypted": "aether-proxy-node-secret-v2:aether-runtime-secret-v1:sealed-old"
+            }
+        });
+        let next = json!({
+            "tunnel_security": {
+                "mode": "non_tls_required",
+                "encryption_key_encrypted": "aether-proxy-node-secret-v2:aether-runtime-secret-v1:sealed-new"
+            }
+        });
+
+        let merged = merge_proxy_metadata_for_registration(Some(&previous), Some(next))
+            .expect("rotated registration metadata should remain present");
+        assert_eq!(
+            merged.pointer("/tunnel_security/encryption_key_encrypted"),
+            Some(&json!(
+                "aether-proxy-node-secret-v2:aether-runtime-secret-v1:sealed-new"
+            ))
+        );
+    }
+
+    #[test]
+    fn registration_metadata_rejects_invalid_security_replacement() {
+        let previous = json!({
+            "tunnel_security": {
+                "mode": "non_tls_required",
+                "encryption_key_encrypted": "aether-proxy-node-secret-v2:aether-runtime-secret-v1:sealed-old"
+            }
+        });
+        let next = json!({
+            "version": "1.2.0",
+            "tunnel_security": null
+        });
+
+        let merged = merge_proxy_metadata_for_registration(Some(&previous), Some(next))
+            .expect("previous security should be retained");
+        assert_eq!(merged.get("version"), Some(&json!("1.2.0")));
+        assert_eq!(
+            merged.pointer("/tunnel_security/encryption_key_encrypted"),
+            Some(&json!(
+                "aether-proxy-node-secret-v2:aether-runtime-secret-v1:sealed-old"
+            ))
+        );
+    }
+
+    #[test]
+    fn registration_metadata_rejects_mode_only_security_downgrade() {
+        let previous = json!({
+            "tunnel_security": {
+                "mode": "non_tls_required",
+                "encryption_key_encrypted": "aether-proxy-node-secret-v2:aether-runtime-secret-v1:sealed-old"
+            }
+        });
+        let next = json!({
+            "version": "1.3.0",
+            "tunnel_security": {"mode": "disabled"}
+        });
+
+        let merged = merge_proxy_metadata_for_registration(Some(&previous), Some(next))
+            .expect("mode-only security must not replace the registered credential");
+        assert_eq!(merged.get("version"), Some(&json!("1.3.0")));
+        assert_eq!(
+            merged.pointer("/tunnel_security/encryption_key_encrypted"),
+            Some(&json!(
+                "aether-proxy-node-secret-v2:aether-runtime-secret-v1:sealed-old"
+            ))
+        );
+        assert_eq!(
+            merged.pointer("/tunnel_security/mode"),
+            Some(&json!("non_tls_required"))
+        );
+    }
+
+    #[test]
+    fn registration_metadata_rejects_bound_ciphertext_with_disabled_mode() {
+        let previous = json!({
+            "tunnel_security": {
+                "mode": "non_tls_required",
+                "encryption_key_encrypted": "aether-proxy-node-secret-v2:aether-runtime-secret-v1:sealed-old"
+            }
+        });
+        let next = json!({
+            "version": "1.3.1",
+            "tunnel_security": {
+                "mode": "disabled",
+                "encryption_key_encrypted": "aether-proxy-node-secret-v2:aether-runtime-secret-v1:sealed-attacker"
+            }
+        });
+
+        let merged = merge_proxy_metadata_for_registration(Some(&previous), Some(next))
+            .expect("disabled security must not replace the registered credential");
+        assert_eq!(merged.get("version"), Some(&json!("1.3.1")));
+        assert_eq!(
+            merged.pointer("/tunnel_security/encryption_key_encrypted"),
+            Some(&json!(
+                "aether-proxy-node-secret-v2:aether-runtime-secret-v1:sealed-old"
+            ))
+        );
+        assert_eq!(
+            merged.pointer("/tunnel_security/mode"),
+            Some(&json!("non_tls_required"))
+        );
+    }
+
+    #[test]
+    fn new_registration_drops_invalid_tunnel_security_fields() {
+        for invalid_security in [
+            json!(null),
+            json!("disabled"),
+            json!({}),
+            json!({"mode": "disabled"}),
+            json!({"mode": "disabled", "encryption_key_encrypted": "aether-proxy-node-secret-v2:aether-runtime-secret-v1:sealed-attacker"}),
+            json!({"mode": "non_tls_required", "encryption_key_encrypted": ""}),
+            json!({"mode": "non_tls_required", "encryption_key_encrypted": "not-gateway-bound"}),
+        ] {
+            let next = json!({
+                "version": "1.4.0",
+                "tunnel_security": invalid_security
+            });
+            let merged = merge_proxy_metadata_for_registration(None, Some(next))
+                .expect("valid non-security metadata should remain");
+            assert_eq!(merged.get("version"), Some(&json!("1.4.0")));
+            assert!(merged.get("tunnel_security").is_none());
+        }
+
+        assert_eq!(
+            merge_proxy_metadata_for_registration(
+                None,
+                Some(json!({"tunnel_security": {"mode": "disabled"}})),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn heartbeat_metadata_cannot_introduce_tunnel_security() {
+        let injected = json!({
+            "tunnel_security": {
+                "mode": "disabled",
+                "encryption_key": "attacker-controlled"
+            }
+        });
+        assert_eq!(
+            normalize_heartbeat_proxy_metadata(None, Some(&injected), None),
+            None
+        );
+
+        let injected_with_runtime_metadata = json!({
+            "version": "1.2.3",
+            "arch": "arm64",
+            "tunnel_security": {
+                "mode": "disabled",
+                "encryption_key": "attacker-controlled"
+            }
+        });
+        let normalized =
+            normalize_heartbeat_proxy_metadata(None, Some(&injected_with_runtime_metadata), None)
+                .expect("runtime metadata should remain present");
+        assert_eq!(normalized.get("version"), Some(&json!("1.2.3")));
+        assert_eq!(normalized.get("arch"), Some(&json!("arm64")));
+        assert!(normalized.get("tunnel_security").is_none());
     }
 
     #[test]

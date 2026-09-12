@@ -6,6 +6,7 @@
 
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, watch, nextTick } from 'vue'
+import { useI18n } from '@/i18n'
 import {
   Chart as ChartJS,
   CategoryScale,
@@ -43,6 +44,7 @@ interface Props {
 }
 
 const chartRef = ref<HTMLCanvasElement>()
+const { locale } = useI18n()
 let chart: ChartJS<'bar'> | null = null
 
 const defaultOptions: ChartOptions<'bar'> = {
@@ -91,9 +93,7 @@ const defaultOptions: ChartOptions<'bar'> = {
   }
 }
 
-function createChart() {
-  if (!chartRef.value) return
-
+function buildChartOptions(): ChartOptions<'bar'> {
   const stackedOptions = props.stacked ? {
     scales: {
       x: { ...defaultOptions.scales?.x, stacked: true },
@@ -106,14 +106,21 @@ function createChart() {
     }
   }
 
+  return {
+    ...defaultOptions,
+    ...stackedOptions,
+    locale: locale.value,
+    ...props.options
+  }
+}
+
+function createChart() {
+  if (!chartRef.value) return
+
   chart = new ChartJS(chartRef.value, {
     type: 'bar',
     data: props.data,
-    options: {
-      ...defaultOptions,
-      ...stackedOptions,
-      ...props.options
-    }
+    options: buildChartOptions()
   })
 }
 
@@ -137,12 +144,9 @@ onUnmounted(() => {
 })
 
 watch(() => props.data, updateChart, { deep: true })
-watch(() => props.options, () => {
+watch([() => props.options, () => props.stacked, locale], () => {
   if (chart) {
-    chart.options = {
-      ...defaultOptions,
-      ...props.options
-    }
+    chart.options = buildChartOptions()
     chart.update()
   }
 }, { deep: true })

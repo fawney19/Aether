@@ -18,6 +18,7 @@ use crate::handlers::proxy::websocket::session::{
     CLOSE_INTERNAL_ERROR, CLOSE_POLICY_VIOLATION, CLOSE_TRY_AGAIN, WEBSOCKET_LOG_TRANSPORT,
 };
 use crate::handlers::proxy::websocket::transport::send_responses_websocket_error;
+use crate::plan_usage_policy::PlanUsagePolicySnapshot;
 use crate::{AppState, GatewayError};
 
 const RESPONSES_WEBSOCKET_ADAPTER_OBSERVATION_TIMEOUT: Duration = Duration::from_secs(5);
@@ -85,6 +86,7 @@ pub(super) async fn begin_responses_websocket_turn(
     control_decision: &crate::control::GatewayControlDecision,
     decision: crate::ai_serving::AiExecutionDecision,
     client_event: &serde_json::Value,
+    plan_usage_policy_snapshot: Option<PlanUsagePolicySnapshot>,
 ) -> Result<ActiveProviderAttempt, GatewayError> {
     let state = state.clone();
     let trace_id = trace_id.to_string();
@@ -108,6 +110,7 @@ pub(super) async fn begin_responses_websocket_turn(
                 &control_decision,
                 decision,
                 &client_event,
+                plan_usage_policy_snapshot,
             )
             .await?;
             Ok(ActiveProviderAttempt::new(&state, turn))
@@ -231,12 +234,29 @@ impl PreviousAttemptSettled {
 pub(super) async fn settle_turn_finalization(
     bound: &mut BoundResponsesConnection,
     state: &AppState,
-    turn: ActiveProviderAttempt,
+    mut turn: ActiveProviderAttempt,
     outcome: ResponsesWebSocketTurnOutcome,
-) -> PreviousAttemptSettled {
+) -> Option<PreviousAttemptSettled> {
+    // This awaited finalization entry is used only by transparent quota retry.
+    // Free the old attempt's durable cost reservation before planning can
+    // reserve the replacement, otherwise two per-attempt estimates briefly
+    // count against the same user and can manufacture a false local 429.
+    if let Err(error) = turn.release_plan_usage_cost_for_retry(state).await {
+        warn!(
+            event_name = "responses_websocket_plan_usage_cost_retry_release_failed",
+            log_type = "ops",
+            transport = WEBSOCKET_LOG_TRANSPORT,
+            websocket = true,
+            error = ?error,
+            "gateway stopped a transparent Responses WebSocket retry because the old plan cost reservation could not be released"
+        );
+        queue_turn_finalization(bound, state, turn, outcome).await;
+        await_pending_turn_finalization(bound).await;
+        return None;
+    }
     queue_turn_finalization(bound, state, turn, outcome).await;
     await_pending_turn_finalization(bound).await;
-    PreviousAttemptSettled(())
+    Some(PreviousAttemptSettled(()))
 }
 
 pub(super) fn spawn_bounded_adapter_observation(
@@ -334,6 +354,16 @@ pub(super) async fn send_responses_websocket_turn_start_error(
 ) {
     let status_code = responses_websocket_turn_start_http_status(error);
     match error {
+        GatewayError::PlanUsageLimited(_) => {
+            send_responses_websocket_error(
+                client_socket,
+                status_code,
+                "rate_limit_error",
+                "plan_usage_limit_exceeded",
+                "Subscription plan usage limit exceeded; retry later",
+            )
+            .await;
+        }
         GatewayError::Client { status, message } => {
             let (error_type, code) = if status.as_u16() == 429 {
                 ("rate_limit_error", "gateway_request_capacity_exceeded")
@@ -378,6 +408,7 @@ pub(super) async fn send_responses_websocket_turn_start_error(
 
 fn responses_websocket_turn_start_http_status(error: &GatewayError) -> u16 {
     match error {
+        GatewayError::PlanUsageLimited(_) => StatusCode::TOO_MANY_REQUESTS.as_u16(),
         GatewayError::Client { status, .. } => status.as_u16(),
         GatewayError::AdmissionTimeout { .. } => StatusCode::TOO_MANY_REQUESTS.as_u16(),
         GatewayError::LocalExecutionPlanningTimeout { .. } => StatusCode::GATEWAY_TIMEOUT.as_u16(),
@@ -387,6 +418,7 @@ fn responses_websocket_turn_start_http_status(error: &GatewayError) -> u16 {
 
 pub(super) fn responses_websocket_turn_start_close(error: &GatewayError) -> (u16, &'static str) {
     match error {
+        GatewayError::PlanUsageLimited(_) => (CLOSE_TRY_AGAIN, "plan_usage_limit_exceeded"),
         GatewayError::Client { .. } => (CLOSE_POLICY_VIOLATION, "request_not_allowed"),
         GatewayError::AdmissionTimeout { .. }
         | GatewayError::LocalExecutionPlanningTimeout { .. } => (CLOSE_TRY_AGAIN, "gateway_busy"),
@@ -405,6 +437,7 @@ mod tests {
         await_turn_finalization_handle, responses_websocket_turn_start_close,
         responses_websocket_turn_start_http_status, spawn_bounded_adapter_observation_with_timeout,
     };
+    use crate::plan_usage_policy::PlanUsagePolicyRejection;
     use crate::GatewayError;
 
     #[test]
@@ -419,6 +452,22 @@ mod tests {
         assert_eq!(
             responses_websocket_turn_start_close(&error),
             (1013, "gateway_busy")
+        );
+    }
+
+    #[test]
+    fn plan_usage_limit_uses_http_429_and_retry_later_close_code() {
+        let error = GatewayError::PlanUsageLimited(PlanUsagePolicyRejection {
+            metric: "actual_cost_usd",
+            limit: 10.0,
+            retry_after: 60,
+            window: "calendar_month",
+        });
+
+        assert_eq!(responses_websocket_turn_start_http_status(&error), 429);
+        assert_eq!(
+            responses_websocket_turn_start_close(&error),
+            (1013, "plan_usage_limit_exceeded")
         );
     }
 

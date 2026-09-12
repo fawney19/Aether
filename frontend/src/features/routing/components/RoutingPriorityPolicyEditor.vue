@@ -179,7 +179,7 @@
               <div class="flex items-center gap-2">
                 <span class="truncate text-sm font-medium">{{ row.name }}</span>
                 <span
-                  v-if="row.kind === 'pool'"
+                  v-if="poolProviderIds.has(row.id)"
                   class="rounded bg-primary/10 px-1.5 py-0.5 text-[10px] text-primary"
                 >
                   Pool
@@ -315,7 +315,8 @@ import {
   getDefaultModelPolicy,
   getModelPolicy,
   normalizeRoutingGroupConfig,
-  setModelKeyPriorityOverrides,
+  normalizeRoutingApiFormatKey,
+  setModelKeyPriorityOverridesForFormat,
   setModelPoolPriorityOverrides,
   setModelProviderPriorityOverrides,
   type RoutingDefaultPolicy,
@@ -323,6 +324,7 @@ import {
   type RoutingPriorityMode,
   type RoutingSchedulingMode,
 } from '../utils/routingPolicy'
+import { buildRoutingProviderSummaryQuery } from '../utils/providerQuery'
 
 interface ProviderPriorityRow {
   id: string
@@ -366,6 +368,7 @@ interface GlobalKeySource {
 const props = defineProps<{
   config: RoutingGroupConfig
   model?: string
+  modelId?: string
   priorityMode?: RoutingPriorityMode
   schedulingMode?: RoutingSchedulingMode
   showPriorityMode?: boolean
@@ -397,6 +400,7 @@ const draggedKeyId = ref<string | null>(null)
 const dragOverKeyId = ref<string | null>(null)
 const providerMultiSelectEnabled = ref(false)
 const selectedProviderIds = ref<Set<string>>(new Set())
+let providerLoadRequestId = 0
 
 const config = computed(() => normalizeRoutingGroupConfig(props.config))
 const targetModel = computed(() => props.model?.trim() || DEFAULT_ROUTING_POLICY_MODEL)
@@ -452,9 +456,18 @@ const providerRows = computed<ProviderPriorityRow[]>(() => {
     .sort(comparePriorityRows)
 })
 
+const selectedFormatKey = computed(() => normalizeRoutingApiFormatKey(selectedApiFormat.value))
+const selectedFormatKeyOverrides = computed<Record<string, number>>(() => (
+  targetModelPolicy.value.key_priority_overrides_by_format[selectedFormatKey.value] ?? {}
+))
+
 const keyRows = computed<KeyPriorityRow[]>(() => {
   const format = selectedApiFormat.value
-  const keyOverrides = targetModelPolicy.value.key_priority_overrides
+  // 按格式覆盖优先；旧的不分格式覆盖仅作为兜底展示
+  const keyOverrides: Record<string, number> = {
+    ...targetModelPolicy.value.key_priority_overrides,
+    ...selectedFormatKeyOverrides.value,
+  }
   const poolOverrides = targetModelPolicy.value.pool_priority_overrides
   const normalRows: KeyPriorityRow[] = []
   const poolGroups = new Map<string, GlobalKeySource[]>()
@@ -495,6 +508,12 @@ watch(effectivePriorityMode, mode => {
     providerMultiSelectEnabled.value = false
     selectedProviderIds.value = new Set()
   }
+  void loadProviders()
+})
+
+// 父组件异步解析全局模型 ID 后，重新加载对应模型的提供商列表。
+watch([targetModel, () => props.modelId], () => {
+  void loadProviders()
 })
 
 watch(providerRows, rows => {
@@ -551,16 +570,31 @@ function updateSchedulingMode(mode: RoutingSchedulingMode): void {
 }
 
 async function loadProviders(): Promise<void> {
+  const requestId = ++providerLoadRequestId
   loadingProviders.value = true
   loadError.value = null
   try {
-    const response = await getProvidersSummary({ page: 1, page_size: 9999 })
+    const query = buildRoutingProviderSummaryQuery(
+      targetModel.value,
+      props.modelId,
+      effectivePriorityMode.value,
+    )
+    if (!query) {
+      providers.value = []
+      return
+    }
+
+    const response = await getProvidersSummary(query)
+    if (requestId !== providerLoadRequestId) return
     providers.value = response.items
   } catch (err) {
+    if (requestId !== providerLoadRequestId) return
     loadError.value = parseApiError(err, '加载 Provider 失败')
     providers.value = []
   } finally {
-    loadingProviders.value = false
+    if (requestId === providerLoadRequestId) {
+      loadingProviders.value = false
+    }
   }
 }
 
@@ -686,7 +720,7 @@ function setKeyPriority(keyId: string, event: Event): void {
     })
   } else {
     updateKeyOverrides({
-      ...targetModelPolicy.value.key_priority_overrides,
+      ...selectedFormatKeyOverrides.value,
       [row.target_id]: priority,
     })
   }
@@ -697,8 +731,14 @@ function moveKey(keyId: string, direction: -1 | 1): void {
   updateVisibleKeyAndPoolOverrides(rows)
 }
 
+// Key 覆盖始终写入当前选中的 API 格式，不同格式互不影响
 function updateKeyOverrides(overrides: Record<string, number>): void {
-  updateConfig(setModelKeyPriorityOverrides(config.value, targetModel.value, overrides))
+  updateConfig(setModelKeyPriorityOverridesForFormat(
+    config.value,
+    targetModel.value,
+    selectedApiFormat.value,
+    overrides,
+  ))
 }
 
 function updatePoolOverrides(overrides: Record<string, number>): void {
@@ -710,7 +750,12 @@ function updateKeyAndPoolOverrides(
   poolOverrides: Record<string, number>,
 ): void {
   const next = setModelPoolPriorityOverrides(
-    setModelKeyPriorityOverrides(config.value, targetModel.value, keyOverrides),
+    setModelKeyPriorityOverridesForFormat(
+      config.value,
+      targetModel.value,
+      selectedApiFormat.value,
+      keyOverrides,
+    ),
     targetModel.value,
     poolOverrides,
   )
@@ -718,7 +763,7 @@ function updateKeyAndPoolOverrides(
 }
 
 function updateVisibleKeyAndPoolOverrides(rows: KeyPriorityRow[]): void {
-  const keyOverrides = { ...targetModelPolicy.value.key_priority_overrides }
+  const keyOverrides = { ...selectedFormatKeyOverrides.value }
   const poolOverrides = { ...targetModelPolicy.value.pool_priority_overrides }
 
   for (const row of keyRows.value) {

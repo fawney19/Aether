@@ -89,7 +89,7 @@ pub enum LocalVideoTaskSeed {
     GeminiCreate(GeminiVideoTaskSeed),
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct LocalVideoTaskTransport {
     pub upstream_base_url: String,
     pub provider_name: Option<String>,
@@ -104,7 +104,52 @@ pub struct LocalVideoTaskTransport {
     pub timeouts: Option<ExecutionTimeouts>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+impl std::fmt::Debug for LocalVideoTaskTransport {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("LocalVideoTaskTransport")
+            .field("upstream_base_url", &"[redacted]")
+            .field("provider_name", &self.provider_name)
+            .field("provider_id", &self.provider_id)
+            .field("endpoint_id", &self.endpoint_id)
+            .field("key_id", &self.key_id)
+            .field("headers", &"[redacted]")
+            .field("content_type", &self.content_type)
+            .field("model_name", &self.model_name)
+            .field("proxy", &self.proxy.as_ref().map(|_| "[redacted]"))
+            .field(
+                "transport_profile",
+                &self.transport_profile.as_ref().map(|_| "[redacted]"),
+            )
+            .field("timeouts", &self.timeouts)
+            .finish()
+    }
+}
+
+pub(crate) fn sanitize_video_task_error_code(value: Option<String>) -> Option<String> {
+    let value = value?.trim().to_ascii_lowercase();
+    if value.is_empty() {
+        return None;
+    }
+    Some(match value.as_str() {
+        "authentication_error"
+        | "cancelled"
+        | "content_policy_violation"
+        | "expired"
+        | "invalid_request"
+        | "not_found"
+        | "permission_denied"
+        | "poll_permanent_error"
+        | "poll_timeout"
+        | "provider_error"
+        | "rate_limit_exceeded"
+        | "server_error"
+        | "unknown" => value,
+        _ => "provider_error".to_string(),
+    })
+}
+
+#[derive(Clone, PartialEq)]
 pub struct LocalVideoTaskTransportBridgeInput {
     pub upstream_base_url: String,
     pub provider_name: Option<String>,
@@ -118,6 +163,29 @@ pub struct LocalVideoTaskTransportBridgeInput {
     pub proxy: Option<ProxySnapshot>,
     pub transport_profile: Option<ResolvedTransportProfile>,
     pub timeouts: Option<ExecutionTimeouts>,
+}
+
+impl std::fmt::Debug for LocalVideoTaskTransportBridgeInput {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("LocalVideoTaskTransportBridgeInput")
+            .field("upstream_base_url", &"[redacted]")
+            .field("provider_name", &self.provider_name)
+            .field("provider_id", &self.provider_id)
+            .field("endpoint_id", &self.endpoint_id)
+            .field("key_id", &self.key_id)
+            .field("auth_header", &"[redacted]")
+            .field("auth_value", &"[redacted]")
+            .field("content_type", &self.content_type)
+            .field("model_name", &self.model_name)
+            .field("proxy", &self.proxy.as_ref().map(|_| "[redacted]"))
+            .field(
+                "transport_profile",
+                &self.transport_profile.as_ref().map(|_| "[redacted]"),
+            )
+            .field("timeouts", &self.timeouts)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

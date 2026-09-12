@@ -137,6 +137,36 @@ function clickButton(text: string) {
   button.click()
 }
 
+const billingFieldNames = [
+  'billing_type',
+  'monthly_quota_usd',
+  'quota_reset_day',
+  'quota_last_reset_at',
+  'quota_expires_at',
+] as const
+
+function expectBillingConfigurationHidden() {
+  for (const text of [
+    '计费类型',
+    '月卡额度',
+    '按量付费',
+    '免费套餐',
+    '周期额度 (USD)',
+    '重置周期 (天)',
+    '周期开始时间',
+    '过期时间',
+  ]) {
+    expect(document.body.textContent).not.toContain(text)
+  }
+}
+
+function expectBillingFieldsOmitted(payload: unknown) {
+  expect(payload).toEqual(expect.any(Object))
+  for (const field of billingFieldNames) {
+    expect(payload).not.toHaveProperty(field)
+  }
+}
+
 beforeEach(() => {
   endpointMocks.createProvider.mockReset()
   endpointMocks.createProvider.mockResolvedValue({ id: 'provider-new', name: 'New Provider' })
@@ -226,6 +256,41 @@ describe('ProviderFormDialog transfer limits', () => {
   })
 })
 
+describe('ProviderFormDialog billing configuration', () => {
+  it('hides billing configuration and omits billing fields when creating', async () => {
+    mountDialog(null)
+    await settle()
+
+    expectBillingConfigurationHidden()
+
+    await setInput('#name', 'New Provider')
+    clickButton('创建')
+    await settle()
+
+    expect(endpointMocks.createProvider).toHaveBeenCalledTimes(1)
+    expectBillingFieldsOmitted(endpointMocks.createProvider.mock.calls[0]?.[0])
+  })
+
+  it('hides existing monthly quota configuration and preserves it when editing', async () => {
+    mountDialog(makeProvider({
+      billing_type: 'monthly_quota',
+      monthly_quota_usd: 200,
+      quota_reset_day: 30,
+      quota_last_reset_at: '2026-08-01T00:00:00Z',
+      quota_expires_at: '2026-09-01T00:00:00Z',
+    }))
+    await settle()
+
+    expectBillingConfigurationHidden()
+
+    clickButton('保存')
+    await settle()
+
+    expect(endpointMocks.updateProvider).toHaveBeenCalledTimes(1)
+    expectBillingFieldsOmitted(endpointMocks.updateProvider.mock.calls[0]?.[1])
+  })
+})
+
 describe('ProviderFormDialog provider types', () => {
   it('creates an experimental Claude Code provider from the add dialog', async () => {
     mountDialog(null)
@@ -275,6 +340,7 @@ describe('ProviderFormDialog provider types', () => {
       '#codex-fingerprint-convergence',
     )
     expect(convergenceSwitch).not.toBeNull()
+    expect(document.body.textContent).toContain('Codex 指纹收敛')
     expect(convergenceSwitch?.getAttribute('aria-checked')).toBe('false')
 
     convergenceSwitch?.click()

@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::fmt;
 
 use aether_contracts::{
     ResolvedTransportProfile, TRANSPORT_BACKEND_BROWSER_WREQ, TRANSPORT_HTTP_MODE_AUTO,
@@ -33,7 +34,7 @@ pub struct GrokBrowserProfileMetadata {
     pub sec_ch_ua_platform: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct GrokHeaderInput<'a> {
     pub transport: &'a GatewayProviderTransportSnapshot,
     pub transport_profile: Option<&'a ResolvedTransportProfile>,
@@ -43,6 +44,37 @@ pub struct GrokHeaderInput<'a> {
     pub header_rules: Option<&'a Value>,
     pub provider_request_body: &'a Value,
     pub original_request_body: &'a Value,
+}
+
+impl fmt::Debug for GrokHeaderInput<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GrokHeaderInput")
+            .field("transport", &self.transport)
+            .field("transport_profile", &self.transport_profile)
+            .field(
+                "request_header_names",
+                &self
+                    .request_headers
+                    .map(|headers| headers.keys().map(|name| name.as_str()).collect::<Vec<_>>()),
+            )
+            .field("content_type", &self.content_type)
+            .field("accept", &self.accept)
+            .field("has_header_rules", &self.header_rules.is_some())
+            .field(
+                "provider_request_body_bytes",
+                &serde_json::to_vec(self.provider_request_body)
+                    .ok()
+                    .map(|bytes| bytes.len()),
+            )
+            .field(
+                "original_request_body_bytes",
+                &serde_json::to_vec(self.original_request_body)
+                    .ok()
+                    .map(|bytes| bytes.len()),
+            )
+            .finish()
+    }
 }
 
 pub fn is_grok_provider_transport(transport: &GatewayProviderTransportSnapshot) -> bool {
@@ -253,6 +285,14 @@ pub fn build_grok_browser_headers(input: GrokHeaderInput<'_>) -> Option<BTreeMap
         input.request_headers,
     ) {
         return None;
+    }
+    if let Some(request_headers) = input.request_headers {
+        let declared_connection_headers =
+            super::headers::declared_connection_header_names(request_headers, &BTreeMap::new());
+        super::headers::remove_declared_connection_headers(
+            &mut headers,
+            &declared_connection_headers,
+        );
     }
     Some(headers)
 }

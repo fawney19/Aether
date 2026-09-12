@@ -6,6 +6,7 @@
 
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, watch, nextTick } from 'vue'
+import { useI18n } from '@/i18n'
 import {
   Chart as ChartJS,
   CategoryScale,
@@ -44,11 +45,13 @@ interface Props {
 }
 
 const chartRef = ref<HTMLCanvasElement>()
+const { locale } = useI18n()
 let chart: ChartJS<'line'> | null = null
 
 function buildChartOptions(): ChartOptions<'line'> {
   return {
     ...defaultOptions,
+    locale: locale.value,
     ...props.options
   }
 }
@@ -121,7 +124,7 @@ onUnmounted(() => {
 
 // 监听引用变化，避免深监听触发整图重算
 watch(() => props.data, updateChart)
-watch(() => props.options, () => {
+watch([() => props.options, locale], () => {
   if (chart) {
     chart.options = buildChartOptions()
     chart.update('none')

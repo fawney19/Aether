@@ -1,7 +1,8 @@
 use axum::{body::Body, http, response::Response};
 
 use super::{
-    process_payment_callback_input_with_wallet_repository, AppState, GatewayPublicRequestContext,
+    process_payment_callback_input_with_wallet_repository,
+    reconcile_payment_callback_referral_rewards, AppState, GatewayPublicRequestContext,
 };
 use serde_json::json;
 use tracing::warn;
@@ -37,24 +38,26 @@ pub(super) async fn handle_wxpay_notify(
             .await
         {
             Ok(value) => value,
-            Err(detail) => {
-                warn!(error = %detail, "wxpay notify verification failed");
-                return wxpay_json(http::StatusCode::BAD_REQUEST, "FAIL", detail);
+            Err(_) => {
+                warn!(
+                    error_category = "callback_verification_failed",
+                    "wxpay notify verification failed"
+                );
+                return wxpay_json(http::StatusCode::BAD_REQUEST, "FAIL", "支付通知验证失败");
             }
         };
-    match process_payment_callback_input_with_wallet_repository(state, input).await {
-        Ok(aether_data::repository::wallet::ProcessPaymentCallbackOutcome::Applied {
-            order,
-            order_id,
-            ..
-        }) => {
-            if let Err(err) = state.apply_referral_rewards_for_paid_order(&order).await {
-                warn!(
-                    error = ?err,
-                    order_id = %order_id,
-                    "failed to apply referral rewards for wxpay callback"
-                );
-            }
+    let outcome = process_payment_callback_input_with_wallet_repository(state, input).await;
+    if let Ok(outcome) = &outcome {
+        if !reconcile_payment_callback_referral_rewards(state, outcome, "wxpay").await {
+            return wxpay_json(
+                http::StatusCode::INTERNAL_SERVER_ERROR,
+                "FAIL",
+                "支付通知关联处理失败",
+            );
+        }
+    }
+    match outcome {
+        Ok(aether_data::repository::wallet::ProcessPaymentCallbackOutcome::Applied { .. }) => {
             wxpay_json(http::StatusCode::OK, "SUCCESS", "成功")
         }
         Ok(
@@ -65,13 +68,26 @@ pub(super) async fn handle_wxpay_notify(
                 ..
             },
         ) => wxpay_json(http::StatusCode::OK, "SUCCESS", "成功"),
-        Ok(aether_data::repository::wallet::ProcessPaymentCallbackOutcome::Failed {
-            error,
-            ..
-        }) => {
-            warn!(error = %error, path = %request_context.request_path, "wxpay notify processing failed");
-            wxpay_json(http::StatusCode::INTERNAL_SERVER_ERROR, "FAIL", error)
+        Ok(aether_data::repository::wallet::ProcessPaymentCallbackOutcome::Failed { .. }) => {
+            warn!(
+                error_category = "callback_rejected",
+                path = %request_context.request_path,
+                "wxpay notify processing failed"
+            );
+            wxpay_json(
+                http::StatusCode::INTERNAL_SERVER_ERROR,
+                "FAIL",
+                "支付通知处理失败",
+            )
         }
-        Err(response) => response,
+        Err(response) => {
+            let status = response.status();
+            warn!(
+                status = %status,
+                path = %request_context.request_path,
+                "wxpay notify storage processing failed"
+            );
+            wxpay_json(status, "FAIL", "支付通知处理失败")
+        }
     }
 }

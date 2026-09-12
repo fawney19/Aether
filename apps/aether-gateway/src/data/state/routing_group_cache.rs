@@ -684,7 +684,7 @@ mod tests {
                     .unwrap_or_default();
                 // One Arc is retained by the map and every active request
                 // owns one through its leader guard or follower state.
-                if participant_count >= participants + 1 {
+                if participant_count > participants {
                     break;
                 }
                 tokio::task::yield_now().await;

@@ -13,6 +13,33 @@ use serde_json::json;
 use std::collections::BTreeSet;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+const MAX_ADMIN_PROVIDER_MODEL_BATCH_ITEMS: usize = 100;
+
+fn validate_admin_provider_model_batch(
+    payloads: Vec<AdminProviderModelCreateRequest>,
+) -> Result<Vec<(String, AdminProviderModelCreateRequest)>, String> {
+    if payloads.len() > MAX_ADMIN_PROVIDER_MODEL_BATCH_ITEMS {
+        return Err(format!(
+            "批量创建模型最多支持 {MAX_ADMIN_PROVIDER_MODEL_BATCH_ITEMS} 条"
+        ));
+    }
+
+    let mut normalized = Vec::with_capacity(payloads.len());
+    let mut seen = BTreeSet::new();
+    for mut payload in payloads {
+        let normalized_name = payload.provider_model_name.trim().to_string();
+        if normalized_name.is_empty() {
+            return Err("provider_model_name 不能为空".to_string());
+        }
+        if !seen.insert(normalized_name.clone()) {
+            return Err(format!("批量请求中包含重复模型 {normalized_name}"));
+        }
+        payload.provider_model_name = normalized_name.clone();
+        normalized.push((normalized_name, payload));
+    }
+    Ok(normalized)
+}
+
 pub(super) async fn maybe_handle(
     state: &AdminAppState<'_>,
     request_context: &AdminRequestContext<'_>,
@@ -68,28 +95,23 @@ pub(super) async fn maybe_handle(
                     ));
                 }
             };
-        let mut created = Vec::new();
-        let mut seen = BTreeSet::new();
-        for payload in payloads {
-            let normalized_name = payload.provider_model_name.trim().to_string();
-            if normalized_name.is_empty() {
+        let payloads = match validate_admin_provider_model_batch(payloads) {
+            Ok(payloads) => payloads,
+            Err(detail) => {
                 return Ok(Some(
                     (
                         http::StatusCode::BAD_REQUEST,
-                        Json(json!({ "detail": "provider_model_name 不能为空" })),
+                        Json(json!({ "detail": detail })),
                     )
                         .into_response(),
                 ));
             }
-            if !seen.insert(normalized_name.clone()) {
-                return Ok(Some(
-                    (
-                        http::StatusCode::BAD_REQUEST,
-                        Json(json!({ "detail": format!("批量请求中包含重复模型 {normalized_name}") })),
-                    )
-                        .into_response(),
-                ));
-            }
+        };
+
+        // Complete request validation before the first write so a bad later item cannot leave
+        // an earlier subset committed while the endpoint returns a validation error.
+        let mut staged = Vec::new();
+        for (normalized_name, payload) in payloads {
             if admin_provider_model_name_exists(state, &provider_id, &normalized_name, None).await?
             {
                 continue;
@@ -109,6 +131,11 @@ pub(super) async fn maybe_handle(
                     ));
                 }
             };
+            staged.push(record);
+        }
+
+        let mut created = Vec::with_capacity(staged.len());
+        for record in staged {
             let Some(model) = state.create_admin_provider_model(&record).await? else {
                 return Ok(Some(
                     (
@@ -139,4 +166,37 @@ pub(super) async fn maybe_handle(
     }
 
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        validate_admin_provider_model_batch, AdminProviderModelCreateRequest,
+        MAX_ADMIN_PROVIDER_MODEL_BATCH_ITEMS,
+    };
+
+    fn payload(name: &str) -> AdminProviderModelCreateRequest {
+        serde_json::from_value(serde_json::json!({
+            "provider_model_name": name,
+            "global_model_id": "global-1"
+        }))
+        .expect("payload should deserialize")
+    }
+
+    #[test]
+    fn provider_model_batch_is_bounded_and_prevalidates_duplicates() {
+        let at_limit = (0..MAX_ADMIN_PROVIDER_MODEL_BATCH_ITEMS)
+            .map(|index| payload(&format!("model-{index}")))
+            .collect();
+        assert!(validate_admin_provider_model_batch(at_limit).is_ok());
+
+        let oversized = (0..=MAX_ADMIN_PROVIDER_MODEL_BATCH_ITEMS)
+            .map(|index| payload(&format!("model-{index}")))
+            .collect();
+        assert!(validate_admin_provider_model_batch(oversized).is_err());
+
+        let duplicate = vec![payload("model-1"), payload(" model-1 ")];
+        assert!(validate_admin_provider_model_batch(duplicate).is_err());
+        assert!(validate_admin_provider_model_batch(vec![payload("   ")]).is_err());
+    }
 }

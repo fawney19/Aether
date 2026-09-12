@@ -122,13 +122,44 @@ impl AppState {
     {
         let session = session.into();
         #[cfg(test)]
-        if let Some(store) = self.auth_session_store.as_ref() {
+        if let (Some(user_store), Some(session_store)) = (
+            self.auth_user_store.as_ref(),
+            self.auth_session_store.as_ref(),
+        ) {
+            let existing = {
+                user_store
+                    .lock()
+                    .expect("auth user store should lock")
+                    .get(&session.user_id)
+                    .cloned()
+            };
+            let existing = match existing {
+                Some(user) => Some(user),
+                None => self
+                    .data
+                    .find_user_auth_by_id(&session.user_id)
+                    .await
+                    .map_err(|err| GatewayError::Internal(err.to_string()))?,
+            };
+            let Some(existing) = existing else {
+                return Ok(None);
+            };
+            let mut users = user_store.lock().expect("auth user store should lock");
+            let user = users.entry(session.user_id.clone()).or_insert(existing);
+            if !user.is_active
+                || user.is_deleted
+                || user.security_version != session.security_version
+            {
+                return Ok(None);
+            }
             let now = session
                 .created_at
                 .or(session.updated_at)
                 .or(session.last_seen_at)
                 .unwrap_or_else(chrono::Utc::now);
-            let mut guard = store.lock().expect("auth session store should lock");
+            let mut guard = session_store
+                .lock()
+                .expect("auth session store should lock");
             for existing in guard.values_mut() {
                 if existing.user_id == session.user_id
                     && existing.client_device_id == session.client_device_id
@@ -155,12 +186,89 @@ impl AppState {
             .map_err(|err| GatewayError::Internal(err.to_string()))
     }
 
+    pub(crate) async fn create_user_session_if_password_matches<T>(
+        &self,
+        session: T,
+        expected_password_hash: &str,
+    ) -> Result<Option<GatewayUserSessionView>, GatewayError>
+    where
+        T: Into<GatewayUserSessionView>,
+    {
+        let session = session.into();
+        #[cfg(test)]
+        if let (Some(session_store), Some(user_store)) = (
+            self.auth_session_store.as_ref(),
+            self.auth_user_store.as_ref(),
+        ) {
+            let existing = {
+                user_store
+                    .lock()
+                    .expect("auth user store should lock")
+                    .get(&session.user_id)
+                    .cloned()
+            };
+            let existing = match existing {
+                Some(user) => Some(user),
+                None => self
+                    .data
+                    .find_user_auth_by_id(&session.user_id)
+                    .await
+                    .map_err(|err| GatewayError::Internal(err.to_string()))?,
+            };
+            let Some(existing) = existing else {
+                return Ok(None);
+            };
+            let mut users = user_store.lock().expect("auth user store should lock");
+            let user = users.entry(session.user_id.clone()).or_insert(existing);
+            if user.password_hash.as_deref() != Some(expected_password_hash)
+                || !user.auth_source.eq_ignore_ascii_case("local")
+                || !user.is_active
+                || user.is_deleted
+                || user.security_version != session.security_version
+            {
+                return Ok(None);
+            }
+            let now = session
+                .created_at
+                .or(session.updated_at)
+                .or(session.last_seen_at)
+                .unwrap_or_else(chrono::Utc::now);
+            user.last_login_at = Some(now);
+            let mut sessions = session_store
+                .lock()
+                .expect("auth session store should lock");
+            for existing in sessions.values_mut() {
+                if existing.user_id == session.user_id
+                    && existing.client_device_id == session.client_device_id
+                    && !existing.is_revoked()
+                    && !existing.is_expired(now)
+                {
+                    existing.revoked_at = Some(now);
+                    existing.revoke_reason = Some("replaced_by_new_login".to_string());
+                    existing.updated_at = Some(now);
+                }
+            }
+            sessions.insert(
+                format!("{}:{}", session.user_id, session.id),
+                session.clone().into(),
+            );
+            return Ok(Some(session));
+        }
+
+        let raw_session: crate::data::state::StoredUserSessionRecord = session.into();
+        self.data
+            .create_user_session_if_password_matches(&raw_session, expected_password_hash)
+            .await
+            .map(|value| value.map(Into::into))
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn rotate_user_session_refresh_token(
         &self,
         user_id: &str,
         session_id: &str,
-        previous_refresh_token_hash: &str,
+        expected_refresh_token_hash: &str,
         next_refresh_token_hash: &str,
         rotated_at: chrono::DateTime<chrono::Utc>,
         expires_at: chrono::DateTime<chrono::Utc>,
@@ -171,8 +279,12 @@ impl AppState {
         if let Some(store) = self.auth_session_store.as_ref() {
             let key = format!("{user_id}:{session_id}");
             let mut guard = store.lock().expect("auth session store should lock");
-            if let Some(session) = guard.get_mut(&key) {
-                session.prev_refresh_token_hash = Some(previous_refresh_token_hash.to_string());
+            if let Some(session) = guard.get_mut(&key).filter(|session| {
+                session.refresh_token_hash == expected_refresh_token_hash
+                    && !session.is_revoked()
+                    && !session.is_expired(rotated_at)
+            }) {
+                session.prev_refresh_token_hash = Some(expected_refresh_token_hash.to_string());
                 session.refresh_token_hash = next_refresh_token_hash.to_string();
                 session.rotated_at = Some(rotated_at);
                 session.expires_at = Some(expires_at);
@@ -193,7 +305,7 @@ impl AppState {
             .rotate_user_session_refresh_token(
                 user_id,
                 session_id,
-                previous_refresh_token_hash,
+                expected_refresh_token_hash,
                 next_refresh_token_hash,
                 rotated_at,
                 expires_at,

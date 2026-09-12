@@ -19,6 +19,11 @@ pub struct WalletReadSeed {
     pub payment_callbacks: Vec<StoredAdminPaymentCallback>,
     pub wallet_transactions: Vec<StoredAdminWalletTransaction>,
     pub refunds: Vec<StoredAdminWalletRefund>,
+    /// `(user_id, idempotency_key, refund_id)` entries for mutable in-memory
+    /// repositories. Refund read records intentionally do not expose their
+    /// idempotency keys, so callers must seed this private write index
+    /// explicitly when replay behavior matters.
+    pub refund_idempotency: Vec<(String, String, String)>,
     pub redeem_batches: Vec<StoredAdminRedeemCodeBatch>,
     pub redeem_codes: Vec<StoredAdminRedeemCode>,
 }
@@ -248,7 +253,7 @@ impl WalletReadSnapshot {
                     let effective = if order.status == "pending"
                         && order
                             .expires_at_unix_secs
-                            .is_some_and(|value| value < now_unix_secs)
+                            .is_some_and(|value| value <= now_unix_secs)
                     {
                         "expired"
                     } else {
@@ -282,6 +287,14 @@ impl WalletReadSnapshot {
             .payment_orders
             .values()
             .filter(|order| order.user_id.as_deref() == Some(user_id))
+            .filter(|order| {
+                order
+                    .gateway_response
+                    .as_ref()
+                    .and_then(|value| value.get("order_kind"))
+                    .and_then(serde_json::Value::as_str)
+                    != Some("plan_purchase")
+            })
             .cloned()
             .collect::<Vec<_>>();
         items.sort_by_key(|item| std::cmp::Reverse(item.created_at_unix_ms));
@@ -317,7 +330,15 @@ impl WalletReadSnapshot {
     ) -> Option<StoredAdminPaymentOrder> {
         self.payment_orders
             .get(order_id)
-            .filter(|order| order.user_id.as_deref() == Some(user_id))
+            .filter(|order| {
+                order.user_id.as_deref() == Some(user_id)
+                    && order
+                        .gateway_response
+                        .as_ref()
+                        .and_then(|value| value.get("order_kind"))
+                        .and_then(serde_json::Value::as_str)
+                        != Some("plan_purchase")
+            })
             .cloned()
     }
 
@@ -440,4 +461,52 @@ fn by_id<T>(items: Vec<T>, id: impl Fn(&T) -> &str) -> BTreeMap<String, T> {
 fn page<T, P>(items: Vec<T>, offset: usize, limit: usize, build: impl Fn(Vec<T>, u64) -> P) -> P {
     let total = items.len() as u64;
     build(items.into_iter().skip(offset).take(limit).collect(), total)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        AdminPaymentOrderListQuery, StoredAdminPaymentOrder, WalletReadSeed, WalletReadSnapshot,
+    };
+
+    #[test]
+    fn payment_orders_expire_at_the_exact_boundary() {
+        let order = StoredAdminPaymentOrder {
+            id: "order-boundary".to_string(),
+            order_no: "order-boundary".to_string(),
+            wallet_id: "wallet-boundary".to_string(),
+            user_id: Some("user-boundary".to_string()),
+            amount_usd: 1.0,
+            pay_amount: None,
+            pay_currency: None,
+            exchange_rate: None,
+            refunded_amount_usd: 0.0,
+            refundable_amount_usd: 0.0,
+            payment_method: "epay".to_string(),
+            payment_provider: Some("epay".to_string()),
+            order_kind: "wallet_recharge".to_string(),
+            gateway_order_id: None,
+            gateway_response: None,
+            status: "pending".to_string(),
+            created_at_unix_ms: 1,
+            paid_at_unix_secs: None,
+            credited_at_unix_secs: None,
+            expires_at_unix_secs: Some(100),
+        };
+        let snapshot = WalletReadSnapshot::new(WalletReadSeed {
+            payment_orders: vec![order],
+            ..WalletReadSeed::default()
+        });
+        let page = snapshot.list_admin_payment_orders(
+            &AdminPaymentOrderListQuery {
+                status: Some("expired".to_string()),
+                payment_method: None,
+                limit: 10,
+                offset: 0,
+            },
+            100,
+        );
+        assert_eq!(page.total, 1);
+        assert_eq!(page.items[0].id, "order-boundary");
+    }
 }

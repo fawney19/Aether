@@ -146,8 +146,11 @@ pub(super) fn admin_api_keys_parse_limit(query: Option<&str>) -> Result<usize, S
     }
 }
 
-fn masked_admin_api_key_display(state: &AdminAppState<'_>, ciphertext: Option<&str>) -> String {
-    masked_user_api_key_display(state, ciphertext)
+fn masked_admin_api_key_display(
+    state: &AdminAppState<'_>,
+    record: &aether_data::repository::auth::StoredAuthApiKeyExportRecord,
+) -> String {
+    masked_user_api_key_display(state, record)
 }
 
 pub(super) fn build_admin_api_key_list_item_payload(
@@ -159,7 +162,7 @@ pub(super) fn build_admin_api_key_list_item_payload(
         "id": record.api_key_id,
         "user_id": record.user_id,
         "name": record.name,
-        "key_display": masked_admin_api_key_display(state, record.key_encrypted.as_deref()),
+        "key_display": masked_admin_api_key_display(state, record),
         "is_active": record.is_active,
         "is_standalone": true,
         "total_requests": record.total_requests,
@@ -190,7 +193,7 @@ pub(super) fn build_admin_api_key_detail_payload(
         "id": record.api_key_id,
         "user_id": record.user_id,
         "name": record.name,
-        "key_display": masked_admin_api_key_display(state, record.key_encrypted.as_deref()),
+        "key_display": masked_admin_api_key_display(state, record),
         "is_active": record.is_active,
         "is_standalone": true,
         "total_requests": record.total_requests,

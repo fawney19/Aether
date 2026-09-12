@@ -40,7 +40,7 @@
         <Select
           :model-value="mergeMode"
           :open="mergeModeSelectOpen"
-          @update:model-value="$emit('update:mergeMode', $event)"
+          @update:model-value="($event === 'skip' || $event === 'overwrite' || $event === 'error') && $emit('update:mergeMode', $event)"
           @update:open="$emit('update:mergeModeSelectOpen', $event)"
         >
           <SelectTrigger>
@@ -66,7 +66,7 @@
             已存在的配置将被导入的配置覆盖
           </template>
           <template v-else>
-            如果发现任何冲突，导入将中止并回滚
+            如果发现任何冲突，导入将在写入前预检并中止
           </template>
         </p>
       </div>

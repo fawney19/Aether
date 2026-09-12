@@ -13,6 +13,9 @@ use sha2::{Digest, Sha256};
 use tokio::sync::{oneshot, watch};
 use tokio::task::JoinHandle;
 
+use crate::ai_serving::transport::{
+    ProviderOutboundRequestContext, PROVIDER_OUTBOUND_CONTEXT_MAX_VALUE_BYTES,
+};
 use crate::ai_serving::ResponsesWebSocketPinnedCandidate;
 
 use super::planner::{LiveAuthMode, PlannedLiveCandidate};
@@ -21,6 +24,9 @@ use super::protocol::validate_call_id;
 const SCHEMA_VERSION: u16 = 2;
 const RECORD_PREFIX: &str = "codex_live:call:v2:";
 const RECORD_DOMAIN: &[u8] = b"aether-codex-live-call-v2";
+const CONTEXT_SCHEMA_VERSION: u16 = 1;
+const CONTEXT_PREFIX: &str = "codex_live:call_context:v1:";
+const CONTEXT_DOMAIN: &[u8] = b"aether-codex-live-call-context-v1";
 const INDEX_PREFIX: &str = "codex_live:call_index:v2:";
 const INDEX_DOMAIN: &[u8] = b"aether-codex-live-call-index-v2";
 const LOCK_PREFIX: &str = "codex_live:call_lock:v2:";
@@ -38,6 +44,8 @@ const LOCK_OWNER: &str = "codex_live_call_registry";
 const SIDEBAND_LOCK_OWNER: &str = "codex_live_sideband_attachment";
 const MAX_RECORDS_PER_PRINCIPAL: usize = 64;
 const MAX_SERIALIZED_RECORD_BYTES: usize = 4 * 1024;
+const MAX_SERIALIZED_CONTEXT_BYTES: usize = 2 * 1024;
+const MAX_CONTEXT_FIELD_BYTES: usize = PROVIDER_OUTBOUND_CONTEXT_MAX_VALUE_BYTES;
 const MAX_PRINCIPAL_BYTES: usize = 256;
 const MAX_RECORD_ID_BYTES: usize = 256;
 const LIVE_LOG_TARGET: &str = "aether_gateway::handlers::proxy::codex_live";
@@ -51,7 +59,7 @@ enum RegisterCommitState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum LiveCallLookup {
-    Found(LiveCallBinding),
+    Found(LiveCallRecord),
     Missing,
     Expired,
 }
@@ -277,6 +285,118 @@ pub(super) struct LiveCallBinding {
     created_at_unix_ms: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct LiveCallRecord {
+    binding: LiveCallBinding,
+    provider_outbound_context: Option<ProviderOutboundRequestContext>,
+}
+
+impl LiveCallRecord {
+    pub(super) fn binding(&self) -> &LiveCallBinding {
+        &self.binding
+    }
+
+    pub(super) fn provider_outbound_context(&self) -> Option<&ProviderOutboundRequestContext> {
+        self.provider_outbound_context.as_ref()
+    }
+
+    pub(super) fn matches_candidate(&self, candidate: &PlannedLiveCandidate) -> bool {
+        self.binding.matches_candidate(candidate)
+            && self
+                .provider_outbound_context
+                .as_ref()
+                .is_none_or(|context| context == &candidate.provider_outbound_context)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LiveProviderOutboundContextRecord {
+    schema_version: u16,
+    binding_created_at_unix_ms: u64,
+    logical_turn_id: String,
+    original_turn_id: Option<String>,
+    original_client_session_id: Option<String>,
+    original_prompt_cache_key: Option<String>,
+    turn_started_at_unix_ms: u64,
+}
+
+impl LiveProviderOutboundContextRecord {
+    fn from_context(
+        binding: &LiveCallBinding,
+        context: &ProviderOutboundRequestContext,
+    ) -> Result<Self, LiveCallRegistryError> {
+        let record = Self {
+            schema_version: CONTEXT_SCHEMA_VERSION,
+            binding_created_at_unix_ms: binding.created_at_unix_ms,
+            logical_turn_id: context.logical_turn_id().to_string(),
+            original_turn_id: context.original_turn_id().map(ToOwned::to_owned),
+            original_client_session_id: context.original_client_session_id().map(ToOwned::to_owned),
+            original_prompt_cache_key: context.original_prompt_cache_key().map(ToOwned::to_owned),
+            turn_started_at_unix_ms: context.turn_started_at_unix_ms(),
+        };
+        record.validate(binding)?;
+        Ok(record)
+    }
+
+    fn into_context(
+        self,
+        binding: &LiveCallBinding,
+    ) -> Result<ProviderOutboundRequestContext, LiveCallRegistryError> {
+        self.validate(binding)?;
+        let mut context =
+            ProviderOutboundRequestContext::new(self.logical_turn_id, self.turn_started_at_unix_ms);
+        if let Some(value) = self.original_turn_id {
+            context = context.with_original_turn_id(value);
+        }
+        if let Some(value) = self.original_client_session_id {
+            context = context.with_original_client_session_id(value);
+        }
+        if let Some(value) = self.original_prompt_cache_key {
+            context = context.with_original_prompt_cache_key(value);
+        }
+        Ok(context)
+    }
+
+    fn validate(&self, binding: &LiveCallBinding) -> Result<(), LiveCallRegistryError> {
+        if self.schema_version != CONTEXT_SCHEMA_VERSION {
+            return Err(LiveCallRegistryError::InvalidRecord(
+                "unsupported_context_schema_version",
+            ));
+        }
+        if self.binding_created_at_unix_ms != binding.created_at_unix_ms {
+            return Err(LiveCallRegistryError::InvalidRecord(
+                "context_binding_mismatch",
+            ));
+        }
+        if self.turn_started_at_unix_ms == 0 {
+            return Err(LiveCallRegistryError::InvalidRecord(
+                "invalid_context_started_at",
+            ));
+        }
+        validate_context_field(
+            self.logical_turn_id.as_str(),
+            "invalid_context_logical_turn",
+        )?;
+        for (value, error) in [
+            (self.original_turn_id.as_deref(), "invalid_context_turn"),
+            (
+                self.original_client_session_id.as_deref(),
+                "invalid_context_session",
+            ),
+            (
+                self.original_prompt_cache_key.as_deref(),
+                "invalid_context_prompt_cache",
+            ),
+        ] {
+            if let Some(value) = value {
+                validate_context_field(value, error)?;
+            }
+        }
+        Ok(())
+    }
+}
+
 impl LiveCallBinding {
     pub(super) fn from_candidate(candidate: &PlannedLiveCandidate) -> Self {
         Self {
@@ -370,9 +490,11 @@ impl LiveCallRegistry {
         api_key_id: &str,
         call_id: &str,
         binding: &LiveCallBinding,
+        provider_outbound_context: Option<&ProviderOutboundRequestContext>,
     ) -> Result<(), LiveCallRegistryError> {
         binding.validate()?;
         let key = record_key(user_id, api_key_id, call_id)?;
+        let context_key = context_key(key.as_str())?;
         let index = index_key(user_id, api_key_id)?;
         let lock = lock_key(user_id, api_key_id)?;
         let serialized =
@@ -380,12 +502,40 @@ impl LiveCallRegistry {
         if serialized.len() > MAX_SERIALIZED_RECORD_BYTES {
             return Err(LiveCallRegistryError::RecordTooLarge);
         }
+        let context_record = provider_outbound_context
+            .map(|context| LiveProviderOutboundContextRecord::from_context(binding, context))
+            .transpose()?;
+        let serialized_context = context_record
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(LiveCallRegistryError::Serialization)?;
+        if serialized_context
+            .as_ref()
+            .is_some_and(|serialized| serialized.len() > MAX_SERIALIZED_CONTEXT_BYTES)
+        {
+            return Err(LiveCallRegistryError::RecordTooLarge);
+        }
         let lease = self.acquire_lock(lock.as_str()).await?;
         let result = self
-            .register_locked(key.as_str(), index.as_str(), serialized, binding)
+            .register_locked(
+                key.as_str(),
+                context_key.as_str(),
+                index.as_str(),
+                serialized,
+                serialized_context,
+                binding,
+                context_record.as_ref(),
+            )
             .await;
         let exact_binding_committed = if result.is_err() {
-            self.exact_binding_is_committed(key.as_str(), binding).await
+            self.exact_binding_is_committed(
+                key.as_str(),
+                context_key.as_str(),
+                binding,
+                context_record.as_ref(),
+            )
+            .await
         } else {
             false
         };
@@ -425,13 +575,13 @@ impl LiveCallRegistry {
         user_id: &str,
         api_key_id: &str,
         call_id: &str,
-    ) -> Result<Option<LiveCallBinding>, LiveCallRegistryError> {
+    ) -> Result<Option<LiveCallRecord>, LiveCallRegistryError> {
         Ok(
             match self
                 .lookup_with_status(user_id, api_key_id, call_id)
                 .await?
             {
-                LiveCallLookup::Found(binding) => Some(binding),
+                LiveCallLookup::Found(record) => Some(record),
                 LiveCallLookup::Missing | LiveCallLookup::Expired => None,
             },
         )
@@ -444,18 +594,38 @@ impl LiveCallRegistry {
         call_id: &str,
     ) -> Result<LiveCallLookup, LiveCallRegistryError> {
         let key = record_key(user_id, api_key_id, call_id)?;
-        if let Some(serialized) = self
+        let context_key = context_key(key.as_str())?;
+        let values = self
             .runtime_state
-            .kv_get(key.as_str())
+            .kv_get_many(&[key.clone(), context_key])
             .await
-            .map_err(LiveCallRegistryError::Storage)?
-        {
+            .map_err(LiveCallRegistryError::Storage)?;
+        if let Some(serialized) = values.first().and_then(Option::as_ref) {
             let binding = serde_json::from_str::<LiveCallBinding>(serialized.as_str())
                 .map_err(LiveCallRegistryError::CorruptRecord)?;
             binding.validate()?;
-            return Ok(LiveCallLookup::Found(binding));
+            // Missing companion data is a rolling-upgrade compatible legacy
+            // v2 binding. Sideband planning will use the existing fallback
+            // behavior until that short-lived binding expires.
+            let provider_outbound_context = values
+                .get(1)
+                .and_then(Option::as_ref)
+                .map(|serialized| {
+                    serde_json::from_str::<LiveProviderOutboundContextRecord>(serialized.as_str())
+                        .map_err(LiveCallRegistryError::CorruptRecord)?
+                        .into_context(&binding)
+                })
+                .transpose()?;
+            return Ok(LiveCallLookup::Found(LiveCallRecord {
+                binding,
+                provider_outbound_context,
+            }));
         }
 
+        // A companion may outlive the base record by the expiry grace period,
+        // or be visible briefly before registration commits the base. Do not
+        // delete it from a lock-free lookup; the bounded TTL and the next
+        // locked registration handle cleanup without racing the writer.
         let index = index_key(user_id, api_key_id)?;
         let indexed = self
             .runtime_state
@@ -521,48 +691,121 @@ impl LiveCallRegistry {
         }
     }
 
-    async fn exact_binding_is_committed(&self, key: &str, expected: &LiveCallBinding) -> bool {
-        let stored =
-            match tokio::time::timeout(COMMIT_VERIFY_TIMEOUT, self.runtime_state.kv_get(key)).await
-            {
-                Ok(Ok(Some(stored))) => stored,
-                Ok(Ok(None) | Err(_)) | Err(_) => return false,
-            };
-        let Ok(actual) = serde_json::from_str::<LiveCallBinding>(stored.as_str()) else {
+    async fn exact_binding_is_committed(
+        &self,
+        key: &str,
+        context_storage_key: &str,
+        expected: &LiveCallBinding,
+        expected_context: Option<&LiveProviderOutboundContextRecord>,
+    ) -> bool {
+        let keys = [key.to_string(), context_storage_key.to_string()];
+        let stored = match tokio::time::timeout(
+            COMMIT_VERIFY_TIMEOUT,
+            self.runtime_state.kv_get_many(&keys),
+        )
+        .await
+        {
+            Ok(Ok(stored)) => stored,
+            Ok(Err(_)) | Err(_) => return false,
+        };
+        let Some(Some(stored_binding)) = stored.first() else {
             return false;
         };
-        actual.validate().is_ok() && actual == *expected
+        let Ok(actual) = serde_json::from_str::<LiveCallBinding>(stored_binding.as_str()) else {
+            return false;
+        };
+        if actual.validate().is_err() || actual != *expected {
+            return false;
+        }
+        match (stored.get(1).and_then(Option::as_ref), expected_context) {
+            (None, None) => true,
+            (Some(stored), Some(expected)) => {
+                serde_json::from_str::<LiveProviderOutboundContextRecord>(stored.as_str())
+                    .is_ok_and(|actual| actual == *expected)
+            }
+            _ => false,
+        }
     }
 
     async fn register_locked(
         &self,
         key: &str,
+        context_storage_key: &str,
         index: &str,
         serialized: String,
+        serialized_context: Option<String>,
         binding: &LiveCallBinding,
+        context_record: Option<&LiveProviderOutboundContextRecord>,
     ) -> Result<(), LiveCallRegistryError> {
-        if let Some(existing) = self
+        let existing = self
             .runtime_state
-            .kv_get(key)
+            .kv_get_many(&[key.to_string(), context_storage_key.to_string()])
             .await
-            .map_err(LiveCallRegistryError::Storage)?
-        {
+            .map_err(LiveCallRegistryError::Storage)?;
+        let existing_binding = existing.first().and_then(Option::as_ref);
+        if let Some(existing) = existing_binding {
             let existing = serde_json::from_str::<LiveCallBinding>(existing.as_str())
                 .map_err(LiveCallRegistryError::CorruptRecord)?;
             if existing != *binding {
                 return Err(LiveCallRegistryError::OwnershipConflict);
             }
         }
-        self.runtime_state
+        let existing_context = existing.get(1).and_then(Option::as_ref);
+        if existing_binding.is_some() {
+            match (existing_context, context_record) {
+                (Some(existing), Some(expected)) => {
+                    let existing = serde_json::from_str::<LiveProviderOutboundContextRecord>(
+                        existing.as_str(),
+                    )
+                    .map_err(LiveCallRegistryError::CorruptRecord)?;
+                    if existing != *expected {
+                        return Err(LiveCallRegistryError::OwnershipConflict);
+                    }
+                }
+                (Some(_), None) => return Err(LiveCallRegistryError::OwnershipConflict),
+                _ => {}
+            }
+        } else if existing_context.is_some() && serialized_context.is_none() {
+            // Old binaries and interrupted writes can leave a companion after
+            // the authoritative base record is gone. Clear it under the
+            // principal lock before committing a legacy/no-context binding.
+            self.runtime_state
+                .kv_delete(context_storage_key)
+                .await
+                .map_err(LiveCallRegistryError::Storage)?;
+        }
+        if let Some(serialized_context) = serialized_context {
+            self.runtime_state
+                // Keep the companion alive through the base record's expiry
+                // grace period. This prevents a normal TTL race from causing
+                // a sideband retry to mint a different provider identity.
+                .kv_set(
+                    context_storage_key,
+                    serialized_context,
+                    Some(self.ttl.saturating_add(EXPIRED_LOOKUP_GRACE)),
+                )
+                .await
+                .map_err(LiveCallRegistryError::Storage)?;
+        }
+        if let Err(error) = self
+            .runtime_state
             .kv_set(key, serialized, Some(self.ttl))
             .await
-            .map_err(LiveCallRegistryError::Storage)?;
+        {
+            // Keep the companion until exact commit verification. A Redis
+            // timeout can happen after the base write committed; deleting the
+            // companion here would turn an idempotent retry into a split record.
+            // If the base did not commit, the bounded companion expires with
+            // the registry grace period and a later retry can safely replace it.
+            return Err(LiveCallRegistryError::Storage(error));
+        }
         if let Err(error) = self
             .runtime_state
             .score_set(index, key, now_unix_ms() as f64)
             .await
         {
             let _ = self.runtime_state.kv_delete(key).await;
+            let _ = self.runtime_state.kv_delete(context_storage_key).await;
             return Err(LiveCallRegistryError::Storage(error));
         }
         if let Err(error) = self
@@ -572,6 +815,7 @@ impl LiveCallRegistry {
         {
             let _ = self.runtime_state.score_remove(index, key).await;
             let _ = self.runtime_state.kv_delete(key).await;
+            let _ = self.runtime_state.kv_delete(context_storage_key).await;
             return Err(LiveCallRegistryError::Storage(error));
         }
         let members = self
@@ -581,8 +825,13 @@ impl LiveCallRegistry {
             .map_err(LiveCallRegistryError::Storage)?;
         let overflow = members.len().saturating_sub(self.max_records_per_principal);
         for oldest in members.into_iter().take(overflow) {
+            let oldest_context = context_key(oldest.as_str())?;
             self.runtime_state
                 .kv_delete(oldest.as_str())
+                .await
+                .map_err(LiveCallRegistryError::Storage)?;
+            self.runtime_state
+                .kv_delete(oldest_context.as_str())
                 .await
                 .map_err(LiveCallRegistryError::Storage)?;
             self.runtime_state
@@ -621,6 +870,21 @@ fn record_key(
     ))
 }
 
+fn context_key(record_key: &str) -> Result<String, LiveCallRegistryError> {
+    if !record_key.starts_with(RECORD_PREFIX)
+        || record_key.len() != RECORD_PREFIX.len() + 64
+        || !record_key[RECORD_PREFIX.len()..]
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(LiveCallRegistryError::InvalidIdentity("invalid_record_key"));
+    }
+    Ok(format!(
+        "{CONTEXT_PREFIX}{}",
+        digest(CONTEXT_DOMAIN, &[record_key])
+    ))
+}
+
 fn index_key(user_id: &str, api_key_id: &str) -> Result<String, LiveCallRegistryError> {
     validate_principal(user_id, "invalid_user_id")?;
     validate_principal(api_key_id, "invalid_api_key_id")?;
@@ -656,6 +920,19 @@ fn sideband_lock_key(
 fn validate_principal(value: &str, error: &'static str) -> Result<(), LiveCallRegistryError> {
     if value.is_empty() || value.len() > MAX_PRINCIPAL_BYTES {
         return Err(LiveCallRegistryError::InvalidIdentity(error));
+    }
+    Ok(())
+}
+
+fn validate_context_field(value: &str, error: &'static str) -> Result<(), LiveCallRegistryError> {
+    let encoded_len = serde_json::to_string(value)
+        .map(|encoded| encoded.len())
+        .unwrap_or(usize::MAX);
+    if value.trim().is_empty()
+        || value.len() > MAX_CONTEXT_FIELD_BYTES
+        || encoded_len > MAX_CONTEXT_FIELD_BYTES.saturating_add(2)
+    {
+        return Err(LiveCallRegistryError::InvalidRecord(error));
     }
     Ok(())
 }
@@ -704,6 +981,13 @@ mod tests {
         }
     }
 
+    fn provider_outbound_context(logical_turn_id: &str) -> ProviderOutboundRequestContext {
+        ProviderOutboundRequestContext::new(logical_turn_id, 1_700_000_000_123)
+            .with_original_turn_id("client-turn")
+            .with_original_client_session_id("client-session")
+            .with_original_prompt_cache_key("client-cache")
+    }
+
     fn candidate_for_binding(binding: &LiveCallBinding) -> PlannedLiveCandidate {
         let execution: crate::ai_serving::AiExecutionDecision =
             serde_json::from_value(serde_json::json!({
@@ -718,6 +1002,7 @@ mod tests {
         PlannedLiveCandidate {
             execution,
             pinned_candidate: binding.pinned_candidate.clone(),
+            provider_outbound_context: ProviderOutboundRequestContext::new("test-live-turn", 1),
             client_model: binding.client_model.clone(),
             provider_model: binding.provider_model.clone(),
             auth_mode: binding.auth_mode,
@@ -730,7 +1015,13 @@ mod tests {
         let state = runtime_state();
         let registry = LiveCallRegistry::new(Arc::clone(&state));
         registry
-            .register("user-1", "api-key-1", "rtc_secret", &binding("global"))
+            .register(
+                "user-1",
+                "api-key-1",
+                "rtc_secret",
+                &binding("global"),
+                None,
+            )
             .await
             .unwrap();
         assert!(registry
@@ -751,19 +1042,128 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provider_outbound_context_round_trips_in_companion_record() {
+        let state = runtime_state();
+        let registry = LiveCallRegistry::new(Arc::clone(&state));
+        let binding = binding("global");
+        let context = provider_outbound_context("logical-live-turn");
+        registry
+            .register("user", "key", "rtc_context", &binding, Some(&context))
+            .await
+            .unwrap();
+
+        let record = registry
+            .lookup("user", "key", "rtc_context")
+            .await
+            .unwrap()
+            .expect("binding should exist");
+        assert_eq!(record.binding(), &binding);
+        assert_eq!(record.provider_outbound_context(), Some(&context));
+
+        let key = record_key("user", "key", "rtc_context").unwrap();
+        let serialized_binding = state.kv_get(key.as_str()).await.unwrap().unwrap();
+        let strict_v2 = serde_json::from_str::<LiveCallBinding>(&serialized_binding).unwrap();
+        assert_eq!(strict_v2, binding);
+        assert!(!serialized_binding.contains("provider_outbound_context"));
+        assert!(!serialized_binding.contains("logical_turn_id"));
+    }
+
+    #[test]
+    fn bounded_context_fields_fit_the_companion_record_budget() {
+        let binding = binding("global");
+        let value = "x".repeat(PROVIDER_OUTBOUND_CONTEXT_MAX_VALUE_BYTES);
+        let context = ProviderOutboundRequestContext::new(value.clone(), 1)
+            .with_original_turn_id(value.clone())
+            .with_original_client_session_id(value.clone())
+            .with_original_prompt_cache_key(value);
+        let record = LiveProviderOutboundContextRecord::from_context(&binding, &context)
+            .expect("bounded context should be valid");
+        let serialized = serde_json::to_string(&record).expect("context should serialize");
+        assert!(serialized.len() <= MAX_SERIALIZED_CONTEXT_BYTES);
+    }
+
+    #[tokio::test]
+    async fn legacy_binding_without_companion_context_still_loads() {
+        let state = runtime_state();
+        let registry = LiveCallRegistry::new(Arc::clone(&state));
+        registry
+            .register("user", "key", "rtc_legacy", &binding("global"), None)
+            .await
+            .unwrap();
+
+        let record = registry
+            .lookup("user", "key", "rtc_legacy")
+            .await
+            .unwrap()
+            .expect("legacy binding should exist");
+        assert!(record.provider_outbound_context().is_none());
+    }
+
+    #[tokio::test]
+    async fn corrupt_or_mismatched_companion_context_is_rejected() {
+        let state = runtime_state();
+        let registry = LiveCallRegistry::new(Arc::clone(&state));
+        let binding = binding("global");
+        let context = provider_outbound_context("logical-live-turn");
+        registry
+            .register("user", "key", "rtc_corrupt", &binding, Some(&context))
+            .await
+            .unwrap();
+        let key = record_key("user", "key", "rtc_corrupt").unwrap();
+        let context_key = context_key(key.as_str()).unwrap();
+        state
+            .kv_set(
+                context_key.as_str(),
+                "not-json",
+                Some(Duration::from_secs(60)),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            registry.lookup("user", "key", "rtc_corrupt").await,
+            Err(LiveCallRegistryError::CorruptRecord(_))
+        ));
+
+        let mut mismatch = LiveProviderOutboundContextRecord::from_context(&binding, &context)
+            .expect("context should be valid");
+        mismatch.binding_created_at_unix_ms = mismatch.binding_created_at_unix_ms.saturating_add(1);
+        state
+            .kv_set(
+                context_key.as_str(),
+                serde_json::to_string(&mismatch).unwrap(),
+                Some(Duration::from_secs(60)),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            registry.lookup("user", "key", "rtc_corrupt").await,
+            Err(LiveCallRegistryError::InvalidRecord(
+                "context_binding_mismatch"
+            ))
+        ));
+    }
+
+    #[tokio::test]
     async fn capacity_evicts_the_oldest_binding() {
         let state = runtime_state();
         let registry =
             LiveCallRegistry::with_limits(Arc::clone(&state), Duration::from_secs(60), 2);
+        let context = provider_outbound_context("logical-live-turn");
         for call_id in ["rtc_1", "rtc_2", "rtc_3"] {
             registry
-                .register("user", "key", call_id, &binding(call_id))
+                .register("user", "key", call_id, &binding(call_id), Some(&context))
                 .await
                 .unwrap();
             tokio::time::sleep(Duration::from_millis(2)).await;
         }
         assert!(registry
             .lookup("user", "key", "rtc_1")
+            .await
+            .unwrap()
+            .is_none());
+        let evicted_key = record_key("user", "key", "rtc_1").unwrap();
+        assert!(state
+            .kv_get(context_key(evicted_key.as_str()).unwrap().as_str())
             .await
             .unwrap()
             .is_none());
@@ -784,8 +1184,15 @@ mod tests {
         let state = runtime_state();
         let registry =
             LiveCallRegistry::with_limits(Arc::clone(&state), Duration::from_millis(5), 2);
+        let context = provider_outbound_context("logical-live-turn");
         registry
-            .register("user", "key", "rtc_expiring", &binding("global"))
+            .register(
+                "user",
+                "key",
+                "rtc_expiring",
+                &binding("global"),
+                Some(&context),
+            )
             .await
             .unwrap();
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -801,6 +1208,53 @@ mod tests {
                 .unwrap(),
             LiveCallLookup::Expired
         );
+        let expired_key = record_key("user", "key", "rtc_expiring").unwrap();
+        assert!(state
+            .kv_get(context_key(expired_key.as_str()).unwrap().as_str())
+            .await
+            .unwrap()
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn orphan_companion_does_not_block_a_new_binding() {
+        let state = runtime_state();
+        let registry = LiveCallRegistry::new(Arc::clone(&state));
+        let old_binding = binding("old");
+        let old_context = provider_outbound_context("old-turn");
+        let key = record_key("user", "key", "rtc_reused").unwrap();
+        let context_storage_key = context_key(key.as_str()).unwrap();
+        let old_record =
+            LiveProviderOutboundContextRecord::from_context(&old_binding, &old_context).unwrap();
+        state
+            .kv_set(
+                context_storage_key.as_str(),
+                serde_json::to_string(&old_record).unwrap(),
+                Some(Duration::from_secs(60)),
+            )
+            .await
+            .unwrap();
+
+        let new_binding = binding("new");
+        let new_context = provider_outbound_context("new-turn");
+        registry
+            .register(
+                "user",
+                "key",
+                "rtc_reused",
+                &new_binding,
+                Some(&new_context),
+            )
+            .await
+            .unwrap();
+
+        let record = registry
+            .lookup("user", "key", "rtc_reused")
+            .await
+            .unwrap()
+            .expect("new binding should be committed");
+        assert_eq!(record.binding(), &new_binding);
+        assert_eq!(record.provider_outbound_context(), Some(&new_context));
     }
 
     #[tokio::test]
@@ -809,19 +1263,22 @@ mod tests {
         let registry = LiveCallRegistry::new(Arc::clone(&state));
         let original = binding("global-a");
         registry
-            .register("user", "key", "rtc_shared", &original)
+            .register("user", "key", "rtc_shared", &original, None)
             .await
             .unwrap();
 
         assert!(matches!(
             registry
-                .register("user", "key", "rtc_shared", &binding("global-b"))
+                .register("user", "key", "rtc_shared", &binding("global-b"), None,)
                 .await,
             Err(LiveCallRegistryError::OwnershipConflict)
         ));
         assert_eq!(
             registry.lookup("user", "key", "rtc_shared").await.unwrap(),
-            Some(original)
+            Some(LiveCallRecord {
+                binding: original,
+                provider_outbound_context: None,
+            })
         );
     }
 
@@ -942,7 +1399,7 @@ mod tests {
         for call_id in [".", "..", "rtc/escape"] {
             assert!(matches!(
                 registry
-                    .register("user", "key", call_id, &binding("global"))
+                    .register("user", "key", call_id, &binding("global"), None)
                     .await,
                 Err(LiveCallRegistryError::InvalidIdentity("invalid_call_id"))
             ));
@@ -987,11 +1444,17 @@ mod tests {
         let state = runtime_state();
         let registry = LiveCallRegistry::new(Arc::clone(&state));
         let key = record_key("user", "key", "rtc_verify").unwrap();
+        let context_storage_key = context_key(key.as_str()).unwrap();
         let expected = binding("global");
 
         assert!(
             !registry
-                .exact_binding_is_committed(key.as_str(), &expected)
+                .exact_binding_is_committed(
+                    key.as_str(),
+                    context_storage_key.as_str(),
+                    &expected,
+                    None
+                )
                 .await
         );
 
@@ -1001,7 +1464,12 @@ mod tests {
             .unwrap();
         assert!(
             !registry
-                .exact_binding_is_committed(key.as_str(), &expected)
+                .exact_binding_is_committed(
+                    key.as_str(),
+                    context_storage_key.as_str(),
+                    &expected,
+                    None
+                )
                 .await
         );
 
@@ -1015,7 +1483,12 @@ mod tests {
             .unwrap();
         assert!(
             !registry
-                .exact_binding_is_committed(key.as_str(), &expected)
+                .exact_binding_is_committed(
+                    key.as_str(),
+                    context_storage_key.as_str(),
+                    &expected,
+                    None
+                )
                 .await
         );
 
@@ -1029,7 +1502,12 @@ mod tests {
             .unwrap();
         assert!(
             registry
-                .exact_binding_is_committed(key.as_str(), &expected)
+                .exact_binding_is_committed(
+                    key.as_str(),
+                    context_storage_key.as_str(),
+                    &expected,
+                    None
+                )
                 .await
         );
     }

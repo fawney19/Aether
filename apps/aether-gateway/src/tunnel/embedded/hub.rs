@@ -1,4 +1,5 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -11,14 +12,16 @@ use axum::extract::ws::Message;
 use bytes::Bytes;
 use dashmap::DashMap;
 use parking_lot::{Mutex, RwLock};
-use tokio::sync::mpsc;
 use tokio::sync::{watch, Notify};
 use tracing::{debug, info, warn};
 
+pub use super::body::LocalBodyEvent;
+use super::body::{BodyReceiver, ResponseBuffer};
 use super::control_plane::ControlPlaneClient;
 use super::protocol;
 
 const MAX_REQUEST_BODY_FRAME_SIZE: usize = 32 * 1024;
+const MAX_TUNNEL_CONTROL_PAYLOAD_SIZE: usize = 256 * 1024;
 const SOFT_AVOID_QUEUE_PRESSURE_PERCENT: u64 = 50;
 const SOFT_AVOID_STREAM_PRESSURE_PERCENT: u64 = 85;
 const OUTBOUND_BACKPRESSURE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -26,6 +29,10 @@ const DEFAULT_STREAM_INITIAL_WINDOW_BYTES: u32 = 4 * 1024 * 1024;
 const DEFAULT_DRAIN_DEADLINE_MS: u64 = 30_000;
 const DEFAULT_NODE_STATUS_QUEUE_CAPACITY: usize = 1_024;
 const CONNECTION_WARMUP: Duration = Duration::from_secs(1);
+
+#[cfg(test)]
+#[path = "flow_control_tests.rs"]
+mod flow_control_tests;
 
 static STREAM_INITIAL_WINDOW_BYTES: LazyLock<u32> = LazyLock::new(|| {
     std::env::var("AETHER_TUNNEL_STREAM_INITIAL_WINDOW_BYTES")
@@ -51,11 +58,16 @@ static NODE_STATUS_QUEUE_CAPACITY: LazyLock<usize> = LazyLock::new(|| {
         .unwrap_or(DEFAULT_NODE_STATUS_QUEUE_CAPACITY)
 });
 
-static STREAM_MIN_WINDOW_UPDATE_BYTES: LazyLock<u32> = LazyLock::new(|| {
-    STREAM_INITIAL_WINDOW_BYTES
-        .saturating_div(4)
-        .clamp(1, 1024 * 1024)
-});
+pub(super) fn local_settings() -> protocol::SettingsPayload {
+    protocol::SettingsPayload {
+        initial_stream_window_bytes: (*STREAM_INITIAL_WINDOW_BYTES)
+            .min(aether_contracts::tunnel::MAX_TUNNEL_DECOMPRESSED_PAYLOAD_BYTES as u32),
+        min_window_update_bytes: STREAM_INITIAL_WINDOW_BYTES
+            .saturating_div(4)
+            .clamp(1, 1024 * 1024),
+        drain_deadline_ms: *DRAIN_DEADLINE_MS,
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SendStatus {
@@ -89,6 +101,7 @@ impl ConnHealthState {
 struct StreamFlowWindow {
     available: Mutex<u64>,
     notify: Notify,
+    closed: AtomicBool,
 }
 
 impl StreamFlowWindow {
@@ -96,6 +109,7 @@ impl StreamFlowWindow {
         Self {
             available: Mutex::new(u64::from(initial)),
             notify: Notify::new(),
+            closed: AtomicBool::new(false),
         }
     }
 
@@ -107,6 +121,12 @@ impl StreamFlowWindow {
         let requested = bytes as u64;
         let started_at = Instant::now();
         loop {
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.closed.load(Ordering::Acquire) {
+                return Err(());
+            }
             {
                 let mut available = self.available.lock();
                 if *available >= requested {
@@ -118,10 +138,7 @@ impl StreamFlowWindow {
             let Some(remaining) = timeout.checked_sub(started_at.elapsed()) else {
                 return Err(());
             };
-            if tokio::time::timeout(remaining, self.notify.notified())
-                .await
-                .is_err()
-            {
+            if tokio::time::timeout(remaining, notified).await.is_err() {
                 return Err(());
             }
         }
@@ -134,6 +151,11 @@ impl StreamFlowWindow {
         let mut available = self.available.lock();
         *available = available.saturating_add(u64::from(delta));
         drop(available);
+        self.notify.notify_waiters();
+    }
+
+    fn close(&self) {
+        self.closed.store(true, Ordering::Release);
         self.notify.notify_waiters();
     }
 }
@@ -207,12 +229,19 @@ impl BoundedOutbound {
     pub fn snapshot(&self) -> QueueSnapshot {
         self.tx.snapshot()
     }
+
+    pub(super) fn subscribe_close(&self) -> watch::Receiver<bool> {
+        self.close_tx.subscribe()
+    }
 }
 
 pub struct ProxyConn {
     pub id: u64,
     pub node_id: String,
     pub node_name: String,
+    pub node_generation: String,
+    pub authenticated_key: Option<String>,
+    pub(crate) management_token_credential: Option<ProxyManagementTokenCredential>,
     pub outbound: BoundedOutbound,
     next_stream_id: AtomicU32,
     pub stream_count: AtomicUsize,
@@ -226,6 +255,7 @@ pub struct ProxyConn {
     flow_window_blocked_ms: AtomicU64,
     write_latency_last_us: AtomicU64,
     write_latency_ewma_us: AtomicU64,
+    settings: Mutex<protocol::SettingsPayload>,
 }
 
 impl ProxyConn {
@@ -239,9 +269,13 @@ impl ProxyConn {
         protocol_version: u8,
     ) -> Self {
         Self {
+            settings: Mutex::new(local_settings()),
             id,
             node_id,
             node_name,
+            node_generation: String::new(),
+            authenticated_key: None,
+            management_token_credential: None,
             outbound: BoundedOutbound::new(tx, close_tx),
             next_stream_id: AtomicU32::new(2),
             stream_count: AtomicUsize::new(0),
@@ -255,6 +289,42 @@ impl ProxyConn {
             flow_window_blocked_ms: AtomicU64::new(0),
             write_latency_last_us: AtomicU64::new(0),
             write_latency_ewma_us: AtomicU64::new(0),
+        }
+    }
+
+    pub fn with_authenticated_key(mut self, authenticated_key: String) -> Self {
+        self.authenticated_key = Some(authenticated_key);
+        self
+    }
+
+    pub(super) fn with_settings(mut self, settings: protocol::SettingsPayload) -> Self {
+        *self.settings.get_mut() = settings;
+        self
+    }
+
+    pub fn with_tunnel_generation(mut self, tunnel_generation: String) -> Self {
+        self.node_generation = tunnel_generation;
+        self
+    }
+
+    pub(crate) fn with_management_token_credential(
+        mut self,
+        credential: ProxyManagementTokenCredential,
+    ) -> Self {
+        self.management_token_credential = Some(credential);
+        self
+    }
+
+    pub(crate) fn credential_binding(&self) -> Option<ProxyCredentialBinding> {
+        match (
+            self.authenticated_key.as_deref(),
+            self.management_token_credential.as_ref(),
+        ) {
+            (Some(key), None) => Some(ProxyCredentialBinding::Psk(key.to_string())),
+            (None, Some(credential)) => {
+                Some(ProxyCredentialBinding::ManagementToken(credential.clone()))
+            }
+            _ => None,
         }
     }
 
@@ -440,6 +510,44 @@ impl ProxyConn {
     }
 }
 
+#[derive(Clone)]
+pub(crate) struct ProxyManagementTokenCredential {
+    pub(crate) verified_token_hash: crate::management_token_auth::VerifiedManagementTokenHash,
+    pub(crate) token_id: String,
+    pub(crate) user_id: String,
+    pub(crate) remote_ip: IpAddr,
+}
+
+#[derive(Clone)]
+pub(crate) enum ProxyCredentialBinding {
+    Psk(String),
+    ManagementToken(ProxyManagementTokenCredential),
+}
+
+impl std::fmt::Debug for ProxyCredentialBinding {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Psk(_) => formatter.write_str("ProxyCredentialBinding::Psk([REDACTED])"),
+            Self::ManagementToken(credential) => formatter
+                .debug_tuple("ProxyCredentialBinding::ManagementToken")
+                .field(credential)
+                .finish(),
+        }
+    }
+}
+
+impl std::fmt::Debug for ProxyManagementTokenCredential {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProxyManagementTokenCredential")
+            .field("verified_token_hash", &"[REDACTED]")
+            .field("token_id", &self.token_id)
+            .field("user_id", &self.user_id)
+            .field("remote_ip", &self.remote_ip)
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct ProxyConnSnapshot {
     conn_id: u64,
@@ -488,13 +596,6 @@ pub struct LocalResponseHead {
     pub headers: Vec<(String, String)>,
 }
 
-#[derive(Debug)]
-pub enum LocalBodyEvent {
-    Chunk(Bytes),
-    End,
-    Error(String),
-}
-
 #[derive(Debug, Default)]
 struct LocalWaitState {
     response: Option<LocalResponseHead>,
@@ -503,32 +604,45 @@ struct LocalWaitState {
 
 pub struct LocalStream {
     pub id: u64,
+    tunnel_generation: String,
     proxy_conn_id: u64,
     proxy_stream_id: u32,
     request_window: StreamFlowWindow,
     response_consumed_since_update: Mutex<u64>,
+    min_window_update_bytes: u32,
+    response_connection: Mutex<Option<std::sync::Weak<ProxyConn>>>,
     wait_state: Mutex<LocalWaitState>,
     headers_notify: Notify,
-    body_tx: mpsc::Sender<LocalBodyEvent>,
-    body_rx: Mutex<Option<mpsc::Receiver<LocalBodyEvent>>>,
+    body: Arc<ResponseBuffer>,
     terminal: AtomicBool,
 }
 
 impl LocalStream {
-    fn new(id: u64, proxy_conn_id: u64, proxy_stream_id: u32, initial_window_bytes: u32) -> Self {
-        let (body_tx, body_rx) = mpsc::channel(128);
+    fn new(
+        id: u64,
+        tunnel_generation: String,
+        proxy_conn_id: u64,
+        proxy_stream_id: u32,
+        initial_window_bytes: u32,
+    ) -> Self {
         Self {
             id,
+            tunnel_generation,
             proxy_conn_id,
             proxy_stream_id,
             request_window: StreamFlowWindow::new(initial_window_bytes),
             response_consumed_since_update: Mutex::new(0),
+            min_window_update_bytes: (initial_window_bytes / 4).clamp(1, 1024 * 1024),
+            response_connection: Mutex::new(None),
             wait_state: Mutex::new(LocalWaitState::default()),
             headers_notify: Notify::new(),
-            body_tx,
-            body_rx: Mutex::new(Some(body_rx)),
+            body: ResponseBuffer::new(initial_window_bytes as usize),
             terminal: AtomicBool::new(false),
         }
+    }
+
+    pub(crate) fn tunnel_generation(&self) -> &str {
+        &self.tunnel_generation
     }
 
     async fn acquire_request_window(
@@ -543,26 +657,51 @@ impl LocalStream {
         self.request_window.add(delta);
     }
 
-    fn response_window_update_delta(&self, bytes: usize) -> Option<u32> {
-        if bytes == 0 {
-            return None;
+    async fn flush_response_credit(&self) -> Result<(), String> {
+        if self.terminal.load(Ordering::Acquire) {
+            return Ok(());
         }
-
-        let mut consumed = self.response_consumed_since_update.lock();
-        *consumed = consumed.saturating_add(bytes as u64);
-        let threshold = u64::from(*STREAM_MIN_WINDOW_UPDATE_BYTES);
-        if *consumed < threshold {
-            return None;
+        let connection = self
+            .response_connection
+            .lock()
+            .as_ref()
+            .and_then(std::sync::Weak::upgrade);
+        let Some(connection) = connection else {
+            return Ok(());
+        };
+        if connection.protocol_version() < 3 {
+            return Ok(());
         }
-
-        let delta = (*consumed).min(u64::from(u32::MAX)) as u32;
-        *consumed = consumed.saturating_sub(u64::from(delta));
-        Some(delta)
+        let delta = {
+            let consumed = self.response_consumed_since_update.lock();
+            if *consumed < u64::from(self.min_window_update_bytes) {
+                return Ok(());
+            }
+            (*consumed).min(u64::from(u32::MAX)) as u32
+        };
+        let frame = protocol::encode_window_update(self.proxy_stream_id, delta);
+        if connection
+            .send_wait(Message::Binary(frame.into()), OUTBOUND_BACKPRESSURE_TIMEOUT)
+            .await
+            == SendStatus::Queued
+        {
+            let mut consumed = self.response_consumed_since_update.lock();
+            *consumed = consumed.saturating_sub(u64::from(delta));
+            return Ok(());
+        }
+        if self.terminal.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        connection.request_close();
+        Err("proxy flow-control update failed".to_string())
     }
 
     pub async fn wait_headers(&self, timeout: Duration) -> Result<LocalResponseHead, String> {
         tokio::time::timeout(timeout, async {
             loop {
+                let notified = self.headers_notify.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
                 let outcome = {
                     let state = self.wait_state.lock();
                     if let Some(response) = &state.response {
@@ -573,15 +712,20 @@ impl LocalStream {
                 if let Some(error) = outcome {
                     return Err(error);
                 }
-                self.headers_notify.notified().await;
+                notified.await;
             }
         })
         .await
         .map_err(|_| "timed out waiting for response headers".to_string())?
     }
 
-    pub fn take_body_receiver(&self) -> Option<mpsc::Receiver<LocalBodyEvent>> {
-        self.body_rx.lock().take()
+    pub fn take_body_receiver(self: &Arc<Self>) -> Option<LocalBodyReceiver> {
+        self.body.take_receiver().map(|receiver| LocalBodyReceiver {
+            receiver,
+            stream: Arc::clone(self),
+            failed: false,
+            pending: None,
+        })
     }
 
     fn set_response_headers(&self, meta: protocol::ResponseMeta) {
@@ -601,21 +745,11 @@ impl LocalStream {
         }
     }
 
-    async fn push_body_chunk(&self, payload: Bytes) -> bool {
+    fn push_body_chunk(&self, payload: Bytes) -> bool {
         if self.terminal.load(Ordering::Acquire) {
             return false;
         }
-        // Use a timeout to prevent a slow consumer from blocking the shared
-        // proxy-connection reader (head-of-line blocking across streams).
-        match tokio::time::timeout(
-            Duration::from_secs(5),
-            self.body_tx.send(LocalBodyEvent::Chunk(payload)),
-        )
-        .await
-        {
-            Ok(Ok(())) => true,
-            _ => false,
-        }
+        self.body.push(payload)
     }
 
     fn finish(&self) {
@@ -633,7 +767,8 @@ impl LocalStream {
         if notify {
             self.headers_notify.notify_waiters();
         }
-        let _ = self.body_tx.try_send(LocalBodyEvent::End);
+        self.request_window.close();
+        self.body.finish(Ok(()));
     }
 
     fn fail(&self, error: impl Into<String>) {
@@ -653,7 +788,38 @@ impl LocalStream {
         if notify {
             self.headers_notify.notify_waiters();
         }
-        let _ = self.body_tx.try_send(LocalBodyEvent::Error(error));
+        self.request_window.close();
+        self.body.finish(Err(error));
+    }
+}
+
+pub struct LocalBodyReceiver {
+    receiver: BodyReceiver,
+    stream: Arc<LocalStream>,
+    failed: bool,
+    pending: Option<LocalBodyEvent>,
+}
+
+impl LocalBodyReceiver {
+    pub async fn recv(&mut self) -> Option<LocalBodyEvent> {
+        if self.failed {
+            return None;
+        }
+        if self.pending.is_none() {
+            let event = self.receiver.recv().await?;
+            if let LocalBodyEvent::Chunk(chunk) = &event {
+                let mut consumed = self.stream.response_consumed_since_update.lock();
+                *consumed = consumed.saturating_add(chunk.len() as u64);
+            }
+            self.pending = Some(event);
+        }
+        if matches!(self.pending, Some(LocalBodyEvent::Chunk(_))) {
+            if let Err(error) = self.stream.flush_response_credit().await {
+                self.failed = true;
+                return Some(LocalBodyEvent::Error(error));
+            }
+        }
+        self.pending.take()
     }
 }
 
@@ -676,9 +842,26 @@ pub struct HubRouter {
     drain_reasons: Mutex<HashMap<String, u64>>,
 }
 
-#[derive(Debug)]
+struct PendingStreamGuard<'router> {
+    hub: &'router HubRouter,
+    connection: &'router ProxyConn,
+    stream_id: u64,
+    committed: bool,
+}
+
+impl Drop for PendingStreamGuard<'_> {
+    fn drop(&mut self) {
+        if !self.committed && self.hub.cleanup_local_stream(self.stream_id) {
+            self.connection.release_stream();
+        }
+    }
+}
+
 struct NodeStatusEvent {
     node_id: String,
+    authenticated_key: Option<String>,
+    tunnel_generation: String,
+    connection: Option<Arc<ProxyConn>>,
     connected: bool,
     conn_count: usize,
     observed_at_unix_secs: u64,
@@ -692,15 +875,37 @@ impl HubRouter {
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
                 while let Some(event) = node_status_rx.recv().await {
-                    if let Err(error) = worker_control_plane
-                        .push_node_status(
-                            &event.node_id,
-                            event.connected,
-                            event.conn_count,
-                            event.observed_at_unix_secs,
-                        )
-                        .await
-                    {
+                    let connection = event.connection.clone();
+                    let result = match connection {
+                        Some(connection) => {
+                            worker_control_plane
+                                .push_node_status_for_connection(
+                                    connection,
+                                    event.connected,
+                                    event.conn_count,
+                                    event.observed_at_unix_secs,
+                                )
+                                .await
+                        }
+                        None => {
+                            worker_control_plane
+                                .push_node_status(
+                                    &event.node_id,
+                                    event.authenticated_key.as_deref(),
+                                    &event.tunnel_generation,
+                                    event.connected,
+                                    event.conn_count,
+                                    event.observed_at_unix_secs,
+                                )
+                                .await
+                        }
+                    };
+                    if let Err(error) = result {
+                        if super::control_plane::is_credential_revoked_error(&error) {
+                            if let Some(connection) = event.connection.as_ref() {
+                                connection.request_close();
+                            }
+                        }
                         warn!(
                             node_id = %event.node_id,
                             connected = event.connected,
@@ -746,7 +951,7 @@ impl HubRouter {
 
         let healthy_count = {
             let mut map = self.proxy_conns.write();
-            map.entry(node_id.clone()).or_default().push(conn);
+            map.entry(node_id.clone()).or_default().push(conn.clone());
             available_conn_count(map.get(&node_id).map(Vec::as_slice).unwrap_or(&[]))
         };
 
@@ -758,11 +963,23 @@ impl HubRouter {
             "proxy connected"
         );
 
-        self.notify_node_status(node_id, healthy_count > 0, healthy_count);
+        self.notify_node_status(
+            node_id,
+            conn.authenticated_key.clone(),
+            Some(conn),
+            healthy_count > 0,
+            healthy_count,
+        );
     }
 
     pub fn unregister_proxy(&self, conn_id: u64, node_id: &str) {
-        self.proxy_conns_by_id.remove(&conn_id);
+        let disconnected_connection = self
+            .proxy_conns_by_id
+            .remove(&conn_id)
+            .map(|(_, connection)| connection);
+        let disconnected_authenticated_key = disconnected_connection
+            .as_ref()
+            .and_then(|connection| connection.authenticated_key.clone());
 
         let healthy_count = {
             let mut map = self.proxy_conns.write();
@@ -785,7 +1002,20 @@ impl HubRouter {
         );
 
         self.cancel_streams_for_proxy(conn_id);
-        self.notify_node_status(node_id.to_string(), healthy_count > 0, healthy_count);
+        let authenticated_key = self
+            .proxy_conns
+            .read()
+            .get(node_id)
+            .and_then(|connections| connections.first())
+            .and_then(|connection| connection.authenticated_key.clone())
+            .or(disconnected_authenticated_key);
+        self.notify_node_status(
+            node_id.to_string(),
+            authenticated_key,
+            disconnected_connection,
+            healthy_count > 0,
+            healthy_count,
+        );
     }
 
     pub fn request_close_all_proxies(&self) -> usize {
@@ -801,9 +1031,52 @@ impl HubRouter {
         total
     }
 
-    fn notify_node_status(&self, node_id: String, connected: bool, conn_count: usize) {
+    pub(crate) fn request_close_proxy(&self, conn_id: u64) -> bool {
+        let Some(conn) = self
+            .proxy_conns_by_id
+            .get(&conn_id)
+            .map(|entry| Arc::clone(entry.value()))
+        else {
+            return false;
+        };
+        conn.request_close();
+        true
+    }
+
+    pub(crate) fn request_close_proxies_for_node(&self, node_id: &str) -> usize {
+        let conns = self.proxy_connections_for_node(node_id);
+        let total = conns.len();
+        for conn in conns {
+            conn.request_close();
+        }
+        total
+    }
+
+    pub(crate) fn proxy_connections_for_node(&self, node_id: &str) -> Vec<Arc<ProxyConn>> {
+        self.proxy_conns
+            .read()
+            .get(node_id)
+            .map(|connections| connections.to_vec())
+            .unwrap_or_default()
+    }
+
+    fn notify_node_status(
+        &self,
+        node_id: String,
+        authenticated_key: Option<String>,
+        connection: Option<Arc<ProxyConn>>,
+        connected: bool,
+        conn_count: usize,
+    ) {
+        let tunnel_generation = connection
+            .as_ref()
+            .map(|connection| connection.node_generation.clone())
+            .unwrap_or_default();
         let event = NodeStatusEvent {
             node_id,
+            authenticated_key,
+            tunnel_generation,
+            connection,
             connected,
             conn_count,
             observed_at_unix_secs: current_unix_secs(),
@@ -837,13 +1110,24 @@ impl HubRouter {
     }
 
     fn notify_current_node_status(&self, node_id: &str) {
-        let healthy_count = {
+        let (healthy_count, connection, authenticated_key) = {
             let map = self.proxy_conns.read();
-            map.get(node_id)
-                .map(|v| available_conn_count(v.as_slice()))
-                .unwrap_or(0)
+            let connections = map.get(node_id).map(Vec::as_slice).unwrap_or(&[]);
+            (
+                available_conn_count(connections),
+                connections.first().cloned(),
+                connections
+                    .first()
+                    .and_then(|connection| connection.authenticated_key.clone()),
+            )
         };
-        self.notify_node_status(node_id.to_string(), healthy_count > 0, healthy_count);
+        self.notify_node_status(
+            node_id.to_string(),
+            authenticated_key,
+            connection,
+            healthy_count > 0,
+            healthy_count,
+        );
     }
 
     fn record_stream_reset(&self, reason: &str) {
@@ -856,7 +1140,11 @@ impl HubRouter {
         increment_reason(&self.drain_reasons, reason);
     }
 
-    fn ranked_proxy_conn_candidates(&self, node_id: &str) -> Vec<ProxyConnCandidate> {
+    fn ranked_proxy_conn_candidates(
+        &self,
+        node_id: &str,
+        authorized_conn_ids: Option<&HashSet<u64>>,
+    ) -> Vec<ProxyConnCandidate> {
         let conns = {
             let map = self.proxy_conns.read();
             map.get(node_id)
@@ -866,6 +1154,9 @@ impl HubRouter {
         let mut candidates = conns
             .into_iter()
             .filter_map(|conn| {
+                if authorized_conn_ids.is_some_and(|allowed| !allowed.contains(&conn.id)) {
+                    return None;
+                }
                 let snapshot = conn.snapshot();
                 snapshot
                     .available
@@ -877,7 +1168,7 @@ impl HubRouter {
     }
 
     pub fn has_local_proxy(&self, node_id: &str) -> bool {
-        !self.ranked_proxy_conn_candidates(node_id).is_empty()
+        !self.ranked_proxy_conn_candidates(node_id, None).is_empty()
     }
 
     pub async fn open_local_stream(
@@ -885,7 +1176,17 @@ impl HubRouter {
         node_id: &str,
         meta: &protocol::RequestMeta,
     ) -> Result<Arc<LocalStream>, String> {
-        let candidates = self.ranked_proxy_conn_candidates(node_id);
+        self.open_local_stream_with_authorized_connections(node_id, meta, None)
+            .await
+    }
+
+    pub(crate) async fn open_local_stream_with_authorized_connections(
+        &self,
+        node_id: &str,
+        meta: &protocol::RequestMeta,
+        authorized_conn_ids: Option<&HashSet<u64>>,
+    ) -> Result<Arc<LocalStream>, String> {
+        let candidates = self.ranked_proxy_conn_candidates(node_id, authorized_conn_ids);
         if candidates.is_empty() {
             self.selection_unavailable_total
                 .fetch_add(1, Ordering::Relaxed);
@@ -957,16 +1258,27 @@ impl HubRouter {
 
         // Frames encoded successfully -- now register the stream.
         let local_stream_id = self.next_local_stream_id.fetch_add(1, Ordering::Relaxed);
-        let local_stream = Arc::new(LocalStream::new(
+        let settings = proxy_conn.settings.lock().clone();
+        let mut local_stream = LocalStream::new(
             local_stream_id,
+            proxy_conn.node_generation.clone(),
             proxy_conn.id,
             proxy_stream_id,
-            *STREAM_INITIAL_WINDOW_BYTES,
-        ));
+            settings.initial_stream_window_bytes,
+        );
+        local_stream.min_window_update_bytes = settings.min_window_update_bytes;
+        *local_stream.response_connection.get_mut() = Some(Arc::downgrade(&proxy_conn));
+        let local_stream = Arc::new(local_stream);
         self.local_streams
             .insert(local_stream_id, local_stream.clone());
         self.proxy_to_local
             .insert((proxy_conn.id, proxy_stream_id), local_stream_id);
+        let mut pending_stream = PendingStreamGuard {
+            hub: self,
+            connection: &proxy_conn,
+            stream_id: local_stream_id,
+            committed: false,
+        };
 
         let send_status = proxy_conn
             .send_wait(
@@ -985,10 +1297,11 @@ impl HubRouter {
             "open_local_stream dispatched"
         );
         match send_status {
-            SendStatus::Queued => Ok(local_stream),
+            SendStatus::Queued => {
+                pending_stream.committed = true;
+                Ok(local_stream)
+            }
             SendStatus::Closed | SendStatus::Congested => {
-                self.cleanup_local_stream(local_stream_id);
-                proxy_conn.release_stream();
                 Err("proxy connection congested".to_string())
             }
         }
@@ -1033,7 +1346,9 @@ impl HubRouter {
             .map(|entry| entry.value().clone())
             .ok_or_else(|| "proxy connection unavailable".to_string())?;
 
-        let total_chunks = payload.len().div_ceil(MAX_REQUEST_BODY_FRAME_SIZE);
+        let chunk_size = MAX_REQUEST_BODY_FRAME_SIZE
+            .min(proxy_conn.settings.lock().initial_stream_window_bytes as usize);
+        let total_chunks = payload.len().div_ceil(chunk_size);
         let result = if total_chunks == 0 {
             if end_stream {
                 self.send_request_body_frame(&proxy_conn, &stream, &[], true)
@@ -1042,7 +1357,7 @@ impl HubRouter {
                 Ok(())
             }
         } else {
-            for (index, chunk) in payload.chunks(MAX_REQUEST_BODY_FRAME_SIZE).enumerate() {
+            for (index, chunk) in payload.chunks(chunk_size).enumerate() {
                 let is_last_chunk = index + 1 == total_chunks;
                 if let Err(error) = self
                     .send_request_body_frame(
@@ -1142,17 +1457,20 @@ impl HubRouter {
             } else {
                 protocol::encode_stream_error(stream.proxy_stream_id, reason)
             };
-            let _ = pc.send(Message::Binary(frame.into()));
+            if pc.send(Message::Binary(frame.into())) != SendStatus::Queued {
+                pc.request_close();
+            }
         }
         stream.fail(reason.to_string());
     }
 
-    fn cleanup_local_stream(&self, local_stream_id: u64) {
+    fn cleanup_local_stream(&self, local_stream_id: u64) -> bool {
         let Some((_, stream)) = self.local_streams.remove(&local_stream_id) else {
-            return;
+            return false;
         };
         self.proxy_to_local
             .remove(&(stream.proxy_conn_id, stream.proxy_stream_id));
+        true
     }
 
     pub async fn handle_proxy_frame(self: &Arc<Self>, proxy_conn_id: u64, data: &mut [u8]) {
@@ -1160,8 +1478,14 @@ impl HubRouter {
             Some(h) => h,
             None => return,
         };
-        let expected_len = protocol::HEADER_SIZE + header.payload_len as usize;
-        if data.len() < expected_len {
+        let Some(expected_len) = protocol::HEADER_SIZE.checked_add(header.payload_len as usize)
+        else {
+            return;
+        };
+        if data.len() != expected_len {
+            if header.stream_id != 0 {
+                self.fail_proxy_stream(proxy_conn_id, header.stream_id, "invalid frame length");
+            }
             return;
         }
 
@@ -1176,22 +1500,32 @@ impl HubRouter {
                 self.finish_proxy_stream(proxy_conn_id, header.stream_id);
             }
             protocol::STREAM_ERROR => {
-                let message = protocol::decode_payload(data, &header)
-                    .ok()
-                    .and_then(|payload| String::from_utf8(payload).ok())
-                    .unwrap_or_else(|| "stream error".to_string());
+                let raw_message = protocol::decode_payload_with_limit(
+                    data,
+                    &header,
+                    MAX_TUNNEL_CONTROL_PAYLOAD_SIZE,
+                )
+                .ok()
+                .and_then(|payload| String::from_utf8(payload).ok())
+                .unwrap_or_else(|| "stream error".to_string());
+                let message = safe_peer_stream_error(&raw_message);
                 self.record_stream_reset(&message);
                 self.fail_proxy_stream(proxy_conn_id, header.stream_id, message);
             }
             protocol::RESET_STREAM => {
-                let message = protocol::decode_payload(data, &header)
-                    .ok()
-                    .and_then(|payload| {
-                        serde_json::from_slice::<protocol::ResetStreamPayload>(&payload)
-                            .ok()
-                            .map(|payload| payload.reason)
-                    })
-                    .unwrap_or_else(|| "stream reset".to_string());
+                let raw_message = protocol::decode_payload_with_limit(
+                    data,
+                    &header,
+                    MAX_TUNNEL_CONTROL_PAYLOAD_SIZE,
+                )
+                .ok()
+                .and_then(|payload| {
+                    serde_json::from_slice::<protocol::ResetStreamPayload>(&payload)
+                        .ok()
+                        .map(|payload| payload.reason)
+                })
+                .unwrap_or_else(|| "stream reset".to_string());
+                let message = safe_peer_stream_error(&raw_message);
                 self.record_stream_reset(&message);
                 self.fail_proxy_stream(proxy_conn_id, header.stream_id, message);
             }
@@ -1207,9 +1541,7 @@ impl HubRouter {
                     .get(&proxy_conn_id)
                     .map(|entry| entry.value().clone());
                 if let Some(pc) = pc {
-                    let _ = pc
-                        .send_wait(Message::Binary(pong.into()), Duration::from_millis(250))
-                        .await;
+                    let _ = pc.send(Message::Binary(pong.into()));
                 }
             }
             protocol::PONG => {}
@@ -1217,17 +1549,19 @@ impl HubRouter {
                 if let Some(pc) = self.proxy_conns_by_id.get(&proxy_conn_id) {
                     let first = pc.mark_draining();
                     if first {
-                        let drain =
-                            protocol::decode_payload(data, &header)
-                                .ok()
-                                .and_then(|payload| {
-                                    if payload.is_empty() {
-                                        None
-                                    } else {
-                                        serde_json::from_slice::<protocol::GoAwayPayload>(&payload)
-                                            .ok()
-                                    }
-                                });
+                        let drain = protocol::decode_payload_with_limit(
+                            data,
+                            &header,
+                            MAX_TUNNEL_CONTROL_PAYLOAD_SIZE,
+                        )
+                        .ok()
+                        .and_then(|payload| {
+                            if payload.is_empty() {
+                                None
+                            } else {
+                                serde_json::from_slice::<protocol::GoAwayPayload>(&payload).ok()
+                            }
+                        });
                         let reason = drain
                             .as_ref()
                             .map(|payload| payload.reason.as_str())
@@ -1262,12 +1596,13 @@ impl HubRouter {
                 }
             }
             protocol::HELLO => {
-                if let Some(payload) =
-                    protocol::decode_payload(data, &header)
-                        .ok()
-                        .and_then(|payload| {
-                            serde_json::from_slice::<protocol::HelloPayload>(&payload).ok()
-                        })
+                if let Some(payload) = protocol::decode_payload_with_limit(
+                    data,
+                    &header,
+                    MAX_TUNNEL_CONTROL_PAYLOAD_SIZE,
+                )
+                .ok()
+                .and_then(|payload| serde_json::from_slice::<protocol::HelloPayload>(&payload).ok())
                 {
                     if let Some(pc) = self.proxy_conns_by_id.get(&proxy_conn_id) {
                         pc.update_protocol_version(payload.protocol_version);
@@ -1280,23 +1615,50 @@ impl HubRouter {
                 );
             }
             protocol::SETTINGS => {
-                debug!(
-                    msg_type = header.msg_type,
-                    proxy_conn_id = proxy_conn_id,
-                    "received tunnel protocol v3 SETTINGS from proxy"
-                );
+                let settings = protocol::decode_payload_with_limit(
+                    data,
+                    &header,
+                    MAX_TUNNEL_CONTROL_PAYLOAD_SIZE,
+                )
+                .ok()
+                .and_then(|payload| {
+                    serde_json::from_slice::<protocol::SettingsPayload>(&payload).ok()
+                })
+                .filter(|settings| settings.is_valid());
+                if let Some(connection) = self.proxy_conns_by_id.get(&proxy_conn_id) {
+                    if header.stream_id != 0 || header.flags != 0 {
+                        connection.request_close();
+                        return;
+                    }
+                    let Some(settings) = settings else {
+                        connection.request_close();
+                        return;
+                    };
+                    let local = local_settings();
+                    let settings = settings
+                        .negotiate(local.initial_stream_window_bytes, local.drain_deadline_ms);
+                    let mut current = connection.settings.lock();
+                    if connection.stream_count.load(Ordering::Acquire) > 0 && *current != settings {
+                        drop(current);
+                        connection.request_close();
+                        return;
+                    }
+                    *current = settings;
+                }
             }
             protocol::WINDOW_UPDATE => {
                 self.handle_window_update(proxy_conn_id, header.stream_id, data, &header);
             }
             protocol::LOAD_REPORT => {
-                if let Some(payload) =
-                    protocol::decode_payload(data, &header)
-                        .ok()
-                        .and_then(|payload| {
-                            serde_json::from_slice::<protocol::LoadReportPayload>(&payload).ok()
-                        })
-                {
+                if let Some(payload) = protocol::decode_payload_with_limit(
+                    data,
+                    &header,
+                    MAX_TUNNEL_CONTROL_PAYLOAD_SIZE,
+                )
+                .ok()
+                .and_then(|payload| {
+                    serde_json::from_slice::<protocol::LoadReportPayload>(&payload).ok()
+                }) {
                     if let Some(pc) = self.proxy_conns_by_id.get(&proxy_conn_id) {
                         pc.update_remote_health_score(payload.health_score);
                     }
@@ -1332,12 +1694,13 @@ impl HubRouter {
         data: &[u8],
         header: &protocol::FrameHeader,
     ) {
-        let Some(delta) = protocol::decode_payload(data, header)
-            .ok()
-            .and_then(|payload| {
-                serde_json::from_slice::<protocol::WindowUpdatePayload>(&payload).ok()
-            })
-            .map(|payload| payload.delta_bytes)
+        let Some(delta) =
+            protocol::decode_payload_with_limit(data, header, MAX_TUNNEL_CONTROL_PAYLOAD_SIZE)
+                .ok()
+                .and_then(|payload| {
+                    serde_json::from_slice::<protocol::WindowUpdatePayload>(&payload).ok()
+                })
+                .map(|payload| payload.delta_bytes)
         else {
             return;
         };
@@ -1457,7 +1820,9 @@ impl HubRouter {
         let Some(local_id) = self.lookup_local_stream(proxy_conn_id, header.stream_id) else {
             return;
         };
-        let Ok(payload) = protocol::decode_payload(data, &header) else {
+        let Ok(payload) =
+            protocol::decode_payload_with_limit(data, &header, MAX_TUNNEL_CONTROL_PAYLOAD_SIZE)
+        else {
             self.fail_proxy_stream(
                 proxy_conn_id,
                 header.stream_id,
@@ -1487,7 +1852,11 @@ impl HubRouter {
         let Some(local_id) = self.lookup_local_stream(proxy_conn_id, header.stream_id) else {
             return;
         };
-        let Ok(payload) = protocol::decode_payload(data, &header) else {
+        let Ok(payload) = protocol::decode_payload_with_limit(
+            data,
+            &header,
+            aether_contracts::tunnel::MAX_TUNNEL_DECOMPRESSED_PAYLOAD_BYTES,
+        ) else {
             self.fail_proxy_stream(
                 proxy_conn_id,
                 header.stream_id,
@@ -1501,19 +1870,8 @@ impl HubRouter {
             None => return,
         };
 
-        let payload_len = payload.len();
-        if !stream.push_body_chunk(Bytes::from(payload)).await {
+        if !stream.push_body_chunk(Bytes::from(payload)) {
             self.cancel_local_stream(local_id, "local relay response congested");
-            return;
-        }
-
-        if let Some(pc) = self.proxy_conns_by_id.get(&proxy_conn_id) {
-            if pc.protocol_version() >= 3 {
-                if let Some(delta) = stream.response_window_update_delta(payload_len) {
-                    let frame = protocol::encode_window_update(header.stream_id, delta);
-                    let _ = pc.send(Message::Binary(frame.into()));
-                }
-            }
         }
     }
 
@@ -1567,16 +1925,70 @@ impl HubRouter {
         data: &[u8],
         header: &protocol::FrameHeader,
     ) {
-        let payload = match protocol::decode_payload(data, header) {
+        let payload = match protocol::decode_payload_with_limit(
+            data,
+            header,
+            MAX_TUNNEL_CONTROL_PAYLOAD_SIZE,
+        ) {
             Ok(payload) => payload,
             Err(error) => {
-                warn!(proxy_conn_id = proxy_conn_id, error = %error, "failed to decode heartbeat payload");
+                warn!(proxy_conn_id = proxy_conn_id, error = %crate::error::redact_error_detail(&error), "failed to decode heartbeat payload");
                 return;
             }
         };
-        let ack_payload = match self.control_plane.heartbeat_ack(&payload).await {
+        let Some(authenticated_node_id) = self
+            .proxy_conns_by_id
+            .get(&proxy_conn_id)
+            .map(|entry| entry.node_id.clone())
+        else {
+            warn!(
+                proxy_conn_id,
+                "heartbeat rejected for unregistered proxy connection"
+            );
+            return;
+        };
+        let payload_node_id = match heartbeat_payload_node_id(&payload) {
+            Ok(node_id) => node_id,
+            Err(error) => {
+                warn!(
+                    proxy_conn_id,
+                    authenticated_node_id = %authenticated_node_id,
+                    error = %error,
+                    "heartbeat rejected before control-plane dispatch"
+                );
+                return;
+            }
+        };
+        if payload_node_id != authenticated_node_id {
+            warn!(
+                proxy_conn_id,
+                authenticated_node_id = %authenticated_node_id,
+                payload_node_id = %payload_node_id,
+                "heartbeat rejected because node identity does not match tunnel authentication"
+            );
+            return;
+        }
+        let connection = self
+            .proxy_conns_by_id
+            .get(&proxy_conn_id)
+            .map(|entry| Arc::clone(entry.value()));
+        let Some(connection) = connection else {
+            warn!(
+                proxy_conn_id,
+                "heartbeat rejected for unregistered proxy connection"
+            );
+            return;
+        };
+        let ack_payload = match self
+            .control_plane
+            .heartbeat_ack_for_connection(connection.clone(), &payload)
+            .await
+        {
             Ok(payload) => payload,
             Err(error) => {
+                if super::control_plane::is_credential_revoked_error(&error) {
+                    connection.request_close();
+                }
                 warn!(
                     proxy_conn_id = proxy_conn_id,
                     error = %error,
@@ -1755,6 +2167,18 @@ impl HubRouter {
     }
 }
 
+fn heartbeat_payload_node_id(payload: &[u8]) -> Result<String, String> {
+    let value: serde_json::Value = serde_json::from_slice(payload)
+        .map_err(|_| "heartbeat payload is not valid JSON".to_string())?;
+    let node_id = value
+        .get("node_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "heartbeat payload is missing node_id".to_string())?;
+    Ok(node_id.to_string())
+}
+
 fn current_unix_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1828,6 +2252,56 @@ fn metric_reason(raw: &str) -> String {
     } else {
         normalized
     }
+}
+
+fn safe_peer_stream_error(raw: &str) -> String {
+    const CLASSIFICATION_PREFIX_BYTES: usize = 4 * 1024;
+
+    let prefix = if raw.len() <= CLASSIFICATION_PREFIX_BYTES {
+        raw
+    } else {
+        let mut end = CLASSIFICATION_PREFIX_BYTES;
+        while !raw.is_char_boundary(end) {
+            end = end.saturating_sub(1);
+        }
+        &raw[..end]
+    };
+    let category = if contains_ascii_case_insensitive(prefix, "timed out")
+        || contains_ascii_case_insensitive(prefix, "timeout")
+    {
+        "timeout"
+    } else if contains_ascii_case_insensitive(prefix, "overloaded")
+        || contains_ascii_case_insensitive(prefix, "backpressure")
+        || contains_ascii_case_insensitive(prefix, "congested")
+        || contains_ascii_case_insensitive(prefix, "window")
+    {
+        "overloaded"
+    } else if contains_ascii_case_insensitive(prefix, "forbidden")
+        || contains_ascii_case_insensitive(prefix, "unauthorized")
+        || contains_ascii_case_insensitive(prefix, "authentication")
+    {
+        "forbidden"
+    } else if contains_ascii_case_insensitive(prefix, "dns") {
+        "dns"
+    } else if contains_ascii_case_insensitive(prefix, "connect")
+        || contains_ascii_case_insensitive(prefix, "socket")
+    {
+        "connect"
+    } else if contains_ascii_case_insensitive(prefix, "cancel")
+        || contains_ascii_case_insensitive(prefix, "reset")
+    {
+        "reset"
+    } else {
+        "relay"
+    };
+    format!("tunnel stream {category} error")
+}
+
+fn contains_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
+    haystack
+        .as_bytes()
+        .windows(needle.len())
+        .any(|candidate| candidate.eq_ignore_ascii_case(needle.as_bytes()))
 }
 
 #[derive(serde::Serialize)]
@@ -2098,12 +2572,35 @@ impl HubStats {
 mod tests {
     use aether_runtime::bounded_queue;
 
-    use super::{protocol, ControlPlaneClient, HubRouter, ProxyConn, MAX_REQUEST_BODY_FRAME_SIZE};
+    use super::{
+        protocol, safe_peer_stream_error, ControlPlaneClient, HubRouter, ProxyConn,
+        MAX_REQUEST_BODY_FRAME_SIZE,
+    };
     use axum::extract::ws::Message;
     use bytes::Bytes;
     use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use tokio::sync::watch;
+
+    #[test]
+    fn peer_stream_errors_are_projected_to_finite_categories() {
+        let sensitive = safe_peer_stream_error(
+            "request failed for https://alice:secret@10.0.0.8/private?token=query-secret\r\nx: y",
+        );
+        assert_eq!(sensitive, "tunnel stream relay error");
+        for secret in ["alice", "secret", "10.0.0.8", "private", "query", "x: y"] {
+            assert!(!sensitive.contains(secret), "leaked {secret}: {sensitive}");
+        }
+        assert_eq!(
+            safe_peer_stream_error("upstream connect timeout: Bearer secret"),
+            "tunnel stream timeout error"
+        );
+        assert_eq!(
+            safe_peer_stream_error("outbound backpressure timeout"),
+            "tunnel stream timeout error"
+        );
+    }
 
     fn build_meta() -> protocol::RequestMeta {
         protocol::RequestMeta {
@@ -2358,8 +2855,10 @@ mod tests {
     #[tokio::test]
     async fn heartbeat_callback_failure_does_not_send_fake_ack() {
         let hub = HubRouter::new(ControlPlaneClient::local(
-            |_payload| Box::pin(async { Err("db unavailable".to_string()) }),
-            |_node_id, _connected, _conn_count, _observed_at_unix_secs| Box::pin(async { Ok(()) }),
+            |_connection, _payload| Box::pin(async { Err("db unavailable".to_string()) }),
+            |_connection, _connected, _conn_count, _observed_at_unix_secs| {
+                Box::pin(async { Ok(()) })
+            },
         ));
 
         let (proxy_tx, mut proxy_rx) = bounded_queue(8);
@@ -2383,6 +2882,45 @@ mod tests {
         let mut frame = protocol::encode_frame(1, protocol::HEARTBEAT_DATA, 0, &payload);
         hub.handle_proxy_frame(300, &mut frame).await;
 
+        assert!(proxy_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn heartbeat_for_another_node_is_rejected_before_callback_and_ack() {
+        let callback_calls = Arc::new(AtomicUsize::new(0));
+        let callback_calls_for_heartbeat = Arc::clone(&callback_calls);
+        let hub = HubRouter::new(ControlPlaneClient::local(
+            move |_connection, _payload| {
+                callback_calls_for_heartbeat.fetch_add(1, Ordering::Relaxed);
+                Box::pin(async { Ok(br#"{"heartbeat_id":99}"#.to_vec()) })
+            },
+            |_connection, _connected, _conn_count, _observed_at_unix_secs| {
+                Box::pin(async { Ok(()) })
+            },
+        ));
+
+        let (proxy_tx, mut proxy_rx) = bounded_queue(8);
+        let (proxy_close_tx, _) = watch::channel(false);
+        let proxy = Arc::new(ProxyConn::new(
+            301,
+            "authenticated-node".to_string(),
+            "Authenticated Node".to_string(),
+            proxy_tx,
+            proxy_close_tx,
+            16,
+            2,
+        ));
+        hub.register_proxy(proxy);
+
+        let payload = serde_json::to_vec(&serde_json::json!({
+            "node_id": "victim-node",
+            "heartbeat_id": 99u64,
+        }))
+        .expect("payload should serialize");
+        let mut frame = protocol::encode_frame(1, protocol::HEARTBEAT_DATA, 0, &payload);
+        hub.handle_proxy_frame(301, &mut frame).await;
+
+        assert_eq!(callback_calls.load(Ordering::Relaxed), 0);
         assert!(proxy_rx.try_recv().is_err());
     }
 

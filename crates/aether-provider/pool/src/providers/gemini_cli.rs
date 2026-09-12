@@ -73,6 +73,5 @@ pub fn build_gemini_cli_pool_quota_request(
         client_api_format: "gemini:generate_content".to_string(),
         provider_api_format: "gemini_cli:retrieve_user_quota".to_string(),
         model_name: Some("retrieveUserQuota".to_string()),
-        accept_invalid_certs: false,
     }
 }

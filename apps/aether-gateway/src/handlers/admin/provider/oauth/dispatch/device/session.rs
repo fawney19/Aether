@@ -17,7 +17,7 @@ pub(super) struct AdminProviderOAuthDeviceAuthorizePayload {
     pub(super) proxy_node_id: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub(super) struct AdminProviderOAuthDevicePollPayload {
     pub(super) session_id: String,
     pub(super) callback_url: Option<String>,

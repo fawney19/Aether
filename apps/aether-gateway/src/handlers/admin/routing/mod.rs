@@ -44,6 +44,8 @@ struct AdminRoutingGroupCreateRequest {
     #[serde(default)]
     is_system_default: bool,
     #[serde(default)]
+    sort_order: i64,
+    #[serde(default)]
     config_json: Option<Value>,
 }
 
@@ -137,6 +139,7 @@ async fn maybe_build_routing_groups_response(
                 description: payload.description,
                 enabled: payload.enabled,
                 is_system_default: payload.is_system_default,
+                sort_order: payload.sort_order,
                 config_json,
                 version: 1,
                 created_at: now,
@@ -464,6 +467,9 @@ fn build_routing_group_update_patch(
     if let Some(value) = object.get("is_system_default") {
         patch.is_system_default = Some(required_bool(value, "is_system_default")?);
     }
+    if let Some(value) = object.get("sort_order") {
+        patch.sort_order = Some(required_i64(value, "sort_order")?.max(0));
+    }
     if let Some(value) = object.get("config_json") {
         validate_config_json(value)?;
         patch.config_json = Some(value.clone());
@@ -604,6 +610,7 @@ fn routing_group_payload(group: &StoredRoutingGroup) -> Value {
         "description": group.description,
         "enabled": group.enabled,
         "is_system_default": group.is_system_default,
+        "sort_order": group.sort_order,
         "config_json": group.config_json,
         "version": group.version,
         "created_at": group.created_at,

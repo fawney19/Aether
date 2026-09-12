@@ -64,6 +64,14 @@ export function parseNumberInput(
  * @returns Parsed number, null (for empty/adaptive), or undefined
  */
 export function parseNullableNumberInput(
+  value: string | number,
+  options?: { allowFloat?: boolean; min?: number; max?: number }
+): number | null
+export function parseNullableNumberInput(
+  value: string | number | null | undefined,
+  options?: { allowFloat?: boolean; min?: number; max?: number }
+): number | null | undefined
+export function parseNullableNumberInput(
   value: string | number | null | undefined,
   options: {
     allowFloat?: boolean

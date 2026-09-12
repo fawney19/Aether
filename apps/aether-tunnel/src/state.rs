@@ -55,6 +55,8 @@ pub struct ServerContext {
     pub node_name: String,
     /// Node ID assigned by this Aether server.
     pub node_id: Arc<RwLock<String>>,
+    /// Server-issued node incarnation bound into tunnel authentication.
+    pub tunnel_generation: String,
     /// API client for this server.
     pub aether_client: Arc<AetherClient>,
     /// Dynamic config from this server's heartbeat ACKs.

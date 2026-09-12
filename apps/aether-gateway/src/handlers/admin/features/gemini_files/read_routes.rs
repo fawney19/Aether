@@ -173,6 +173,7 @@ pub(super) async fn maybe_build_local_admin_gemini_files_read_response(
             let mappings = state
                 .list_gemini_file_mappings(
                     &aether_data::repository::gemini_file_mappings::GeminiFileMappingListQuery {
+                        user_id: None,
                         include_expired: page.include_expired,
                         search: page.search.clone(),
                         offset: (page.page - 1).saturating_mul(page.page_size),

@@ -34,6 +34,7 @@ pub struct CandidateFailureDiagnostic {
     client_api_format: Option<String>,
     provider_api_format: Option<String>,
     safe_to_show: bool,
+    details: Option<Value>,
 }
 
 impl CandidateFailureDiagnostic {
@@ -50,11 +51,17 @@ impl CandidateFailureDiagnostic {
             client_api_format: None,
             provider_api_format: None,
             safe_to_show: true,
+            details: None,
         }
     }
 
     pub fn source(mut self, source: impl Into<String>) -> Self {
         self.source = Some(source.into());
+        self
+    }
+
+    pub fn details(mut self, details: Value) -> Self {
+        self.details = Some(details);
         self
     }
 
@@ -219,6 +226,10 @@ impl CandidateFailureDiagnostic {
             "client_api_format": self.client_api_format,
             "provider_api_format": self.provider_api_format,
             "safe_to_show": self.safe_to_show,
+            "details": self.details,
+            "stage": "request",
+            "source_format": self.client_api_format,
+            "target_format": self.provider_api_format,
         })
     }
 }

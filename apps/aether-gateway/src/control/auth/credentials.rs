@@ -23,7 +23,7 @@ pub(crate) fn extract_requested_model(
     body: &Bytes,
 ) -> Option<String> {
     if decision.route_family.as_deref() == Some("gemini") {
-        if let Some(model) = extract_gemini_model_from_path(uri.path()) {
+        if let Some(model) = extract_gemini_requested_model_from_path(uri.path()) {
             return Some(model);
         }
     }
@@ -43,23 +43,46 @@ pub(crate) fn extract_requested_model(
         .filter(|value| !value.is_empty())
 }
 
+fn extract_gemini_requested_model_from_path(path: &str) -> Option<String> {
+    let model = extract_gemini_model_from_path(path)?;
+    Some(
+        model
+            .split_once("/operations/")
+            .map(|(model, _)| model)
+            .unwrap_or(model.as_str())
+            .to_string(),
+    )
+}
+
 pub(super) fn extract_request_credentials(
     headers: &http::HeaderMap,
     uri: &Uri,
     auth_endpoint_signature: &str,
 ) -> GatewayExtractedCredentials {
+    extract_request_credentials_with_trusted_auth(headers, uri, auth_endpoint_signature, cfg!(test))
+}
+
+pub(super) fn extract_request_credentials_with_trusted_auth(
+    headers: &http::HeaderMap,
+    uri: &Uri,
+    auth_endpoint_signature: &str,
+    trusted_auth_verified: bool,
+) -> GatewayExtractedCredentials {
     let bundle = GatewayCredentialBundle {
-        authorization_bearer: header_value_str(headers, http::header::AUTHORIZATION.as_str())
-            .as_deref()
-            .and_then(extract_bearer_token)
-            .map(ToOwned::to_owned),
+        authorization_bearer: unique_header_value_str(
+            headers,
+            http::header::AUTHORIZATION.as_str(),
+        )
+        .as_deref()
+        .and_then(extract_bearer_token)
+        .map(ToOwned::to_owned),
         x_api_key: header_value_str(headers, "x-api-key"),
         api_key: header_value_str(headers, "api-key"),
         x_goog_api_key: header_value_str(headers, "x-goog-api-key"),
         query_key: extract_query_api_key(uri),
         cookie_header: header_value_str(headers, http::header::COOKIE.as_str()),
     };
-    let trusted_headers = extract_trusted_auth_headers(headers);
+    let trusted_headers = extract_trusted_auth_headers(headers, trusted_auth_verified);
     let trusted_admin_headers = extract_trusted_admin_headers(headers);
     let primary = select_primary_credential(auth_endpoint_signature, &bundle);
 
@@ -69,6 +92,20 @@ pub(super) fn extract_request_credentials(
         bundle,
         primary,
     }
+}
+
+fn unique_header_value_str(headers: &http::HeaderMap, key: &str) -> Option<String> {
+    let mut values = headers.get_all(key).iter();
+    let value = values.next()?;
+    if values.next().is_some() {
+        return None;
+    }
+    value
+        .to_str()
+        .ok()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 pub(in crate::control) fn resolve_gateway_credential_carrier(
@@ -85,6 +122,7 @@ pub(in crate::control) fn resolve_gateway_credential_carrier(
         })
 }
 
+#[cfg(test)]
 fn has_trusted_gateway_marker(headers: &http::HeaderMap) -> bool {
     header_value_str(headers, crate::constants::GATEWAY_HEADER)
         .unwrap_or_default()
@@ -98,12 +136,31 @@ pub(super) fn build_auth_context_cache_key(
     uri: &Uri,
     auth_endpoint_signature: &str,
 ) -> Option<String> {
+    build_auth_context_cache_key_with_trusted_auth(
+        headers,
+        uri,
+        auth_endpoint_signature,
+        cfg!(test),
+    )
+}
+
+pub(super) fn build_auth_context_cache_key_with_trusted_auth(
+    headers: &http::HeaderMap,
+    uri: &Uri,
+    auth_endpoint_signature: &str,
+    trusted_auth_verified: bool,
+) -> Option<String> {
     let signature = auth_endpoint_signature.trim();
     if signature.is_empty() {
         return None;
     }
 
-    let extracted = extract_request_credentials(headers, uri, signature);
+    let extracted = extract_request_credentials_with_trusted_auth(
+        headers,
+        uri,
+        signature,
+        trusted_auth_verified,
+    );
     let trusted_headers = extracted.trusted_headers;
     let bundle = extracted.bundle;
     if bundle.authorization_bearer.is_none()
@@ -135,7 +192,7 @@ pub(super) fn build_auth_context_cache_key(
             })
             .unwrap_or_default();
 
-    Some(format!(
+    let raw_cache_identity = format!(
         "{signature}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
         bundle.authorization_bearer.unwrap_or_default(),
         bundle.x_api_key.unwrap_or_default(),
@@ -147,11 +204,26 @@ pub(super) fn build_auth_context_cache_key(
         trusted_api_key_id,
         trusted_balance_remaining,
         trusted_access_allowed,
-    ))
+    );
+    let mut hasher = Sha256::new();
+    hasher.update(raw_cache_identity.as_bytes());
+    Some(format!("auth-context:sha256:{:x}", hasher.finalize()))
 }
 
-fn extract_trusted_auth_headers(headers: &http::HeaderMap) -> Option<GatewayTrustedAuthHeaders> {
-    if !has_trusted_gateway_marker(headers) {
+fn extract_trusted_auth_headers(
+    headers: &http::HeaderMap,
+    trusted_auth_verified: bool,
+) -> Option<GatewayTrustedAuthHeaders> {
+    if !trusted_auth_verified {
+        return None;
+    }
+    #[cfg(test)]
+    if !header_value_str(headers, crate::constants::GATEWAY_HEADER)
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase()
+        .starts_with("rust-phase3")
+    {
         return None;
     }
     let user_id = header_value_str(headers, crate::constants::TRUSTED_AUTH_USER_ID_HEADER)
@@ -387,7 +459,7 @@ fn extract_bearer_token(value: &str) -> Option<&str> {
         return None;
     }
     let token = token.trim();
-    if token.is_empty() {
+    if token.is_empty() || token.chars().any(char::is_whitespace) {
         None
     } else {
         Some(token)
@@ -473,6 +545,46 @@ mod tests {
     }
 
     #[test]
+    fn extract_requested_model_handles_gemini_generation_and_operation_paths() {
+        let generation_decision = GatewayControlDecision::synthetic(
+            "/v1beta/models/gemini-2.5-pro:generateContent",
+            Some("ai_public".to_string()),
+            Some("gemini".to_string()),
+            Some("generate_content".to_string()),
+            Some("gemini:generate_content".to_string()),
+        );
+        let operation_decision = GatewayControlDecision::synthetic(
+            "/v1beta/models/veo-3/operations/task-123:cancel",
+            Some("ai_public".to_string()),
+            Some("gemini".to_string()),
+            Some("video".to_string()),
+            Some("gemini:video".to_string()),
+        );
+        let headers = http::HeaderMap::new();
+
+        assert_eq!(
+            extract_requested_model(
+                &generation_decision,
+                &uri("/v1beta/models/gemini-2.5-pro:generateContent"),
+                &headers,
+                &Bytes::new(),
+            )
+            .as_deref(),
+            Some("gemini-2.5-pro")
+        );
+        assert_eq!(
+            extract_requested_model(
+                &operation_decision,
+                &uri("/v1beta/models/veo-3/operations/task-123:cancel"),
+                &headers,
+                &Bytes::new(),
+            )
+            .as_deref(),
+            Some("veo-3")
+        );
+    }
+
+    #[test]
     fn selects_openai_bearer_as_provider_api_key() {
         let mut headers = http::HeaderMap::new();
         headers.insert(
@@ -489,6 +601,33 @@ mod tests {
                 carrier: GatewayCredentialCarrier::AuthorizationBearer,
             })
         );
+    }
+
+    #[test]
+    fn rejects_duplicate_or_combined_authorization_credentials() {
+        let mut duplicate = http::HeaderMap::new();
+        duplicate.append(
+            http::header::AUTHORIZATION,
+            "Bearer first-token".parse().unwrap(),
+        );
+        duplicate.append(
+            http::header::AUTHORIZATION,
+            "Bearer second-token".parse().unwrap(),
+        );
+        let extracted =
+            extract_request_credentials(&duplicate, &uri("/api/admin/system"), "admin:operational");
+        assert!(extracted.bundle.authorization_bearer.is_none());
+        assert!(extracted.primary.is_none());
+
+        let mut combined = http::HeaderMap::new();
+        combined.insert(
+            http::header::AUTHORIZATION,
+            "Bearer first-token, Bearer second-token".parse().unwrap(),
+        );
+        let extracted =
+            extract_request_credentials(&combined, &uri("/api/admin/system"), "admin:operational");
+        assert!(extracted.bundle.authorization_bearer.is_none());
+        assert!(extracted.primary.is_none());
     }
 
     #[test]
@@ -608,7 +747,7 @@ mod tests {
     }
 
     #[test]
-    fn cache_key_includes_cookie_header() {
+    fn cache_key_hashes_cookie_header_instead_of_retaining_session_secret() {
         let mut headers = http::HeaderMap::new();
         headers.insert(http::header::COOKIE, "session=abc123".parse().unwrap());
 
@@ -618,7 +757,8 @@ mod tests {
             "internal:session",
         )
         .expect("cache key should exist");
-        assert!(cache_key.contains("session=abc123"));
+        assert!(cache_key.starts_with("auth-context:sha256:"));
+        assert!(!cache_key.contains("session=abc123"));
     }
 
     #[test]
@@ -669,12 +809,10 @@ mod tests {
         .expect("trusted cache key should exist");
 
         assert_ne!(first, second);
-        assert!(first.contains("user-1"));
-        assert!(first.contains("key-1"));
-        assert!(first.contains("1.5"));
-        assert!(first.contains("true"));
-        assert!(second.contains("user-2"));
-        assert!(second.contains("false"));
+        for raw_identity in ["user-1", "key-1", "1.5", "user-2"] {
+            assert!(!first.contains(raw_identity));
+            assert!(!second.contains(raw_identity));
+        }
     }
 
     #[test]

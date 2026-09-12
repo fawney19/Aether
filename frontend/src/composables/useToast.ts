@@ -1,4 +1,4 @@
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import { TOAST_CONFIG } from '@/config/constants'
 import { getI18nLocale } from '@/i18n'
 import { translateLegacyText } from '@/i18n/messages'
@@ -36,8 +36,8 @@ export function useToast() {
       duration: 5000,
       ...toastOptions,
       variant: normalizeToastVariant(options.variant),
-      title: localizeToastText(options.title),
-      message: localizeToastText(options.message ?? description),
+      title: options.title,
+      message: options.message ?? description,
     }
 
 
@@ -81,7 +81,11 @@ export function useToast() {
   }
 
   return {
-    toasts,
+    toasts: computed(() => toasts.value.map(toast => ({
+      ...toast,
+      title: localizeToastText(toast.title),
+      message: localizeToastText(toast.message),
+    }))),
     showToast,
     removeToast,
     toast: showToast,

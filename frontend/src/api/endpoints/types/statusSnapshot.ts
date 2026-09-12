@@ -31,6 +31,11 @@ export interface QuotaWindowSnapshot {
   scope?: 'account' | 'workspace' | 'model' | string
   unit?: 'percent' | 'count' | 'usd' | 'tokens' | string
   model?: string | null
+  quota_group?: string | null
+  quota_group_label?: string | null
+  bucket_id?: string | null
+  window?: string | null
+  description?: string | null
   used_ratio?: number | null
   remaining_ratio?: number | null
   used_value?: number | null

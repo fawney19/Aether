@@ -31,6 +31,7 @@ impl GatewayHarnessConfig {
 #[derive(Debug)]
 pub struct GatewayHarness {
     server: SpawnedServer,
+    state: AppState,
 }
 
 impl GatewayHarness {
@@ -67,7 +68,7 @@ impl GatewayHarness {
         if let Some(gate) = config.distributed_request_gate {
             state = state.with_distributed_request_concurrency_gate(gate);
         }
-        let router = build_router_with_state(state);
+        let router = build_router_with_state(state.clone());
         let server = match port {
             Some(port) => SpawnedServer::start_on_port(port, router)
                 .await
@@ -76,7 +77,7 @@ impl GatewayHarness {
                 .await
                 .map_err(|err| format!("failed to start gateway harness: {err}"))?,
         };
-        Ok(Self { server })
+        Ok(Self { server, state })
     }
 
     pub fn base_url(&self) -> &str {
@@ -85,5 +86,21 @@ impl GatewayHarness {
 
     pub fn port(&self) -> u16 {
         self.server.port()
+    }
+
+    pub async fn metric_samples(&self) -> Result<Vec<crate::PrometheusSample>, String> {
+        let samples = aether_gateway::testkit::gateway_metric_samples(&self.state).await?;
+        Ok(samples
+            .into_iter()
+            .map(|sample| crate::PrometheusSample {
+                name: sample.name.to_string(),
+                labels: sample
+                    .labels
+                    .into_iter()
+                    .map(|label| (label.key.to_string(), label.value))
+                    .collect(),
+                value: sample.value.to_string(),
+            })
+            .collect())
     }
 }

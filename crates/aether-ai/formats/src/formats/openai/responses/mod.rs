@@ -10,6 +10,7 @@ pub mod stream;
 
 const TOOL_ERROR_PREFIX: &str = "[tool error]";
 const AETHER_REASONING_ITEM_ID_PREFIX: &str = "rs_aether_";
+const AETHER_MESSAGE_ITEM_ID_PREFIX: &str = "msg_aether_";
 const GEMINI_TOOL_SIGNATURE_CARRIER_PREFIX: &str = "cpa-gemini-responses-carrier-v1:";
 const MAX_GEMINI_THOUGHT_SIGNATURE_LEN: usize = 32 * 1024 * 1024;
 const MAX_GEMINI_THOUGHT_SIGNATURE_ENCODED_LEN: usize =
@@ -102,12 +103,74 @@ pub fn openai_responses_synthetic_reasoning_item_id(
     )
 }
 
+/// Builds a stable, wire-compatible ID for a message item synthesized by Aether.
+///
+/// Responses clients replay assistant message items verbatim on the next turn and
+/// OpenAI requires those IDs to begin with `msg`. Upstream response IDs are not
+/// guaranteed to have that prefix (Chat completion IDs and UUIDs are common), so
+/// appending a suffix to the response ID is not sufficient. A deterministic UUID
+/// keeps the ID stable across sync/stream projections while avoiding assumptions
+/// about the upstream ID's shape or length.
+pub fn openai_responses_message_item_id(response_id: &str, output_index: usize) -> String {
+    let seed = format!("{response_id}:{output_index}");
+    format!(
+        "{AETHER_MESSAGE_ITEM_ID_PREFIX}{}",
+        uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, seed.as_bytes()).simple()
+    )
+}
+
+/// Repairs legacy/non-OpenAI message IDs in a Responses request in place.
+///
+/// Aether versions before the `msg_` contract emitted IDs such as
+/// `<response-id>_msg`. Clients legitimately replay those assistant items on
+/// the next turn, so merely fixing newly generated responses leaves existing
+/// conversations broken. Preserve already-valid provider IDs and deterministically
+/// remap only message items that do not begin with `msg`.
+pub fn normalize_openai_responses_message_item_ids(body: &mut Value) -> usize {
+    let Some(items) = body.get_mut("input").and_then(Value::as_array_mut) else {
+        return 0;
+    };
+    let mut repaired = 0usize;
+    for (index, item) in items.iter_mut().enumerate() {
+        let Some(object) = item.as_object_mut() else {
+            continue;
+        };
+        if object.get("type").and_then(Value::as_str) != Some("message") {
+            continue;
+        }
+        let Some(raw_id) = object.get("id") else {
+            // IDs are optional for newly-authored input messages. Only repair
+            // an ID that a previous response actually supplied.
+            continue;
+        };
+        let valid = object
+            .get("id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| id.starts_with("msg"));
+        if valid {
+            continue;
+        }
+        let source_id = raw_id
+            .as_str()
+            .filter(|id| !id.trim().is_empty())
+            .unwrap_or("missing")
+            .to_string();
+        object.insert(
+            "id".to_string(),
+            Value::String(openai_responses_message_item_id(source_id.as_str(), index)),
+        );
+        repaired += 1;
+    }
+    repaired
+}
+
 /// Removes reasoning history items that cannot be replayed against an OpenAI Responses backend.
 ///
 /// Reasoning IDs are opaque provider references and must never be repaired by changing their
-/// prefix. Foreign IDs (for example `item_...`) are therefore removed. Aether-synthesized
-/// reasoning summaries are also removed unless they carry encrypted reasoning state that can be
-/// replayed statelessly.
+/// prefix. Foreign IDs (for example `item_...`) are therefore removed. Aether's Gemini signature
+/// carriers are also removed: they are intentionally transported through the Responses
+/// `encrypted_content` field so they can be restored on a later Gemini tool turn, but they are not
+/// OpenAI ciphertext and must never be replayed to an OpenAI/Codex backend.
 pub fn strip_incompatible_openai_responses_reasoning_items(
     body: &mut Value,
     provider_api_format: &str,
@@ -158,6 +221,13 @@ fn openai_responses_reasoning_item_is_replayable(
     };
     if object.get("type").and_then(Value::as_str) != Some("reasoning") {
         return true;
+    }
+    if object
+        .get("encrypted_content")
+        .and_then(Value::as_str)
+        .is_some_and(|value| value.starts_with(GEMINI_TOOL_SIGNATURE_CARRIER_PREFIX))
+    {
+        return false;
     }
     if policy == OpenAiResponsesReasoningReplayPolicy::DeepSeekOpaque
         && deepseek_opaque_reasoning_item_is_replayable(object)
@@ -255,6 +325,7 @@ mod tests {
 
     use super::{
         decode_gemini_tool_signature_carrier, encode_gemini_tool_signature_carrier_with_direction,
+        normalize_openai_responses_message_item_ids, openai_responses_message_item_id,
         openai_responses_request_operation, openai_responses_synthetic_reasoning_item_id,
         strip_incompatible_openai_responses_reasoning_items,
         strip_incompatible_openai_responses_reasoning_items_with_policy,
@@ -349,6 +420,38 @@ mod tests {
     }
 
     #[test]
+    fn synthetic_message_item_ids_are_stable_and_start_with_msg() {
+        let first = openai_responses_message_item_id("1c938e58-32a8-4d28-9c34-538d78076895", 0);
+        let second = openai_responses_message_item_id("1c938e58-32a8-4d28-9c34-538d78076895", 0);
+        let other = openai_responses_message_item_id("chatcmpl-123", 1);
+
+        assert!(first.starts_with("msg_"));
+        assert_eq!(first, second);
+        assert_ne!(first, other);
+    }
+
+    #[test]
+    fn normalizes_legacy_message_ids_but_preserves_valid_ids() {
+        let mut body = json!({
+            "input": [
+                {"type": "message", "id": "1c938e58-32a8-4d28-9c34-538d78076895_msg", "role": "assistant"},
+                {"type": "message", "id": "msg_provider_123", "role": "assistant"},
+                {"type": "function_call", "id": "legacy_call"},
+                {"type": "message", "role": "user"}
+            ]
+        });
+
+        assert_eq!(normalize_openai_responses_message_item_ids(&mut body), 1);
+        let input = body["input"].as_array().expect("input array");
+        assert!(input[0]["id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("msg_")));
+        assert_eq!(input[1]["id"], "msg_provider_123");
+        assert_eq!(input[2].get("id"), Some(&json!("legacy_call")));
+        assert!(input[3].get("id").is_none());
+    }
+
+    #[test]
     fn strips_foreign_and_non_replayable_synthetic_reasoning_items() {
         let portable_synthetic = openai_responses_synthetic_reasoning_item_id("resp_123", 1);
         let local_synthetic = openai_responses_synthetic_reasoning_item_id("resp_123", 2);
@@ -378,6 +481,43 @@ mod tests {
         assert_eq!(input[0]["id"], "rs_provider_123");
         assert_eq!(input[1]["encrypted_content"], "opaque");
         assert_eq!(input[2]["id"], "item_message_123");
+    }
+
+    #[test]
+    fn strips_gemini_signature_carriers_before_openai_replay() {
+        let gemini_item_id = openai_responses_synthetic_reasoning_item_id("resp_gemini", 0);
+        let openai_item_id = openai_responses_synthetic_reasoning_item_id("resp_openai", 0);
+        let carrier = encode_gemini_tool_signature_carrier_with_direction(
+            "opaque-gemini-thought-signature",
+            GeminiToolSignatureCarrierDirection::Next,
+        )
+        .expect("Gemini signature carrier");
+        let mut body = json!({
+            "input": [
+                {
+                    "type": "reasoning",
+                    "id": gemini_item_id,
+                    "summary": [],
+                    "encrypted_content": carrier
+                },
+                {
+                    "type": "reasoning",
+                    "id": openai_item_id,
+                    "summary": [],
+                    "encrypted_content": "provider-encrypted-state"
+                },
+                {"type": "reasoning", "id": "rs_provider_123", "summary": []}
+            ]
+        });
+
+        assert_eq!(
+            strip_incompatible_openai_responses_reasoning_items(&mut body, "openai:responses"),
+            1
+        );
+        let input = body["input"].as_array().expect("input array");
+        assert_eq!(input.len(), 2);
+        assert_eq!(input[0]["encrypted_content"], "provider-encrypted-state");
+        assert_eq!(input[1]["id"], "rs_provider_123");
     }
 
     #[test]

@@ -192,7 +192,7 @@ const chartWidth = 640
 const chartHeight = 220
 const yTickRatios = [0, 0.25, 0.5, 0.75, 1]
 
-const latest = computed(() => props.samples.at(-1) ?? null)
+const latest = computed(() => props.samples[props.samples.length - 1] ?? null)
 
 const maxChartValue = computed(() => {
   const maxValue = props.samples.reduce((max, sample) => {

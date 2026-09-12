@@ -1,15 +1,17 @@
 use super::shared::{
-    build_quota_snapshot_payload, execute_provider_quota_plan, extract_execution_error_message,
+    build_quota_snapshot_payload, execute_provider_quota_plan, extract_execution_error_message_ref,
     oauth_refresh_auto_removed_result, persist_provider_quota_refresh_state,
     quota_key_auto_removed, quota_refresh_success_invalid_state,
     resolve_provider_quota_execution_timeouts, ProviderQuotaExecutionOutcome,
 };
+use crate::execution_runtime::transport::decode_base64_body_with_limit;
 use crate::handlers::admin::provider::shared::payloads::{
     OAUTH_ACCOUNT_BLOCK_PREFIX, OAUTH_EXPIRED_PREFIX, OAUTH_REFRESH_FAILED_PREFIX,
 };
 use crate::handlers::admin::request::{AdminAppState, AdminGatewayProviderTransportSnapshot};
 use crate::GatewayError;
 use aether_admin::provider::quota::parse_chatgpt_web_conversation_init_response;
+use aether_admin::provider::redaction::admin_provider_metadata_bucket_safe_json;
 use aether_contracts::{
     ExecutionResult, ProxySnapshot, ResolvedTransportProfile, TRANSPORT_BACKEND_BROWSER_WREQ,
     TRANSPORT_HTTP_MODE_AUTO, TRANSPORT_POOL_SCOPE_KEY,
@@ -21,7 +23,6 @@ use aether_provider_pool::{
     build_chatgpt_web_pool_quota_request, enrich_chatgpt_web_quota_metadata,
     normalize_chatgpt_web_image_quota_limit,
 };
-use base64::Engine as _;
 use serde_json::json;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -125,14 +126,21 @@ fn default_chatgpt_web_quota_transport_profile() -> ResolvedTransportProfile {
 }
 
 fn chatgpt_web_quota_error_detail(result: &ExecutionResult) -> Option<String> {
-    extract_execution_error_message(result).or_else(|| {
-        let body = result.body.as_ref()?.body_bytes_b64.as_deref()?;
-        let decoded = base64::engine::general_purpose::STANDARD
-            .decode(body)
-            .ok()?;
-        let text = String::from_utf8_lossy(&decoded).trim().to_string();
-        (!text.is_empty()).then_some(text)
-    })
+    extract_execution_error_message_ref(result)
+        .map(bound_quota_error_detail)
+        .or_else(|| {
+            let body = result.body.as_ref()?.body_bytes_b64.as_deref()?;
+            let decoded = decode_base64_body_with_limit(body, crate::MAX_ERROR_BODY_BYTES).ok()?;
+            let text = String::from_utf8_lossy(&decoded);
+            let text = text.trim();
+            (!text.is_empty()).then(|| bound_quota_error_detail(text))
+        })
+}
+
+fn bound_quota_error_detail(value: &str) -> String {
+    let value = value.trim();
+    let end = value.floor_char_boundary(value.len().min(crate::MAX_ERROR_BODY_BYTES));
+    value[..end].to_string()
 }
 
 fn chatgpt_web_is_structured_account_block(message: &str) -> bool {
@@ -162,11 +170,8 @@ fn chatgpt_web_is_structured_account_block(message: &str) -> bool {
 }
 
 fn chatgpt_web_quota_403_refresh_failed_reason(message: Option<&str>) -> String {
-    let detail = message
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .filter(|value| !value.contains('<'))
-        .unwrap_or("ChatGPT Web 访问验证失败，请检查浏览器指纹、Cloudflare 验证或代理/地区限制");
+    let _ = message;
+    let detail = "ChatGPT Web 访问验证失败，请检查浏览器指纹、Cloudflare 验证或代理/地区限制";
     format!("{OAUTH_REFRESH_FAILED_PREFIX}{detail}")
 }
 
@@ -175,14 +180,10 @@ fn chatgpt_web_quota_invalid_reason(status_code: u16, upstream_message: Option<&
     if status_code == 403 && !chatgpt_web_is_structured_account_block(message) {
         return chatgpt_web_quota_403_refresh_failed_reason(upstream_message);
     }
-    let detail = if message.is_empty() {
-        match status_code {
-            401 => "ChatGPT Web Token 无效或已过期",
-            403 => "ChatGPT Web 账户访问受限",
-            _ => "ChatGPT Web 请求失败",
-        }
-    } else {
-        message
+    let detail = match status_code {
+        401 => "ChatGPT Web Token 无效或已过期",
+        403 => "ChatGPT Web 账户访问受限",
+        _ => "ChatGPT Web 请求失败",
     };
     match status_code {
         401 => format!("{OAUTH_EXPIRED_PREFIX}{detail}"),
@@ -263,13 +264,13 @@ pub(crate) async fn refresh_chatgpt_web_provider_quota_locally(
         .await?
         {
             ProviderQuotaExecutionOutcome::Response(result) => result,
-            ProviderQuotaExecutionOutcome::Failure(detail) => {
+            ProviderQuotaExecutionOutcome::Failure(_) => {
                 failed_count += 1;
                 results.push(json!({
                     "key_id": key.id,
                     "key_name": key.name,
                     "status": "error",
-                    "message": format!("conversation/init 请求执行失败: {detail}"),
+                    "message": "conversation/init 请求执行失败",
                     "status_code": 502,
                 }));
                 continue;
@@ -304,6 +305,8 @@ pub(crate) async fn refresh_chatgpt_web_provider_quota_locally(
                         &mut metadata,
                         key.upstream_metadata.as_ref(),
                     );
+                    metadata =
+                        admin_provider_metadata_bucket_safe_json("chatgpt_web", Some(&metadata));
                     metadata_update = Some(json!({ "chatgpt_web": metadata }));
                     (oauth_invalid_at_unix_secs, oauth_invalid_reason) =
                         quota_refresh_success_invalid_state(&key);
@@ -328,8 +331,7 @@ pub(crate) async fn refresh_chatgpt_web_provider_quota_locally(
             };
             let display_detail = invalid_reason
                 .as_deref()
-                .map(chatgpt_web_quota_result_message)
-                .or_else(|| err_msg.clone());
+                .map(chatgpt_web_quota_result_message);
             message = Some(match display_detail.as_deref() {
                 Some(detail) if !detail.is_empty() => {
                     format!(
@@ -395,9 +397,11 @@ pub(crate) async fn refresh_chatgpt_web_provider_quota_locally(
         if let Some(metadata) = metadata_update
             .as_ref()
             .and_then(|value| value.get("chatgpt_web"))
-            .cloned()
         {
-            payload.insert("metadata".to_string(), metadata);
+            payload.insert(
+                "metadata".to_string(),
+                admin_provider_metadata_bucket_safe_json("chatgpt_web", Some(metadata)),
+            );
         }
         if let Some(quota_snapshot) = build_quota_snapshot_payload(
             "chatgpt_web",
@@ -495,5 +499,66 @@ mod tests {
         let reason = chatgpt_web_quota_invalid_reason(403, Some("account has been deactivated"));
 
         assert!(reason.starts_with(OAUTH_ACCOUNT_BLOCK_PREFIX));
+    }
+
+    #[test]
+    fn quota_error_detail_is_bounded_before_copying_json_message() {
+        let message = format!("{}界", "x".repeat(crate::MAX_ERROR_BODY_BYTES));
+        let result = ExecutionResult {
+            request_id: "chatgpt-web-quota:oversized-json".to_string(),
+            candidate_id: None,
+            status_code: 500,
+            headers: BTreeMap::new(),
+            response_observation: None,
+            body: Some(ResponseBody {
+                json_body: Some(json!({"error": {"message": message}})),
+                body_bytes_b64: None,
+            }),
+            telemetry: None,
+            error: None,
+        };
+
+        let detail = chatgpt_web_quota_error_detail(&result).expect("JSON error detail");
+
+        assert_eq!(detail.len(), crate::MAX_ERROR_BODY_BYTES);
+        assert!(detail.bytes().all(|byte| byte == b'x'));
+    }
+
+    #[test]
+    fn quota_error_detail_rejects_oversized_base64_before_decode() {
+        let encoded_limit =
+            crate::execution_runtime::transport::maximum_base64_len_for_decoded_limit(
+                crate::MAX_ERROR_BODY_BYTES,
+            );
+        let result = ExecutionResult {
+            request_id: "chatgpt-web-quota:oversized-base64".to_string(),
+            candidate_id: None,
+            status_code: 500,
+            headers: BTreeMap::new(),
+            response_observation: None,
+            body: Some(ResponseBody {
+                json_body: None,
+                body_bytes_b64: Some("A".repeat(encoded_limit + 1)),
+            }),
+            telemetry: None,
+            error: None,
+        };
+
+        assert_eq!(chatgpt_web_quota_error_detail(&result), None);
+    }
+
+    #[test]
+    fn quota_invalid_reason_does_not_persist_upstream_credentials() {
+        let reason = chatgpt_web_quota_invalid_reason(
+            401,
+            Some("authorization=Bearer upstream-secret https://user:pass@example.test?q=secret"),
+        );
+
+        assert_eq!(
+            reason,
+            format!("{OAUTH_EXPIRED_PREFIX}ChatGPT Web Token 无效或已过期")
+        );
+        assert!(!reason.contains("upstream-secret"));
+        assert!(!reason.contains("user:pass"));
     }
 }

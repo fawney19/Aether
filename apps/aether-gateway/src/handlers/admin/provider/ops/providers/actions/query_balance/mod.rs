@@ -73,7 +73,17 @@ pub(super) async fn admin_provider_ops_run_query_balance_action(
     }
 
     let start = std::time::Instant::now();
-    let url = admin_provider_ops_request_url(base_url, action_config, "/api/user/balance");
+    let url = match admin_provider_ops_request_url(base_url, action_config, "/api/user/balance") {
+        Ok(url) => url,
+        Err(message) => {
+            return admin_provider_ops_action_error(
+                "not_configured",
+                "query_balance",
+                message,
+                None,
+            )
+        }
+    };
     let method = admin_provider_ops_request_method(action_config, "GET");
     let (status, response_json) = match admin_provider_ops_execute_json_request(
         state,
@@ -200,5 +210,5 @@ fn admin_provider_ops_network_error_message(error: &str) -> String {
     if lower.contains("timeout") || normalized.contains("超时") {
         return "请求超时".to_string();
     }
-    format!("网络错误: {normalized}")
+    "网络错误".to_string()
 }

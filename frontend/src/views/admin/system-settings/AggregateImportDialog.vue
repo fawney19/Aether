@@ -55,7 +55,7 @@
         <Select
           :model-value="aggregateMergeMode"
           :open="aggregateMergeModeSelectOpen"
-          @update:model-value="$emit('update:aggregateMergeMode', $event)"
+          @update:model-value="($event === 'skip' || $event === 'overwrite' || $event === 'error') && $emit('update:aggregateMergeMode', $event)"
           @update:open="$emit('update:aggregateMergeModeSelectOpen', $event)"
         >
           <SelectTrigger>
@@ -87,7 +87,7 @@
       </div>
 
       <p class="text-xs text-muted-foreground">
-        注意：完整备份会先导入配置数据，再导入用户数据；文件包含用户、用户组、API Keys、Key 用量、钱包快照与统计聚合。正常导出的 API Keys 会在导入时使用目标系统密钥重新加密；仅当备份中包含 key_encrypted 等未解密密文字段时，才需要目标系统使用兼容的 ENCRYPTION_KEY。
+        注意：完整备份会先导入配置数据，再导入用户数据。用户密码及用户和独立余额 API Key 凭据不会导出或恢复；仅保留账户、Key 元数据、用量、钱包快照与统计聚合。导入后的这些 Keys 默认禁用，需重置用户密码并重新签发 Keys 后再使用。
       </p>
 
       <div

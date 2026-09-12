@@ -18,6 +18,7 @@ mod frame;
 mod lifecycle;
 mod observation;
 mod ownership;
+mod plan_admission;
 mod quota;
 mod redaction;
 mod relay_policy;

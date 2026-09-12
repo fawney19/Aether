@@ -1,3 +1,4 @@
+import type { TimeScatterChartData } from '@/components/charts/types'
 /**
  * TTL 分析 composable
  * 封装缓存亲和性 TTL 分析相关的状态和逻辑
@@ -10,7 +11,6 @@ import {
   type CacheHitAnalysisResponse,
   type IntervalTimelineResponse
 } from '@/api/cache'
-import type { ChartData } from 'chart.js'
 import { log } from '@/utils/logger'
 
 // 时间范围选项
@@ -162,7 +162,7 @@ export function useTTLAnalysis() {
   }
 
   // 用户时间线散点图数据
-  const userTimelineChartData = computed<ChartData<'scatter'>>(() => {
+  const userTimelineChartData = computed<TimeScatterChartData>(() => {
     if (!userTimelineData.value || userTimelineData.value.points.length === 0) {
       return { datasets: [] }
     }

@@ -1,13 +1,24 @@
 use serde_json::Value;
+use std::fmt;
 
 use super::super::snapshot::GatewayProviderTransportSnapshot;
 
 pub const GEMINI_CLI_PROVIDER_TYPE: &str = "gemini_cli";
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct GeminiCliRequestAuth {
     pub project_id: Option<String>,
     pub session_id: Option<String>,
+}
+
+impl fmt::Debug for GeminiCliRequestAuth {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GeminiCliRequestAuth")
+            .field("project_id", &self.project_id)
+            .field("has_session_id", &self.session_id.is_some())
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

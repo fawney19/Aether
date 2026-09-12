@@ -1,12 +1,11 @@
 use std::collections::BTreeMap;
+use std::fmt;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub const EXECUTION_REQUEST_FOLLOW_REDIRECTS_HEADER: &str = "x-aether-execution-follow-redirects";
 pub const EXECUTION_REQUEST_HTTP1_ONLY_HEADER: &str = "x-aether-execution-http1-only";
-pub const EXECUTION_REQUEST_ACCEPT_INVALID_CERTS_HEADER: &str =
-    "x-aether-execution-accept-invalid-certs";
 pub const EXECUTION_RESPONSE_BODY_MODE_HEADER: &str = "x-aether-execution-response-body-mode";
 pub const MAX_EXECUTION_REQUEST_TIMEOUT_SECS: u64 = 1_200;
 pub const MAX_EXECUTION_REQUEST_TIMEOUT_MS: u64 = MAX_EXECUTION_REQUEST_TIMEOUT_SECS * 1_000;
@@ -57,7 +56,7 @@ pub struct ExecutionTimeouts {
     pub total_ms: Option<u64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
 pub struct RequestBody {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub json_body: Option<Value>,
@@ -65,6 +64,27 @@ pub struct RequestBody {
     pub body_bytes_b64: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body_ref: Option<String>,
+}
+
+impl fmt::Debug for RequestBody {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RequestBody")
+            .field("has_json_body", &self.json_body.is_some())
+            .field(
+                "json_body_bytes",
+                &self
+                    .json_body
+                    .as_ref()
+                    .and_then(|body| serde_json::to_vec(body).ok().map(|bytes| bytes.len())),
+            )
+            .field(
+                "body_bytes_b64_len",
+                &self.body_bytes_b64.as_ref().map(String::len),
+            )
+            .field("body_ref_len", &self.body_ref.as_ref().map(String::len))
+            .finish()
+    }
 }
 
 impl RequestBody {
@@ -77,7 +97,7 @@ impl RequestBody {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ProxySnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
@@ -93,6 +113,24 @@ pub struct ProxySnapshot {
     pub extra: Option<Value>,
 }
 
+impl fmt::Debug for ProxySnapshot {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProxySnapshot")
+            .field("enabled", &self.enabled)
+            .field("mode", &self.mode)
+            .field("node_id", &self.node_id)
+            .field("label", &self.label)
+            .field("url", &self.url.as_deref().map(redact_url_for_debug))
+            .field("has_extra", &self.extra.is_some())
+            .finish()
+    }
+}
+
+/// Reserved internal metadata key used to fence proxy-node mutations against
+/// a node incarnation recreated under the same stable id.
+pub const PROXY_NODE_TUNNEL_GENERATION_EXTRA_KEY: &str = "proxy_node_tunnel_generation";
+
 pub const TRANSPORT_BACKEND_REQWEST_RUSTLS: &str = "reqwest_rustls";
 pub const TRANSPORT_BACKEND_HYPER_RUSTLS: &str = "hyper_rustls";
 pub const TRANSPORT_BACKEND_BROWSER_WREQ: &str = "browser_wreq";
@@ -101,7 +139,7 @@ pub const TRANSPORT_HTTP_MODE_HTTP1_ONLY: &str = "http1_only";
 pub const TRANSPORT_HTTP_MODE_H2C_PRIOR_KNOWLEDGE: &str = "h2c_prior_knowledge";
 pub const TRANSPORT_POOL_SCOPE_KEY: &str = "key";
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct ResolvedTransportProfile {
     pub profile_id: String,
@@ -127,7 +165,21 @@ impl Default for ResolvedTransportProfile {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+impl fmt::Debug for ResolvedTransportProfile {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ResolvedTransportProfile")
+            .field("profile_id", &self.profile_id)
+            .field("backend", &self.backend)
+            .field("http_mode", &self.http_mode)
+            .field("pool_scope", &self.pool_scope)
+            .field("has_header_fingerprint", &self.header_fingerprint.is_some())
+            .field("has_extra", &self.extra.is_some())
+            .finish()
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
 pub struct ExecutionPlan {
     pub request_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -160,6 +212,63 @@ pub struct ExecutionPlan {
     pub transport_profile: Option<ResolvedTransportProfile>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeouts: Option<ExecutionTimeouts>,
+}
+
+impl fmt::Debug for ExecutionPlan {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ExecutionPlan")
+            .field("request_id", &self.request_id)
+            .field("candidate_id", &self.candidate_id)
+            .field("provider_name", &self.provider_name)
+            .field("provider_id", &self.provider_id)
+            .field("endpoint_id", &self.endpoint_id)
+            .field("key_id", &self.key_id)
+            .field("method", &self.method)
+            .field("url", &redact_url_for_debug(&self.url))
+            .field("header_names", &self.headers.keys().collect::<Vec<_>>())
+            .field("content_type", &self.content_type)
+            .field("content_encoding", &self.content_encoding)
+            .field("body", &self.body)
+            .field("stream", &self.stream)
+            .field("client_api_format", &self.client_api_format)
+            .field("provider_api_format", &self.provider_api_format)
+            .field("model_name", &self.model_name)
+            .field("proxy", &self.proxy)
+            .field("transport_profile", &self.transport_profile)
+            .field("timeouts", &self.timeouts)
+            .finish()
+    }
+}
+
+/// Return a bounded URL representation suitable for diagnostics.
+///
+/// URL userinfo, query parameters, and fragments are never emitted because
+/// providers commonly put API keys or OAuth tokens in those locations. An
+/// unparsable URL is represented only by its length rather than echoing input.
+pub fn redact_url_for_debug(raw: &str) -> String {
+    const MAX_DEBUG_URL_CHARS: usize = 512;
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return String::new();
+    }
+    let Ok(mut url) = url::Url::parse(raw) else {
+        return format!("[invalid-url len={}]", raw.len());
+    };
+    let _ = url.set_username("");
+    let _ = url.set_password(None);
+    url.set_query(None);
+    url.set_fragment(None);
+    let rendered = url.to_string();
+    if rendered.chars().count() <= MAX_DEBUG_URL_CHARS {
+        rendered
+    } else {
+        let prefix = rendered
+            .chars()
+            .take(MAX_DEBUG_URL_CHARS - 3)
+            .collect::<String>();
+        format!("{prefix}...")
+    }
 }
 
 #[cfg(test)]
@@ -267,5 +376,76 @@ mod tests {
                 .and_then(|timeouts| timeouts.total_ms),
             Some(300_000)
         );
+    }
+
+    #[test]
+    fn debug_redacts_plan_credentials_and_payloads() {
+        let plan = ExecutionPlan {
+            request_id: "req-debug".into(),
+            candidate_id: Some("candidate-debug".into()),
+            provider_name: Some("provider".into()),
+            provider_id: "provider-id".into(),
+            endpoint_id: "endpoint-id".into(),
+            key_id: "key-id".into(),
+            method: "POST".into(),
+            url: "https://proxy-user:proxy-password@example.test/v1?api_key=url-secret#fragment-secret".into(),
+            headers: BTreeMap::from([(
+                "authorization".into(),
+                "Bearer header-secret".into(),
+            )]),
+            content_type: Some("application/json".into()),
+            content_encoding: None,
+            body: RequestBody::from_json(serde_json::json!({
+                "access_token": "body-secret",
+                "prompt": "hello"
+            })),
+            stream: false,
+            client_api_format: "openai:chat".into(),
+            provider_api_format: "openai:chat".into(),
+            model_name: Some("model".into()),
+            proxy: Some(ProxySnapshot {
+                enabled: Some(true),
+                mode: Some("http".into()),
+                node_id: Some("node".into()),
+                label: None,
+                url: Some("http://proxy-user:proxy-password@proxy.test?token=proxy-secret".into()),
+                extra: Some(serde_json::json!({"credential": "extra-secret"})),
+            }),
+            transport_profile: Some(ResolvedTransportProfile {
+                profile_id: "profile".into(),
+                backend: TRANSPORT_BACKEND_REQWEST_RUSTLS.into(),
+                http_mode: TRANSPORT_HTTP_MODE_AUTO.into(),
+                pool_scope: TRANSPORT_POOL_SCOPE_KEY.into(),
+                header_fingerprint: Some(serde_json::json!({"authorization": "fingerprint-secret"})),
+                extra: Some(serde_json::json!({"secret": "profile-secret"})),
+            }),
+            timeouts: None,
+        };
+
+        let debug = format!("{plan:?}");
+        for secret in [
+            "proxy-user",
+            "proxy-password",
+            "url-secret",
+            "fragment-secret",
+            "header-secret",
+            "body-secret",
+            "proxy-secret",
+            "extra-secret",
+            "fingerprint-secret",
+            "profile-secret",
+        ] {
+            assert!(!debug.contains(secret), "debug leaked {secret}: {debug}");
+        }
+        assert!(debug.contains("header_names"));
+        assert!(debug.contains("has_json_body"));
+        assert!(debug.contains("profile"));
+    }
+
+    #[test]
+    fn debug_url_redaction_fails_closed_for_invalid_urls() {
+        let redacted = redact_url_for_debug("not a url?token=secret");
+        assert!(!redacted.contains("secret"));
+        assert!(redacted.starts_with("[invalid-url"));
     }
 }

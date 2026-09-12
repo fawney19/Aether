@@ -68,6 +68,60 @@ enum StreamFailureHandling {
     HonorLocalFailover,
 }
 
+const UPSTREAM_STREAM_FAILURE_MESSAGE: &str = "Upstream response stream failed";
+const EXECUTION_STREAM_PROTOCOL_FAILURE_MESSAGE: &str = "Execution runtime stream protocol failed";
+const EXECUTION_STREAM_PROCESSING_FAILURE_MESSAGE: &str =
+    "Execution runtime stream processing failed";
+
+fn encode_bounded_stream_capture(body: &[u8]) -> Option<String> {
+    encode_stream_capture_with_limit(
+        body,
+        crate::execution_runtime::MAX_STREAM_BODY_CAPTURE_BYTES,
+    )
+}
+
+fn encode_stream_capture_with_limit(body: &[u8], max_bytes: usize) -> Option<String> {
+    let captured = &body[..body.len().min(max_bytes)];
+    (!captured.is_empty()).then(|| base64::engine::general_purpose::STANDARD.encode(captured))
+}
+
+fn stable_stream_failure_message(error_type: &str) -> &'static str {
+    match error_type {
+        "first_byte_timeout" => "Upstream response timed out before the first byte",
+        "read_timeout" => "Upstream response stream timed out",
+        "execution_runtime_stream_read_error" => UPSTREAM_STREAM_FAILURE_MESSAGE,
+        "execution_runtime_stream_frame_decode_error"
+        | "execution_runtime_stream_chunk_decode_error" => {
+            EXECUTION_STREAM_PROTOCOL_FAILURE_MESSAGE
+        }
+        "execution_runtime_sync_json_stream_bridge_error"
+        | "execution_runtime_stream_rewrite_error"
+        | "execution_runtime_stream_rewrite_flush_error" => {
+            EXECUTION_STREAM_PROCESSING_FAILURE_MESSAGE
+        }
+        _ => "Execution runtime stream failed",
+    }
+}
+
+fn public_execution_error_message(error: &ExecutionError) -> String {
+    match &error.kind {
+        ExecutionErrorKind::ConnectTimeout => "Upstream connection timed out".to_string(),
+        ExecutionErrorKind::FirstByteTimeout => {
+            "Upstream response timed out before the first byte".to_string()
+        }
+        ExecutionErrorKind::ReadTimeout => "Upstream response stream timed out".to_string(),
+        ExecutionErrorKind::Upstream4xx | ExecutionErrorKind::Upstream5xx => error
+            .upstream_status
+            .map(|status| format!("Upstream request returned HTTP {status}"))
+            .unwrap_or_else(|| "Upstream request failed".to_string()),
+        ExecutionErrorKind::TlsError => "Upstream TLS connection failed".to_string(),
+        ExecutionErrorKind::ProxyError => "Upstream proxy request failed".to_string(),
+        ExecutionErrorKind::ProtocolError => UPSTREAM_STREAM_FAILURE_MESSAGE.to_string(),
+        ExecutionErrorKind::Cancelled => "Request was cancelled".to_string(),
+        ExecutionErrorKind::Internal => "Execution runtime stream failed".to_string(),
+    }
+}
+
 impl StreamFailureReport {
     fn into_body_jsons(self) -> (Value, Option<Value>) {
         let Self {
@@ -110,11 +164,11 @@ impl StreamFailureReport {
 
 pub(super) fn build_stream_failure_report(
     error_type: impl Into<String>,
-    error_message: impl Into<String>,
+    _error_message: impl Into<String>,
     status_code: u16,
 ) -> StreamFailureReport {
     let error_type = error_type.into();
-    let error_message = error_message.into();
+    let error_message = stable_stream_failure_message(error_type.as_str()).to_string();
     StreamFailureReport {
         status_code,
         error_type,
@@ -129,13 +183,14 @@ pub(super) fn build_stream_failure_report(
 
 pub(super) fn build_stream_transport_failure_report(
     error_type: impl Into<String>,
-    error_message: impl Into<String>,
+    _error_message: impl Into<String>,
     status_code: u16,
 ) -> StreamFailureReport {
+    let error_type = error_type.into();
     StreamFailureReport {
         status_code,
-        error_type: error_type.into(),
-        error_message: error_message.into(),
+        error_message: stable_stream_failure_message(error_type.as_str()).to_string(),
+        error_type,
         upstream_status_code: None,
         transport_error: true,
         honor_http_failover: false,
@@ -163,7 +218,7 @@ pub(super) fn build_stream_failure_from_execution_error(
         .ok()
         .and_then(|value| value.as_str().map(ToOwned::to_owned))
         .unwrap_or_else(|| "internal".to_string());
-    let error_message = error.message.trim().to_string();
+    let error_message = public_execution_error_message(error);
     let phase = serde_json::to_value(&error.phase).unwrap_or(Value::Null);
     let mut error_object = Map::from_iter([
         ("phase".to_string(), phase),
@@ -323,8 +378,7 @@ fn build_stream_failure_sync_payload(
         headers,
         body_json: Some(body),
         client_body_json: client_body,
-        body_base64: (!provider_buffered_body.is_empty())
-            .then(|| base64::engine::general_purpose::STANDARD.encode(provider_buffered_body)),
+        body_base64: encode_bounded_stream_capture(provider_buffered_body),
         telemetry,
     }
 }
@@ -524,8 +578,7 @@ pub(super) async fn handle_prefetch_provider_private_stream_error(
         headers,
         body_json: Some(body_json),
         client_body_json: None,
-        body_base64: (!buffered_body.is_empty())
-            .then(|| base64::engine::general_purpose::STANDARD.encode(buffered_body)),
+        body_base64: encode_bounded_stream_capture(buffered_body),
         telemetry,
     };
     let failure_analysis = record_stream_sync_failure(
@@ -813,11 +866,11 @@ pub(super) async fn submit_midstream_stream_failure(
     started_at_unix_ms: u64,
     failure: StreamFailureReport,
 ) {
-    let Some(report_kind) =
-        direct_stream_finalize_kind.and_then(resolve_core_error_background_report_kind)
-    else {
-        return;
-    };
+    let background_report_kind =
+        direct_stream_finalize_kind.and_then(resolve_core_error_background_report_kind);
+    let submit_background_report = background_report_kind.is_some();
+    let report_kind =
+        background_report_kind.unwrap_or_else(|| "execution_runtime_stream_error".to_string());
 
     let candidate_status_code = failure.upstream_status_code;
     let payload = build_stream_failure_sync_payload(
@@ -839,7 +892,10 @@ pub(super) async fn submit_midstream_stream_failure(
         StreamFailureHandling::Terminal,
     )
     .await;
-    if let Err(err) = submit_sync_report(state, payload).await {
+    if !submit_background_report {
+        return;
+    }
+    if let Err(_err) = submit_sync_report(state, payload).await {
         let request_id = short_request_id(plan.request_id.as_str());
         warn!(
             event_name = "execution_report_submit_failed",
@@ -848,7 +904,7 @@ pub(super) async fn submit_midstream_stream_failure(
             request_id = %request_id,
             candidate_id = ?plan.candidate_id,
             report_scope = "stream_failure",
-            error = ?err,
+            error_category = "stream_report_submit_failed",
             "gateway failed to submit sync execution report for terminal stream failure"
         );
     }
@@ -864,8 +920,21 @@ mod tests {
 
     use super::{
         build_stream_failure_from_execution_error, build_stream_failure_from_provider_error_body,
-        build_stream_failure_sync_payload, build_stream_transport_failure_report,
+        build_stream_failure_report, build_stream_failure_sync_payload,
+        build_stream_transport_failure_report, encode_stream_capture_with_limit,
     };
+
+    #[test]
+    fn failure_capture_encoding_defensively_caps_an_oversized_slice() {
+        let encoded = encode_stream_capture_with_limit(b"abcdef", 3)
+            .expect("bounded failure capture should be encoded");
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .expect("capture should be valid base64");
+
+        assert_eq!(decoded, b"abc");
+        assert!(encode_stream_capture_with_limit(b"abc", 0).is_none());
+    }
 
     #[test]
     fn committed_transport_failure_has_no_upstream_status() {
@@ -911,6 +980,61 @@ mod tests {
         });
 
         assert!(!failure.transport_error);
+    }
+
+    #[test]
+    fn execution_error_details_are_not_projected_to_stream_clients() {
+        let secret = "Bearer stream-secret https://user:password@example.test/private";
+        let failure = build_stream_failure_from_execution_error(&ExecutionError {
+            kind: ExecutionErrorKind::ProtocolError,
+            phase: ExecutionPhase::StreamRead,
+            message: secret.to_string(),
+            upstream_status: None,
+            retryable: true,
+            failover_recommended: true,
+        });
+
+        assert_eq!(failure.error_message, "Upstream response stream failed");
+        let client_body = failure
+            .to_json_string()
+            .expect("stream failure should serialize");
+        assert!(!client_body.contains(secret));
+        assert!(!client_body.contains("stream-secret"));
+    }
+
+    #[test]
+    fn upstream_execution_error_keeps_only_http_status_diagnostics() {
+        let secret = "authorization=Bearer upstream-secret";
+        let failure = build_stream_failure_from_execution_error(&ExecutionError {
+            kind: ExecutionErrorKind::Upstream4xx,
+            phase: ExecutionPhase::FirstByte,
+            message: secret.to_string(),
+            upstream_status: Some(429),
+            retryable: true,
+            failover_recommended: true,
+        });
+
+        assert_eq!(failure.error_message, "Upstream request returned HTTP 429");
+        assert!(!failure
+            .to_json_string()
+            .expect("stream failure should serialize")
+            .contains(secret));
+    }
+
+    #[test]
+    fn internal_stream_failure_details_are_replaced_with_stable_text() {
+        let secret = "failed near /Users/admin/.config with token=stream-secret";
+        let failure =
+            build_stream_failure_report("execution_runtime_stream_rewrite_error", secret, 502);
+
+        assert_eq!(
+            failure.error_message,
+            "Execution runtime stream processing failed"
+        );
+        assert!(!failure
+            .to_json_string()
+            .expect("stream failure should serialize")
+            .contains(secret));
     }
 
     #[test]

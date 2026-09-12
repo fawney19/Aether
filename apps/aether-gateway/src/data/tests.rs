@@ -255,40 +255,6 @@ async fn app_state_wires_gateway_data_state_from_config() {
 }
 
 #[tokio::test]
-async fn app_state_prepares_sqlite_database_startup() -> Result<(), Box<dyn std::error::Error>> {
-    let mut pool = SqlPoolConfig::default();
-    pool.min_connections = 0;
-    pool.max_connections = 1;
-    let database = SqlDatabaseConfig::new(DatabaseDriver::Sqlite, "sqlite::memory:", pool)?;
-    let state =
-        AppState::new()?.with_data_config(GatewayDataConfig::from_database_config(database))?;
-
-    let pending = state
-        .prepare_database_for_startup()
-        .await?
-        .expect("sqlite database should expose migration state");
-    assert!(
-        !pending.is_empty(),
-        "fresh sqlite gateway databases should report pending migrations"
-    );
-
-    assert!(
-        state.run_database_migrations().await?,
-        "sqlite gateway database should run migrations"
-    );
-    let pending = state
-        .prepare_database_for_startup()
-        .await?
-        .expect("sqlite database should expose migration state");
-    assert!(
-        pending.is_empty(),
-        "sqlite gateway databases should be current after migrations"
-    );
-
-    Ok(())
-}
-
-#[tokio::test]
 async fn data_state_checks_user_uniqueness_through_user_reader() {
     let user = StoredUserAuthRecord::new(
         "user-1".to_string(),
@@ -312,7 +278,7 @@ async fn data_state_checks_user_uniqueness_through_user_reader() {
         Some("admin@example.com".to_string()),
         true,
         "admin".to_string(),
-        Some(format!("$2b$12${}", "a".repeat(53))),
+        Some("$2b$12$4qL4tdcsFwVaDTw5Ck3xzu8GpNdre56DiNR6Dnw7t6gCXaEnqAe7G".to_string()),
         "admin".to_string(),
         "local".to_string(),
         None,

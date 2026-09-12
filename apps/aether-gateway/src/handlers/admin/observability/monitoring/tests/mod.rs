@@ -3,6 +3,7 @@ use super::test_support::*;
 use crate::control::GatewayPublicRequestContext;
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::AppState;
+use aether_crypto::DEVELOPMENT_ENCRYPTION_KEY;
 use aether_data_contracts::repository::{
     candidates::{RequestCandidateStatus, StoredRequestCandidate},
     provider_catalog::{
@@ -119,9 +120,12 @@ async fn admin_monitoring_cache_affinities_and_affinity_return_local_payload_fro
     let state = AppState::new()
         .expect("state should build")
         .with_data_state_for_tests(
-            crate::data::GatewayDataState::with_provider_catalog_reader_for_tests(provider_catalog)
-                .with_user_reader(user_repository)
-                .with_auth_api_key_reader(auth_repository),
+            crate::data::GatewayDataState::with_provider_catalog_repository_for_tests(
+                provider_catalog,
+            )
+            .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY)
+            .with_user_reader(user_repository)
+            .with_auth_api_key_reader(auth_repository),
         )
         .with_admin_monitoring_cache_affinity_entry_for_tests(
             "cache_affinity:user-key-1:openai:model-alpha",
@@ -228,9 +232,12 @@ async fn admin_monitoring_cache_affinities_and_delete_use_runtime_scheduler_affi
     let state = AppState::new()
         .expect("state should build")
         .with_data_state_for_tests(
-            crate::data::GatewayDataState::with_provider_catalog_reader_for_tests(provider_catalog)
-                .with_user_reader(user_repository)
-                .with_auth_api_key_reader(auth_repository),
+            crate::data::GatewayDataState::with_provider_catalog_repository_for_tests(
+                provider_catalog,
+            )
+            .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY)
+            .with_user_reader(user_repository)
+            .with_auth_api_key_reader(auth_repository),
         );
     let affinity_cache_key =
         aether_scheduler_core::build_scheduler_affinity_cache_key_for_api_key_id(
@@ -358,9 +365,12 @@ async fn admin_monitoring_cache_affinities_parse_session_scoped_scheduler_affini
     let state = AppState::new()
         .expect("state should build")
         .with_data_state_for_tests(
-            crate::data::GatewayDataState::with_provider_catalog_reader_for_tests(provider_catalog)
-                .with_user_reader(user_repository)
-                .with_auth_api_key_reader(auth_repository),
+            crate::data::GatewayDataState::with_provider_catalog_repository_for_tests(
+                provider_catalog,
+            )
+            .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY)
+            .with_user_reader(user_repository)
+            .with_auth_api_key_reader(auth_repository),
         );
     let client_session = aether_scheduler_core::ClientSessionAffinity::new(
         Some("Codex".to_string()),

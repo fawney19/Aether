@@ -6,7 +6,7 @@ use sqlx::{
 use super::types::PendingMigrationInfo;
 
 pub use aether_data_postgres::pending_migrations;
-#[cfg(all(test, feature = "postgres", feature = "mysql", feature = "sqlite"))]
+#[cfg(all(test, feature = "postgres"))]
 pub(super) use aether_data_postgres::{
     all_up_migrations, pending_migrations_from_applied, POSTGRES_MIGRATOR,
 };

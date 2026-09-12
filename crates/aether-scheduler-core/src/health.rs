@@ -720,6 +720,71 @@ mod tests {
         .expect("candidate should build")
     }
 
+    #[test]
+    fn runtime_projection_preserves_concurrency_rpm_and_failure_cooldown() {
+        let statuses = [
+            RequestCandidateStatus::Available,
+            RequestCandidateStatus::Unused,
+            RequestCandidateStatus::Pending,
+            RequestCandidateStatus::Streaming,
+            RequestCandidateStatus::Success,
+            RequestCandidateStatus::Failed,
+            RequestCandidateStatus::Cancelled,
+            RequestCandidateStatus::Skipped,
+        ];
+        let mut candidates = Vec::new();
+        for (index, status) in statuses.into_iter().cycle().take(40).enumerate() {
+            let mut row = stored_candidate(&index.to_string(), status, 100 - index as i64);
+            row.api_key_id = Some("api-key".into());
+            row.concurrent_requests = Some(index as u32);
+            row.started_at_unix_ms = (index % 2 == 0).then_some(99_000);
+            row.finished_at_unix_ms = (index % 3 == 0).then_some(101_000);
+            row.extra_data = Some(serde_json::json!({"stream_completed": true}));
+            candidates.push(row);
+        }
+        let projected = candidates
+            .iter()
+            .map(StoredRequestCandidate::runtime_snapshot)
+            .collect::<Vec<_>>();
+        for now in [90, 101, 160, 401] {
+            for rows in [&candidates[..], &candidates[5..], &candidates[39..]] {
+                let slim = &projected[candidates.len() - rows.len()..];
+                assert_eq!(
+                    count_recent_active_requests_for_api_key(rows, "api-key", now),
+                    count_recent_active_requests_for_api_key(slim, "api-key", now)
+                );
+                assert_eq!(
+                    count_recent_active_requests_for_provider(rows, "provider-a", now),
+                    count_recent_active_requests_for_provider(slim, "provider-a", now)
+                );
+                assert_eq!(
+                    count_recent_active_requests_for_provider_key(rows, "key-a", now),
+                    count_recent_active_requests_for_provider_key(slim, "key-a", now)
+                );
+                assert_eq!(
+                    count_recent_rpm_requests_for_provider_key_since(rows, "key-a", now, Some(80)),
+                    count_recent_rpm_requests_for_provider_key_since(slim, "key-a", now, Some(80))
+                );
+                assert_eq!(
+                    is_candidate_in_recent_failure_cooldown(
+                        rows,
+                        "provider-a",
+                        "endpoint-a",
+                        "key-a",
+                        now
+                    ),
+                    is_candidate_in_recent_failure_cooldown(
+                        slim,
+                        "provider-a",
+                        "endpoint-a",
+                        "key-a",
+                        now
+                    )
+                );
+            }
+        }
+    }
+
     fn provider_catalog_key(id: &str) -> StoredProviderCatalogKey {
         StoredProviderCatalogKey::new(
             id.to_string(),

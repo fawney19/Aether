@@ -2,13 +2,10 @@ use std::collections::BTreeMap;
 
 use aether_contracts::ExecutionPlan;
 use axum::body::Body;
-use axum::http::header::HeaderValue;
 use axum::http::Response;
 use serde_json::json;
 
-use crate::api::response::{
-    build_client_response_from_parts, build_client_response_from_parts_with_mutator,
-};
+use crate::api::response::build_client_response_from_parts;
 use crate::async_task::VideoTaskService;
 use crate::control::GatewayControlDecision;
 use crate::video_tasks::{
@@ -156,33 +153,53 @@ pub(crate) fn maybe_build_local_video_error_response(
         return Ok(None);
     }
 
-    let empty_body = json!({});
-    let response_body = payload.body_json.as_ref().unwrap_or(&empty_body);
-    let body_bytes =
-        serde_json::to_vec(response_body).map_err(|err| GatewayError::Internal(err.to_string()))?;
-    let body_len = body_bytes.len().to_string();
+    let response_body =
+        local_video_error_response_body(payload.report_kind.as_str(), payload.status_code);
+    let body_bytes = serde_json::to_vec(&response_body)
+        .map_err(|err| GatewayError::Internal(err.to_string()))?;
+    let headers = BTreeMap::from([
+        ("content-type".to_string(), "application/json".to_string()),
+        ("content-length".to_string(), body_bytes.len().to_string()),
+    ]);
 
-    Ok(Some(build_client_response_from_parts_with_mutator(
+    Ok(Some(build_client_response_from_parts(
         payload.status_code,
-        &payload.headers,
+        &headers,
         Body::from(body_bytes),
         trace_id,
         Some(decision),
-        |headers| {
-            headers.remove(http::header::CONTENT_ENCODING);
-            headers.remove(http::header::CONTENT_LENGTH);
-            headers.insert(
-                http::header::CONTENT_TYPE,
-                HeaderValue::from_static("application/json"),
-            );
-            headers.insert(
-                http::header::CONTENT_LENGTH,
-                HeaderValue::from_str(body_len.as_str())
-                    .map_err(|err| GatewayError::Internal(err.to_string()))?,
-            );
-            Ok(())
-        },
     )?))
+}
+
+fn local_video_error_response_body(report_kind: &str, status_code: u16) -> serde_json::Value {
+    let (code, gemini_status) = match status_code {
+        400 => ("invalid_request", "INVALID_ARGUMENT"),
+        401 => ("authentication_error", "UNAUTHENTICATED"),
+        403 => ("permission_denied", "PERMISSION_DENIED"),
+        404 => ("not_found", "NOT_FOUND"),
+        429 => ("rate_limit_exceeded", "RESOURCE_EXHAUSTED"),
+        503 => ("server_error", "UNAVAILABLE"),
+        500..=599 => ("server_error", "INTERNAL"),
+        _ => ("provider_error", "UNKNOWN"),
+    };
+
+    if report_kind.starts_with("gemini_video_") {
+        json!({
+            "error": {
+                "code": status_code,
+                "message": "Video generation failed",
+                "status": gemini_status,
+            }
+        })
+    } else {
+        json!({
+            "error": {
+                "message": "Video generation failed",
+                "type": code,
+                "code": code,
+            }
+        })
+    }
 }
 
 #[cfg(test)]
@@ -193,7 +210,7 @@ mod tests {
     use serde_json::json;
 
     #[tokio::test]
-    async fn local_video_error_response_rewrites_headers_without_mutating_payload() {
+    async fn local_video_error_response_does_not_expose_upstream_payload_or_headers() {
         let decision = GatewayControlDecision::synthetic(
             "/v1/videos",
             Some("ai_public".to_string()),
@@ -212,12 +229,15 @@ mod tests {
             headers: BTreeMap::from([
                 ("content-encoding".to_string(), "gzip".to_string()),
                 ("content-length".to_string(), "999".to_string()),
-                ("x-upstream-id".to_string(), "video-123".to_string()),
+                (
+                    "x-upstream-debug".to_string(),
+                    "Authorization: Bearer header-secret".to_string(),
+                ),
             ]),
             body_json: Some(json!({
                 "error": {
                     "type": "video_backend_error",
-                    "message": "backend failed",
+                    "message": "Authorization: Bearer body-secret at https://internal.test/?key=secret",
                 }
             })),
             client_body_json: None,
@@ -239,13 +259,7 @@ mod tests {
             Some("application/json")
         );
         assert_eq!(response.headers().get(http::header::CONTENT_ENCODING), None);
-        assert_eq!(
-            response
-                .headers()
-                .get("x-upstream-id")
-                .and_then(|value| value.to_str().ok()),
-            Some("video-123")
-        );
+        assert_eq!(response.headers().get("x-upstream-debug"), None);
         assert_eq!(
             payload.headers.get("content-encoding").map(String::as_str),
             Some("gzip")
@@ -258,12 +272,36 @@ mod tests {
         let body = to_bytes(response.into_body(), usize::MAX)
             .await
             .expect("response body should read");
+        let response_body =
+            serde_json::from_slice::<serde_json::Value>(&body).expect("response body should parse");
         assert_eq!(
-            serde_json::from_slice::<serde_json::Value>(&body).expect("response body should parse"),
-            payload
-                .body_json
-                .clone()
-                .expect("payload body should exist")
+            response_body,
+            json!({
+                "error": {
+                    "message": "Video generation failed",
+                    "type": "server_error",
+                    "code": "server_error",
+                }
+            })
+        );
+        let encoded = response_body.to_string();
+        for sensitive in ["Bearer", "body-secret", "header-secret", "internal.test"] {
+            assert!(!encoded.contains(sensitive));
+        }
+        assert!(payload.body_json.is_some());
+    }
+
+    #[test]
+    fn gemini_video_error_response_uses_fixed_schema() {
+        assert_eq!(
+            local_video_error_response_body("gemini_video_create_sync_finalize", 429),
+            json!({
+                "error": {
+                    "code": 429,
+                    "message": "Video generation failed",
+                    "status": "RESOURCE_EXHAUSTED",
+                }
+            })
         );
     }
 }

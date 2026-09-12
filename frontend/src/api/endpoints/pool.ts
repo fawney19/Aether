@@ -2,6 +2,7 @@ import client from '../client'
 import { buildCacheKey, cachedRequest } from '@/utils/cache'
 import type {
   AllowedModels,
+  ProviderType,
   OAuthOrganizationInfo,
   ProxyConfig,
   UpstreamMetadata,
@@ -77,7 +78,7 @@ export async function resetPoolCost(
 export interface PoolOverviewItem {
   provider_id: string
   provider_name: string
-  provider_type: string
+  provider_type: ProviderType
   total_keys: number
   active_keys: number
   cooldown_count: number
@@ -152,6 +153,7 @@ export interface PoolKeyDetail {
   rate_multipliers?: Record<string, number> | null
   internal_priority?: number
   rpm_limit?: number | null
+  concurrent_limit?: number | null
   cache_ttl_minutes?: number
   max_probe_interval_minutes?: number
   note?: string | null
@@ -507,7 +509,7 @@ export async function batchActionPoolKeys(
   providerId: string,
   body: PoolBatchAction,
 ): Promise<{ affected: number; message: string; task_id?: string }> {
-  const response = await client.post(
+  const response = await client.post<{ affected: number; message: string; task_id?: string }>(
     `/api/admin/pool/${providerId}/keys/batch-action`,
     body,
     { timeout: POOL_BATCH_ACTION_TIMEOUT_MS },
@@ -560,7 +562,7 @@ export async function getPoolBatchDeleteTask(
 export async function cleanupBannedPoolKeys(
   providerId: string,
 ): Promise<{ affected: number; message: string }> {
-  const response = await client.post(
+  const response = await client.post<{ affected: number; message: string }>(
     `/api/admin/pool/${providerId}/keys/cleanup-banned`,
     undefined,
     { timeout: POOL_BATCH_ACTION_TIMEOUT_MS },

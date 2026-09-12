@@ -1,8 +1,8 @@
 use aether_data_contracts::repository::billing::StoredBillingModelContext;
 use aether_data_contracts::repository::usage::{
     extract_provider_cache_ttl_minutes_from_metadata, resolve_provider_cache_ttl_minutes,
-    resolve_provider_service_tier_from_request_capture, USAGE_AVAILABLE_METADATA_KEY,
-    USAGE_PRICING_AVAILABLE_METADATA_KEY,
+    resolve_provider_service_tier_from_request_capture, CANCELLED_REQUEST_FEE_METADATA_KEY,
+    USAGE_AVAILABLE_METADATA_KEY, USAGE_PRICING_AVAILABLE_METADATA_KEY,
 };
 use aether_data_contracts::DataLayerError;
 use aether_usage_runtime::{UsageEvent, UsageEventType};
@@ -40,6 +40,18 @@ pub async fn enrich_usage_event_with_billing(
     data: &dyn BillingModelContextLookup,
     event: &mut UsageEvent,
 ) -> Result<(), DataLayerError> {
+    if matches!(event.event_type, UsageEventType::Cancelled) {
+        event.data.total_cost_usd = Some(0.0);
+        event.data.actual_total_cost_usd = Some(0.0);
+        if let Some(metadata) = event
+            .data
+            .request_metadata
+            .as_mut()
+            .and_then(Value::as_object_mut)
+        {
+            metadata.remove(CANCELLED_REQUEST_FEE_METADATA_KEY);
+        }
+    }
     // Session transports such as Codex Live expose lifecycle telemetry but no
     // authoritative token/cost object. Do not run request-based pricing with
     // zero default tokens: that would turn "unknown" into a fabricated charge.
@@ -65,7 +77,10 @@ pub async fn enrich_usage_event_with_billing(
         clear_usage_costs(event);
         return Ok(());
     }
-    if !matches!(event.event_type, UsageEventType::Completed) {
+    if !matches!(
+        event.event_type,
+        UsageEventType::Completed | UsageEventType::Cancelled
+    ) {
         event.data.total_cost_usd = Some(0.0);
         event.data.actual_total_cost_usd = Some(0.0);
         return Ok(());
@@ -189,7 +204,10 @@ fn calculate_billing_computation(
     } else {
         usage_event_image_count(&event.data).unwrap_or(0)
     };
-    let request_count = if failed {
+    let cancelled = matches!(event.event_type, UsageEventType::Cancelled);
+    let request_count = if cancelled {
+        1
+    } else if failed {
         0
     } else if is_image_usage && image_count > 0 {
         image_count
@@ -197,7 +215,7 @@ fn calculate_billing_computation(
         1
     };
     let processing_tiers = usage_event_processing_tiers(&event.data);
-    let input = BillingUsageInput {
+    let mut input = BillingUsageInput {
         task_type: if is_image_usage {
             "image".to_string()
         } else {
@@ -236,6 +254,16 @@ fn calculate_billing_computation(
         cache_ttl_minutes: usage_event_provider_cache_ttl_minutes(&event.data)
             .or(pricing.provider_api_key_cache_ttl_minutes),
     };
+
+    if cancelled {
+        input.input_tokens = 0;
+        input.output_tokens = 0;
+        input.cache_creation_tokens = 0;
+        input.cache_creation_ephemeral_5m_tokens = 0;
+        input.cache_creation_ephemeral_1h_tokens = 0;
+        input.cache_read_tokens = 0;
+        input.image_count = 0;
+    }
 
     BillingService::new()
         .calculate(pricing, &input)
@@ -356,9 +384,32 @@ fn apply_billing_computation(
     pricing: &BillingModelPricingSnapshot,
     computation: BillingComputation,
 ) -> Result<(), DataLayerError> {
+    let cancelled = matches!(event.event_type, UsageEventType::Cancelled);
+    if cancelled
+        && !computation
+            .pricing_resolution
+            .price_per_request
+            .is_some_and(|price| price > 0.0)
+    {
+        return Ok(());
+    }
     event.data.total_cost_usd = Some(computation.cost_result.cost);
     event.data.actual_total_cost_usd = Some(computation.actual_total_cost);
-    merge_billing_snapshot_metadata(&mut event.data.request_metadata, pricing, &computation)
+    merge_billing_snapshot_metadata(&mut event.data.request_metadata, pricing, &computation)?;
+    if cancelled {
+        if let Some(metadata) = event
+            .data
+            .request_metadata
+            .as_mut()
+            .and_then(Value::as_object_mut)
+        {
+            metadata.insert(
+                CANCELLED_REQUEST_FEE_METADATA_KEY.to_string(),
+                Value::Bool(true),
+            );
+        }
+    }
+    Ok(())
 }
 
 fn map_pricing_context(context: StoredBillingModelContext) -> BillingModelPricingSnapshot {
@@ -449,9 +500,14 @@ fn build_settlement_snapshot(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use aether_data_contracts::repository::billing::StoredBillingModelContext;
     use aether_data_contracts::repository::usage::UsageBodyCaptureState;
-    use aether_usage_runtime::{UsageEvent, UsageEventData, UsageEventType};
+    use aether_runtime_state::{MemoryRuntimeStateConfig, RuntimeState};
+    use aether_usage_runtime::{
+        UsageEvent, UsageEventData, UsageEventType, UsageQueue, UsageRuntimeConfig,
+    };
     use async_trait::async_trait;
     use serde_json::json;
     use serde_json::Value;
@@ -486,6 +542,539 @@ mod tests {
         {
             Ok(self.name_context.clone())
         }
+    }
+
+    fn wire_billing_lookup(pricing: Option<Value>, request_price: Option<f64>) -> TestLookup {
+        TestLookup {
+            name_context: Some(
+                StoredBillingModelContext::new(
+                    "provider-wire".to_string(),
+                    Some("pay_as_you_go".to_string()),
+                    Some("key-wire".to_string()),
+                    None,
+                    Some(5),
+                    "global-model-wire".to_string(),
+                    "wire-model".to_string(),
+                    None,
+                    request_price,
+                    pricing,
+                    Some("model-wire".to_string()),
+                    Some("wire-model".to_string()),
+                    None,
+                    None,
+                    None,
+                )
+                .expect("wire billing context"),
+            ),
+            model_id_context: None,
+        }
+    }
+
+    fn wire_billing_event(request_id: &str) -> UsageEvent {
+        UsageEvent::new(
+            UsageEventType::Completed,
+            request_id,
+            UsageEventData {
+                user_id: Some("user-wire".to_string()),
+                api_key_id: Some("key-wire".to_string()),
+                provider_name: "OpenAI".to_string(),
+                provider_id: Some("provider-wire".to_string()),
+                provider_api_key_id: Some("key-wire".to_string()),
+                model: "gpt-5.6-sol".to_string(),
+                target_model: Some("gpt-5.6-sol".to_string()),
+                request_type: Some("chat".to_string()),
+                api_format: Some("openai:responses".to_string()),
+                endpoint_api_format: Some("openai:responses".to_string()),
+                input_tokens: Some(1_000),
+                output_tokens: Some(100),
+                total_tokens: Some(1_100),
+                cache_creation_input_tokens: Some(0),
+                cache_creation_ephemeral_5m_input_tokens: Some(0),
+                cache_creation_ephemeral_1h_input_tokens: Some(0),
+                cache_read_input_tokens: Some(0),
+                status_code: Some(200),
+                first_byte_time_ms: Some(12),
+                response_time_ms: Some(30),
+                request_headers: Some(json!({"x-audit": "request"})),
+                provider_request_headers: Some(json!({"x-audit": "provider request"})),
+                response_headers: Some(json!({"x-audit": "provider response"})),
+                client_response_headers: Some(json!({"x-audit": "client response"})),
+                provider_request_body: Some(json!({"model": "gpt-5.6-sol"})),
+                provider_request_body_state: Some(UsageBodyCaptureState::Inline),
+                response_body: Some(json!({"service_tier": "default", "output": "x".repeat(8192)})),
+                response_body_state: Some(UsageBodyCaptureState::Inline),
+                request_metadata: Some(json!({
+                    "usage_available": true,
+                    "usage_pricing_available": true,
+                    "api_key_is_standalone": true,
+                    "plan_usage_reservation_token": "550e8400-e29b-41d4-a716-446655440000",
+                    "plan_usage_reservation_deferred": true
+                })),
+                ..UsageEventData::default()
+            },
+        )
+    }
+
+    fn wire_billing_result(event: &UsageEvent) -> Value {
+        let mut data = serde_json::to_value(&event.data).expect("serialized billing event");
+        let object = data.as_object_mut().expect("event data object");
+        for key in [
+            "request_body",
+            "provider_request_body",
+            "response_body",
+            "client_response_body",
+            "request_body_state",
+            "provider_request_body_state",
+            "response_body_state",
+            "client_response_body_state",
+            "request_headers",
+            "provider_request_headers",
+            "response_headers",
+            "client_response_headers",
+        ] {
+            object.remove(key);
+        }
+        if let Some(metadata) = object
+            .get_mut("request_metadata")
+            .and_then(Value::as_object_mut)
+        {
+            metadata.retain(|key, _| {
+                matches!(
+                    key.as_str(),
+                    "usage_available"
+                        | "usage_pricing_available"
+                        | "api_key_is_standalone"
+                        | "plan_usage_reservation_token"
+                        | "plan_usage_reservation_deferred"
+                        | "cancelled_request_fee"
+                        | "dimensions"
+                        | "billing_dimensions"
+                        | "billing_snapshot"
+                        | "settlement_snapshot"
+                        | "rate_multiplier"
+                        | "is_free_tier"
+                        | "settlement_snapshot_schema_version"
+                )
+            });
+            for key in ["billing_snapshot", "settlement_snapshot"] {
+                if let Some(snapshot) = metadata.get_mut(key).and_then(Value::as_object_mut) {
+                    snapshot.remove("calculated_at");
+                }
+            }
+        }
+        json!({
+            "event_type": event.event_type,
+            "request_id": event.request_id,
+            "timestamp_ms": event.timestamp_ms,
+            "data": data,
+        })
+    }
+
+    async fn assert_wire_billing_equivalent(
+        lookup: &TestLookup,
+        original: UsageEvent,
+    ) -> UsageEvent {
+        const LIMIT: usize = 4096;
+        let original_fields = original.to_stream_fields().expect("legacy full envelope");
+        assert!(original_fields["payload"].len() > LIMIT);
+        let provider_body_present = original
+            .data
+            .provider_request_body
+            .as_ref()
+            .is_some_and(|body| !body.is_null());
+        let queue = UsageQueue::new(
+            Arc::new(RuntimeState::memory(MemoryRuntimeStateConfig::default())),
+            UsageRuntimeConfig {
+                enabled: true,
+                queue_payload_max_bytes: LIMIT,
+                consumer_block_ms: 1,
+                ..UsageRuntimeConfig::default()
+            },
+        )
+        .expect("bounded billing queue");
+        queue.ensure_consumer_group().await.expect("billing group");
+        queue
+            .enqueue(&original)
+            .await
+            .expect("diagnostic projection should fit");
+        let entries = queue
+            .read_group("billing-wire-reader")
+            .await
+            .expect("billing queue read");
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].fields["payload"].len() <= LIMIT);
+        // The legacy consumer also prepares request facts after decoding the full envelope.
+        let mut original =
+            UsageEvent::from_stream_fields(&original_fields).expect("legacy consumer event");
+        let mut queued =
+            UsageEvent::from_stream_fields(&entries[0].fields).expect("projected event");
+        assert!(original.data.response_body.is_some());
+        assert_eq!(
+            original.data.provider_request_body.is_some(),
+            provider_body_present
+        );
+        assert!(queued.data.response_body.is_none());
+        assert!(queued.data.request_headers.is_none());
+        assert!(queued.data.provider_request_headers.is_none());
+        assert!(queued.data.response_headers.is_none());
+        assert!(queued.data.client_response_headers.is_none());
+        assert_eq!(
+            queued.data.response_body_state,
+            Some(UsageBodyCaptureState::Truncated)
+        );
+
+        enrich_usage_event_with_billing(lookup, &mut original)
+            .await
+            .expect("original billing");
+        enrich_usage_event_with_billing(lookup, &mut queued)
+            .await
+            .expect("projected billing");
+        assert_eq!(wire_billing_result(&queued), wire_billing_result(&original));
+        queued
+    }
+
+    #[tokio::test]
+    async fn wire_projection_preserves_openai_requested_tier_and_effective_cache_ttl() {
+        let lookup = wire_billing_lookup(
+            Some(json!({
+                "tiers": [{"up_to": null, "input_price_per_1m": 5.0,
+                    "output_price_per_1m": 30.0, "cache_creation_price_per_1m": 6.25,
+                    "cache_read_price_per_1m": 0.5,
+                    "cache_ttl_pricing": [{"ttl_minutes": 60,
+                        "cache_creation_price_per_1m": 100.0, "cache_read_price_per_1m": 100.0}]}],
+                "processing_tiers": {"priority": {"price_multiplier": 2.0}}
+            })),
+            None,
+        );
+        let mut event = wire_billing_event("wire-openai-tier");
+        event.data.cache_creation_input_tokens = Some(100);
+        event.data.provider_request_body = Some(json!({
+            "model": "gpt-5.6-sol", "service_tier": "priority", "reasoning": {"effort": "high"}
+        }));
+        event.data.request_metadata.as_mut().unwrap()["provider_service_tier"] = json!("flex");
+        event.data.request_metadata.as_mut().unwrap()["provider_actual_service_tier"] =
+            json!("flex");
+        let queued = assert_wire_billing_equivalent(&lookup, event).await;
+        let metadata = queued.data.request_metadata.as_ref().unwrap();
+        assert_eq!(metadata["provider_service_tier"], "priority");
+        assert_eq!(metadata["provider_actual_service_tier"], "flex");
+        assert_eq!(metadata["provider_reasoning_effort"], "high");
+        assert_eq!(metadata["billing_dimensions"]["cache_ttl_minutes"], 30);
+        assert_eq!(
+            metadata["billing_dimensions"]["billing_processing_tier"],
+            "priority"
+        );
+        assert!(queued.data.total_cost_usd.unwrap() > 0.0);
+    }
+
+    #[tokio::test]
+    async fn wire_projection_preserves_non_object_body_authority_and_null_decode_semantics() {
+        let lookup = wire_billing_lookup(
+            Some(json!({
+                "tiers": [{"up_to": null, "input_price_per_1m": 5.0,
+                    "output_price_per_1m": 30.0, "cache_creation_price_per_1m": 6.25,
+                    "cache_read_price_per_1m": 0.5,
+                    "cache_ttl_pricing": [{"ttl_minutes": 60,
+                        "cache_creation_price_per_1m": 100.0, "cache_read_price_per_1m": 100.0}]}],
+                "processing_tiers": {"priority": {"price_multiplier": 2.0}}
+            })),
+            None,
+        );
+        for (kind, body) in [
+            ("string", json!("not an object")),
+            ("array", json!([{"service_tier": "flex"}])),
+            ("number", json!(42)),
+            ("boolean", json!(false)),
+            ("null", Value::Null),
+        ] {
+            for state in [
+                Some(UsageBodyCaptureState::Inline),
+                Some(UsageBodyCaptureState::Reference),
+                None,
+            ] {
+                let mut event = wire_billing_event(&format!("wire-{kind}-{state:?}"));
+                event.data.input_tokens = Some(1_000_000);
+                event.data.output_tokens = Some(0);
+                event.data.total_tokens = Some(1_000_000);
+                event.data.cache_creation_input_tokens = Some(1_000_000);
+                event.data.provider_request_body = Some(body.clone());
+                event.data.provider_request_body_state = state;
+                let metadata = event.data.request_metadata.as_mut().unwrap();
+                metadata["provider_service_tier"] = json!("priority");
+                metadata["provider_reasoning_effort"] = json!("high");
+                metadata["provider_cache_ttl_minutes"] = json!(60);
+
+                let queued = assert_wire_billing_equivalent(&lookup, event).await;
+                let metadata = queued.data.request_metadata.as_ref().unwrap();
+                assert!(queued.data.provider_request_body.is_none());
+                assert_eq!(metadata["provider_cache_ttl_minutes"], 60);
+                assert_eq!(metadata["billing_dimensions"]["cache_ttl_minutes"], 60);
+                let expected_tier = if body.is_null() && state.is_some() {
+                    Some("priority")
+                } else {
+                    None
+                };
+                assert_eq!(
+                    usage_event_processing_tiers(&queued.data)
+                        .requested
+                        .as_deref(),
+                    expected_tier,
+                    "{kind} with {state:?}"
+                );
+                assert_eq!(
+                    queued.data.total_cost_usd,
+                    Some(if expected_tier.is_some() {
+                        200.0
+                    } else {
+                        100.0
+                    }),
+                    "{kind} with {state:?}"
+                );
+                if body.is_null() {
+                    // Option<Value> decodes JSON null as absent, so the old capture marker remains.
+                    assert_eq!(queued.data.provider_request_body_state, state);
+                    assert_eq!(metadata["provider_service_tier"], "priority");
+                    assert_eq!(metadata["provider_reasoning_effort"], "high");
+                } else {
+                    assert_eq!(
+                        queued.data.provider_request_body_state,
+                        Some(UsageBodyCaptureState::Truncated)
+                    );
+                    assert!(metadata.get("provider_service_tier").is_none());
+                    assert!(metadata.get("provider_reasoning_effort").is_none());
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn wire_projection_preserves_raw_body_ttl_with_non_authoritative_capture_states() {
+        let lookup = wire_billing_lookup(
+            Some(json!({
+                "tiers": [{"up_to": null, "input_price_per_1m": 5.0,
+                    "output_price_per_1m": 30.0, "cache_creation_price_per_1m": 6.25,
+                    "cache_read_price_per_1m": 0.5,
+                    "cache_ttl_pricing": [{"ttl_minutes": 60,
+                        "cache_creation_price_per_1m": 100.0, "cache_read_price_per_1m": 100.0}]}]
+            })),
+            None,
+        );
+        for state in [
+            UsageBodyCaptureState::Disabled,
+            UsageBodyCaptureState::Unavailable,
+            UsageBodyCaptureState::Truncated,
+        ] {
+            let mut event = wire_billing_event(&format!("wire-capture-state-{state:?}"));
+            event.data.input_tokens = Some(1_000_000);
+            event.data.output_tokens = Some(0);
+            event.data.total_tokens = Some(1_000_000);
+            event.data.cache_creation_input_tokens = Some(1_000_000);
+            event.data.provider_request_body = Some(json!({
+                "model": "gpt-5.6-sol", "prompt_cache_options": {"ttl": "30m"}
+            }));
+            event.data.provider_request_body_state = Some(state);
+            event.data.request_metadata.as_mut().unwrap()["provider_cache_ttl_minutes"] = json!(60);
+
+            let queued = assert_wire_billing_equivalent(&lookup, event).await;
+            assert_eq!(queued.data.provider_request_body_state, Some(state));
+            assert!(queued.data.provider_request_body.is_none());
+            assert_eq!(queued.data.total_cost_usd, Some(6.25));
+            assert_eq!(
+                queued.data.request_metadata.as_ref().unwrap()["billing_dimensions"]
+                    ["cache_ttl_minutes"],
+                30
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn wire_projection_rejects_typed_none_when_omitting_raw_ttl_would_change_billing() {
+        let lookup = wire_billing_lookup(
+            Some(json!({
+                "tiers": [{"up_to": null, "input_price_per_1m": 5.0,
+                    "output_price_per_1m": 30.0, "cache_creation_price_per_1m": 6.25,
+                    "cache_read_price_per_1m": 0.5,
+                    "cache_ttl_pricing": [{"ttl_minutes": 60,
+                        "cache_creation_price_per_1m": 100.0, "cache_read_price_per_1m": 100.0}]}]
+            })),
+            None,
+        );
+        let mut event = wire_billing_event("wire-typed-none-ttl");
+        event.data.input_tokens = Some(1_000_000);
+        event.data.output_tokens = Some(0);
+        event.data.total_tokens = Some(1_000_000);
+        event.data.cache_creation_input_tokens = Some(1_000_000);
+        event.data.provider_request_body = Some(json!({
+            "model": "gpt-5.6-sol", "prompt_cache_options": {"ttl": "30m"}
+        }));
+        event.data.provider_request_body_state = Some(UsageBodyCaptureState::None);
+        event.data.request_metadata.as_mut().unwrap()["provider_cache_ttl_minutes"] = json!(60);
+        let original_fields = event.to_stream_fields().expect("legacy full envelope");
+        assert!(original_fields["payload"].len() > 4096);
+        let mut legacy = UsageEvent::from_stream_fields(&original_fields).expect("legacy consumer");
+        assert_eq!(
+            legacy.data.provider_request_body_state,
+            Some(UsageBodyCaptureState::None)
+        );
+        assert!(legacy.data.provider_request_body.is_some());
+        assert!(legacy
+            .data
+            .request_metadata
+            .as_ref()
+            .unwrap()
+            .get("provider_cache_ttl_minutes")
+            .is_none());
+        enrich_usage_event_with_billing(&lookup, &mut legacy)
+            .await
+            .expect("legacy billing");
+        assert_eq!(legacy.data.total_cost_usd, Some(6.25));
+
+        let queue = UsageQueue::new(
+            Arc::new(RuntimeState::memory(MemoryRuntimeStateConfig::default())),
+            UsageRuntimeConfig {
+                enabled: true,
+                queue_payload_max_bytes: 4096,
+                consumer_block_ms: 1,
+                ..UsageRuntimeConfig::default()
+            },
+        )
+        .expect("bounded billing queue");
+        queue.ensure_consumer_group().await.expect("billing group");
+        assert!(matches!(
+            queue.enqueue(&event).await,
+            Err(aether_data_contracts::DataLayerError::InvalidInput(_))
+        ));
+        assert_eq!(event.to_stream_fields().unwrap(), original_fields);
+        assert!(queue
+            .read_group("typed-none-reader")
+            .await
+            .unwrap()
+            .is_empty());
+
+        // The unchanged source event remains usable by the terminal direct-write fallback.
+        enrich_usage_event_with_billing(&lookup, &mut event)
+            .await
+            .expect("direct fallback billing");
+        assert_eq!(wire_billing_result(&event), wire_billing_result(&legacy));
+    }
+
+    #[tokio::test]
+    async fn wire_projection_preserves_claude_cache_ttl_and_explicit_zero_segments() {
+        let lookup = wire_billing_lookup(
+            Some(json!({
+                "tiers": [{"up_to": null, "input_price_per_1m": 3.0,
+                    "output_price_per_1m": 15.0, "cache_creation_price_per_1m": 3.75,
+                    "cache_read_price_per_1m": 0.3,
+                    "cache_ttl_pricing": [{"ttl_minutes": 60,
+                        "cache_creation_price_per_1m": 6.0, "cache_read_price_per_1m": 0.6}]}]
+            })),
+            None,
+        );
+        let mut event = wire_billing_event("wire-claude-cache");
+        event.data.model = "claude-sonnet-4-6".to_string();
+        event.data.target_model = Some("claude-sonnet-4-6".to_string());
+        event.data.api_format = Some("claude:messages".to_string());
+        event.data.endpoint_api_format = Some("claude:messages".to_string());
+        event.data.provider_request_body = None;
+        event.data.provider_request_body_state = Some(UsageBodyCaptureState::Disabled);
+        event.data.cache_creation_input_tokens = Some(200);
+        event.data.cache_creation_ephemeral_5m_input_tokens = Some(0);
+        event.data.cache_creation_ephemeral_1h_input_tokens = Some(100);
+        event.data.request_metadata.as_mut().unwrap()["provider_cache_ttl_minutes"] = json!(60);
+        let queued = assert_wire_billing_equivalent(&lookup, event).await;
+        assert_eq!(
+            queued.data.cache_creation_ephemeral_5m_input_tokens,
+            Some(0)
+        );
+        assert_eq!(queued.data.cache_read_input_tokens, Some(0));
+        let dimensions = &queued.data.request_metadata.as_ref().unwrap()["billing_dimensions"];
+        assert_eq!(dimensions["cache_ttl_minutes"], 60);
+        assert_eq!(dimensions["cache_creation_ephemeral_1h_tokens"], 100);
+        assert_eq!(dimensions["cache_creation_uncategorized_tokens"], 100);
+    }
+
+    #[tokio::test]
+    async fn wire_projection_preserves_unknown_zero_error_and_cancellation_billing() {
+        let lookup = wire_billing_lookup(None, Some(0.02));
+        for mode in ["unknown", "unpriced", "zero", "error_present", "cancelled"] {
+            let mut event = wire_billing_event(mode);
+            event.data.input_tokens = Some(0);
+            event.data.output_tokens = Some(0);
+            event.data.total_tokens = Some(0);
+            match mode {
+                "unknown" => {
+                    event.data.input_tokens = None;
+                    event.data.output_tokens = None;
+                    event.data.total_tokens = None;
+                    event.data.request_metadata.as_mut().unwrap()["usage_available"] = json!(false);
+                }
+                "unpriced" => {
+                    event.data.input_tokens = Some(12);
+                    event.data.output_tokens = Some(3);
+                    event.data.total_tokens = Some(15);
+                    event.data.request_metadata.as_mut().unwrap()["usage_pricing_available"] =
+                        json!(false);
+                }
+                "error_present" => event.data.error_message = Some(String::new()),
+                "cancelled" => event.event_type = UsageEventType::Cancelled,
+                _ => {}
+            }
+            let queued = assert_wire_billing_equivalent(&lookup, event).await;
+            match mode {
+                "unknown" => {
+                    assert_eq!(queued.data.input_tokens, None);
+                    assert_eq!(queued.data.total_cost_usd, None);
+                }
+                "unpriced" => {
+                    assert_eq!(queued.data.input_tokens, Some(12));
+                    assert_eq!(queued.data.total_cost_usd, None);
+                }
+                "error_present" => {
+                    assert_eq!(queued.data.error_message.as_deref(), Some(""));
+                    assert_eq!(queued.data.total_cost_usd, Some(0.0));
+                }
+                "zero" | "cancelled" => assert_eq!(queued.data.total_cost_usd, Some(0.02)),
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn wire_projection_preserves_image_matrix_dimensions_and_request_count() {
+        let lookup = wire_billing_lookup(
+            Some(json!({
+                "image_output_price_default": 0.01,
+                "image_output_prices": {"1536x1024": {"medium": 0.041, "high": 0.165}}
+            })),
+            Some(0.02),
+        );
+        let mut event = wire_billing_event("wire-image");
+        event.data.request_type = Some("image".to_string());
+        event.data.api_format = Some("openai:image".to_string());
+        event.data.endpoint_api_format = Some("openai:image".to_string());
+        event.data.input_tokens = Some(0);
+        event.data.output_tokens = Some(0);
+        event.data.total_tokens = Some(0);
+        event.data.request_metadata.as_mut().unwrap()["dimensions"] = json!({
+            "image_count": 2, "image_size": "1536x1024", "image_quality": "medium",
+            "image_output_format": "png"
+        });
+        let queued = assert_wire_billing_equivalent(&lookup, event).await;
+        let metadata = queued.data.request_metadata.as_ref().unwrap();
+        assert_eq!(metadata["billing_dimensions"]["image_count"], 2);
+        assert_eq!(metadata["billing_dimensions"]["request_count"], 2);
+        assert_eq!(
+            metadata["billing_dimensions"]["image_price_key"],
+            "1536x1024:medium"
+        );
+        assert_eq!(
+            metadata["billing_snapshot"]["cost_breakdown"]["image_output_cost"],
+            0.082
+        );
+        assert_eq!(
+            metadata["billing_snapshot"]["cost_breakdown"]["request_cost"],
+            0.04
+        );
     }
 
     #[tokio::test]
@@ -1272,8 +1861,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancelled_usage_event_remains_unbilled() {
-        let lookup = TestLookup {
+    async fn cancelled_usage_bills_only_configured_request_fee() {
+        for (request_type, request_price) in
+            [("chat", None), ("chat", Some(0.02)), ("image", Some(0.02))]
+        {
+            let lookup = TestLookup {
             name_context: Some(
                 StoredBillingModelContext::new(
                     "provider-1".to_string(),
@@ -1284,7 +1876,7 @@ mod tests {
                     "global-model-1".to_string(),
                     "gpt-5".to_string(),
                     None,
-                    Some(0.02),
+                    request_price,
                     Some(json!({"tiers":[{"up_to":null,"input_price_per_1m":3.0,"output_price_per_1m":15.0,"cache_creation_price_per_1m":3.75,"cache_read_price_per_1m":0.30}]})),
                     Some("model-1".to_string()),
                     Some("gpt-5-upstream".to_string()),
@@ -1296,61 +1888,69 @@ mod tests {
             ),
             model_id_context: None,
         };
-        let mut event = UsageEvent::new(
-            UsageEventType::Cancelled,
-            "req-billing-cancelled-1",
-            UsageEventData {
-                provider_name: "OpenAI".to_string(),
-                model: "gpt-5".to_string(),
-                provider_id: Some("provider-1".to_string()),
-                provider_api_key_id: Some("key-1".to_string()),
-                request_type: Some("chat".to_string()),
-                api_format: Some("openai:responses".to_string()),
-                endpoint_api_format: Some("openai:responses".to_string()),
-                input_tokens: Some(1_000),
-                output_tokens: Some(500),
-                cache_read_input_tokens: Some(100),
-                status_code: Some(499),
-                ..UsageEventData::default()
-            },
-        );
+            let mut event = UsageEvent::new(
+                UsageEventType::Cancelled,
+                "req-billing-cancelled-1",
+                UsageEventData {
+                    provider_name: "OpenAI".to_string(),
+                    model: "gpt-5".to_string(),
+                    provider_id: Some("provider-1".to_string()),
+                    provider_api_key_id: Some("key-1".to_string()),
+                    request_type: Some(request_type.to_string()),
+                    api_format: Some("openai:responses".to_string()),
+                    endpoint_api_format: Some("openai:responses".to_string()),
+                    input_tokens: Some(1_000),
+                    output_tokens: Some(500),
+                    cache_read_input_tokens: Some(100),
+                    status_code: Some(499),
+                    request_metadata: Some(
+                        json!({"cancelled_request_fee": true, "image_count": 3}),
+                    ),
+                    ..UsageEventData::default()
+                },
+            );
 
-        enrich_usage_event_with_billing(&lookup, &mut event)
-            .await
-            .expect("billing should succeed");
+            enrich_usage_event_with_billing(&lookup, &mut event)
+                .await
+                .expect("billing should succeed");
 
-        assert_eq!(event.data.total_cost_usd, Some(0.0));
-        assert_eq!(event.data.actual_total_cost_usd, Some(0.0));
-        assert_eq!(
-            event
-                .data
-                .request_metadata
-                .as_ref()
-                .and_then(|value| value.get("billing_snapshot"))
-                .and_then(|value| value.get("status"))
-                .and_then(Value::as_str),
-            None
-        );
-        assert_eq!(
-            event
-                .data
-                .request_metadata
-                .as_ref()
-                .and_then(|value| value.get("billing_dimensions"))
-                .and_then(|value| value.get("input_tokens"))
-                .and_then(Value::as_i64),
-            None
-        );
-        assert_eq!(
-            event
-                .data
-                .request_metadata
-                .as_ref()
-                .and_then(|value| value.get("billing_dimensions"))
-                .and_then(|value| value.get("cache_read_tokens"))
-                .and_then(Value::as_i64),
-            None
-        );
+            let expected_cost = request_price.unwrap_or(0.0);
+            assert_eq!(event.data.total_cost_usd, Some(expected_cost));
+            assert_eq!(event.data.actual_total_cost_usd, Some(expected_cost * 0.5));
+            assert_eq!(event.data.input_tokens, Some(1_000));
+            assert_eq!(event.data.output_tokens, Some(500));
+            let metadata = event.data.request_metadata.as_ref().unwrap();
+            assert_eq!(
+                aether_data_contracts::repository::usage::cancelled_request_fee_is_billable(Some(
+                    metadata
+                )),
+                request_price.is_some()
+            );
+            if request_price.is_some() {
+                assert_eq!(
+                    metadata.pointer("/billing_snapshot/cost_breakdown/request_cost"),
+                    Some(&json!(expected_cost))
+                );
+                assert_eq!(
+                    metadata.pointer("/billing_dimensions/input_tokens"),
+                    Some(&json!(0))
+                );
+                assert_eq!(
+                    metadata.pointer("/billing_dimensions/output_tokens"),
+                    Some(&json!(0))
+                );
+                assert_eq!(
+                    metadata.pointer("/billing_dimensions/cache_read_tokens"),
+                    Some(&json!(0))
+                );
+                assert_eq!(
+                    metadata.pointer("/billing_dimensions/request_count"),
+                    Some(&json!(1))
+                );
+            } else {
+                assert!(metadata.get("billing_snapshot").is_none());
+            }
+        }
     }
 
     #[tokio::test]

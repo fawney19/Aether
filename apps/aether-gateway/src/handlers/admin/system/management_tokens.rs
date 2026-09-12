@@ -1,7 +1,5 @@
 use crate::control::{
-    management_token_permission_catalog_payload,
-    management_token_permissions_cover_all_assignable_permissions,
-    normalize_assignable_management_token_permissions,
+    management_token_permission_catalog_payload, normalize_assignable_management_token_permissions,
 };
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::handlers::admin::shared::{query_param_optional_bool, query_param_value};
@@ -58,6 +56,35 @@ fn admin_management_token_read_only_response() -> Response<Body> {
         .into_response()
 }
 
+fn admin_management_token_secret_response(mut response: Response<Body>) -> Response<Body> {
+    response.headers_mut().insert(
+        http::header::CACHE_CONTROL,
+        http::HeaderValue::from_static("no-store"),
+    );
+    response
+}
+
+fn admin_management_token_internal_error_response(
+    trace_id: &str,
+    event_name: &'static str,
+    error: impl std::fmt::Debug,
+) -> Response<Body> {
+    tracing::error!(
+        event_name,
+        trace_id,
+        error = %crate::error::redact_error_debug(&error),
+        "management token operation failed"
+    );
+    (
+        http::StatusCode::INTERNAL_SERVER_ERROR,
+        Json(json!({
+            "detail": "Management Token 服务暂不可用，请稍后重试",
+            "trace_id": trace_id,
+        })),
+    )
+        .into_response()
+}
+
 #[derive(Debug, Clone)]
 struct AdminManagementTokenCreateInput {
     name: String,
@@ -93,8 +120,12 @@ fn hash_admin_management_token(value: &str) -> String {
 }
 
 fn admin_management_token_prefix(value: &str) -> Option<String> {
-    (!value.is_empty())
-        .then(|| value[..value.len().min(ADMIN_MANAGEMENT_TOKEN_DISPLAY_PREFIX_LEN)].to_string())
+    (!value.is_empty()).then(|| {
+        value
+            .chars()
+            .take(ADMIN_MANAGEMENT_TOKEN_DISPLAY_PREFIX_LEN)
+            .collect()
+    })
 }
 
 fn admin_parse_management_token_allowed_ips(
@@ -228,13 +259,14 @@ fn admin_parse_management_token_update_input(
 async fn admin_management_token_user_summary(
     state: &AdminAppState<'_>,
     user_id: &str,
+    trace_id: &str,
 ) -> Result<StoredManagementTokenUserSummary, Response<Body>> {
     let Some(user) = state.find_user_auth_by_id(user_id).await.map_err(|err| {
-        (
-            http::StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "detail": format!("management token user lookup failed: {err:?}") })),
+        admin_management_token_internal_error_response(
+            trace_id,
+            "admin_management_token_user_lookup_failed",
+            err,
         )
-            .into_response()
     })?
     else {
         return Err((
@@ -243,19 +275,15 @@ async fn admin_management_token_user_summary(
         )
             .into_response());
     };
-    StoredManagementTokenUserSummary::new(
-        user.id,
-        user.email,
-        user.username,
-        user.role,
+    StoredManagementTokenUserSummary::new(user.id, user.email, user.username, user.role).map_err(
+        |err| {
+            admin_management_token_internal_error_response(
+                trace_id,
+                "admin_management_token_user_summary_build_failed",
+                err,
+            )
+        },
     )
-    .map_err(|err| {
-        (
-            http::StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "detail": format!("management token user summary build failed: {err:?}") })),
-        )
-            .into_response()
-    })
 }
 
 pub(crate) async fn maybe_build_local_admin_management_tokens_response(
@@ -275,17 +303,12 @@ pub(crate) async fn maybe_build_local_admin_management_tokens_response(
         .as_ref()
         .and_then(|principal| principal.management_token_id.as_deref())
         .is_some();
-    let management_token_is_full = decision
-        .admin_principal
-        .as_ref()
-        .and_then(|principal| principal.management_token_permissions.as_deref())
-        .is_none_or(management_token_permissions_cover_all_assignable_permissions);
-    if is_management_token && !management_token_is_full {
+    if is_management_token {
         return Ok(Some(
             (
                 http::StatusCode::FORBIDDEN,
                 Json(json!({
-                    "detail": "不允许使用 Management Token 管理其他 Token，请使用 Web 界面或 JWT 认证"
+                    "detail": "不允许使用 Management Token 管理其他 Token，请使用管理员会话认证"
                 })),
             )
                 .into_response(),
@@ -359,7 +382,12 @@ pub(crate) async fn maybe_build_local_admin_management_tokens_response(
         let Some(admin_principal) = decision.admin_principal.as_ref() else {
             return Ok(None);
         };
-        let user = match admin_management_token_user_summary(state, &admin_principal.user_id).await
+        let user = match admin_management_token_user_summary(
+            state,
+            &admin_principal.user_id,
+            request_context.trace_id(),
+        )
+        .await
         {
             Ok(value) => value,
             Err(response) => return Ok(Some(response)),
@@ -380,15 +408,17 @@ pub(crate) async fn maybe_build_local_admin_management_tokens_response(
         };
 
         return Ok(Some(match state.create_management_token(&record).await? {
-            LocalMutationOutcome::Applied(token) => (
-                http::StatusCode::CREATED,
-                Json(json!({
-                    "message": "Management Token 创建成功",
-                    "token": raw_token,
-                    "data": build_management_token_payload(&token, Some(&record.user)),
-                })),
-            )
-                .into_response(),
+            LocalMutationOutcome::Applied(token) => admin_management_token_secret_response(
+                (
+                    http::StatusCode::CREATED,
+                    Json(json!({
+                        "message": "Management Token 创建成功",
+                        "token": raw_token,
+                        "data": build_management_token_payload(&token, Some(&record.user)),
+                    })),
+                )
+                    .into_response(),
+            ),
             LocalMutationOutcome::Invalid(detail) => {
                 admin_management_token_bad_request_response(detail)
             }
@@ -546,12 +576,14 @@ pub(crate) async fn maybe_build_local_admin_management_tokens_response(
 
         return Ok(Some(
             match state.regenerate_management_token_secret(&mutation).await? {
-                LocalMutationOutcome::Applied(token) => Json(json!({
-                    "message": "Token 已重新生成",
-                    "token": raw_token,
-                    "data": build_management_token_payload(&token, Some(&existing.user)),
-                }))
-                .into_response(),
+                LocalMutationOutcome::Applied(token) => admin_management_token_secret_response(
+                    Json(json!({
+                        "message": "Token 已重新生成",
+                        "token": raw_token,
+                        "data": build_management_token_payload(&token, Some(&existing.user)),
+                    }))
+                    .into_response(),
+                ),
                 LocalMutationOutcome::NotFound => admin_management_token_not_found_response(),
                 LocalMutationOutcome::Invalid(detail) => {
                     admin_management_token_bad_request_response(detail)
@@ -562,4 +594,21 @@ pub(crate) async fn maybe_build_local_admin_management_tokens_response(
     }
 
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plaintext_management_token_responses_are_never_cacheable() {
+        let response = admin_management_token_secret_response(
+            Json(json!({ "token": "ae-secret" })).into_response(),
+        );
+
+        assert_eq!(
+            response.headers().get(http::header::CACHE_CONTROL),
+            Some(&http::HeaderValue::from_static("no-store"))
+        );
+    }
 }

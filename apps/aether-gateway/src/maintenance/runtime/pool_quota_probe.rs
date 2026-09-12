@@ -1,4 +1,6 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::future::Future;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use aether_data_contracts::repository::pool_scores::{
@@ -47,6 +49,166 @@ const POOL_QUOTA_PROBE_BURST_RETRY_GUARD_SECONDS: u64 = 15;
 const POOL_QUOTA_PROBE_AUTO_MIN_INTERVAL_SECONDS: u64 = 30;
 const POOL_QUOTA_PROBE_AUTO_MAX_INTERVAL_SECONDS: u64 = 10 * 60;
 const POOL_QUOTA_PROBE_AUTO_MAX_PRESSURE: u64 = 64;
+const POOL_QUOTA_PROBE_LOCAL_MAX_PROVIDERS: usize = 1024;
+
+#[derive(Debug)]
+pub(crate) struct PoolQuotaProbeReplenishCoordinator {
+    capacity: usize,
+    state: Mutex<PoolQuotaProbeReplenishState>,
+}
+
+#[derive(Debug, Default)]
+struct PoolQuotaProbeReplenishState {
+    providers: HashMap<String, PoolQuotaProbeReplenishEntry>,
+    started_total: u64,
+    coalesced_total: u64,
+    capacity_rejected_total: u64,
+}
+
+#[derive(Debug)]
+struct PoolQuotaProbeReplenishEntry {
+    identity: Arc<()>,
+    pending: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PoolQuotaProbeReplenishSnapshot {
+    pub(crate) capacity: usize,
+    pub(crate) active: usize,
+    pub(crate) started_total: u64,
+    pub(crate) coalesced_total: u64,
+    pub(crate) capacity_rejected_total: u64,
+}
+
+impl Default for PoolQuotaProbeReplenishCoordinator {
+    fn default() -> Self {
+        Self::new(POOL_QUOTA_PROBE_LOCAL_MAX_PROVIDERS)
+    }
+}
+
+impl PoolQuotaProbeReplenishCoordinator {
+    fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            state: Mutex::new(PoolQuotaProbeReplenishState::default()),
+        }
+    }
+
+    pub(crate) fn snapshot(&self) -> PoolQuotaProbeReplenishSnapshot {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        PoolQuotaProbeReplenishSnapshot {
+            capacity: self.capacity,
+            active: state.providers.len(),
+            started_total: state.started_total,
+            coalesced_total: state.coalesced_total,
+            capacity_rejected_total: state.capacity_rejected_total,
+        }
+    }
+
+    fn request(self: &Arc<Self>, provider_id: String) -> Option<PoolQuotaProbeReplenishGuard> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(entry) = state.providers.get_mut(&provider_id) {
+            entry.pending = true;
+            state.coalesced_total = state.coalesced_total.saturating_add(1);
+            return None;
+        }
+        if state.providers.len() >= self.capacity {
+            // Replenishment is best effort; the periodic base scan remains available.
+            state.capacity_rejected_total = state.capacity_rejected_total.saturating_add(1);
+            return None;
+        }
+        let identity = Arc::new(());
+        state.providers.insert(
+            provider_id.clone(),
+            PoolQuotaProbeReplenishEntry {
+                identity: Arc::clone(&identity),
+                pending: true,
+            },
+        );
+        state.started_total = state.started_total.saturating_add(1);
+        Some(PoolQuotaProbeReplenishGuard {
+            coordinator: Arc::clone(self),
+            provider_id,
+            identity,
+            finished: false,
+        })
+    }
+
+    fn spawn<F, Fut>(
+        self: &Arc<Self>,
+        provider_id: String,
+        mut replenish: F,
+    ) -> Option<tokio::task::JoinHandle<()>>
+    where
+        F: FnMut() -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        // Own the guard before spawn so cancellation before the first poll also cleans up.
+        let mut guard = self.request(provider_id)?;
+        Some(tokio::spawn(async move {
+            while guard.next_pass() {
+                replenish().await;
+            }
+        }))
+    }
+}
+
+struct PoolQuotaProbeReplenishGuard {
+    coordinator: Arc<PoolQuotaProbeReplenishCoordinator>,
+    provider_id: String,
+    identity: Arc<()>,
+    finished: bool,
+}
+
+impl PoolQuotaProbeReplenishGuard {
+    fn next_pass(&mut self) -> bool {
+        let mut state = self
+            .coordinator
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(entry) = state
+            .providers
+            .get_mut(&self.provider_id)
+            .filter(|entry| Arc::ptr_eq(&entry.identity, &self.identity))
+        {
+            if entry.pending {
+                entry.pending = false;
+                return true;
+            }
+            // Check for a follow-up and release ownership in one critical section.
+            state.providers.remove(&self.provider_id);
+        }
+        self.finished = true;
+        false
+    }
+}
+
+impl Drop for PoolQuotaProbeReplenishGuard {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        let mut state = self
+            .coordinator
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state
+            .providers
+            .get(&self.provider_id)
+            .is_some_and(|entry| Arc::ptr_eq(&entry.identity, &self.identity))
+        {
+            state.providers.remove(&self.provider_id);
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PoolQuotaProbeMode {
@@ -1042,6 +1204,17 @@ async fn refresh_provider_probe_keys(
         .await
 }
 
+fn pool_quota_probe_worker_error_score_reason(_error: &GatewayError) -> Value {
+    serde_json::json!({
+        "last_probe": {
+            "source": "pool_quota_probe",
+            "status": "worker_error",
+            "category": "worker_error",
+            "message": "Provider quota probe worker failed"
+        }
+    })
+}
+
 fn update_summary_from_payload(
     summary: &mut PoolQuotaProbeRunSummary,
     selected_count: usize,
@@ -1213,6 +1386,18 @@ fn probe_result_hard_state(item: &Value) -> Option<PoolMemberHardState> {
         .unwrap_or_default()
         .trim()
         .to_ascii_lowercase();
+    // Providers frequently encode an exhausted account as HTTP 429 with a
+    // provider-specific status/message (for example RESOURCE_EXHAUSTED or
+    // `quota exceeded`) rather than the normalized `quota_exhausted` status.
+    // Preserve that distinction in the score so the member stays out of the
+    // scheduler until a successful quota probe observes a reset.
+    let serialized_item = item.to_string().to_ascii_lowercase();
+    let status_code = item.get("status_code").and_then(Value::as_u64);
+    if status == "quota_exhausted"
+        || (status_code == Some(429) && contains_quota_exhaustion_marker(&serialized_item))
+    {
+        return Some(PoolMemberHardState::QuotaExhausted);
+    }
     match status.as_str() {
         "auth_invalid" | "forbidden" => Some(PoolMemberHardState::AuthInvalid),
         "workspace_deactivated" => Some(PoolMemberHardState::Banned),
@@ -1224,6 +1409,26 @@ fn probe_result_hard_state(item: &Value) -> Option<PoolMemberHardState> {
             _ => None,
         },
     }
+}
+
+fn contains_quota_exhaustion_marker(value: &str) -> bool {
+    [
+        "quota exhausted",
+        "quota_exhausted",
+        "quota exceeded",
+        "quota_exceeded",
+        "insufficient_quota",
+        "resource exhausted",
+        "resource has been exhausted",
+        "resource_exhausted",
+        "usage_limit_reached",
+        "limit_reached",
+        "quota limit reached",
+        "credits exhausted",
+        "insufficient credits",
+    ]
+    .iter()
+    .any(|marker| value.contains(marker))
 }
 
 async fn perform_pool_quota_probe_for_provider(
@@ -1417,20 +1622,14 @@ async fn perform_pool_quota_probe_for_provider(
                     now_ts,
                     false,
                     Some(PoolMemberHardState::Cooldown),
-                    serde_json::json!({
-                        "last_probe": {
-                            "source": "pool_quota_probe",
-                            "status": "worker_error",
-                            "message": format!("{err:?}")
-                        }
-                    }),
+                    pool_quota_probe_worker_error_score_reason(&err),
                 )
                 .await;
                 warn!(
                     provider_id = %provider_short_id,
                     provider_type,
                     key_id,
-                    error = ?err,
+                    error_category = "provider_quota_probe_failed",
                     "gateway pool quota probe failed"
                 );
             }
@@ -1635,38 +1834,62 @@ pub(crate) fn spawn_pool_quota_probe_replenish_for_request(
         return None;
     }
 
-    Some(tokio::spawn(async move {
-        let runtime = state.runtime_state.clone();
-        mark_probe_burst_pending(runtime.as_ref(), &provider_id).await;
-        let lease =
-            acquire_pool_quota_probe_burst_trigger_lock(runtime.as_ref(), &provider_id).await;
-        if lease.is_none() {
-            return;
-        }
+    let coordinator = Arc::clone(&state.pool_quota_probe_replenish);
+    coordinator.spawn(provider_id.clone(), move || {
+        run_pool_quota_probe_replenish(state.clone(), provider_id.clone())
+    })
+}
 
-        let config = PoolQuotaProbeWorkerConfig::from_env();
-        loop {
-            let pending = runtime
-                .kv_take(&probe_burst_pending_key(&provider_id))
-                .await
-                .ok()
-                .flatten()
-                .is_some();
-            if !pending {
-                break;
-            }
-
-            match perform_pool_quota_probe_once_for_provider_with_mode(
+async fn run_pool_quota_probe_replenish(state: AppState, provider_id: String) {
+    let runtime = state.runtime_state.clone();
+    let runtime = runtime.as_ref();
+    let config = PoolQuotaProbeWorkerConfig::from_env();
+    run_pool_quota_probe_replenish_with(
+        runtime,
+        &provider_id,
+        || {
+            perform_pool_quota_probe_once_for_provider_with_mode(
                 &state,
                 &provider_id,
                 config,
                 PoolQuotaProbeMode::Burst,
             )
-            .await
-            {
+        },
+        |lease| release_pool_quota_probe_burst_trigger_lock(runtime, Some(lease)),
+    )
+    .await;
+}
+
+async fn run_pool_quota_probe_replenish_with<Probe, ProbeFuture, Release, ReleaseFuture>(
+    runtime: &RuntimeState,
+    provider_id: &str,
+    mut probe: Probe,
+    mut release: Release,
+) where
+    Probe: FnMut() -> ProbeFuture,
+    ProbeFuture: Future<Output = Result<PoolQuotaProbeRunSummary, GatewayError>>,
+    Release: FnMut(RuntimeLockLease) -> ReleaseFuture,
+    ReleaseFuture: Future<Output = ()>,
+{
+    mark_probe_burst_pending(runtime, provider_id).await;
+    loop {
+        let Some(lease) = acquire_pool_quota_probe_burst_trigger_lock(runtime, provider_id).await
+        else {
+            return;
+        };
+        let recheck_after_release = loop {
+            let pending = match runtime.kv_take(&probe_burst_pending_key(provider_id)).await {
+                Ok(pending) => pending.is_some(),
+                Err(_) => break false,
+            };
+            if !pending {
+                break true;
+            }
+
+            match probe().await {
                 Ok(summary) => {
                     if summary.providers_busy > 0 {
-                        mark_probe_burst_pending(runtime.as_ref(), &provider_id).await;
+                        mark_probe_burst_pending(runtime, provider_id).await;
                         tokio::time::sleep(Duration::from_millis(250)).await;
                         continue;
                     }
@@ -1680,17 +1903,30 @@ pub(crate) fn spawn_pool_quota_probe_replenish_for_request(
                 }
             }
 
-            let still_pending = runtime
-                .kv_exists(&probe_burst_pending_key(&provider_id))
+            match runtime
+                .kv_exists(&probe_burst_pending_key(provider_id))
                 .await
-                .unwrap_or(false);
-            if !still_pending {
-                break;
+            {
+                Ok(true) => {}
+                Ok(false) => break true,
+                Err(_) => break false,
             }
-        }
+        };
 
-        release_pool_quota_probe_burst_trigger_lock(runtime.as_ref(), lease).await;
-    }))
+        release(lease).await;
+        // A different instance may publish after the final pending check and fail
+        // to acquire our old lease. Recheck after release, then acquire a fresh token
+        // before consuming that signal. Read failures terminate instead of spinning.
+        if !recheck_after_release
+            || !runtime
+                .kv_exists(&probe_burst_pending_key(provider_id))
+                .await
+                .unwrap_or(false)
+        {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
 }
 
 pub(crate) fn spawn_pool_quota_probe_worker(
@@ -1710,9 +1946,12 @@ pub(crate) fn spawn_pool_quota_probe_worker(
             interval.tick().await;
             loop {
                 interval.tick().await;
-                if let Err(err) = perform_pool_quota_probe_once_with_config(&state, config).await {
+                if perform_pool_quota_probe_once_with_config(&state, config)
+                    .await
+                    .is_err()
+                {
                     warn!(
-                        error = ?err,
+                        error_category = "pool_quota_probe_worker_failed",
                         "gateway pool quota probe worker tick failed"
                     );
                 }
@@ -1724,7 +1963,454 @@ pub(crate) fn spawn_pool_quota_probe_worker(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use aether_runtime_state::MemoryRuntimeStateConfig;
     use serde_json::json;
+    use tokio::sync::Notify;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn pool_quota_probe_local_coalesces_before_spawn_and_keeps_one_follow_up() {
+        let coordinator = Arc::new(PoolQuotaProbeReplenishCoordinator::new(8));
+        let runtime = Arc::new(RuntimeState::memory(MemoryRuntimeStateConfig::default()));
+        let probe_calls = Arc::new(AtomicUsize::new(0));
+        let release_calls = Arc::new(AtomicUsize::new(0));
+        let started = Arc::new(Notify::new());
+        let finish_first = Arc::new(Notify::new());
+        let leader = coordinator
+            .spawn("provider".to_string(), {
+                let runtime = Arc::clone(&runtime);
+                let probe_calls = Arc::clone(&probe_calls);
+                let release_calls = Arc::clone(&release_calls);
+                let started = Arc::clone(&started);
+                let finish_first = Arc::clone(&finish_first);
+                move || {
+                    let runtime = Arc::clone(&runtime);
+                    let probe_calls = Arc::clone(&probe_calls);
+                    let release_calls = Arc::clone(&release_calls);
+                    let started = Arc::clone(&started);
+                    let finish_first = Arc::clone(&finish_first);
+                    async move {
+                        run_pool_quota_probe_replenish_with(
+                            runtime.as_ref(),
+                            "provider",
+                            || async {
+                                if probe_calls.fetch_add(1, Ordering::AcqRel) == 0 {
+                                    started.notify_one();
+                                    finish_first.notified().await;
+                                }
+                                Ok(PoolQuotaProbeRunSummary::empty())
+                            },
+                            |lease| {
+                                release_calls.fetch_add(1, Ordering::AcqRel);
+                                release_pool_quota_probe_burst_trigger_lock(
+                                    runtime.as_ref(),
+                                    Some(lease),
+                                )
+                            },
+                        )
+                        .await;
+                    }
+                }
+            })
+            .expect("one leader");
+        tokio::time::timeout(Duration::from_secs(2), started.notified())
+            .await
+            .expect("first probe starts");
+        let barrier = Arc::new(tokio::sync::Barrier::new(65));
+        let mut triggers = tokio::task::JoinSet::new();
+        for _ in 0..64 {
+            let coordinator = Arc::clone(&coordinator);
+            let barrier = Arc::clone(&barrier);
+            triggers.spawn(async move {
+                barrier.wait().await;
+                assert!(coordinator
+                    .spawn("provider".to_string(), || async {
+                        panic!("a duplicate trigger must not spawn work")
+                    })
+                    .is_none());
+            });
+        }
+        barrier.wait().await;
+        while let Some(result) = triggers.join_next().await {
+            result.expect("concurrent trigger");
+        }
+        assert_eq!(coordinator.snapshot().started_total, 1);
+        assert_eq!(coordinator.snapshot().coalesced_total, 64);
+        assert_eq!(probe_calls.load(Ordering::Acquire), 1);
+        assert!(
+            !runtime
+                .kv_exists(&probe_burst_pending_key("provider"))
+                .await
+                .expect("pending read"),
+            "local duplicates must not each write Redis pending while the leader is running"
+        );
+        finish_first.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), leader)
+            .await
+            .expect("leader finishes")
+            .expect("leader task");
+        assert_eq!(probe_calls.load(Ordering::Acquire), 2);
+        assert_eq!(
+            release_calls.load(Ordering::Acquire),
+            2,
+            "64 retriggers produce one additional Redis lock/drain cycle"
+        );
+        assert_eq!(coordinator.snapshot().active, 0);
+    }
+
+    #[tokio::test]
+    async fn pool_quota_probe_local_different_providers_run_independently() {
+        let coordinator = Arc::new(PoolQuotaProbeReplenishCoordinator::new(2));
+        let started = Arc::new(tokio::sync::Semaphore::new(0));
+        let finish = Arc::new(tokio::sync::Semaphore::new(0));
+        let mut tasks = Vec::new();
+        for provider_id in ["provider-a", "provider-b"] {
+            tasks.push(
+                coordinator
+                    .spawn(provider_id.to_string(), {
+                        let started = Arc::clone(&started);
+                        let finish = Arc::clone(&finish);
+                        move || {
+                            let started = Arc::clone(&started);
+                            let finish = Arc::clone(&finish);
+                            async move {
+                                started.add_permits(1);
+                                finish.acquire().await.expect("finish signal").forget();
+                            }
+                        }
+                    })
+                    .expect("independent provider leader"),
+            );
+        }
+        tokio::time::timeout(Duration::from_secs(2), started.acquire_many(2))
+            .await
+            .expect("both providers start")
+            .expect("started permits")
+            .forget();
+        assert_eq!(coordinator.snapshot().active, 2);
+        finish.add_permits(2);
+        for task in tasks {
+            task.await.expect("provider finishes");
+        }
+        assert_eq!(coordinator.snapshot().active, 0);
+    }
+
+    #[test]
+    fn pool_quota_probe_local_exit_handoff_keeps_exactly_one_owner() {
+        let coordinator = Arc::new(PoolQuotaProbeReplenishCoordinator::new(1));
+        for _ in 0..100 {
+            let mut first = coordinator
+                .request("provider".to_string())
+                .expect("first owner");
+            assert!(first.next_pass());
+            let barrier = Arc::new(std::sync::Barrier::new(2));
+            let (mut first, continues, replacement) = std::thread::scope(|scope| {
+                let first_barrier = Arc::clone(&barrier);
+                let exit = scope.spawn(move || {
+                    first_barrier.wait();
+                    let continues = first.next_pass();
+                    (first, continues)
+                });
+                let trigger = scope.spawn(|| {
+                    barrier.wait();
+                    coordinator.request("provider".to_string())
+                });
+                let (first, continues) = exit.join().expect("exit thread");
+                (first, continues, trigger.join().expect("trigger thread"))
+            });
+            assert_ne!(
+                continues,
+                replacement.is_some(),
+                "the signal is consumed by exactly one owner"
+            );
+            assert_eq!(coordinator.snapshot().active, 1);
+            if continues {
+                assert!(!first.next_pass());
+            }
+            drop(first);
+            if replacement.is_some() {
+                assert_eq!(
+                    coordinator.snapshot().active,
+                    1,
+                    "old cleanup must not delete the replacement"
+                );
+            }
+            drop(replacement);
+            assert_eq!(coordinator.snapshot().active, 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn pool_quota_probe_local_abort_and_panic_release_admission() {
+        let coordinator = Arc::new(PoolQuotaProbeReplenishCoordinator::new(1));
+        let unpolled = coordinator
+            .spawn("provider".to_string(), || async {
+                std::future::pending::<()>().await;
+            })
+            .expect("unpolled owner");
+        unpolled.abort();
+        assert!(unpolled.await.expect_err("aborted").is_cancelled());
+        assert_eq!(coordinator.snapshot().active, 0);
+
+        let started = Arc::new(Notify::new());
+        let running = coordinator
+            .spawn("provider".to_string(), {
+                let started = Arc::clone(&started);
+                move || {
+                    let started = Arc::clone(&started);
+                    async move {
+                        started.notify_one();
+                        std::future::pending::<()>().await;
+                    }
+                }
+            })
+            .expect("running owner");
+        started.notified().await;
+        assert!(coordinator.request("provider".to_string()).is_none());
+        running.abort();
+        assert!(running.await.expect_err("aborted").is_cancelled());
+        assert_eq!(coordinator.snapshot().active, 0);
+
+        let panicked = coordinator
+            .spawn("provider".to_string(), || async {
+                panic!("probe panicked")
+            })
+            .expect("panic owner");
+        assert!(panicked.await.expect_err("probe panic").is_panic());
+        assert_eq!(coordinator.snapshot().active, 0);
+        coordinator
+            .spawn("provider".to_string(), || std::future::ready(()))
+            .expect("later trigger can run")
+            .await
+            .expect("recovered probe");
+        assert_eq!(coordinator.snapshot().active, 0);
+    }
+
+    #[test]
+    fn pool_quota_probe_local_capacity_is_bounded_and_completed_keys_are_removed() {
+        let coordinator = Arc::new(PoolQuotaProbeReplenishCoordinator::new(2));
+        let first = coordinator.request("a".to_string()).expect("first");
+        let second = coordinator.request("b".to_string()).expect("second");
+        assert!(coordinator.request("c".to_string()).is_none());
+        assert!(coordinator.request("a".to_string()).is_none());
+        assert_eq!(coordinator.snapshot().capacity_rejected_total, 1);
+        assert_eq!(coordinator.snapshot().coalesced_total, 1);
+        drop(first);
+        let replacement = coordinator
+            .request("c".to_string())
+            .expect("freed capacity");
+        drop((second, replacement));
+        for index in 0..1000 {
+            drop(
+                coordinator
+                    .request(format!("provider-{index}"))
+                    .expect("new provider"),
+            );
+            assert_eq!(coordinator.snapshot().active, 0);
+        }
+        assert_eq!(coordinator.snapshot().started_total, 1003);
+    }
+
+    #[tokio::test]
+    async fn pool_quota_probe_local_state_clones_share_only_the_same_runtime_binding() {
+        let state = AppState::new().expect("state");
+        let cloned = state.clone();
+        assert!(Arc::ptr_eq(
+            &state.pool_quota_probe_replenish,
+            &cloned.pool_quota_probe_replenish
+        ));
+        let rebound_same = cloned.with_runtime_state(Arc::clone(&state.runtime_state));
+        assert!(Arc::ptr_eq(
+            &state.pool_quota_probe_replenish,
+            &rebound_same.pool_quota_probe_replenish
+        ));
+        let rebound = state
+            .clone()
+            .with_runtime_state(Arc::new(RuntimeState::memory(
+                MemoryRuntimeStateConfig::default(),
+            )));
+        assert!(!Arc::ptr_eq(
+            &state.pool_quota_probe_replenish,
+            &rebound.pool_quota_probe_replenish
+        ));
+        let first = state
+            .pool_quota_probe_replenish
+            .request("provider".to_string())
+            .expect("first runtime");
+        assert!(rebound_same
+            .pool_quota_probe_replenish
+            .request("provider".to_string())
+            .is_none());
+        let second = rebound
+            .pool_quota_probe_replenish
+            .request("provider".to_string())
+            .expect("other runtime is independent");
+        drop((first, second));
+    }
+
+    #[tokio::test]
+    async fn pool_quota_probe_replenish_rechecks_remote_pending_after_unlock() {
+        let runtime = Arc::new(RuntimeState::memory(MemoryRuntimeStateConfig::default()));
+        let first = Arc::new(PoolQuotaProbeReplenishCoordinator::new(1));
+        let second = Arc::new(PoolQuotaProbeReplenishCoordinator::new(1));
+        let before_unlock = Arc::new(Notify::new());
+        let finish_unlock = Arc::new(Notify::new());
+        let first_probes = Arc::new(AtomicUsize::new(0));
+        let first_releases = Arc::new(AtomicUsize::new(0));
+        let first_task = first
+            .spawn("provider".to_string(), {
+                let runtime = Arc::clone(&runtime);
+                let before_unlock = Arc::clone(&before_unlock);
+                let finish_unlock = Arc::clone(&finish_unlock);
+                let first_probes = Arc::clone(&first_probes);
+                let first_releases = Arc::clone(&first_releases);
+                move || {
+                    let runtime = Arc::clone(&runtime);
+                    let before_unlock = Arc::clone(&before_unlock);
+                    let finish_unlock = Arc::clone(&finish_unlock);
+                    let first_probes = Arc::clone(&first_probes);
+                    let first_releases = Arc::clone(&first_releases);
+                    async move {
+                        run_pool_quota_probe_replenish_with(
+                            runtime.as_ref(),
+                            "provider",
+                            || {
+                                first_probes.fetch_add(1, Ordering::AcqRel);
+                                std::future::ready(Ok(PoolQuotaProbeRunSummary::empty()))
+                            },
+                            |lease| {
+                                let runtime = Arc::clone(&runtime);
+                                let before_unlock = Arc::clone(&before_unlock);
+                                let finish_unlock = Arc::clone(&finish_unlock);
+                                let first_release =
+                                    first_releases.fetch_add(1, Ordering::AcqRel) == 0;
+                                async move {
+                                    if first_release {
+                                        before_unlock.notify_one();
+                                        finish_unlock.notified().await;
+                                    }
+                                    release_pool_quota_probe_burst_trigger_lock(
+                                        runtime.as_ref(),
+                                        Some(lease),
+                                    )
+                                    .await;
+                                }
+                            },
+                        )
+                        .await;
+                    }
+                }
+            })
+            .expect("first instance leader");
+        tokio::time::timeout(Duration::from_secs(2), before_unlock.notified())
+            .await
+            .expect("first instance drained but still owns Redis lease");
+        assert_eq!(first_probes.load(Ordering::Acquire), 1);
+        assert!(!runtime
+            .kv_exists(&probe_burst_pending_key("provider"))
+            .await
+            .expect("drained pending"));
+        let second_task = second.spawn("provider".to_string(), {
+            let runtime = Arc::clone(&runtime);
+            move || {
+                let runtime = Arc::clone(&runtime);
+                async move {
+                    run_pool_quota_probe_replenish_with(
+                        runtime.as_ref(), "provider",
+                        || async { panic!("second instance must not consume pending without the Redis lease") },
+                        |lease| release_pool_quota_probe_burst_trigger_lock(runtime.as_ref(), Some(lease)),
+                    ).await;
+                }
+            }
+        }).expect("independent second instance leader");
+        second_task
+            .await
+            .expect("second instance leaves pending for the current owner");
+        assert_eq!(second.snapshot().active, 0);
+        assert!(runtime
+            .kv_exists(&probe_burst_pending_key("provider"))
+            .await
+            .expect("new pending signal"));
+        finish_unlock.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), first_task)
+            .await
+            .expect("handoff drains")
+            .expect("first instance finishes");
+        assert_eq!(
+            first_probes.load(Ordering::Acquire),
+            2,
+            "the cross-instance exit signal must trigger a second probe"
+        );
+        assert_eq!(first_releases.load(Ordering::Acquire), 2);
+        assert_eq!(first.snapshot().active, 0);
+        assert!(!runtime
+            .kv_exists(&probe_burst_pending_key("provider"))
+            .await
+            .expect("all pending consumed"));
+        let lease = acquire_pool_quota_probe_burst_trigger_lock(runtime.as_ref(), "provider").await;
+        assert!(lease.is_some(), "the replacement Redis lease is released");
+        release_pool_quota_probe_burst_trigger_lock(runtime.as_ref(), lease).await;
+    }
+
+    #[tokio::test]
+    async fn pool_quota_probe_replenish_public_spawn_returns_none_for_merged_triggers() {
+        let repository = Arc::new(
+            aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository::seed(
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ),
+        );
+        let state = AppState::new().expect("state").with_data_state_for_tests(
+            crate::data::GatewayDataState::with_provider_catalog_repository_for_tests(repository),
+        );
+        let leader =
+            spawn_pool_quota_probe_replenish_for_request(state.clone(), "provider".to_string())
+                .expect("leader handle");
+        for _ in 0..64 {
+            assert!(spawn_pool_quota_probe_replenish_for_request(
+                state.clone(),
+                "provider".to_string()
+            )
+            .is_none());
+        }
+        leader.await.expect("leader completes");
+        assert_eq!(state.pool_quota_probe_replenish.snapshot().started_total, 1);
+        assert_eq!(
+            state.pool_quota_probe_replenish.snapshot().coalesced_total,
+            64
+        );
+        assert_eq!(state.pool_quota_probe_replenish.snapshot().active, 0);
+        spawn_pool_quota_probe_replenish_for_request(state.clone(), "provider".to_string())
+            .expect("later leader handle")
+            .await
+            .expect("later leader finishes");
+    }
+
+    #[test]
+    fn worker_error_score_reason_drops_runtime_error_details() {
+        let secret = "postgresql://admin:db-secret@db.internal/aether; Authorization: Bearer quota-secret; https://user:password@upstream.test/quota?q=secret";
+        let patch =
+            pool_quota_probe_worker_error_score_reason(&GatewayError::Internal(secret.to_string()));
+        let serialized = patch.to_string();
+
+        assert_eq!(patch["last_probe"]["status"], "worker_error");
+        assert_eq!(patch["last_probe"]["category"], "worker_error");
+        assert_eq!(
+            patch["last_probe"]["message"],
+            "Provider quota probe worker failed"
+        );
+        for sensitive in [
+            "db-secret",
+            "quota-secret",
+            "user:password",
+            "db.internal",
+            "upstream.test",
+        ] {
+            assert!(!serialized.contains(sensitive));
+        }
+    }
 
     fn key(
         id: &str,
@@ -1769,6 +2455,26 @@ mod tests {
         let selected = select_pool_quota_probe_key_ids(&keys, "codex", 2_000, 600, &stamps, 2);
 
         assert_eq!(selected, vec!["never".to_string(), "old".to_string()]);
+    }
+
+    #[test]
+    fn quota_markers_in_429_probe_results_are_hard_exhaustion() {
+        assert_eq!(
+            probe_result_hard_state(&json!({
+                "status": "rate_limited",
+                "status_code": 429,
+                "message": "RESOURCE_EXHAUSTED: quota exceeded"
+            })),
+            Some(PoolMemberHardState::QuotaExhausted)
+        );
+        assert_eq!(
+            probe_result_hard_state(&json!({
+                "status": "rate_limited",
+                "status_code": 429,
+                "message": "temporary rate limit"
+            })),
+            Some(PoolMemberHardState::Cooldown)
+        );
     }
 
     fn score(

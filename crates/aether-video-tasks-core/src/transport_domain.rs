@@ -98,10 +98,15 @@ impl LocalVideoTaskPersistence {
             api_key_name: task.api_key_name.clone(),
             client_api_format,
             provider_api_format,
-            original_request_body: task
-                .original_request_body
-                .clone()
-                .unwrap_or_else(|| Value::Object(Map::new())),
+            original_request_body: task.original_request_body.clone().unwrap_or_else(|| {
+                serde_json::json!({
+                    "prompt": task.prompt,
+                    "seconds": task.duration_seconds,
+                    "resolution": task.resolution,
+                    "aspect_ratio": task.aspect_ratio,
+                    "size": task.size,
+                })
+            }),
             format_converted: task.format_converted,
         })
     }

@@ -211,12 +211,11 @@ pub(crate) async fn acquire_codex_oauth_account_locks(
                 release_codex_oauth_account_locks(state, leases).await;
                 return Err(CodexOAuthAccountLockError::Contended);
             }
-            Err(error) => {
+            Err(_) => {
                 tracing::warn!(
                     provider_id = %provider_id,
                     lock_key = %lock_key,
                     operation,
-                    error = ?error,
                     "gateway Codex OAuth account lock unavailable"
                 );
                 release_codex_oauth_account_locks(state, leases).await;
@@ -249,9 +248,8 @@ pub(crate) async fn release_provider_oauth_account_locks(
                 lock_key = %lease.key,
                 "gateway provider OAuth account lock was not owned during release"
             ),
-            Err(error) => tracing::warn!(
+            Err(_) => tracing::warn!(
                 lock_key = %lease.key,
-                error = ?error,
                 "gateway provider OAuth account lock release failed"
             ),
         }
@@ -308,12 +306,11 @@ pub(crate) async fn acquire_claude_oauth_account_lock(
     {
         Ok(Some(lease)) => lease,
         Ok(None) => return Err(ClaudeOAuthAccountLockError::Contended),
-        Err(error) => {
+        Err(_) => {
             tracing::warn!(
                 provider_id = %provider_id,
                 lock_key = %lock_key,
                 operation,
-                error = ?error,
                 "gateway Claude OAuth account lock unavailable"
             );
             return Err(ClaudeOAuthAccountLockError::Unavailable);

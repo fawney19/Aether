@@ -1,10 +1,13 @@
+use super::super::helpers::admin_provider_oauth_key_name_from_auth_config;
 use super::super::kiro::{
     admin_provider_oauth_kiro_refresh_base_url_override, fetch_admin_provider_oauth_kiro_email,
     refresh_admin_provider_oauth_kiro_auth_config,
 };
+use super::lease::{AdminProviderOAuthDevicePollLease, AdminProviderOAuthDevicePollLeaseAcquire};
 use super::session::{
     attach_admin_provider_oauth_device_poll_terminal_response, AdminProviderOAuthDevicePollPayload,
 };
+use crate::control::GatewayAdminPrincipalContext;
 use crate::handlers::admin::provider::oauth::errors::build_internal_control_error_response;
 use crate::handlers::admin::provider::oauth::provisioning::{
     provider_oauth_active_api_formats, provider_oauth_key_proxy_value,
@@ -77,7 +80,7 @@ fn kiro_social_key_name(
                 .collect::<String>()
         })
         .unwrap_or_else(|| "unknown".to_string());
-    format!("kiro_{fallback} ({provider})")
+    format!("账号_{fallback} ({provider})")
 }
 
 fn kiro_social_poll_error_response(error: impl Into<String>) -> Response<Body> {
@@ -103,11 +106,7 @@ fn sanitize_windsurf_browser_poll_detail(detail: impl AsRef<str>) -> String {
     if detail.is_empty() {
         return "-".to_string();
     }
-    if contains_windsurf_sensitive_marker(detail) {
-        "[REDACTED upstream error body]".to_string()
-    } else {
-        detail.chars().take(500).collect()
-    }
+    "[REDACTED upstream error body]".to_string()
 }
 
 fn sanitize_windsurf_browser_poll_callback_error(error: &str, description: &str) -> String {
@@ -139,25 +138,6 @@ fn sanitize_windsurf_browser_poll_oauth_error(error: &aether_oauth::core::OAuthE
         }
         _ => "Windsurf token 验证失败".to_string(),
     }
-}
-
-fn contains_windsurf_sensitive_marker(value: &str) -> bool {
-    let lowered = value.to_ascii_lowercase();
-    [
-        "token",
-        "api_key",
-        "apikey",
-        "sessiontoken",
-        "firebase_id_token",
-        "idtoken",
-        "authorization",
-        "password",
-        "secret",
-        "devin-session-token$",
-    ]
-    .iter()
-    .any(|marker| lowered.contains(marker))
-        || value.contains("sk-")
 }
 
 fn secret_fingerprint(value: &str) -> Option<String> {
@@ -301,14 +281,9 @@ async fn exchange_admin_provider_oauth_kiro_social_code(
             proxy,
         )
         .await
-        .map_err(|err| format!("Kiro social token 请求失败: {err}"))?;
+        .map_err(|_| "Kiro social token 请求失败".to_string())?;
     if !response.status.is_success() {
-        let detail = response.body_text.trim();
-        return Err(if detail.is_empty() {
-            format!("HTTP {}", response.status.as_u16())
-        } else {
-            detail.to_string()
-        });
+        return Err(format!("HTTP {}", response.status.as_u16()));
     }
     response
         .json_body
@@ -316,11 +291,64 @@ async fn exchange_admin_provider_oauth_kiro_social_code(
         .ok_or_else(|| "Kiro social token 返回了非 JSON 响应".to_string())
 }
 
+fn admin_provider_oauth_device_poll_principal_has_authenticator(
+    principal: &GatewayAdminPrincipalContext,
+) -> bool {
+    let valid_identity =
+        |value: Option<&str>| value.is_some_and(|value| !value.is_empty() && value == value.trim());
+    valid_identity(principal.session_id.as_deref())
+        || valid_identity(principal.management_token_id.as_deref())
+}
+
+fn admin_provider_oauth_device_session_matches_resolved_principal(
+    session: &StoredAdminProviderOAuthDeviceSession,
+    principal: Option<&GatewayAdminPrincipalContext>,
+) -> bool {
+    let Some(principal) = principal else {
+        return false;
+    };
+    admin_provider_oauth_device_poll_principal_has_authenticator(principal)
+        && session.initiated_by_user_id == principal.user_id
+        && session.initiated_by_session_id == principal.session_id
+        && session.initiated_by_management_token_id == principal.management_token_id
+}
+
+fn admin_provider_oauth_device_session_unavailable_response() -> Response<Body> {
+    Json(json!({
+        "status": "expired",
+        "error": "会话不存在或已过期",
+        "replaced": false,
+    }))
+    .into_response()
+}
+
+fn admin_provider_oauth_device_poll_busy_response(status: http::StatusCode) -> Response<Body> {
+    let mut response = Json(json!({
+        "status": "pending",
+        "busy": true,
+        "replaced": false,
+    }))
+    .into_response();
+    *response.status_mut() = status;
+    response
+}
+
 pub(super) async fn handle_admin_provider_oauth_device_poll(
     state: &AdminAppState<'_>,
     request_context: &AdminRequestContext<'_>,
     request_body: Option<&Bytes>,
 ) -> Result<Response<Body>, GatewayError> {
+    let Some(principal) = request_context
+        .decision()
+        .and_then(|decision| decision.admin_principal.as_ref())
+        .filter(|principal| admin_provider_oauth_device_poll_principal_has_authenticator(principal))
+        .cloned()
+    else {
+        return Ok(build_internal_control_error_response(
+            http::StatusCode::UNAUTHORIZED,
+            "管理员身份不可用",
+        ));
+    };
     if !state.has_provider_catalog_data_reader() {
         return Ok(build_admin_provider_oauth_backend_unavailable_response());
     }
@@ -355,140 +383,57 @@ pub(super) async fn handle_admin_provider_oauth_device_poll(
         ));
     }
 
-    let Some(mut session) = state.read_provider_oauth_device_session(session_id).await? else {
-        return Ok(Json(json!({
-            "status": "expired",
-            "error": "会话不存在或已过期",
-            "replaced": false,
-        }))
-        .into_response());
+    let lease = match AdminProviderOAuthDevicePollLease::try_acquire(state, session_id).await {
+        AdminProviderOAuthDevicePollLeaseAcquire::Acquired(lease) => lease,
+        AdminProviderOAuthDevicePollLeaseAcquire::Contended => {
+            return Ok(admin_provider_oauth_device_poll_busy_response(
+                http::StatusCode::CONFLICT,
+            ));
+        }
+        AdminProviderOAuthDevicePollLeaseAcquire::Unavailable => {
+            return Ok(admin_provider_oauth_device_poll_busy_response(
+                http::StatusCode::SERVICE_UNAVAILABLE,
+            ));
+        }
     };
-    if session.provider_id != provider_id {
-        return Ok(Json(json!({
-            "status": "error",
-            "error": "会话与 Provider 不匹配",
-            "replaced": false,
-        }))
-        .into_response());
-    }
-    if session.status == "authorized" {
-        return Ok(Json(json!({
-            "status": "authorized",
-            "key_id": session.key_id,
-            "email": session.email,
-            "replaced": session.replaced,
-        }))
-        .into_response());
-    }
-    if matches!(session.status.as_str(), "expired" | "error") {
-        return Ok(Json(json!({
-            "status": session.status,
-            "error": session.error_msg,
-            "replaced": session.replaced,
-        }))
-        .into_response());
-    }
 
-    if current_unix_secs() > session.expires_at_unix_secs {
-        session.status = "expired".to_string();
-        session.error_msg = Some("设备码已过期".to_string());
-        let _ = state
-            .save_provider_oauth_device_session(session_id, &session, 30)
-            .await;
-        return Ok(attach_admin_provider_oauth_device_poll_terminal_response(
-            session_id,
-            "expired",
-            Json(json!({
-                "status": "expired",
-                "error": "设备码已过期",
+    let operation = async {
+        let Some(mut session) = state.read_provider_oauth_device_session(session_id).await? else {
+            return Ok(admin_provider_oauth_device_session_unavailable_response());
+        };
+        if !admin_provider_oauth_device_session_matches_resolved_principal(
+            &session,
+            Some(&principal),
+        ) {
+            return Ok(admin_provider_oauth_device_session_unavailable_response());
+        }
+        if session.provider_id != provider_id {
+            return Ok(Json(json!({
+                "status": "error",
+                "error": "会话与 Provider 不匹配",
                 "replaced": false,
             }))
-            .into_response(),
-        ));
-    }
-
-    let Some(provider) = state
-        .read_provider_catalog_providers_by_ids(std::slice::from_ref(&provider_id))
-        .await?
-        .into_iter()
-        .next()
-    else {
-        return Ok(build_internal_control_error_response(
-            http::StatusCode::NOT_FOUND,
-            "Provider 不存在",
-        ));
-    };
-    let provider_type = provider.provider_type.trim().to_ascii_lowercase();
-    let endpoint_resolution =
-        resolve_provider_oauth_runtime_endpoints(state, &provider, &provider_type).await?;
-    let endpoints = endpoint_resolution.endpoints;
-    let runtime_endpoint = endpoint_resolution.runtime_endpoint;
-    let request_proxy = state
-        .resolve_admin_provider_oauth_operation_proxy_snapshot(
-            session.proxy_node_id.as_deref(),
-            &[
-                runtime_endpoint
-                    .as_ref()
-                    .and_then(|endpoint| endpoint.proxy.as_ref()),
-                provider.proxy.as_ref(),
-            ],
-        )
-        .await;
-
-    if provider_type == "windsurf" {
-        return handle_admin_provider_oauth_windsurf_browser_device_poll(
-            state,
-            &provider,
-            &endpoints,
-            request_proxy,
-            session_id,
-            session,
-            payload.callback_url.as_deref(),
-            payload.token.as_deref(),
-        )
-        .await;
-    }
-
-    if kiro_device_session_is_social(&session) {
-        return handle_admin_provider_oauth_kiro_social_device_poll(
-            state,
-            &provider,
-            &endpoints,
-            request_proxy,
-            session_id,
-            session,
-            payload.callback_url.as_deref(),
-        )
-        .await;
-    }
-
-    let token_result = match state
-        .poll_admin_kiro_device_token(
-            &session.region,
-            &session.client_id,
-            &session.client_secret,
-            &session.device_code,
-            request_proxy.clone(),
-        )
-        .await
-    {
-        Ok(payload) => payload,
-        Err(response) => return Ok(response),
-    };
-
-    if token_result
-        .get("_error")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false)
-    {
-        let error_code = json_non_empty_string(token_result.get("error")).unwrap_or_default();
-        if error_code == "authorization_pending" {
-            return Ok(Json(json!({"status": "pending", "replaced": false})).into_response());
+            .into_response());
         }
-        if error_code == "slow_down" {
-            return Ok(Json(json!({"status": "slow_down", "replaced": false})).into_response());
+        if session.status == "authorized" {
+            return Ok(Json(json!({
+                "status": "authorized",
+                "key_id": session.key_id,
+                "email": session.email,
+                "replaced": session.replaced,
+            }))
+            .into_response());
         }
-        if error_code == "expired_token" {
+        if matches!(session.status.as_str(), "expired" | "error") {
+            return Ok(Json(json!({
+                "status": session.status,
+                "error": session.error_msg,
+                "replaced": session.replaced,
+            }))
+            .into_response());
+        }
+
+        if current_unix_secs() > session.expires_at_unix_secs {
             session.status = "expired".to_string();
             session.error_msg = Some("设备码已过期".to_string());
             let _ = state
@@ -505,240 +450,351 @@ pub(super) async fn handle_admin_provider_oauth_device_poll(
                 .into_response(),
             ));
         }
-        if error_code == "access_denied" {
-            session.status = "error".to_string();
-            session.error_msg = Some("用户拒绝授权".to_string());
-            let _ = state
-                .save_provider_oauth_device_session(session_id, &session, 30)
-                .await;
-            return Ok(attach_admin_provider_oauth_device_poll_terminal_response(
+
+        let Some(provider) = state
+            .read_provider_catalog_providers_by_ids(std::slice::from_ref(&provider_id))
+            .await?
+            .into_iter()
+            .next()
+        else {
+            return Ok(build_internal_control_error_response(
+                http::StatusCode::NOT_FOUND,
+                "Provider 不存在",
+            ));
+        };
+        let provider_type = provider.provider_type.trim().to_ascii_lowercase();
+        let endpoint_resolution =
+            resolve_provider_oauth_runtime_endpoints(state, &provider, &provider_type).await?;
+        let endpoints = endpoint_resolution.endpoints;
+        let runtime_endpoint = endpoint_resolution.runtime_endpoint;
+        let request_proxy = state
+            .resolve_admin_provider_oauth_operation_proxy_snapshot(
+                session.proxy_node_id.as_deref(),
+                &[
+                    runtime_endpoint
+                        .as_ref()
+                        .and_then(|endpoint| endpoint.proxy.as_ref()),
+                    provider.proxy.as_ref(),
+                ],
+            )
+            .await;
+
+        if provider_type == "windsurf" {
+            return handle_admin_provider_oauth_windsurf_browser_device_poll(
+                state,
+                &provider,
+                &endpoints,
+                request_proxy,
                 session_id,
-                "error",
-                Json(json!({
+                session,
+                payload.callback_url.as_deref(),
+                payload.token.as_deref(),
+            )
+            .await;
+        }
+
+        if kiro_device_session_is_social(&session) {
+            return handle_admin_provider_oauth_kiro_social_device_poll(
+                state,
+                &provider,
+                &endpoints,
+                request_proxy,
+                session_id,
+                session,
+                payload.callback_url.as_deref(),
+            )
+            .await;
+        }
+
+        let token_result = match state
+            .poll_admin_kiro_device_token(
+                &session.region,
+                &session.client_id,
+                &session.client_secret,
+                &session.device_code,
+                request_proxy.clone(),
+            )
+            .await
+        {
+            Ok(payload) => payload,
+            Err(response) => return Ok(response),
+        };
+
+        if token_result
+            .get("_error")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+        {
+            let error_code = json_non_empty_string(token_result.get("error")).unwrap_or_default();
+            if error_code == "authorization_pending" {
+                return Ok(Json(json!({"status": "pending", "replaced": false})).into_response());
+            }
+            if error_code == "slow_down" {
+                return Ok(Json(json!({"status": "slow_down", "replaced": false})).into_response());
+            }
+            if error_code == "expired_token" {
+                session.status = "expired".to_string();
+                session.error_msg = Some("设备码已过期".to_string());
+                let _ = state
+                    .save_provider_oauth_device_session(session_id, &session, 30)
+                    .await;
+                return Ok(attach_admin_provider_oauth_device_poll_terminal_response(
+                    session_id,
+                    "expired",
+                    Json(json!({
+                        "status": "expired",
+                        "error": "设备码已过期",
+                        "replaced": false,
+                    }))
+                    .into_response(),
+                ));
+            }
+            if error_code == "access_denied" {
+                session.status = "error".to_string();
+                session.error_msg = Some("用户拒绝授权".to_string());
+                let _ = state
+                    .save_provider_oauth_device_session(session_id, &session, 30)
+                    .await;
+                return Ok(attach_admin_provider_oauth_device_poll_terminal_response(
+                    session_id,
+                    "error",
+                    Json(json!({
+                        "status": "error",
+                        "error": "用户拒绝授权",
+                        "replaced": false,
+                    }))
+                    .into_response(),
+                ));
+            }
+            let error_message = if error_code.is_empty() {
+                "授权失败".to_string()
+            } else {
+                sanitize_windsurf_browser_poll_error_code(&error_code)
+            };
+            return Ok(Json(json!({
+                "status": "error",
+                "error": error_message,
+                "replaced": false,
+            }))
+            .into_response());
+        }
+
+        let Some(access_token) = json_non_empty_string(
+            token_result
+                .get("accessToken")
+                .or_else(|| token_result.get("access_token")),
+        ) else {
+            return Ok(Json(json!({
+                "status": "error",
+                "error": "token 响应缺少 accessToken 或 refreshToken",
+                "replaced": false,
+            }))
+            .into_response());
+        };
+        let Some(refresh_token) = json_non_empty_string(
+            token_result
+                .get("refreshToken")
+                .or_else(|| token_result.get("refresh_token")),
+        ) else {
+            return Ok(Json(json!({
+                "status": "error",
+                "error": "token 响应缺少 accessToken 或 refreshToken",
+                "replaced": false,
+            }))
+            .into_response());
+        };
+        let initial_expires_at = json_u64_value(
+            token_result
+                .get("expiresIn")
+                .or_else(|| token_result.get("expires_in")),
+        )
+        .map(|expires_in| current_unix_secs().saturating_add(expires_in))
+        .unwrap_or_else(|| current_unix_secs().saturating_add(3600));
+        let social_refresh_base_url =
+            admin_provider_oauth_kiro_refresh_base_url_override(state, "kiro_social_refresh");
+        let idc_refresh_base_url =
+            admin_provider_oauth_kiro_refresh_base_url_override(state, "kiro_idc_refresh");
+        let mut refreshed_auth_config = match refresh_admin_provider_oauth_kiro_auth_config(
+            state,
+            &AdminKiroAuthConfig {
+                auth_method: Some("idc".to_string()),
+                refresh_token: Some(refresh_token.clone()),
+                expires_at: Some(initial_expires_at),
+                profile_arn: None,
+                region: Some(session.region.clone()),
+                auth_region: Some(session.region.clone()),
+                api_region: None,
+                client_id: Some(session.client_id.clone()),
+                client_secret: Some(session.client_secret.clone()),
+                machine_id: None,
+                kiro_version: None,
+                system_version: None,
+                node_version: None,
+                access_token: Some(access_token.clone()),
+            },
+            request_proxy.clone(),
+            social_refresh_base_url.as_deref(),
+            idc_refresh_base_url.as_deref(),
+        )
+        .await
+        {
+            Ok(config) => config,
+            Err(_) => {
+                return Ok(Json(json!({
                     "status": "error",
-                    "error": "用户拒绝授权",
+                    "error": "token 验证失败",
                     "replaced": false,
                 }))
-                .into_response(),
-            ));
+                .into_response());
+            }
+        };
+        if refreshed_auth_config.auth_method.is_none() {
+            refreshed_auth_config.auth_method = Some("idc".to_string());
         }
-        let error_message = json_non_empty_string(token_result.get("error_description"))
-            .or_else(|| (!error_code.is_empty()).then_some(error_code.clone()))
-            .unwrap_or_else(|| "未知错误".to_string());
-        return Ok(Json(json!({
-            "status": "error",
-            "error": error_message,
-            "replaced": false,
-        }))
-        .into_response());
-    }
-
-    let Some(access_token) = json_non_empty_string(
-        token_result
-            .get("accessToken")
-            .or_else(|| token_result.get("access_token")),
-    ) else {
-        return Ok(Json(json!({
-            "status": "error",
-            "error": "token 响应缺少 accessToken 或 refreshToken",
-            "replaced": false,
-        }))
-        .into_response());
-    };
-    let Some(refresh_token) = json_non_empty_string(
-        token_result
-            .get("refreshToken")
-            .or_else(|| token_result.get("refresh_token")),
-    ) else {
-        return Ok(Json(json!({
-            "status": "error",
-            "error": "token 响应缺少 accessToken 或 refreshToken",
-            "replaced": false,
-        }))
-        .into_response());
-    };
-    let initial_expires_at = json_u64_value(
-        token_result
-            .get("expiresIn")
-            .or_else(|| token_result.get("expires_in")),
-    )
-    .map(|expires_in| current_unix_secs().saturating_add(expires_in))
-    .unwrap_or_else(|| current_unix_secs().saturating_add(3600));
-    let social_refresh_base_url =
-        admin_provider_oauth_kiro_refresh_base_url_override(state, "kiro_social_refresh");
-    let idc_refresh_base_url =
-        admin_provider_oauth_kiro_refresh_base_url_override(state, "kiro_idc_refresh");
-    let mut refreshed_auth_config = match refresh_admin_provider_oauth_kiro_auth_config(
-        state,
-        &AdminKiroAuthConfig {
-            auth_method: Some("idc".to_string()),
-            refresh_token: Some(refresh_token.clone()),
-            expires_at: Some(initial_expires_at),
-            profile_arn: None,
-            region: Some(session.region.clone()),
-            auth_region: Some(session.region.clone()),
-            api_region: None,
-            client_id: Some(session.client_id.clone()),
-            client_secret: Some(session.client_secret.clone()),
-            machine_id: None,
-            kiro_version: None,
-            system_version: None,
-            node_version: None,
-            access_token: Some(access_token.clone()),
-        },
-        request_proxy.clone(),
-        social_refresh_base_url.as_deref(),
-        idc_refresh_base_url.as_deref(),
-    )
-    .await
-    {
-        Ok(config) => config,
-        Err(detail) => {
+        let Some(access_token) = refreshed_auth_config
+            .access_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+        else {
             return Ok(Json(json!({
                 "status": "error",
-                "error": format!("token 验证失败: {detail}"),
+                "error": "token 验证失败: accessToken 为空",
                 "replaced": false,
             }))
             .into_response());
+        };
+        let expires_at = refreshed_auth_config
+            .expires_at
+            .unwrap_or_else(|| current_unix_secs().saturating_add(3600));
+        let mut email = decode_jwt_claims(&access_token)
+            .and_then(|claims| claims.get("email").cloned())
+            .and_then(|value| value.as_str().map(ToOwned::to_owned));
+        if email.is_none() {
+            email = fetch_admin_provider_oauth_kiro_email(
+                state,
+                &refreshed_auth_config,
+                request_proxy.clone(),
+            )
+            .await;
         }
-    };
-    if refreshed_auth_config.auth_method.is_none() {
-        refreshed_auth_config.auth_method = Some("idc".to_string());
-    }
-    let Some(access_token) = refreshed_auth_config
-        .access_token
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
-    else {
-        return Ok(Json(json!({
-            "status": "error",
-            "error": "token 验证失败: accessToken 为空",
-            "replaced": false,
-        }))
-        .into_response());
-    };
-    let expires_at = refreshed_auth_config
-        .expires_at
-        .unwrap_or_else(|| current_unix_secs().saturating_add(3600));
-    let mut email = decode_jwt_claims(&access_token)
-        .and_then(|claims| claims.get("email").cloned())
-        .and_then(|value| value.as_str().map(ToOwned::to_owned));
-    if email.is_none() {
-        email = fetch_admin_provider_oauth_kiro_email(
-            state,
-            &refreshed_auth_config,
+
+        let mut auth_config = refreshed_auth_config
+            .to_json_value()
+            .as_object()
+            .cloned()
+            .unwrap_or_default();
+        auth_config.insert("provider_type".to_string(), json!("kiro"));
+        if let Some(email) = email.as_ref() {
+            auth_config.insert("email".to_string(), json!(email));
+        }
+
+        let duplicate = match state
+            .find_duplicate_provider_oauth_key(&provider_id, &auth_config, None)
+            .await
+        {
+            Ok(duplicate) => duplicate,
+            Err(detail) => {
+                return Ok(Json(json!({
+                    "status": "error",
+                    "error": detail,
+                    "replaced": false,
+                }))
+                .into_response());
+            }
+        };
+
+        let api_formats = provider_oauth_active_api_formats(&endpoints);
+        let key_proxy = provider_oauth_key_proxy_value(session.proxy_node_id.as_deref());
+        let mut replaced = false;
+        let persisted_key = if let Some(existing_key) = duplicate {
+            replaced = true;
+            match state
+                .update_existing_provider_oauth_catalog_key(
+                    &existing_key,
+                    &provider.provider_type,
+                    &access_token,
+                    &auth_config,
+                    &api_formats,
+                    key_proxy.clone(),
+                    Some(expires_at),
+                )
+                .await?
+            {
+                Some(key) => key,
+                None => {
+                    return Ok(build_internal_control_error_response(
+                        http::StatusCode::SERVICE_UNAVAILABLE,
+                        "provider oauth write unavailable",
+                    ));
+                }
+            }
+        } else {
+            let key_name = build_kiro_device_key_name(
+                email.as_deref(),
+                refreshed_auth_config.refresh_token.as_deref(),
+            );
+            match state
+                .create_provider_oauth_catalog_key(
+                    &provider_id,
+                    &provider.provider_type,
+                    &key_name,
+                    &access_token,
+                    &auth_config,
+                    &api_formats,
+                    key_proxy,
+                    Some(expires_at),
+                )
+                .await?
+            {
+                Some(key) => key,
+                None => {
+                    return Ok(build_internal_control_error_response(
+                        http::StatusCode::SERVICE_UNAVAILABLE,
+                        "provider oauth write unavailable",
+                    ));
+                }
+            }
+        };
+
+        spawn_provider_oauth_account_state_refresh_after_update(
+            state.cloned_app(),
+            provider.clone(),
+            persisted_key.id.clone(),
             request_proxy.clone(),
-        )
-        .await;
-    }
-
-    let mut auth_config = refreshed_auth_config
-        .to_json_value()
-        .as_object()
-        .cloned()
-        .unwrap_or_default();
-    auth_config.insert("provider_type".to_string(), json!("kiro"));
-    if let Some(email) = email.as_ref() {
-        auth_config.insert("email".to_string(), json!(email));
-    }
-
-    let duplicate = match state
-        .find_duplicate_provider_oauth_key(&provider_id, &auth_config, None)
-        .await
-    {
-        Ok(duplicate) => duplicate,
-        Err(detail) => {
-            return Ok(Json(json!({
-                "status": "error",
-                "error": detail,
-                "replaced": false,
-            }))
-            .into_response());
-        }
-    };
-
-    let api_formats = provider_oauth_active_api_formats(&endpoints);
-    let key_proxy = provider_oauth_key_proxy_value(session.proxy_node_id.as_deref());
-    let mut replaced = false;
-    let persisted_key = if let Some(existing_key) = duplicate {
-        replaced = true;
-        match state
-            .update_existing_provider_oauth_catalog_key(
-                &existing_key,
-                &provider.provider_type,
-                &access_token,
-                &auth_config,
-                &api_formats,
-                key_proxy.clone(),
-                Some(expires_at),
-            )
-            .await?
-        {
-            Some(key) => key,
-            None => {
-                return Ok(build_internal_control_error_response(
-                    http::StatusCode::SERVICE_UNAVAILABLE,
-                    "provider oauth write unavailable",
-                ));
-            }
-        }
-    } else {
-        let key_name = build_kiro_device_key_name(
-            email.as_deref(),
-            refreshed_auth_config.refresh_token.as_deref(),
         );
-        match state
-            .create_provider_oauth_catalog_key(
-                &provider_id,
-                &provider.provider_type,
-                &key_name,
-                &access_token,
-                &auth_config,
-                &api_formats,
-                key_proxy,
-                Some(expires_at),
-            )
-            .await?
-        {
-            Some(key) => key,
-            None => {
-                return Ok(build_internal_control_error_response(
-                    http::StatusCode::SERVICE_UNAVAILABLE,
-                    "provider oauth write unavailable",
-                ));
-            }
-        }
+
+        session.status = "authorized".to_string();
+        session.key_id = Some(persisted_key.id.clone());
+        session.email = email.clone();
+        session.replaced = replaced;
+        session.error_msg = None;
+        let _ = state
+            .save_provider_oauth_device_session(session_id, &session, 60)
+            .await;
+
+        Ok(attach_admin_provider_oauth_device_poll_terminal_response(
+            session_id,
+            "authorized",
+            Json(json!({
+                "status": "authorized",
+                "key_id": persisted_key.id,
+                "email": email,
+                "replaced": replaced,
+            }))
+            .into_response(),
+        ))
     };
 
-    spawn_provider_oauth_account_state_refresh_after_update(
-        state.cloned_app(),
-        provider.clone(),
-        persisted_key.id.clone(),
-        request_proxy.clone(),
-    );
-
-    session.status = "authorized".to_string();
-    session.key_id = Some(persisted_key.id.clone());
-    session.email = email.clone();
-    session.replaced = replaced;
-    session.error_msg = None;
-    let _ = state
-        .save_provider_oauth_device_session(session_id, &session, 60)
-        .await;
-
-    Ok(attach_admin_provider_oauth_device_poll_terminal_response(
-        session_id,
-        "authorized",
-        Json(json!({
-            "status": "authorized",
-            "key_id": persisted_key.id,
-            "email": email,
-            "replaced": replaced,
-        }))
-        .into_response(),
-    ))
+    let result = lease.run(operation).await;
+    lease.release().await;
+    match result {
+        Ok(result) => result,
+        Err(_) => Ok(admin_provider_oauth_device_poll_busy_response(
+            http::StatusCode::SERVICE_UNAVAILABLE,
+        )),
+    }
 }
 
 fn windsurf_raw_api_key(value: &str) -> Option<&str> {
@@ -949,10 +1005,11 @@ async fn handle_admin_provider_oauth_windsurf_browser_device_poll(
             }
         }
     } else {
-        let key_name = email
-            .as_deref()
-            .map(|email| format!("windsurf_{email}"))
-            .unwrap_or_else(|| format!("windsurf_{}", current_unix_secs()));
+        let key_name = admin_provider_oauth_key_name_from_auth_config(
+            &provider.provider_type,
+            &auth_config,
+            None,
+        );
         match state
             .create_provider_oauth_catalog_key(
                 &provider.id,
@@ -1023,19 +1080,17 @@ async fn handle_admin_provider_oauth_kiro_social_device_poll(
 
     let callback_params = parse_provider_oauth_callback_params(callback_url);
     if let Some(error) = callback_params.get("error").map(String::as_str) {
-        let error_description = callback_params
-            .get("error_description")
-            .map(String::as_str)
-            .unwrap_or("用户拒绝授权");
+        let error = sanitize_windsurf_browser_poll_error_code(error);
+        let error_message = format!("{error}: 授权失败");
         session.status = "error".to_string();
-        session.error_msg = Some(format!("{error}: {error_description}"));
+        session.error_msg = Some(error_message.clone());
         let _ = state
             .save_provider_oauth_device_session(session_id, &session, 30)
             .await;
         return Ok(attach_admin_provider_oauth_device_poll_terminal_response(
             session_id,
             "error",
-            kiro_social_poll_error_response(format!("{error}: {error_description}")),
+            kiro_social_poll_error_response(error_message),
         ));
     }
 
@@ -1094,16 +1149,16 @@ async fn handle_admin_provider_oauth_kiro_social_device_poll(
     .await
     {
         Ok(payload) => payload,
-        Err(detail) => {
+        Err(_) => {
             session.status = "error".to_string();
-            session.error_msg = Some(format!("token exchange 失败: {detail}"));
+            session.error_msg = Some("token exchange 失败".to_string());
             let _ = state
                 .save_provider_oauth_device_session(session_id, &session, 30)
                 .await;
             return Ok(attach_admin_provider_oauth_device_poll_terminal_response(
                 session_id,
                 "error",
-                kiro_social_poll_error_response(format!("token exchange 失败: {detail}")),
+                kiro_social_poll_error_response("token exchange 失败"),
             ));
         }
     };
@@ -1299,6 +1354,131 @@ async fn handle_admin_provider_oauth_kiro_social_device_poll(
 
 #[cfg(test)]
 mod tests {
+    use super::admin_provider_oauth_device_session_matches_resolved_principal;
+    use crate::control::GatewayAdminPrincipalContext;
+    use aether_data::repository::provider_oauth::StoredAdminProviderOAuthDeviceSession;
+
+    #[test]
+    fn kiro_social_key_name_preserves_email_and_auth_method() {
+        assert_eq!(
+            super::kiro_social_key_name(
+                Some("  kiro_user@example.com  "),
+                Some("Github"),
+                Some("refresh-token-1"),
+            ),
+            "kiro_user@example.com (Github)"
+        );
+    }
+
+    #[test]
+    fn kiro_social_key_name_without_email_uses_generic_account_prefix() {
+        for email in [None, Some(""), Some("  ")] {
+            assert_eq!(
+                super::kiro_social_key_name(email, Some("Google"), Some("refresh-token-1")),
+                "账号_154f43 (Google)"
+            );
+            assert_eq!(
+                super::kiro_social_key_name(email, None, None),
+                "账号_unknown (social)"
+            );
+        }
+    }
+
+    fn device_session() -> StoredAdminProviderOAuthDeviceSession {
+        StoredAdminProviderOAuthDeviceSession {
+            session_id: "device-session-1".to_string(),
+            provider_id: "provider-1".to_string(),
+            initiated_by_user_id: "admin-1".to_string(),
+            initiated_by_session_id: Some("admin-session-1".to_string()),
+            initiated_by_management_token_id: None,
+            region: "us-east-1".to_string(),
+            client_id: "client-1".to_string(),
+            client_secret: "client-secret".to_string(),
+            device_code: "device-code".to_string(),
+            auth_type: None,
+            social_provider: None,
+            code_verifier: None,
+            redirect_uri: None,
+            machine_id: None,
+            interval: 5,
+            expires_at_unix_secs: 2,
+            status: "pending".to_string(),
+            proxy_node_id: None,
+            created_at_unix_ms: 1,
+            key_id: None,
+            email: None,
+            replaced: false,
+            error_msg: None,
+        }
+    }
+
+    fn principal(
+        user_id: &str,
+        session_id: Option<&str>,
+        management_token_id: Option<&str>,
+    ) -> GatewayAdminPrincipalContext {
+        GatewayAdminPrincipalContext {
+            user_id: user_id.to_string(),
+            user_role: "admin".to_string(),
+            session_id: session_id.map(ToOwned::to_owned),
+            management_token_id: management_token_id.map(ToOwned::to_owned),
+            management_token_permissions: None,
+        }
+    }
+
+    #[test]
+    fn device_poll_session_is_bound_to_exact_admin_principal() {
+        let session = device_session();
+        let matching = principal("admin-1", Some("admin-session-1"), None);
+        let wrong_user = principal("admin-2", Some("admin-session-1"), None);
+        let wrong_session = principal("admin-1", Some("admin-session-2"), None);
+        let wrong_authenticator = principal("admin-1", None, Some("token-1"));
+        let unbound = principal("admin-1", None, None);
+
+        assert!(
+            admin_provider_oauth_device_session_matches_resolved_principal(
+                &session,
+                Some(&matching)
+            )
+        );
+        assert!(
+            !admin_provider_oauth_device_session_matches_resolved_principal(
+                &session,
+                Some(&wrong_user)
+            )
+        );
+        assert!(
+            !admin_provider_oauth_device_session_matches_resolved_principal(
+                &session,
+                Some(&wrong_session)
+            )
+        );
+        assert!(
+            !admin_provider_oauth_device_session_matches_resolved_principal(
+                &session,
+                Some(&wrong_authenticator)
+            )
+        );
+        assert!(
+            !admin_provider_oauth_device_session_matches_resolved_principal(
+                &session,
+                Some(&unbound)
+            )
+        );
+        assert!(!admin_provider_oauth_device_session_matches_resolved_principal(&session, None));
+
+        let mut token_session = session;
+        token_session.initiated_by_session_id = None;
+        token_session.initiated_by_management_token_id = Some("token-1".to_string());
+        let matching_token = principal("admin-1", None, Some("token-1"));
+        assert!(
+            admin_provider_oauth_device_session_matches_resolved_principal(
+                &token_session,
+                Some(&matching_token)
+            )
+        );
+    }
+
     #[test]
     fn windsurf_browser_poll_callback_error_redacts_sensitive_values() {
         let detail = super::sanitize_windsurf_browser_poll_callback_error(

@@ -13,7 +13,8 @@ use aether_data::repository::proxy_nodes::{
 use aether_data_contracts::repository::usage::{
     UsageCounterHealthSnapshot, UsageCounterPendingHealthSnapshot,
 };
-use aether_http::{build_http_client, HttpClientConfig};
+use aether_gateway_frontdoor::{HttpConnectionBudget, HttpConnectionBudgetSnapshot};
+use aether_http::{apply_http_client_config, HttpClientConfig};
 use aether_runtime::{
     service_up_sample, AdmissionPermit, ConcurrencyGate, ConcurrencySnapshot, MetricKind,
     MetricLabel, MetricSample,
@@ -79,12 +80,7 @@ const SYSTEM_CONFIG_CACHE_TTL: Duration = Duration::from_secs(30);
 // five minutes of total age. Direct database edits that bypass AppState
 // invalidation can therefore take at most this bounded interval to appear.
 const SYSTEM_CONFIG_CACHE_MAX_STALENESS: Duration = Duration::from_secs(5 * 60);
-const SCHEDULER_AFFECTING_SYSTEM_CONFIG_KEYS: &[&str] = &[
-    "enable_format_conversion",
-    "keep_priority_on_conversion",
-    "provider_priority_mode",
-    "scheduling_mode",
-];
+const SCHEDULER_AFFECTING_SYSTEM_CONFIG_KEYS: &[&str] = &["enable_format_conversion"];
 const AUTH_AFFECTING_SYSTEM_CONFIG_KEYS: &[&str] = &[
     crate::constants::DEFAULT_USER_GROUP_CONFIG_KEY,
     crate::constants::ANTIGRAVITY_BEARER_BRIDGE_CONFIG_KEY,
@@ -108,6 +104,24 @@ const USAGE_COUNTER_EXACT_HEALTH_METRICS_TIMEOUT: Duration = Duration::from_secs
 const USAGE_COUNTER_EXACT_HEALTH_METRICS_TTL: Duration = Duration::from_secs(5 * 60);
 const USAGE_COUNTER_EXACT_HEALTH_METRICS_MAX_STALENESS: Duration = Duration::from_secs(10 * 60);
 const USAGE_COUNTER_EXACT_HEALTH_METRICS_RETRY_BACKOFF: Duration = Duration::from_secs(5);
+
+const ADMIN_USAGE_AGGREGATE_INVALID_INPUT_DETAIL: &str =
+    "usage aggregate import payload is invalid";
+
+fn admin_usage_aggregate_import_error(detail: String) -> GatewayError {
+    // Import validation errors can include source row IDs, table names, and
+    // adapter-specific details. Keep those details in process memory only;
+    // the public/admin response receives a stable client-safe message.
+    warn!(
+        event_name = "admin_usage_aggregate_import_rejected",
+        error_length = detail.len(),
+        "usage aggregate import input was rejected"
+    );
+    GatewayError::Client {
+        status: http::StatusCode::BAD_REQUEST,
+        message: ADMIN_USAGE_AGGREGATE_INVALID_INPUT_DETAIL.to_string(),
+    }
+}
 
 fn system_config_key_affects_scheduler(key: &str) -> bool {
     let key = key.trim();
@@ -292,18 +306,38 @@ impl AppState {
             GatewayDataState::disabled()
                 .with_usage_worker_queue(Self::usage_worker_queue_for(&runtime_state)),
         );
-        let client = build_http_client(&HttpClientConfig {
-            connect_timeout_ms: Some(10_000),
-            request_timeout_ms: Some(300_000),
-            http2_adaptive_window: true,
-            ..HttpClientConfig::default()
-        })?;
-        let owner_forward_client = build_http_client(&HttpClientConfig {
-            connect_timeout_ms: Some(10_000),
-            http2_adaptive_window: true,
-            ..HttpClientConfig::default()
-        })?;
+        let client = apply_http_client_config(
+            reqwest::Client::builder()
+                .no_proxy()
+                .redirect(reqwest::redirect::Policy::none()),
+            &HttpClientConfig {
+                connect_timeout_ms: Some(10_000),
+                request_timeout_ms: Some(300_000),
+                http2_adaptive_window: true,
+                ..HttpClientConfig::default()
+            },
+        )
+        .build()?;
+        let owner_forward_client = apply_http_client_config(
+            reqwest::Client::builder()
+                .no_proxy()
+                .redirect(reqwest::redirect::Policy::none()),
+            &HttpClientConfig {
+                connect_timeout_ms: Some(10_000),
+                http2_adaptive_window: true,
+                ..HttpClientConfig::default()
+            },
+        )
+        .build()?;
         let frontdoor_runtime_guards = Arc::new(FrontdoorRuntimeGuardConfig::from_env());
+        let internal_gateway_auth =
+            Arc::new(crate::internal_gateway_auth::InternalGatewayAuthConfig::for_process());
+        if internal_gateway_auth.status() == "misconfigured" {
+            warn!(
+                environment_variable = crate::internal_gateway_auth::INTERNAL_GATEWAY_AUTH_SECRET_ENV,
+                "internal gateway control plane is fail-closed because its authentication secret is invalid"
+            );
+        }
         Ok(Self {
             #[cfg(test)]
             execution_runtime_override_base_url: execution_runtime_override_base_url
@@ -315,6 +349,7 @@ impl AppState {
             background_data: Arc::clone(&data),
             background_data_isolated: false,
             runtime_state: runtime_state.clone(),
+            internal_gateway_auth,
             usage_runtime: Arc::new(usage::UsageRuntime::disabled()),
             video_tasks: Arc::new(VideoTaskService::new(
                 VideoTaskTruthSourceMode::PythonSyncReport,
@@ -324,6 +359,7 @@ impl AppState {
             request_body_buffer_budget: Arc::new(tokio::sync::Semaphore::new(
                 frontdoor_runtime_guards.request_body_buffer_budget_permits,
             )),
+            http_connection_budget: None,
             request_gate: None,
             websocket_connection_gate: None,
             auth_snapshot_load_gate: frontdoor_runtime_guards
@@ -354,6 +390,7 @@ impl AppState {
             auth_api_key_force_capabilities_cache: Arc::new(JsonValueCache::default()),
             auth_api_key_feature_settings_cache: Arc::new(JsonValueCache::default()),
             auth_daily_quota_availability_cache: Arc::new(ValueCache::default()),
+            auth_plan_usage_policy_cache: Arc::new(ValueCache::default()),
             auth_wallet_snapshot_cache: Arc::new(ValueCache::default()),
             auth_request_cost_upper_bound_cache: Arc::new(ValueCache::default()),
             provider_quota_snapshot_cache: Arc::new(ValueCache::default()),
@@ -403,6 +440,9 @@ impl AppState {
             local_execution_runtime_miss_diagnostics: Arc::new(DashMap::new()),
             admin_monitoring_error_stats_reset_at: Arc::new(StdMutex::new(None)),
             provider_delete_tasks: Arc::new(StdMutex::new(HashMap::new())),
+            pool_quota_probe_replenish: Arc::new(
+                crate::maintenance::PoolQuotaProbeReplenishCoordinator::default(),
+            ),
             #[cfg(test)]
             turnstile_siteverify_url_override: None,
             #[cfg(test)]
@@ -454,6 +494,10 @@ impl AppState {
 
     pub const fn execution_runtime_configured(&self) -> bool {
         true
+    }
+
+    pub(crate) fn internal_gateway_auth_status(&self) -> &'static str {
+        self.internal_gateway_auth.status()
     }
 
     #[cfg(test)]
@@ -575,6 +619,11 @@ impl AppState {
         self
     }
 
+    pub fn with_http_connection_budget(mut self, budget: Arc<HttpConnectionBudget>) -> Self {
+        self.http_connection_budget = Some(budget);
+        self
+    }
+
     pub fn with_request_concurrency_limit(mut self, limit: usize) -> Self {
         let limit = limit.max(1);
         self.request_gate = Some(Arc::new(ConcurrencyGate::new("gateway_requests", limit)));
@@ -596,6 +645,10 @@ impl AppState {
     }
 
     pub fn with_runtime_state(mut self, runtime_state: Arc<RuntimeState>) -> Self {
+        if !Arc::ptr_eq(&self.runtime_state, &runtime_state) {
+            self.pool_quota_probe_replenish =
+                Arc::new(crate::maintenance::PoolQuotaProbeReplenishCoordinator::default());
+        }
         self.runtime_state = runtime_state;
         self.admin_security_blacklist_cache.clear();
         self.admin_security_whitelist_cache.clear();
@@ -742,22 +795,40 @@ impl AppState {
         &self,
         key: &str,
     ) -> Result<Option<serde_json::Value>, GatewayError> {
-        self.read_system_config_json_value_with_cache_windows(
-            key,
-            SYSTEM_CONFIG_CACHE_TTL,
-            SYSTEM_CONFIG_CACHE_MAX_STALENESS,
-        )
-        .await
+        let value = self
+            .read_system_config_json_value_with_cache_windows(
+                key,
+                SYSTEM_CONFIG_CACHE_TTL,
+                SYSTEM_CONFIG_CACHE_MAX_STALENESS,
+            )
+            .await?;
+        Ok(value)
     }
 
     pub(crate) async fn read_system_config_json_value_strong(
         &self,
         key: &str,
     ) -> Result<Option<serde_json::Value>, GatewayError> {
-        self.data
+        let value = self
+            .data
             .find_system_config_value_strong(key)
             .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        Ok(value)
+    }
+
+    pub(crate) async fn compare_and_set_system_config_string_value(
+        &self,
+        key: &str,
+        expected: &str,
+        replacement: &str,
+    ) -> Result<bool, GatewayError> {
+        let result = self
+            .data
+            .compare_and_set_system_config_string_value(key, expected, replacement)
+            .await;
+        self.system_config_cache.invalidate(key);
+        result.map_err(|err| GatewayError::Internal(err.to_string()))
     }
 
     async fn read_system_config_json_value_with_cache_windows(
@@ -827,7 +898,7 @@ impl AppState {
                 }
                 Err(error) => {
                     guard.fail(GatewayError::Internal(error.to_string()));
-                    warn!(error = %error, "background system config refresh failed");
+                    warn!(error = %crate::error::redact_error_detail(&error), "background system config refresh failed");
                 }
             }
             drop(guard);
@@ -950,6 +1021,7 @@ impl AppState {
         self.auth_api_key_force_capabilities_cache.clear();
         self.auth_api_key_feature_settings_cache.clear();
         self.auth_daily_quota_availability_cache.clear();
+        self.auth_plan_usage_policy_cache.clear();
         self.auth_wallet_snapshot_cache.clear();
         self.auth_request_cost_upper_bound_cache.clear();
         self.provider_quota_snapshot_cache.clear();
@@ -1035,10 +1107,9 @@ impl AppState {
             .import_admin_system_usage_aggregates(snapshot, user_id_map, api_key_id_map, mode)
             .await
             .map_err(|err| match err {
-                aether_data::DataLayerError::InvalidInput(detail) => GatewayError::Client {
-                    status: http::StatusCode::BAD_REQUEST,
-                    message: detail,
-                },
+                aether_data::DataLayerError::InvalidInput(detail) => {
+                    admin_usage_aggregate_import_error(detail)
+                }
                 other => GatewayError::Internal(other.to_string()),
             })
     }
@@ -1129,18 +1200,27 @@ impl AppState {
         &self,
         mutation: &aether_data::repository::proxy_nodes::ProxyNodeRegistrationMutation,
     ) -> Result<Option<StoredProxyNode>, GatewayError> {
-        self.data
-            .register_proxy_node(mutation)
-            .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))
+        self.register_proxy_node_with_bound_secrets(mutation).await
     }
 
     pub(crate) async fn create_manual_proxy_node(
         &self,
         mutation: &ProxyNodeManualCreateMutation,
     ) -> Result<Option<StoredProxyNode>, GatewayError> {
+        let mut protected = mutation.clone();
+        let node_id = mutation
+            .node_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        protected.node_id = Some(node_id.clone());
+        if let Some(password) = mutation.proxy_password.as_deref() {
+            protected.proxy_password = Some(self.protect_proxy_node_password(&node_id, password)?);
+        }
         self.data
-            .create_manual_proxy_node(mutation)
+            .create_manual_proxy_node(&protected)
             .await
             .map_err(|err| GatewayError::Internal(err.to_string()))
     }
@@ -1149,8 +1229,17 @@ impl AppState {
         &self,
         mutation: &ProxyNodeManualUpdateMutation,
     ) -> Result<Option<StoredProxyNode>, GatewayError> {
+        let Some(existing) = self.find_proxy_node(&mutation.node_id).await? else {
+            return Ok(None);
+        };
+        let mut protected = mutation.clone();
+        protected.node_id = existing.id.clone();
+        if let Some(password) = mutation.proxy_password.as_deref() {
+            protected.proxy_password =
+                Some(self.protect_proxy_node_password(&existing.id, password)?);
+        }
         self.data
-            .update_manual_proxy_node(mutation)
+            .update_manual_proxy_node(&protected)
             .await
             .map_err(|err| GatewayError::Internal(err.to_string()))
     }
@@ -1183,6 +1272,9 @@ impl AppState {
         &self,
         mutation: &ProxyNodeHeartbeatMutation,
     ) -> Result<Option<StoredProxyNode>, GatewayError> {
+        crate::state::decrypt_or_migrate_proxy_tunnel_psk(&self.data, &mutation.node_id)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
         self.data
             .apply_proxy_node_heartbeat(mutation)
             .await
@@ -1588,6 +1680,9 @@ impl AppState {
                 .unwrap_or(u64::MAX),
             ),
         ]);
+        if let Some(budget) = &self.http_connection_budget {
+            samples.extend(http_connection_metric_samples(&budget.snapshot()));
+        }
         if let Some(snapshot) = self.request_concurrency_snapshot() {
             samples.extend(snapshot.to_metric_samples("gateway_requests"));
         }
@@ -1742,10 +1837,44 @@ impl AppState {
             &self.task_supervisor_metrics.snapshot(),
         ));
         samples.extend(crate::tokio_metrics::gateway_tokio_runtime_metric_samples());
+        samples.extend(aether_runtime::logging_metric_samples());
         samples.extend(
             crate::execution_runtime::transport::direct_reqwest_client_cache_metric_samples(),
         );
         samples.extend(self.upstream_target_admission.metric_samples());
+        let probe_replenish = self.pool_quota_probe_replenish.snapshot();
+        samples.extend([
+            MetricSample::new(
+                "pool_quota_probe_replenish_provider_capacity",
+                "Maximum providers with an active local request-triggered probe task.",
+                MetricKind::Gauge,
+                probe_replenish.capacity as u64,
+            ),
+            MetricSample::new(
+                "pool_quota_probe_replenish_active_providers",
+                "Providers with an active local request-triggered probe task.",
+                MetricKind::Gauge,
+                probe_replenish.active as u64,
+            ),
+            MetricSample::new(
+                "pool_quota_probe_replenish_started_total",
+                "Local request-triggered provider probe tasks admitted.",
+                MetricKind::Counter,
+                probe_replenish.started_total,
+            ),
+            MetricSample::new(
+                "pool_quota_probe_replenish_coalesced_total",
+                "Request triggers merged into an existing local provider probe task.",
+                MetricKind::Counter,
+                probe_replenish.coalesced_total,
+            ),
+            MetricSample::new(
+                "pool_quota_probe_replenish_capacity_rejected_total",
+                "Request-triggered probe tasks skipped because the local provider limit was reached.",
+                MetricKind::Counter,
+                probe_replenish.capacity_rejected_total,
+            ),
+        ]);
         samples.extend(crate::cache::candidate_page_cache_metric_samples());
         samples.extend(crate::stage_metrics::gateway_stage_metric_samples());
         samples.extend(self.tunnel.metric_samples());
@@ -2020,9 +2149,16 @@ impl AppState {
         mut self,
         path: impl Into<std::path::PathBuf>,
     ) -> std::io::Result<Self> {
+        let encryption_key = self.data.encryption_key().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "AETHER_GATEWAY_VIDEO_TASK_STORE_PATH requires a configured encryption key",
+            )
+        })?;
         self.video_tasks = Arc::new(VideoTaskService::with_file_store(
             self.video_tasks.truth_source_mode(),
             path,
+            encryption_key,
         )?);
         Ok(self)
     }
@@ -2031,6 +2167,36 @@ impl AppState {
         let mut state = self.clone();
         state.data = self.background_data.clone();
         state
+    }
+
+    pub async fn shutdown_usage_runtime(
+        &self,
+        timeout: Duration,
+    ) -> Result<(), aether_data_contracts::DataLayerError> {
+        tokio::time::timeout(timeout, async {
+            let local_queue = self.runtime_state.is_memory().then(|| {
+                let queue: Arc<dyn RuntimeQueueStore> = self.runtime_state.clone();
+                queue
+            });
+            self.usage_runtime
+                .shutdown_with_local_queue(timeout, local_queue)
+                .await?;
+            while self
+                .request_candidate_queue
+                .as_ref()
+                .is_some_and(|queue| queue.pending_writes() != 0)
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|_| {
+            aether_data_contracts::DataLayerError::TimedOut(
+                "gateway usage or candidate persistence did not drain before shutdown deadline"
+                    .to_string(),
+            )
+        })?
     }
 
     pub fn spawn_background_tasks(&self) -> crate::task_runtime::TaskSupervisor {
@@ -2190,6 +2356,41 @@ fn database_bounded_auth_load_limit(
         let database_limit = (database_max_connections as usize / 2).max(1);
         configured_limit.max(1).min(database_limit)
     })
+}
+
+fn http_connection_metric_samples(snapshot: &HttpConnectionBudgetSnapshot) -> Vec<MetricSample> {
+    vec![
+        MetricSample::new(
+            "gateway_http_connections_limit",
+            "Maximum admitted inbound TCP connections across gateway listeners.",
+            MetricKind::Gauge,
+            u64::try_from(snapshot.limit).unwrap_or(u64::MAX),
+        ),
+        MetricSample::new(
+            "gateway_http_connections_in_flight",
+            "Currently admitted inbound TCP connections, including upgraded connections.",
+            MetricKind::Gauge,
+            u64::try_from(snapshot.in_flight).unwrap_or(u64::MAX),
+        ),
+        MetricSample::new(
+            "gateway_http_connections_high_watermark",
+            "Highest simultaneous admitted inbound TCP connection count.",
+            MetricKind::Gauge,
+            u64::try_from(snapshot.high_watermark).unwrap_or(u64::MAX),
+        ),
+        MetricSample::new(
+            "gateway_http_connections_rejected_total",
+            "Inbound TCP connections closed because the connection budget was full.",
+            MetricKind::Counter,
+            snapshot.rejected_total,
+        ),
+        MetricSample::new(
+            "gateway_http_connections_accept_errors_total",
+            "Listener accept errors retried with bounded backoff.",
+            MetricKind::Counter,
+            snapshot.accept_errors_total,
+        ),
+    ]
 }
 
 fn task_supervisor_metric_samples(
@@ -3106,6 +3307,18 @@ fn usage_runtime_metric_samples(
 ) -> Vec<MetricSample> {
     vec![
         MetricSample::new(
+            "usage_runtime_shutdown_started", "Whether local usage admission is closed for shutdown.",
+            MetricKind::Gauge, u64::from(snapshot.shutdown_started),
+        ),
+        MetricSample::new(
+            "usage_runtime_producers_in_flight", "Tracked requests and finalizers that can still submit usage events.",
+            MetricKind::Gauge, snapshot.producers_in_flight as u64,
+        ),
+        MetricSample::new(
+            "usage_runtime_delayed_lifecycle_pending", "Delayed lifecycle events still held in this process.",
+            MetricKind::Gauge, snapshot.delayed_lifecycle_pending as u64,
+        ),
+        MetricSample::new(
             "usage_runtime_enabled",
             "Whether the gateway usage runtime is enabled.",
             MetricKind::Gauge,
@@ -3236,6 +3449,132 @@ fn usage_runtime_metric_samples(
             "Whether deferred lifecycle usage events are scheduled for local enqueue retry.",
             MetricKind::Gauge,
             u64::from(snapshot.retry_deferred_lifecycle_events),
+        ),
+        MetricSample::new(
+            "usage_runtime_queue_payload_max_bytes",
+            "Maximum serialized JSON payload bytes for a new usage queue message.",
+            MetricKind::Gauge,
+            snapshot.queue_payload_max_bytes as u64,
+        ),
+        MetricSample::new(
+            "usage_runtime_queue_payload_downgraded_total",
+            "Process-wide enqueue and retry validation encoding attempts that omitted diagnostic data after exceeding the payload limit; not unique events.",
+            MetricKind::Counter,
+            snapshot.queue_payload_downgraded_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_queue_payload_rejected_total",
+            "Process-wide enqueue and retry validation encoding attempts rejected because the payload exceeded its limit or billing facts could not be preserved; not unique events.",
+            MetricKind::Counter,
+            snapshot.queue_payload_rejected_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_queue_read_payload_budget_bytes",
+            "Process-wide payload reservation limit for usage worker reads and reclaims; not a wire or heap limit.",
+            MetricKind::Gauge,
+            snapshot.queue_read_payload_budget_bytes as u64,
+        ),
+        MetricSample::new(
+            "usage_runtime_queue_read_batch_payload_bytes",
+            "Target payload reservation per usage worker batch, allowing at least one configured maximum payload.",
+            MetricKind::Gauge,
+            snapshot.queue_read_batch_payload_bytes as u64,
+        ),
+        MetricSample::new(
+            "usage_runtime_queue_read_payload_reserved_bytes",
+            "Process-wide logical payload bytes reserved by usage worker reads, reclaims and unprocessed batches.",
+            MetricKind::Gauge,
+            snapshot.queue_read_payload_reserved_bytes as u64,
+        ),
+        MetricSample::new(
+            "usage_runtime_queue_read_payload_waiters",
+            "Usage workers currently waiting for shared payload reservation capacity.",
+            MetricKind::Gauge,
+            snapshot.queue_read_payload_waiters as u64,
+        ),
+        MetricSample::new(
+            "usage_runtime_queue_read_payload_wait_total",
+            "Process-wide usage worker batch reservation attempts that had to wait for capacity.",
+            MetricKind::Counter,
+            snapshot.queue_read_payload_wait_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_queue_read_actual_field_bytes_total",
+            "Cumulative key and value bytes observed in reserved usage worker batches, including repeated reclaims; excludes Redis framing and allocations.",
+            MetricKind::Counter,
+            snapshot.queue_read_actual_field_bytes_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_queue_read_oversized_entries_total",
+            "Observed usage entries whose combined field value bytes exceed the consumer payload estimate, including repeated reclaims.",
+            MetricKind::Counter,
+            snapshot.queue_read_oversized_entries_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_queue_read_oversized_batches_total",
+            "Observed usage batches whose combined field value bytes exceed their initial reservation; entries remain eligible for processing.",
+            MetricKind::Counter,
+            snapshot.queue_read_oversized_batches_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_event_capture_memory_budget_bytes",
+            "Process-wide diagnostic JSON heap estimate budget for retained usage events.",
+            MetricKind::Gauge,
+            snapshot.event_capture_memory_budget_bytes as u64,
+        ),
+        MetricSample::new(
+            "usage_runtime_dlq_encoding_budget_bytes",
+            "Process-wide logical raw string and JSON reservation limit for dead letter encoding; excludes Redis buffers.",
+            MetricKind::Gauge,
+            snapshot.dlq_encoding_budget_bytes as u64,
+        ),
+        MetricSample::new(
+            "usage_runtime_dlq_encoding_max_jobs",
+            "Maximum admitted dead letter encoding and write jobs per process.",
+            MetricKind::Gauge,
+            snapshot.dlq_encoding_max_jobs as u64,
+        ),
+        MetricSample::new(
+            "usage_runtime_dlq_encoding_reserved_bytes",
+            "Logical raw string and JSON bytes reserved by admitted dead letter jobs.",
+            MetricKind::Gauge,
+            snapshot.dlq_encoding_reserved_bytes as u64,
+        ),
+        MetricSample::new(
+            "usage_runtime_dlq_encoding_active_jobs",
+            "Admitted dead letter jobs awaiting or performing encoding or queue writes.",
+            MetricKind::Gauge,
+            snapshot.dlq_encoding_active_jobs as u64,
+        ),
+        MetricSample::new(
+            "usage_runtime_dlq_encoding_capacity_rejected_total",
+            "Dead letter attempts rejected because encoding byte or job capacity was occupied; source remains pending.",
+            MetricKind::Counter,
+            snapshot.dlq_encoding_capacity_rejected_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_dlq_encoding_oversized_rejected_total",
+            "Dead letter attempts rejected because the conservative encoding reservation exceeded the total budget or overflowed.",
+            MetricKind::Counter,
+            snapshot.dlq_encoding_oversized_rejected_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_dlq_encoding_encoded_total",
+            "Completed dead letter JSON encodings, including repeated attempts; not successful archives.",
+            MetricKind::Counter,
+            snapshot.dlq_encoding_encoded_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_event_capture_memory_retained_bytes",
+            "Estimated diagnostic JSON heap retained by budgeted usage events and their clones.",
+            MetricKind::Gauge,
+            snapshot.event_capture_memory_retained_bytes as u64,
+        ),
+        MetricSample::new(
+            "usage_runtime_event_capture_memory_downgraded_total",
+            "Usage event diagnostic captures omitted after memory budget exhaustion.",
+            MetricKind::Counter,
+            snapshot.event_capture_memory_downgraded_total,
         ),
         MetricSample::new(
             "usage_runtime_terminal_submission_limit",
@@ -3616,6 +3955,12 @@ fn usage_runtime_metric_samples(
             snapshot.enqueue_retry_failed_total,
         ),
         MetricSample::new(
+            "usage_runtime_enqueue_retry_permanent_failure_total",
+            "Usage enqueue retry submissions rejected or queued events terminated because of permanent input errors.",
+            MetricKind::Counter,
+            snapshot.enqueue_retry_permanent_failure_total,
+        ),
+        MetricSample::new(
             "usage_runtime_enqueue_retry_closed_or_unavailable_total",
             "Total usage events rejected because the local enqueue dispatcher was full, closed, or unavailable.",
             MetricKind::Counter,
@@ -3848,7 +4193,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        database_bounded_auth_load_limit, merge_usage_counter_health_snapshots,
+        admin_usage_aggregate_import_error, database_bounded_auth_load_limit,
+        merge_usage_counter_health_snapshots,
         usage_counter_pending_health_metric_samples_with_timeout,
         usage_queue_health_metric_samples_with_timeout, usage_runtime_metric_samples, AppState,
         MetricKind, MetricSample, METRIC_SNAPSHOT_TTL,
@@ -3856,6 +4202,23 @@ mod tests {
     };
     use crate::cache::SchedulerAffinityTarget;
     use crate::data::{GatewayDataConfig, GatewayDataState};
+
+    #[test]
+    fn usage_aggregate_import_invalid_input_is_projected_to_a_safe_client_message() {
+        let error = admin_usage_aggregate_import_error(
+            "postgres table stats_user_daily row secret-user contains column password".to_string(),
+        );
+
+        match error {
+            super::GatewayError::Client { status, message } => {
+                assert_eq!(status, http::StatusCode::BAD_REQUEST);
+                assert_eq!(message, "usage aggregate import payload is invalid");
+                assert!(!message.contains("secret-user"));
+                assert!(!message.contains("password"));
+            }
+            other => panic!("expected client-safe import error, got {other:?}"),
+        }
+    }
 
     #[test]
     fn auth_load_gate_reserves_half_of_foreground_database_pool() {
@@ -3867,6 +4230,126 @@ mod tests {
         assert_eq!(database_bounded_auth_load_limit(Some(64), Some(1)), Some(1));
         assert_eq!(database_bounded_auth_load_limit(None, Some(92)), None);
         assert_eq!(database_bounded_auth_load_limit(Some(64), None), Some(64));
+    }
+
+    #[tokio::test]
+    async fn http_connection_budget_is_optional_and_shared_by_app_state_clones() {
+        let state = AppState::new().expect("app state should build");
+        assert!(state.http_connection_budget.is_none());
+        let budget = Arc::new(super::HttpConnectionBudget::new(1));
+        let state = state.with_http_connection_budget(Arc::clone(&budget));
+        let cloned = state.clone();
+        assert!(Arc::ptr_eq(
+            cloned.http_connection_budget.as_ref().unwrap(),
+            &budget,
+        ));
+
+        let connection = budget.try_admit(()).expect("first connection admitted");
+        assert!(cloned
+            .http_connection_budget
+            .as_ref()
+            .unwrap()
+            .try_admit(())
+            .is_err());
+        let samples = state.collect_metric_samples().await;
+        for (name, expected) in [
+            ("gateway_http_connections_limit", 1),
+            ("gateway_http_connections_in_flight", 1),
+            ("gateway_http_connections_high_watermark", 1),
+            ("gateway_http_connections_rejected_total", 1),
+            ("gateway_http_connections_accept_errors_total", 0),
+        ] {
+            assert_eq!(
+                samples
+                    .iter()
+                    .find(|sample| sample.name == name)
+                    .unwrap()
+                    .value,
+                expected,
+            );
+        }
+        drop(connection);
+        assert_eq!(budget.snapshot().in_flight, 0);
+    }
+
+    #[test]
+    fn http_connection_metrics_export_all_budget_counters() {
+        let samples = super::http_connection_metric_samples(&super::HttpConnectionBudgetSnapshot {
+            limit: 4096,
+            in_flight: 11,
+            high_watermark: 30,
+            rejected_total: 7,
+            accept_errors_total: 3,
+        });
+        for (name, kind, value) in [
+            ("gateway_http_connections_limit", MetricKind::Gauge, 4096),
+            ("gateway_http_connections_in_flight", MetricKind::Gauge, 11),
+            (
+                "gateway_http_connections_high_watermark",
+                MetricKind::Gauge,
+                30,
+            ),
+            (
+                "gateway_http_connections_rejected_total",
+                MetricKind::Counter,
+                7,
+            ),
+            (
+                "gateway_http_connections_accept_errors_total",
+                MetricKind::Counter,
+                3,
+            ),
+        ] {
+            let matching = samples
+                .iter()
+                .filter(|sample| sample.name == name)
+                .collect::<Vec<_>>();
+            assert_eq!(matching.len(), 1);
+            assert_eq!((matching[0].kind, matching[0].value), (kind, value));
+        }
+    }
+
+    #[test]
+    fn usage_runtime_metrics_export_queue_payload_limit_and_attempt_counters() {
+        let mut snapshot = crate::usage::UsageRuntimeMetricsSnapshot::default();
+        snapshot.queue_payload_max_bytes = 1024 * 1024;
+        snapshot.queue_payload_downgraded_total = 11;
+        snapshot.queue_payload_rejected_total = 3;
+        snapshot.enqueue_retry_permanent_failure_total = 2;
+        let samples = usage_runtime_metric_samples(&snapshot);
+        for (name, kind, value) in [
+            (
+                "usage_runtime_queue_payload_max_bytes",
+                MetricKind::Gauge,
+                1024 * 1024,
+            ),
+            (
+                "usage_runtime_queue_payload_downgraded_total",
+                MetricKind::Counter,
+                11,
+            ),
+            (
+                "usage_runtime_queue_payload_rejected_total",
+                MetricKind::Counter,
+                3,
+            ),
+            (
+                "usage_runtime_enqueue_retry_permanent_failure_total",
+                MetricKind::Counter,
+                2,
+            ),
+        ] {
+            let matching = samples
+                .iter()
+                .filter(|sample| sample.name == name)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                matching.len(),
+                1,
+                "each payload metric must be emitted once"
+            );
+            assert_eq!((matching[0].kind, matching[0].value), (kind, value));
+        }
     }
 
     #[test]
@@ -4350,12 +4833,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn system_config_entry_write_refreshes_cache_and_scheduler_affinity_for_routing_keys() {
+    async fn system_config_entry_write_refreshes_cache_and_scheduler_affinity_for_format_conversion(
+    ) {
         let state = AppState::new()
             .expect("app state should build")
             .with_data_state_for_tests(
                 GatewayDataState::disabled().with_system_config_values_for_tests([(
-                    "keep_priority_on_conversion".to_string(),
+                    "enable_format_conversion".to_string(),
                     json!(false),
                 )]),
             );
@@ -4364,7 +4848,7 @@ mod tests {
 
         assert_eq!(
             state
-                .read_system_config_json_value("keep_priority_on_conversion")
+                .read_system_config_json_value("enable_format_conversion")
                 .await
                 .expect("system config read should succeed"),
             Some(json!(false))
@@ -4385,13 +4869,13 @@ mod tests {
 
         let initial_epoch = state.scheduler_affinity_epoch();
         state
-            .upsert_system_config_entry("keep_priority_on_conversion", &json!(true), None)
+            .upsert_system_config_entry("enable_format_conversion", &json!(true), None)
             .await
             .expect("admin config write should succeed");
 
         assert_eq!(
             state
-                .read_system_config_json_value("keep_priority_on_conversion")
+                .read_system_config_json_value("enable_format_conversion")
                 .await
                 .expect("system config read should use refreshed cache"),
             Some(json!(true))

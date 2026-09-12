@@ -7,8 +7,17 @@ use base64::{
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 
+const MAX_UNVERIFIED_JWT_PART_BYTES: usize = 64 * 1024;
+
 fn decode_base64_url_part(value: &str) -> Option<Vec<u8>> {
-    URL_SAFE_NO_PAD
+    if value.len()
+        > crate::execution_runtime::transport::maximum_base64_len_for_decoded_limit(
+            MAX_UNVERIFIED_JWT_PART_BYTES,
+        )
+    {
+        return None;
+    }
+    let bytes = URL_SAFE_NO_PAD
         .decode(value.as_bytes())
         .or_else(|_| URL_SAFE.decode(value.as_bytes()))
         .or_else(|_| {
@@ -19,7 +28,8 @@ fn decode_base64_url_part(value: &str) -> Option<Vec<u8>> {
             }
             URL_SAFE.decode(padded.as_bytes())
         })
-        .ok()
+        .ok()?;
+    (bytes.len() <= MAX_UNVERIFIED_JWT_PART_BYTES).then_some(bytes)
 }
 
 fn decode_unverified_jwt_json_part(part: &str) -> Option<Map<String, Value>> {
@@ -31,15 +41,26 @@ fn decode_unverified_jwt_json_part(part: &str) -> Option<Map<String, Value>> {
 }
 
 pub(super) fn looks_like_access_token(token: &str) -> bool {
-    let parts = token.trim().split('.').collect::<Vec<_>>();
-    if parts.len() != 3 || parts.iter().any(|part| part.is_empty()) {
+    let mut parts = token.trim().split('.');
+    let Some(header_part) = parts.next().filter(|part| !part.is_empty()) else {
+        return false;
+    };
+    let Some(payload_part) = parts.next().filter(|part| !part.is_empty()) else {
+        return false;
+    };
+    let Some(_signature_part) = parts.next().filter(|part| !part.is_empty()) else {
+        return false;
+    };
+    // A JWT has exactly three dot-separated parts. Avoid collecting all
+    // attacker-controlled segments into a temporary Vec just to reject extras.
+    if parts.next().is_some() {
         return false;
     }
 
-    let Some(header) = decode_unverified_jwt_json_part(parts[0]) else {
+    let Some(header) = decode_unverified_jwt_json_part(header_part) else {
         return false;
     };
-    let Some(payload) = decode_unverified_jwt_json_part(parts[1]) else {
+    let Some(payload) = decode_unverified_jwt_json_part(payload_part) else {
         return false;
     };
 
@@ -365,6 +386,13 @@ mod tests {
         let (refresh_token, access_token) = normalize_single_import_tokens(Some(&token), None);
         assert!(refresh_token.is_none());
         assert_eq!(access_token.as_deref(), Some(token.as_str()));
+    }
+
+    #[test]
+    fn rejects_jwt_with_many_extra_segments_without_collecting() {
+        let token = unsigned_jwt(json!({"exp": 2_000_000_000u64}));
+        let oversized = format!("{token}.{}", "x.".repeat(4096));
+        assert!(!looks_like_access_token(&oversized));
     }
 
     #[test]

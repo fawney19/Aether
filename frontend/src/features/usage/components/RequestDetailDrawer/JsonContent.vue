@@ -1,408 +1,184 @@
 <template>
   <div>
     <div
-      v-if="!data || (typeof data === 'object' && Object.keys(data).length === 0)"
+      v-if="!bodyDocument && (data == null || (typeof data === 'object' && (Array.isArray(data) ? data.length === 0 : Object.keys(data).length === 0)))"
       class="text-sm text-muted-foreground"
     >
       {{ emptyMessage }}
     </div>
-    <!-- 纯字符串数据（非 JSON 对象） -->
-    <Card
-      v-else-if="typeof data === 'string'"
-      class="bg-muted/30 overflow-hidden"
-    >
-      <div class="p-4 overflow-x-auto max-h-[500px] overflow-y-auto">
-        <pre class="text-xs font-mono whitespace-pre-wrap">{{ data }}</pre>
-      </div>
-    </Card>
-    <!-- 非 JSON 响应（如 HTML 错误页面） -->
-    <Card
-      v-else-if="hasParseError"
-      class="bg-muted/30 overflow-hidden"
-    >
-      <div class="p-3 bg-amber-50 dark:bg-amber-900/20 border-b border-amber-200 dark:border-amber-800">
-        <div class="flex items-start gap-2">
-          <span class="text-amber-600 dark:text-amber-400 text-sm font-medium">Warning: 响应解析失败</span>
-          <span class="text-xs text-amber-700 dark:text-amber-300">{{ parseErrorMessage }}</span>
-        </div>
-      </div>
-      <div class="p-4 overflow-x-auto max-h-[500px] overflow-y-auto">
-        <pre class="text-xs font-mono whitespace-pre-wrap text-muted-foreground">{{ rawResponseContent }}</pre>
-      </div>
-    </Card>
     <Card
       v-else
       class="bg-muted/30 overflow-hidden"
     >
-      <!-- JSON 查看器 -->
-      <div
+      <VirtualBodyContent
+        :key="viewRevision"
+        ref="viewer"
         class="json-viewer"
         :class="{ 'theme-dark': isDark }"
+        :load-chunk="loadChunk"
+        @load-error="emit('load-error', $event)"
       >
-        <div class="json-lines">
-          <template
-            v-for="line in visibleLines"
-            :key="line.displayId"
+        <template #default="{ chunk, index }">
+          <div
+            v-if="chunk.parseError && index === 0"
+            class="p-3 bg-amber-50 dark:bg-amber-900/20 border-b border-amber-200 dark:border-amber-800"
           >
-            <div
-              class="json-line"
-              :class="{ 'has-fold': line.canFold }"
-            >
-              <!-- 行号区域（包含折叠按钮） -->
-              <div class="line-number-area">
-                <span
-                  v-if="line.canFold"
-                  class="fold-button"
-                  @click="toggleFold(line.blockId)"
-                >
-                  <ChevronRight
-                    v-if="collapsedBlocks.has(line.blockId)"
-                    class="fold-icon"
-                  />
-                  <ChevronDown
-                    v-else
-                    class="fold-icon"
-                  />
-                </span>
-                <span class="line-number">{{ line.displayLineNumber }}</span>
-              </div>
-              <!-- 内容区域 -->
-              <div class="line-content-area">
-                <!-- 缩进 -->
-                <span
-                  class="indent"
-                  :style="{ width: `${line.indent * 16}px` }"
-                />
-                <!-- 内容 -->
-                <!-- eslint-disable vue/no-v-html -->
-                <span
-                  class="line-content"
-                  :class="{ 'clickable-collapsed': line.canFold && collapsedBlocks.has(line.blockId) }"
-                  @click="line.canFold && collapsedBlocks.has(line.blockId) && toggleFold(line.blockId)"
-                  v-html="getDisplayHtml(line)"
-                />
-                <!-- eslint-enable vue/no-v-html -->
-              </div>
+            <div class="flex items-start gap-2">
+              <span class="text-amber-600 dark:text-amber-400 text-sm font-medium">Warning: 响应解析失败</span>
+              <span class="text-xs text-amber-700 dark:text-amber-300">{{ chunk.parseError }}</span>
             </div>
-          </template>
-        </div>
-      </div>
+          </div>
+          <div
+            v-if="chunk.text !== undefined"
+            class="px-4"
+            :class="{ 'pt-4': index === 0, 'pb-4': !chunk.hasNext }"
+          >
+            <pre class="text-xs font-mono whitespace-pre-wrap break-all">{{ chunk.text }}</pre>
+          </div>
+          <div
+            v-else
+            class="json-lines"
+          >
+            <template
+              v-for="line in chunk.lines"
+              :key="line.id"
+            >
+              <div
+                class="json-line"
+                :class="{ 'has-fold': line.canFold }"
+                :data-json-line="line.lineNumber"
+              >
+                <!-- 行号区域（包含折叠按钮） -->
+                <div class="line-number-area">
+                  <button
+                    v-if="line.canFold"
+                    class="fold-button"
+                    type="button"
+                    :aria-label="line.collapsed ? '展开节点' : '折叠节点'"
+                    :aria-expanded="!line.collapsed"
+                    @click="toggleFold(line, index)"
+                  >
+                    <ChevronRight
+                      v-if="line.collapsed"
+                      class="fold-icon"
+                    />
+                    <ChevronDown
+                      v-else
+                      class="fold-icon"
+                    />
+                  </button>
+                  <span class="line-number">{{ line.continuation ? '' : line.lineNumber }}</span>
+                </div>
+                <!-- 内容区域 -->
+                <div class="line-content-area">
+                  <!-- 缩进 -->
+                  <span
+                    class="indent"
+                    :style="{ width: `${line.indent * 16}px` }"
+                  />
+                  <!-- 内容 -->
+                  <!-- eslint-disable vue/no-v-html -->
+                  <span
+                    class="line-content"
+                    :class="{ 'clickable-collapsed': line.canFold && line.collapsed }"
+                    @click="line.canFold && line.collapsed && toggleFold(line, index)"
+                    v-html="getDisplayHtml(line)"
+                  />
+                <!-- eslint-enable vue/no-v-html -->
+                </div>
+              </div>
+            </template>
+          </div>
+        </template>
+      </VirtualBodyContent>
     </Card>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch } from 'vue'
+import { ref, watch } from 'vue'
 import { ChevronRight, ChevronDown } from 'lucide-vue-next'
 import Card from '@/components/ui/card.vue'
-
-interface JsonLine {
-  id: number
-  lineNumber: number
-  indent: number
-  html: string
-  canFold: boolean
-  blockId: string
-  blockEnd?: number
-  collapsedInfo?: string
-  closingBracket?: string
-  trailingComma?: string
-}
-
-interface DisplayLine extends JsonLine {
-  displayId: string
-  displayLineNumber: number
-}
-
-/** JSON data can be any serializable value: object, array, string, number, boolean, null */
-type JsonValue = Record<string, unknown> | unknown[] | string | number | boolean | null | undefined
+import VirtualBodyContent from './VirtualBodyContent.vue'
+import { getRawTextChunk, JsonPageReader, JSON_SCROLL_CHUNK_SIZE, JSON_TEXT_CHUNK_SIZE, type JsonDisplayLine } from '../../utils/json-viewer'
+import type { BodyDocument } from '../../utils/body-document'
+import type { BodyJsonPage } from '../../utils/body-document-protocol'
 
 const props = defineProps<{
-  data: JsonValue
+  data: unknown
+  bodyDocument?: BodyDocument | null
   viewMode: 'formatted' | 'raw' | 'compare'
   expandDepth: number
   isDark: boolean
   emptyMessage: string
 }>()
 
-/** Safely cast data to an object for property access in templates */
-const dataAsObject = computed(() => {
-  if (props.data && typeof props.data === 'object' && !Array.isArray(props.data)) {
-    return props.data as Record<string, unknown>
-  }
-  return null
-})
+const emit = defineEmits<{ 'load-error': [error: unknown] }>()
+const viewer = ref<{ refresh: (index: number, resetTail?: boolean) => void } | null>(null)
+const viewRevision = ref(0)
+const foldOverrides = ref(new Map<string, boolean>())
+let localReader: JsonPageReader | undefined
 
-/** Whether the data contains a raw_response with a parse error (non-JSON response) */
-const hasParseError = computed(() => {
-  const obj = dataAsObject.value
-  if (!obj) return false
-  const metadata = obj.metadata as Record<string, unknown> | undefined
-  return Boolean(obj.raw_response && metadata?.parse_error)
-})
-
-/** Parse error message */
-const parseErrorMessage = computed(() => {
-  const obj = dataAsObject.value
-  if (!obj) return ''
-  const metadata = obj.metadata as Record<string, unknown> | undefined
-  return String(metadata?.parse_error || '')
-})
-
-/** Raw response content */
-const rawResponseContent = computed(() => {
-  const obj = dataAsObject.value
-  return obj ? String(obj.raw_response || '') : ''
-})
-
-const collapsedBlocks = ref<Set<string>>(new Set())
-const lines = ref<JsonLine[]>([])
-
-const getTokenHtml = (value: string, type: 'key' | 'string' | 'number' | 'boolean' | 'null' | 'bracket' | 'punctuation' | 'ellipsis'): string => {
-  const classMap = {
-    key: 'token-key',
-    string: 'token-string',
-    number: 'token-number',
-    boolean: 'token-boolean',
-    null: 'token-null',
-    bracket: 'token-bracket',
-    punctuation: 'token-punctuation',
-    ellipsis: 'token-ellipsis',
-  }
-  return `<span class="${classMap[type]}">${escapeHtml(value)}</span>`
+function loadChunk(index: number): BodyJsonPage | Promise<BodyJsonPage> {
+  if (props.bodyDocument) return props.bodyDocument.json({
+    page: index,
+    pageSize: JSON_SCROLL_CHUNK_SIZE,
+    expandDepth: props.expandDepth,
+    foldOverrides: new Map(foldOverrides.value),
+  })
+  const record = props.data && typeof props.data === 'object' ? props.data as Record<string, unknown> : null
+  const metadata = record?.metadata as Record<string, unknown> | undefined
+  const parseError = record?.raw_response && metadata?.parse_error ? String(metadata.parse_error) : undefined
+  const text = typeof props.data === 'string' ? props.data : parseError ? String(record?.raw_response) : undefined
+  if (text !== undefined) return { lines: [], ...getRawTextChunk(text, index), parseError }
+  localReader ??= new JsonPageReader(props.data, { pageSize: JSON_SCROLL_CHUNK_SIZE, expandDepth: props.expandDepth, foldOverrides: new Map(foldOverrides.value), stringChunkSize: JSON_TEXT_CHUNK_SIZE })
+  return localReader.read(index)
 }
 
-const escapeHtml = (str: string): string => {
-  return str
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
+function escapeHtml(value: string): string {
+  return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 }
 
-const jsonStringLiteral = (value: string): string => JSON.stringify(value)
+function token(value: string, type: string): string {
+  return `<span class="token-${type}">${escapeHtml(value)}</span>`
+}
 
-const parseJsonToLines = (data: unknown): JsonLine[] => {
-  const result: JsonLine[] = []
-  let lineNumber = 1
-  let blockIdCounter = 0
-
-  const getBlockId = () => `block-${blockIdCounter++}`
-
-  const processValue = (value: unknown, indent: number, isLast: boolean, keyPrefix: string = ''): void => {
-    const comma = isLast ? '' : ','
-
-    if (value === null) {
-      result.push({
-        id: result.length,
-        lineNumber: lineNumber++,
-        indent,
-        html: keyPrefix + getTokenHtml('null', 'null') + comma,
-        canFold: false,
-        blockId: '',
-      })
-    } else if (typeof value === 'boolean') {
-      result.push({
-        id: result.length,
-        lineNumber: lineNumber++,
-        indent,
-        html: keyPrefix + getTokenHtml(String(value), 'boolean') + comma,
-        canFold: false,
-        blockId: '',
-      })
-    } else if (typeof value === 'number') {
-      result.push({
-        id: result.length,
-        lineNumber: lineNumber++,
-        indent,
-        html: keyPrefix + getTokenHtml(String(value), 'number') + comma,
-        canFold: false,
-        blockId: '',
-      })
-    } else if (typeof value === 'string') {
-      result.push({
-        id: result.length,
-        lineNumber: lineNumber++,
-        indent,
-        html: keyPrefix + getTokenHtml(jsonStringLiteral(value), 'string') + comma,
-        canFold: false,
-        blockId: '',
-      })
-    } else if (Array.isArray(value)) {
-      if (value.length === 0) {
-        result.push({
-          id: result.length,
-          lineNumber: lineNumber++,
-          indent,
-          html: keyPrefix + getTokenHtml('[]', 'bracket') + comma,
-          canFold: false,
-          blockId: '',
-        })
-      } else {
-        const blockId = getBlockId()
-        const startLine = result.length
-        result.push({
-          id: result.length,
-          lineNumber: lineNumber++,
-          indent,
-          html: keyPrefix + getTokenHtml('[', 'bracket'),
-          canFold: true,
-          blockId,
-          collapsedInfo: `${value.length} items`,
-          closingBracket: ']',
-          trailingComma: comma,
-        })
-
-        value.forEach((item, i) => {
-          processValue(item, indent + 1, i === value.length - 1)
-        })
-
-        result.push({
-          id: result.length,
-          lineNumber: lineNumber++,
-          indent,
-          html: getTokenHtml(']', 'bracket') + comma,
-          canFold: false,
-          blockId: '',
-        })
-
-        result[startLine].blockEnd = result.length - 1
-      }
-    } else if (typeof value === 'object') {
-      const obj = value as Record<string, unknown>
-      const keys = Object.keys(obj)
-      if (keys.length === 0) {
-        result.push({
-          id: result.length,
-          lineNumber: lineNumber++,
-          indent,
-          html: keyPrefix + getTokenHtml('{}', 'bracket') + comma,
-          canFold: false,
-          blockId: '',
-        })
-      } else {
-        const blockId = getBlockId()
-        const startLine = result.length
-        result.push({
-          id: result.length,
-          lineNumber: lineNumber++,
-          indent,
-          html: keyPrefix + getTokenHtml('{', 'bracket'),
-          canFold: true,
-          blockId,
-          collapsedInfo: `${keys.length} keys`,
-          closingBracket: '}',
-          trailingComma: comma,
-        })
-
-        keys.forEach((key, i) => {
-          const keyHtml = getTokenHtml(jsonStringLiteral(key), 'key') + getTokenHtml(': ', 'punctuation')
-          processValue(obj[key], indent + 1, i === keys.length - 1, keyHtml)
-        })
-
-        result.push({
-          id: result.length,
-          lineNumber: lineNumber++,
-          indent,
-          html: getTokenHtml('}', 'bracket') + comma,
-          canFold: false,
-          blockId: '',
-        })
-
-        result[startLine].blockEnd = result.length - 1
-      }
-    } else {
-      result.push({
-        id: result.length,
-        lineNumber: lineNumber++,
-        indent,
-        html: keyPrefix + getTokenHtml(String(value), 'string') + comma,
-        canFold: false,
-        blockId: '',
-      })
+function getDisplayHtml(line: JsonDisplayLine): string {
+  if (line.tokens) return line.tokens.map(part => part.type === 'info'
+    ? `<span class="collapsed-info">${escapeHtml(part.text)}</span>` : token(part.text, part.type)).join('')
+  const key = line.key === undefined ? ''
+    : token(JSON.stringify(line.key), 'key') + token(': ', 'punctuation')
+  if (line.bracket) {
+    let content = key + token(line.bracket, 'bracket')
+    if (line.collapsed) {
+      if (line.childCount) content += token('...', 'ellipsis')
+      content += token(line.closingBracket || '', 'bracket') + line.comma
+      if (line.childCount) content += `<span class="collapsed-info">${line.childCount} ${line.isArray ? 'items' : 'keys'}</span>`
+    } else if (!line.canFold) {
+      content += line.comma
     }
+    return content
   }
-
-  processValue(data, 0, true)
-  return result
+  if (line.value === null) return key + token('null', 'null') + line.comma
+  if (typeof line.value === 'string') {
+    return key + token(JSON.stringify(line.value), 'string') + line.comma
+  }
+  const valueType = typeof line.value
+  return key + token(String(line.value), valueType === 'number' || valueType === 'boolean' ? valueType : 'string') + line.comma
 }
 
-const visibleLines = computed((): DisplayLine[] => {
-  const result: DisplayLine[] = []
-  const hiddenRanges: Array<{ start: number; end: number }> = []
-
-  for (const line of lines.value) {
-    if (line.canFold && collapsedBlocks.value.has(line.blockId) && line.blockEnd !== undefined) {
-      hiddenRanges.push({ start: line.id + 1, end: line.blockEnd })
-    }
-  }
-
-  const isHidden = (id: number): boolean => {
-    return hiddenRanges.some(range => id >= range.start && id <= range.end)
-  }
-
-  let displayLineNumber = 1
-  for (const line of lines.value) {
-    if (!isHidden(line.id)) {
-      result.push({
-        ...line,
-        displayId: `display-${line.id}`,
-        displayLineNumber: displayLineNumber++,
-      })
-    }
-  }
-
-  return result
-})
-
-const getDisplayHtml = (line: DisplayLine): string => {
-  if (line.canFold && collapsedBlocks.value.has(line.blockId)) {
-    const closingBracket = getTokenHtml(line.closingBracket || '}', 'bracket')
-    const ellipsis = getTokenHtml('...', 'ellipsis')
-    const comma = line.trailingComma || ''
-    return `${line.html}${ellipsis}${closingBracket}${comma}<span class="collapsed-info">${line.collapsedInfo}</span>`
-  }
-  return line.html
+function toggleFold(line: JsonDisplayLine, index: number) {
+  const overrides = new Map(foldOverrides.value)
+  overrides.set(line.id, !line.collapsed)
+  foldOverrides.value = overrides
+  localReader = undefined
+  viewer.value?.refresh(index, true)
 }
 
-const toggleFold = (blockId: string) => {
-  const newSet = new Set(collapsedBlocks.value)
-  if (newSet.has(blockId)) {
-    newSet.delete(blockId)
-  } else {
-    newSet.add(blockId)
-  }
-  collapsedBlocks.value = newSet
-}
-
-const initCollapsedState = () => {
-  const newSet = new Set<string>()
-
-  // 默认展开第一层（indent = 0），折叠更深层（indent >= 1）
-  // expandDepth = 999 表示全部展开
-  const depth = props.expandDepth === 0 ? 1 : props.expandDepth
-  if (depth < 999) {
-    for (const line of lines.value) {
-      if (line.canFold && line.indent >= depth) {
-        newSet.add(line.blockId)
-      }
-    }
-  }
-
-  collapsedBlocks.value = newSet
-}
-
-watch(() => props.data, () => {
-  if (props.data) {
-    lines.value = parseJsonToLines(props.data)
-    initCollapsedState()
-  } else {
-    lines.value = []
-  }
-}, { immediate: true })
-
-watch(() => props.expandDepth, () => {
-  initCollapsedState()
+watch([() => props.data, () => props.bodyDocument, () => props.expandDepth], () => {
+  viewRevision.value += 1
+  localReader = undefined
+  foldOverrides.value = new Map()
 })
 </script>
 
@@ -413,10 +189,6 @@ watch(() => props.expandDepth, () => {
   font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
   font-size: 13px;
   line-height: 20px;
-}
-
-.json-lines {
-  padding: 4px 0;
 }
 
 .json-line {

@@ -50,3 +50,39 @@ pub(crate) fn attach_admin_audit_response(
     attach_admin_audit_event(&mut response, event_name, action, target_type, target_id);
     response
 }
+
+pub(crate) fn mark_sensitive_admin_response_no_store(
+    mut response: Response<Body>,
+) -> Response<Body> {
+    response.headers_mut().insert(
+        http::header::CACHE_CONTROL,
+        http::HeaderValue::from_static("no-store"),
+    );
+    response.headers_mut().insert(
+        http::header::PRAGMA,
+        http::HeaderValue::from_static("no-cache"),
+    );
+    response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::mark_sensitive_admin_response_no_store;
+    use axum::{http, response::IntoResponse, Json};
+
+    #[test]
+    fn plaintext_admin_secret_responses_are_never_cacheable() {
+        let response = mark_sensitive_admin_response_no_store(
+            Json(serde_json::json!({ "key": "secret" })).into_response(),
+        );
+
+        assert_eq!(
+            response.headers().get(http::header::CACHE_CONTROL),
+            Some(&http::HeaderValue::from_static("no-store"))
+        );
+        assert_eq!(
+            response.headers().get(http::header::PRAGMA),
+            Some(&http::HeaderValue::from_static("no-cache"))
+        );
+    }
+}

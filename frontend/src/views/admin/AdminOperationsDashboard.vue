@@ -1019,6 +1019,7 @@
 </template>
 
 <script setup lang="ts">
+import { getI18nLocale } from '@/i18n'
 import { computed, defineComponent, h, onMounted, onUnmounted, ref, watch, type Component } from 'vue'
 import { RouterLink } from 'vue-router'
 import type { ChartData, ChartOptions } from 'chart.js'
@@ -1300,7 +1301,7 @@ function formatShortDate(value?: string | null): string {
   if (!value) return '-'
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return '-'
-  return date.toLocaleString('zh-CN', {
+  return date.toLocaleString(getI18nLocale(), {
     month: '2-digit',
     day: '2-digit',
     hour: '2-digit',
@@ -1975,7 +1976,7 @@ const usageRuntimeWorkerFaults = computed(() => {
     usage.workerReclaimFailuresTotal,
   ]
   if (!values.some(value => value != null)) return null
-  return values.reduce((total, value) => total + (value ?? 0), 0)
+  return values.reduce<number>((total, value) => total + (value ?? 0), 0)
 })
 const usageQueueOldestPendingIdleText = computed(() => (
   formatDurationSeconds((gatewayMetrics.value?.usageQueue.oldestPendingIdleMs ?? null) == null
@@ -2008,7 +2009,7 @@ const usageCounterOutboxFailures = computed(() => {
     counter.cleanupFailedBatchesTotal,
   ]
   if (!values.some(value => value != null)) return null
-  return values.reduce((total, value) => total + (value ?? 0), 0)
+  return values.reduce<number>((total, value) => total + (value ?? 0), 0)
 })
 const candidateQueueUtilization = computed(() => {
   const depth = gatewayMetrics.value?.requestCandidateQueue.depth

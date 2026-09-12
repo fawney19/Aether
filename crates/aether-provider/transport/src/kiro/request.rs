@@ -1,7 +1,9 @@
 use std::collections::BTreeMap;
+use std::fmt;
 
 use serde_json::{json, Value};
 
+use super::super::headers::{declared_connection_header_names, remove_declared_connection_headers};
 pub use super::super::rules::{
     apply_local_body_rules_with_request_headers, apply_local_header_rules_with_request_headers,
     body_rules_are_locally_supported, header_rules_are_locally_supported,
@@ -83,7 +85,7 @@ pub fn build_kiro_provider_request_body(
     Some(provider_request_body)
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 pub struct KiroProviderHeadersInput<'a> {
     pub headers: &'a http::HeaderMap,
     pub provider_request_body: &'a Value,
@@ -93,6 +95,39 @@ pub struct KiroProviderHeadersInput<'a> {
     pub auth_value: &'a str,
     pub auth_config: &'a KiroAuthConfig,
     pub machine_id: &'a str,
+}
+
+impl fmt::Debug for KiroProviderHeadersInput<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("KiroProviderHeadersInput")
+            .field(
+                "request_header_names",
+                &self
+                    .headers
+                    .keys()
+                    .map(|name| name.as_str())
+                    .collect::<Vec<_>>(),
+            )
+            .field(
+                "provider_request_body_bytes",
+                &serde_json::to_vec(self.provider_request_body)
+                    .ok()
+                    .map(|bytes| bytes.len()),
+            )
+            .field(
+                "original_request_body_bytes",
+                &serde_json::to_vec(self.original_request_body)
+                    .ok()
+                    .map(|bytes| bytes.len()),
+            )
+            .field("has_header_rules", &self.header_rules.is_some())
+            .field("auth_header", &self.auth_header)
+            .field("has_auth_value", &(!self.auth_value.is_empty()))
+            .field("auth_config", &self.auth_config)
+            .field("has_machine_id", &(!self.machine_id.is_empty()))
+            .finish()
+    }
 }
 
 pub fn build_kiro_provider_headers(
@@ -109,13 +144,16 @@ pub fn build_kiro_provider_headers(
         machine_id,
     } = input;
 
+    let declared_connection_headers = declared_connection_header_names(headers, &BTreeMap::new());
     let mut out = BTreeMap::new();
     for (name, value) in headers {
         let Ok(value) = value.to_str() else {
             continue;
         };
         let key = name.as_str().to_ascii_lowercase();
-        if should_skip_upstream_passthrough_header(&key) {
+        if should_skip_upstream_passthrough_header(&key)
+            || declared_connection_headers.contains(&key)
+        {
             continue;
         }
         let value = value.trim();
@@ -143,8 +181,10 @@ pub fn build_kiro_provider_headers(
         auth_header.trim().to_ascii_lowercase(),
         auth_value.trim().to_string(),
     );
+    remove_declared_connection_headers(&mut out, &declared_connection_headers);
     out.entry("content-type".to_string())
         .or_insert_with(|| "application/json".to_string());
+    remove_declared_connection_headers(&mut out, &declared_connection_headers);
     out.remove("content-length");
     Some(out)
 }

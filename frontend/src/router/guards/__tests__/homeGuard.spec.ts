@@ -46,6 +46,13 @@ describe('resolveHomeRedirect', () => {
     expect(sessionStorage.getItem('redirectPath')).toBeNull()
   })
 
+  it('discards cross-origin stored redirect paths', () => {
+    sessionStorage.setItem('redirectPath', '//attacker.example/steal')
+
+    expect(resolveHomeRedirect(route('/'), route('/external'), authStore({ isAuthenticated: true }))).toBe('/dashboard')
+    expect(sessionStorage.getItem('redirectPath')).toBeNull()
+  })
+
   it('routes authenticated users to the correct dashboard by role', () => {
     expect(resolveHomeRedirect(route('/'), route('/external'), authStore({ isAuthenticated: true }))).toBe('/dashboard')
     expect(resolveHomeRedirect(route('/'), route('/external'), authStore({ isAuthenticated: true, canAccessAdmin: true }))).toBe('/admin/dashboard')

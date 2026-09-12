@@ -7,10 +7,12 @@ use serde_json::{json, Map, Value};
 
 use super::{
     ProviderCatalogKeyAdaptiveState, ProviderCatalogKeyAdaptiveStateUpdate,
-    ProviderCatalogKeyAdminCasUpdate, ProviderCatalogKeyHealthStateUpdate,
-    ProviderCatalogKeyListQuery, ProviderCatalogKeyOAuthCredentialCasDelete,
-    ProviderCatalogKeyOAuthRuntimeStateCasUpdate, ProviderCatalogKeyRuntimeMetadataUpdate,
-    ProviderCatalogKeyStatusSnapshotUpdate, ProviderCatalogReadRepository, ProviderCatalogSnapshot,
+    ProviderCatalogKeyAdminCasUpdate, ProviderCatalogKeyCredentialsCasUpdate,
+    ProviderCatalogKeyHealthStateUpdate, ProviderCatalogKeyListQuery,
+    ProviderCatalogKeyOAuthCredentialCasDelete, ProviderCatalogKeyOAuthRuntimeStateCasUpdate,
+    ProviderCatalogKeyRuntimeMetadataUpdate, ProviderCatalogKeyStatusSnapshotUpdate,
+    ProviderCatalogProviderConfigCasUpdate, ProviderCatalogProxyCasUpdate,
+    ProviderCatalogReadRepository, ProviderCatalogSnapshot,
     ProviderCatalogUpstreamMetadataNamespaceUpdate, ProviderCatalogWriteRepository,
     StoredProviderCatalogEndpoint, StoredProviderCatalogKey,
     StoredProviderCatalogKeyMaintenanceSummary, StoredProviderCatalogKeyPage,
@@ -454,6 +456,44 @@ impl ProviderCatalogWriteRepository for InMemoryProviderCatalogReadRepository {
         Ok(stored.clone())
     }
 
+    async fn compare_and_swap_provider_config(
+        &self,
+        update: &ProviderCatalogProviderConfigCasUpdate,
+    ) -> Result<bool, DataLayerError> {
+        let mut index = self
+            .index
+            .write()
+            .expect("provider catalog repository lock");
+        let Some(provider) = index.providers.get_mut(&update.provider_id) else {
+            return Ok(false);
+        };
+        if provider.config != update.expected_config {
+            return Ok(false);
+        }
+        provider.config = update.config.clone();
+        provider.updated_at_unix_secs = Some(current_unix_secs());
+        Ok(true)
+    }
+
+    async fn compare_and_swap_provider_proxy(
+        &self,
+        update: &ProviderCatalogProxyCasUpdate,
+    ) -> Result<bool, DataLayerError> {
+        let mut index = self
+            .index
+            .write()
+            .expect("provider catalog repository lock");
+        let Some(provider) = index.providers.get_mut(&update.record_id) else {
+            return Ok(false);
+        };
+        if provider.proxy != update.expected_proxy {
+            return Ok(false);
+        }
+        provider.proxy = update.proxy.clone();
+        provider.updated_at_unix_secs = Some(current_unix_secs());
+        Ok(true)
+    }
+
     async fn delete_provider(&self, provider_id: &str) -> Result<bool, DataLayerError> {
         let mut index = self
             .index
@@ -504,6 +544,25 @@ impl ProviderCatalogWriteRepository for InMemoryProviderCatalogReadRepository {
         Ok(stored.clone())
     }
 
+    async fn compare_and_swap_endpoint_proxy(
+        &self,
+        update: &ProviderCatalogProxyCasUpdate,
+    ) -> Result<bool, DataLayerError> {
+        let mut index = self
+            .index
+            .write()
+            .expect("provider catalog repository lock");
+        let Some(endpoint) = index.endpoints.get_mut(&update.record_id) else {
+            return Ok(false);
+        };
+        if endpoint.proxy != update.expected_proxy {
+            return Ok(false);
+        }
+        endpoint.proxy = update.proxy.clone();
+        endpoint.updated_at_unix_secs = Some(current_unix_secs());
+        Ok(true)
+    }
+
     async fn delete_endpoint(&self, endpoint_id: &str) -> Result<bool, DataLayerError> {
         let mut index = self
             .index
@@ -546,6 +605,52 @@ impl ProviderCatalogWriteRepository for InMemoryProviderCatalogReadRepository {
         }
         *stored = merge_admin_key_update(stored, key);
         Ok(stored.clone())
+    }
+
+    async fn compare_and_swap_key_proxy(
+        &self,
+        update: &ProviderCatalogProxyCasUpdate,
+    ) -> Result<bool, DataLayerError> {
+        let mut index = self
+            .index
+            .write()
+            .expect("provider catalog repository lock");
+        let Some(key) = index.keys.get_mut(&update.record_id) else {
+            return Ok(false);
+        };
+        if key.proxy != update.expected_proxy {
+            return Ok(false);
+        }
+        key.proxy = update.proxy.clone();
+        key.updated_at_unix_secs = Some(current_unix_secs());
+        Ok(true)
+    }
+
+    async fn compare_and_swap_key_credentials(
+        &self,
+        update: &ProviderCatalogKeyCredentialsCasUpdate,
+    ) -> Result<bool, DataLayerError> {
+        if update.key_id.trim().is_empty() || update.expected_provider_id.trim().is_empty() {
+            return Err(DataLayerError::InvalidInput(
+                "provider catalog key credential CAS requires key_id and provider_id".to_string(),
+            ));
+        }
+        let mut index = self
+            .index
+            .write()
+            .expect("provider catalog repository lock");
+        let Some(key) = index.keys.get_mut(&update.key_id) else {
+            return Ok(false);
+        };
+        if key.provider_id != update.expected_provider_id
+            || key.encrypted_api_key != update.expected_encrypted_api_key
+            || key.encrypted_auth_config != update.expected_encrypted_auth_config
+        {
+            return Ok(false);
+        }
+        key.encrypted_api_key = update.encrypted_api_key.clone();
+        key.encrypted_auth_config = update.encrypted_auth_config.clone();
+        Ok(true)
     }
 
     async fn compare_and_update_key_admin_state(
@@ -882,40 +987,11 @@ impl ProviderCatalogWriteRepository for InMemoryProviderCatalogReadRepository {
         Ok(true)
     }
 
-    async fn update_key_oauth_credentials(
-        &self,
-        key_id: &str,
-        encrypted_api_key: &str,
-        encrypted_auth_config: Option<&str>,
-        expires_at_unix_secs: Option<u64>,
-    ) -> Result<bool, DataLayerError> {
-        if encrypted_api_key.trim().is_empty() {
-            return Err(DataLayerError::InvalidInput(
-                "provider catalog oauth api_key is empty".to_string(),
-            ));
-        }
-
-        let mut index = self
-            .index
-            .write()
-            .expect("provider catalog repository lock");
-        let Some(key) = index.keys.get_mut(key_id) else {
-            return Ok(false);
-        };
-
-        key.encrypted_api_key = Some(encrypted_api_key.to_string());
-        key.encrypted_auth_config = encrypted_auth_config.map(ToOwned::to_owned);
-        key.expires_at_unix_secs = expires_at_unix_secs;
-        key.updated_at_unix_secs = Some(current_unix_secs());
-        Ok(true)
-    }
-
     async fn update_key_oauth_runtime_state(
         &self,
         key_id: &str,
         oauth_invalid_at_unix_secs: Option<u64>,
         oauth_invalid_reason: Option<&str>,
-        encrypted_auth_config_update: Option<&str>,
         updated_at_unix_secs: Option<u64>,
     ) -> Result<bool, DataLayerError> {
         let mut index = self
@@ -928,9 +1004,6 @@ impl ProviderCatalogWriteRepository for InMemoryProviderCatalogReadRepository {
 
         key.oauth_invalid_at_unix_secs = oauth_invalid_at_unix_secs;
         key.oauth_invalid_reason = oauth_invalid_reason.map(ToOwned::to_owned);
-        if let Some(encrypted_auth_config) = encrypted_auth_config_update {
-            key.encrypted_auth_config = Some(encrypted_auth_config.to_string());
-        }
         key.updated_at_unix_secs = Some(updated_at_unix_secs.unwrap_or_else(current_unix_secs));
         Ok(true)
     }
@@ -1576,15 +1649,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn updates_oauth_credentials_for_existing_key() {
+    async fn unfenced_oauth_runtime_state_update_preserves_credentials() {
         let repository = InMemoryProviderCatalogReadRepository::seed(
             vec![sample_provider("provider-1")],
             vec![sample_endpoint("endpoint-1", "provider-1")],
             vec![sample_key("key-1", "provider-1")
                 .with_transport_fields(
                     None,
-                    "ciphertext-placeholder".to_string(),
-                    Some("ciphertext-auth-1".to_string()),
+                    "ciphertext-api".to_string(),
+                    Some("ciphertext-auth".to_string()),
                     None,
                     None,
                     None,
@@ -1596,29 +1669,26 @@ mod tests {
         );
 
         assert!(repository
-            .update_key_oauth_credentials(
-                "key-1",
-                "ciphertext-updated-token",
-                Some("ciphertext-auth-2"),
-                Some(4_102_444_800),
-            )
+            .update_key_oauth_runtime_state("key-1", Some(123), Some("refresh failed"), Some(456),)
             .await
-            .expect("update should succeed"));
+            .expect("runtime state should update"));
 
         let stored = repository
             .list_keys_by_ids(&["key-1".to_string()])
             .await
-            .expect("keys should read");
-        assert_eq!(stored.len(), 1);
+            .expect("key should read")
+            .pop()
+            .expect("key should exist");
+        assert_eq!(stored.encrypted_api_key.as_deref(), Some("ciphertext-api"));
         assert_eq!(
-            stored[0].encrypted_api_key.as_deref(),
-            Some("ciphertext-updated-token")
+            stored.encrypted_auth_config.as_deref(),
+            Some("ciphertext-auth")
         );
+        assert_eq!(stored.oauth_invalid_at_unix_secs, Some(123));
         assert_eq!(
-            stored[0].encrypted_auth_config.as_deref(),
-            Some("ciphertext-auth-2")
+            stored.oauth_invalid_reason.as_deref(),
+            Some("refresh failed")
         );
-        assert_eq!(stored[0].expires_at_unix_secs, Some(4_102_444_800));
     }
 
     #[tokio::test]

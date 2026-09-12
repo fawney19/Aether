@@ -94,14 +94,7 @@ pub fn build_admin_pool_scheduling_presets_payload() -> Value {
             "依据 LRU 时间戳（最近未使用优先）",
             &service,
         ),
-        provider_pool_preset_payload(
-            "cache_affinity",
-            "缓存亲和",
-            "优先复用最近使用过的 Key，利用 Prompt Caching",
-            None,
-            "依据 LRU 时间戳（最近使用优先，与 LRU 轮转相反）",
-            &service,
-        ),
+        cache_affinity_preset_payload(&service),
         provider_pool_preset_payload(
             "cost_first",
             "成本优先",
@@ -220,6 +213,23 @@ fn legacy_free_team_first_preset_payload(service: &ProviderPoolService) -> Value
     payload
 }
 
+fn cache_affinity_preset_payload(service: &ProviderPoolService) -> Value {
+    let mut payload = provider_pool_preset_payload(
+        "cache_affinity",
+        "缓存亲和",
+        "同一用户持续复用 Key，首次分配可集中或轮转",
+        None,
+        "先复用用户粘性 Key，未命中时按所选二级模式分配",
+        service,
+    );
+    payload["modes"] = json!([
+        {"value": "single_account", "label": "单号优先"},
+        {"value": "lru", "label": "LRU 轮号"}
+    ]);
+    payload["default_mode"] = json!("single_account");
+    payload
+}
+
 fn provider_pool_preset_payload(
     name: &'static str,
     label: &'static str,
@@ -272,5 +282,31 @@ fn provider_pool_preset_mutex_group(preset: &str) -> Option<&'static str> {
     match preset {
         "lru" | "cache_affinity" | "load_balance" | "single_account" => Some("distribution_mode"),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_admin_pool_scheduling_presets_payload;
+    use serde_json::json;
+
+    #[test]
+    fn cache_affinity_preset_exposes_secondary_distribution_modes() {
+        let payload = build_admin_pool_scheduling_presets_payload();
+        let cache_affinity = payload
+            .as_array()
+            .expect("preset payload should be an array")
+            .iter()
+            .find(|preset| preset["name"] == "cache_affinity")
+            .expect("cache affinity preset should exist");
+
+        assert_eq!(cache_affinity["default_mode"], json!("single_account"));
+        assert_eq!(
+            cache_affinity["modes"],
+            json!([
+                {"value": "single_account", "label": "单号优先"},
+                {"value": "lru", "label": "LRU 轮号"}
+            ])
+        );
     }
 }

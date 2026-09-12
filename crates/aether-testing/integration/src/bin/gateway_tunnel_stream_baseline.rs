@@ -5,9 +5,10 @@ use std::time::Duration;
 
 use aether_gateway::tunnel_protocol as protocol;
 use aether_testkit::{
-    fetch_prometheus_samples, find_metric_value_u64, init_test_runtime_for, run_http_load_probe,
-    HttpLoadProbeConfig, HttpLoadProbeResponseMode, HttpLoadProbeResult, PrometheusSample,
-    TunnelHarness, TunnelHarnessConfig,
+    fetch_prometheus_samples, find_metric_value_u64, init_test_runtime_for,
+    insert_tunnel_harness_auth_headers, run_http_load_probe, HttpLoadProbeConfig,
+    HttpLoadProbeResponseMode, HttpLoadProbeResult, PrometheusSample, TunnelHarness,
+    TunnelHarnessConfig, TUNNEL_HARNESS_NODE_ID,
 };
 use futures_util::{SinkExt, StreamExt};
 use reqwest::Method;
@@ -103,8 +104,13 @@ struct AcceptanceReport {
     reasons: Vec<String>,
 }
 
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let _log_shutdown = aether_runtime::LogShutdownGuard::new();
+    run()
+}
+
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn run() -> Result<(), Box<dyn std::error::Error>> {
     init_test_runtime_for("gateway-tunnel-stream-baseline");
     let config = parse_args(std::env::args().skip(1).collect())?;
     let report = run_suite(&config).await?;
@@ -242,9 +248,7 @@ async fn connect_protocol_peer(
     );
     let request = ws_url.into_client_request()?;
     let mut request = request;
-    request
-        .headers_mut()
-        .insert("x-node-id", http::HeaderValue::from_static("node-baseline"));
+    insert_tunnel_harness_auth_headers(request.headers_mut(), TUNNEL_HARNESS_NODE_ID)?;
     request.headers_mut().insert(
         aether_contracts::tunnel::TUNNEL_PROTOCOL_VERSION_HEADER,
         http::HeaderValue::from_static(

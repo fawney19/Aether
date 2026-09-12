@@ -147,6 +147,7 @@ describe('RegisterDialog Turnstile flow', () => {
       success: true,
       message: 'ok',
       expire_minutes: 5,
+      verification_token: 'verification-session-token',
     })
     toastErrorMock.mockReset()
     toastSuccessMock.mockReset()

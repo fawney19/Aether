@@ -199,7 +199,14 @@ async fn run_provider_quota_alert_for_provider(
     let Some(total_available) = extract_total_available(&payload) else {
         warn!(
             provider_id = %provider_id,
-            payload = %payload,
+            payload_status = payload
+                .get("status")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown"),
+            action_type = payload
+                .get("action_type")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown"),
             "provider quota alert skipped because balance payload has no total_available"
         );
         write_checked_runtime_state_without_balance(state, &provider_id, now_unix_secs).await;

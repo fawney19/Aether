@@ -1,24 +1,40 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::RwLock;
 
-use async_trait::async_trait;
-
 use super::{
     request_candidate_lifecycle_would_regress, PublicHealthStatusCount, PublicHealthTimelineBucket,
     RequestCandidateReadRepository, RequestCandidateStatus, RequestCandidateWriteRepository,
     StoredRequestCandidate, UpsertRequestCandidateRecord,
 };
 use crate::DataLayerError;
+use async_trait::async_trait;
+
+fn sanitize_stored_candidate(mut candidate: StoredRequestCandidate) -> StoredRequestCandidate {
+    candidate.sanitize_for_persistence();
+    candidate
+}
 
 fn merge_extra_data(
     existing: Option<serde_json::Value>,
     overlay: Option<serde_json::Value>,
+    preserve_error_details: bool,
 ) -> Option<serde_json::Value> {
     match (existing, overlay) {
         (
             Some(serde_json::Value::Object(mut existing_object)),
-            Some(serde_json::Value::Object(overlay_object)),
+            Some(serde_json::Value::Object(mut overlay_object)),
         ) => {
+            if preserve_error_details {
+                for key in [
+                    "upstream_response",
+                    "error_flow",
+                    "failure_diagnostic",
+                    "request_conversion_error",
+                    "request_body_build_error",
+                ] {
+                    overlay_object.remove(key);
+                }
+            }
             existing_object.extend(overlay_object);
             Some(serde_json::Value::Object(existing_object))
         }
@@ -29,7 +45,54 @@ fn merge_extra_data(
 
 #[derive(Debug, Default)]
 pub struct InMemoryRequestCandidateRepository {
-    by_id: RwLock<BTreeMap<String, StoredRequestCandidate>>,
+    rows: RwLock<CandidateRows>,
+}
+
+#[derive(Debug, Default)]
+struct CandidateRows {
+    by_id: BTreeMap<String, StoredRequestCandidate>,
+    by_request: BTreeMap<String, BTreeSet<String>>,
+    by_created: BTreeSet<(std::cmp::Reverse<u64>, String)>,
+}
+
+impl CandidateRows {
+    fn remove(&mut self, id: &str) -> Option<StoredRequestCandidate> {
+        let row = self.by_id.remove(id)?;
+        self.by_created
+            .remove(&(std::cmp::Reverse(row.created_at_unix_ms), row.id.clone()));
+        if let Some(ids) = self.by_request.get_mut(&row.request_id) {
+            ids.remove(id);
+            if ids.is_empty() {
+                self.by_request.remove(&row.request_id);
+            }
+        }
+        Some(row)
+    }
+
+    fn insert(&mut self, row: StoredRequestCandidate) -> &StoredRequestCandidate {
+        // Keep all indexes behind one lock and sanitize every insertion. Reads
+        // can clone these records without rebuilding their diagnostic JSON.
+        let row = sanitize_stored_candidate(row);
+        self.remove(&row.id);
+        self.by_request
+            .entry(row.request_id.clone())
+            .or_default()
+            .insert(row.id.clone());
+        self.by_created
+            .insert((std::cmp::Reverse(row.created_at_unix_ms), row.id.clone()));
+        self.by_id
+            .entry(row.id.clone())
+            .insert_entry(row)
+            .into_mut()
+    }
+
+    fn for_request(&self, request_id: &str) -> impl Iterator<Item = &StoredRequestCandidate> {
+        self.by_request
+            .get(request_id)
+            .into_iter()
+            .flatten()
+            .filter_map(|id| self.by_id.get(id))
+    }
 }
 
 impl InMemoryRequestCandidateRepository {
@@ -37,12 +100,12 @@ impl InMemoryRequestCandidateRepository {
     where
         I: IntoIterator<Item = StoredRequestCandidate>,
     {
-        let mut by_id = BTreeMap::new();
+        let mut rows = CandidateRows::default();
         for item in items {
-            by_id.insert(item.id.clone(), item);
+            rows.insert(item);
         }
         Self {
-            by_id: RwLock::new(by_id),
+            rows: RwLock::new(rows),
         }
     }
 }
@@ -54,11 +117,10 @@ impl RequestCandidateReadRepository for InMemoryRequestCandidateRepository {
         request_id: &str,
     ) -> Result<Vec<StoredRequestCandidate>, DataLayerError> {
         let mut rows = self
-            .by_id
+            .rows
             .read()
             .expect("request candidate repository lock")
-            .values()
-            .filter(|row| row.request_id == request_id)
+            .for_request(request_id)
             .cloned()
             .collect::<Vec<_>>();
         rows.sort_by(|left, right| {
@@ -78,16 +140,14 @@ impl RequestCandidateReadRepository for InMemoryRequestCandidateRepository {
             return Ok(Vec::new());
         }
 
-        let mut rows = self
-            .by_id
-            .read()
-            .expect("request candidate repository lock")
-            .values()
+        let rows = self.rows.read().expect("request candidate repository lock");
+        Ok(rows
+            .by_created
+            .iter()
+            .take(limit)
+            .filter_map(|(_, id)| rows.by_id.get(id))
             .cloned()
-            .collect::<Vec<_>>();
-        rows.sort_by_key(|entry| std::cmp::Reverse(entry.created_at_unix_ms));
-        rows.truncate(limit);
-        Ok(rows)
+            .collect())
     }
 
     async fn list_by_provider_id(
@@ -100,9 +160,10 @@ impl RequestCandidateReadRepository for InMemoryRequestCandidateRepository {
         }
 
         let mut rows = self
-            .by_id
+            .rows
             .read()
             .expect("request candidate repository lock")
+            .by_id
             .values()
             .filter(|row| row.provider_id.as_deref() == Some(provider_id))
             .cloned()
@@ -110,6 +171,20 @@ impl RequestCandidateReadRepository for InMemoryRequestCandidateRepository {
         rows.sort_by_key(|entry| std::cmp::Reverse(entry.created_at_unix_ms));
         rows.truncate(limit);
         Ok(rows)
+    }
+
+    async fn list_recent_runtime(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<StoredRequestCandidate>, DataLayerError> {
+        let rows = self.rows.read().expect("request candidate repository lock");
+        Ok(rows
+            .by_created
+            .iter()
+            .take(limit)
+            .filter_map(|(_, id)| rows.by_id.get(id))
+            .map(StoredRequestCandidate::runtime_snapshot)
+            .collect())
     }
 
     async fn list_finalized_by_endpoint_ids_since(
@@ -124,9 +199,10 @@ impl RequestCandidateReadRepository for InMemoryRequestCandidateRepository {
 
         let endpoint_ids = endpoint_ids.iter().cloned().collect::<BTreeSet<_>>();
         let mut rows = self
-            .by_id
+            .rows
             .read()
             .expect("request candidate repository lock")
+            .by_id
             .values()
             .filter(|row| {
                 row.endpoint_id
@@ -159,9 +235,10 @@ impl RequestCandidateReadRepository for InMemoryRequestCandidateRepository {
         let endpoint_ids = endpoint_ids.iter().cloned().collect::<BTreeSet<_>>();
         let mut counts = BTreeMap::<(String, &'static str), u64>::new();
         for row in self
-            .by_id
+            .rows
             .read()
             .expect("request candidate repository lock")
+            .by_id
             .values()
         {
             let Some(endpoint_id) = row.endpoint_id.as_ref() else {
@@ -223,9 +300,10 @@ impl RequestCandidateReadRepository for InMemoryRequestCandidateRepository {
         let mut buckets = BTreeMap::<(String, u32), PublicHealthTimelineBucket>::new();
 
         for row in self
-            .by_id
+            .rows
             .read()
             .expect("request candidate repository lock")
+            .by_id
             .values()
         {
             let Some(endpoint_id) = row.endpoint_id.as_ref() else {
@@ -294,19 +372,19 @@ impl RequestCandidateReadRepository for InMemoryRequestCandidateRepository {
 impl RequestCandidateWriteRepository for InMemoryRequestCandidateRepository {
     async fn upsert(
         &self,
-        candidate: UpsertRequestCandidateRecord,
+        mut candidate: UpsertRequestCandidateRecord,
     ) -> Result<StoredRequestCandidate, DataLayerError> {
+        candidate.sanitize_for_persistence();
         candidate.validate()?;
 
-        let mut by_id = self
-            .by_id
+        let mut rows = self
+            .rows
             .write()
             .expect("request candidate repository lock");
-        let existing = by_id
-            .values()
+        let existing = rows
+            .for_request(&candidate.request_id)
             .find(|row| {
-                row.request_id == candidate.request_id
-                    && row.candidate_index == candidate.candidate_index
+                row.candidate_index == candidate.candidate_index
                     && row.retry_index == candidate.retry_index
             })
             .cloned();
@@ -336,29 +414,36 @@ impl RequestCandidateWriteRepository for InMemoryRequestCandidateRepository {
                 .map(|row| row.id.clone())
                 .unwrap_or_else(|| candidate.id.clone()),
             request_id: candidate.request_id.clone(),
-            user_id: candidate
-                .user_id
-                .or_else(|| existing.as_ref().and_then(|row| row.user_id.clone())),
-            api_key_id: candidate
-                .api_key_id
-                .or_else(|| existing.as_ref().and_then(|row| row.api_key_id.clone())),
-            username: candidate
-                .username
-                .or_else(|| existing.as_ref().and_then(|row| row.username.clone())),
-            api_key_name: candidate
-                .api_key_name
-                .or_else(|| existing.as_ref().and_then(|row| row.api_key_name.clone())),
+            user_id: existing
+                .as_ref()
+                .and_then(|row| row.user_id.clone())
+                .or(candidate.user_id),
+            api_key_id: existing
+                .as_ref()
+                .and_then(|row| row.api_key_id.clone())
+                .or(candidate.api_key_id),
+            username: existing
+                .as_ref()
+                .and_then(|row| row.username.clone())
+                .or(candidate.username),
+            api_key_name: existing
+                .as_ref()
+                .and_then(|row| row.api_key_name.clone())
+                .or(candidate.api_key_name),
             candidate_index: candidate.candidate_index,
             retry_index: candidate.retry_index,
-            provider_id: candidate
-                .provider_id
-                .or_else(|| existing.as_ref().and_then(|row| row.provider_id.clone())),
-            endpoint_id: candidate
-                .endpoint_id
-                .or_else(|| existing.as_ref().and_then(|row| row.endpoint_id.clone())),
-            key_id: candidate
-                .key_id
-                .or_else(|| existing.as_ref().and_then(|row| row.key_id.clone())),
+            provider_id: existing
+                .as_ref()
+                .and_then(|row| row.provider_id.clone())
+                .or(candidate.provider_id),
+            endpoint_id: existing
+                .as_ref()
+                .and_then(|row| row.endpoint_id.clone())
+                .or(candidate.endpoint_id),
+            key_id: existing
+                .as_ref()
+                .and_then(|row| row.key_id.clone())
+                .or(candidate.key_id),
             status: merged_status,
             skip_reason: candidate
                 .skip_reason
@@ -400,6 +485,7 @@ impl RequestCandidateWriteRepository for InMemoryRequestCandidateRepository {
             extra_data: merge_extra_data(
                 existing.as_ref().and_then(|row| row.extra_data.clone()),
                 candidate.extra_data,
+                preserve_existing_lifecycle,
             ),
             required_capabilities: candidate.required_capabilities.or_else(|| {
                 existing
@@ -407,9 +493,10 @@ impl RequestCandidateWriteRepository for InMemoryRequestCandidateRepository {
                     .and_then(|row| row.required_capabilities.clone())
             }),
             created_at_unix_ms,
-            started_at_unix_ms: candidate
-                .started_at_unix_ms
-                .or_else(|| existing.as_ref().and_then(|row| row.started_at_unix_ms)),
+            started_at_unix_ms: existing
+                .as_ref()
+                .and_then(|row| row.started_at_unix_ms)
+                .or(candidate.started_at_unix_ms),
             finished_at_unix_ms: if preserve_existing_lifecycle {
                 existing.as_ref().and_then(|row| row.finished_at_unix_ms)
             } else {
@@ -418,9 +505,7 @@ impl RequestCandidateWriteRepository for InMemoryRequestCandidateRepository {
                     .or_else(|| existing.as_ref().and_then(|row| row.finished_at_unix_ms))
             },
         };
-
-        by_id.insert(stored.id.clone(), stored.clone());
-        Ok(stored)
+        Ok(rows.insert(stored).clone())
     }
 
     async fn delete_created_before(
@@ -432,11 +517,12 @@ impl RequestCandidateWriteRepository for InMemoryRequestCandidateRepository {
             return Ok(0);
         }
 
-        let mut by_id = self
-            .by_id
+        let mut rows = self
+            .rows
             .write()
             .expect("request candidate repository lock");
-        let mut ids = by_id
+        let mut ids = rows
+            .by_id
             .values()
             .filter(|row| row.created_at_unix_ms < created_before_unix_secs * 1000)
             .map(|row| (row.created_at_unix_ms, row.id.clone()))
@@ -445,7 +531,7 @@ impl RequestCandidateWriteRepository for InMemoryRequestCandidateRepository {
 
         let mut deleted = 0usize;
         for (_, id) in ids.into_iter().take(limit) {
-            if by_id.remove(&id).is_some() {
+            if rows.remove(&id).is_some() {
                 deleted += 1;
             }
         }
@@ -515,6 +601,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn request_index_tracks_replaced_ids_and_removes_empty_requests() {
+        let repository = InMemoryRequestCandidateRepository::seed([
+            sample_candidate("same-id", "old-request", 100),
+            sample_candidate("same-id", "new-request", 200),
+            sample_candidate("other-id", "new-request", 300),
+        ]);
+        assert!(repository
+            .list_by_request_id("old-request")
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            repository
+                .list_by_request_id("new-request")
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(repository.delete_created_before(1, 1).await.unwrap(), 1);
+        let remaining = repository.list_by_request_id("new-request").await.unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, "other-id");
+        assert_eq!(repository.delete_created_before(1, 1).await.unwrap(), 1);
+        let rows = repository.rows.read().unwrap();
+        assert!(rows.by_id.is_empty());
+        assert!(rows.by_request.is_empty());
+        assert!(rows.by_created.is_empty());
+    }
+
+    #[tokio::test]
+    async fn recent_index_preserves_equal_timestamp_order_and_replaced_dates() {
+        let repository = InMemoryRequestCandidateRepository::seed([
+            sample_candidate("b", "req-b", 400),
+            sample_candidate("a", "req-a", 200),
+            sample_candidate("c", "req-c", 200),
+            sample_candidate("b", "req-b", 100),
+        ]);
+        let recent = repository.list_recent(2).await.unwrap();
+        assert_eq!(
+            recent.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+            ["a", "c"]
+        );
+        assert_eq!(repository.list_recent(0).await.unwrap().len(), 0);
+        assert_eq!(repository.rows.read().unwrap().by_created.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn runtime_reads_keep_metadata_without_diagnostic_payloads() {
+        let mut candidate = sample_candidate("candidate", "request", 100);
+        candidate.extra_data = Some(json!({"upstream_response": {"body": "x".repeat(32_768)}}));
+        candidate.error_message = Some("diagnostic detail".into());
+        candidate.required_capabilities = Some(json!({"vision": true}));
+        candidate.concurrent_requests = Some(17);
+        let repository = InMemoryRequestCandidateRepository::seed([candidate]);
+        let full = repository.list_recent(1).await.unwrap();
+        let runtime = repository.list_recent_runtime(1).await.unwrap();
+        assert_eq!(
+            runtime,
+            full.iter()
+                .map(StoredRequestCandidate::runtime_snapshot)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(runtime[0].concurrent_requests, Some(17));
+        assert!(runtime[0].extra_data.is_none());
+        assert!(runtime[0].error_message.is_none());
+        assert!(runtime[0].required_capabilities.is_none());
+        assert!(full[0].extra_data.is_some());
+        assert_eq!(repository.list_recent(1).await.unwrap(), full);
+        assert!(repository.list_recent_runtime(0).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn lists_recent_request_candidates_in_descending_created_order() {
         let repository = InMemoryRequestCandidateRepository::seed(vec![
             sample_candidate("cand-1", "req-1", 100),
@@ -529,6 +688,145 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].id, "cand-2");
         assert_eq!(rows[1].id, "cand-1");
+    }
+
+    #[tokio::test]
+    async fn seed_and_reads_sanitize_candidates_that_bypass_contract_constructors() {
+        let raw_candidate = StoredRequestCandidate {
+            id: "cand-raw".to_string(),
+            request_id: "req-raw".to_string(),
+            user_id: None,
+            api_key_id: None,
+            username: None,
+            api_key_name: None,
+            candidate_index: 0,
+            retry_index: 0,
+            provider_id: Some("provider-1".to_string()),
+            endpoint_id: Some("endpoint-1".to_string()),
+            key_id: None,
+            status: RequestCandidateStatus::Failed,
+            skip_reason: Some("secret=/private/path".to_string()),
+            is_cached: false,
+            status_code: Some(500),
+            error_type: Some("token=secret".to_string()),
+            error_message: Some("Bearer secret-token".to_string()),
+            latency_ms: Some(10),
+            concurrent_requests: Some(1),
+            extra_data: Some(json!({
+                "gateway_execution_runtime": true,
+                "request_headers": {"authorization": "Bearer secret-token"},
+                "request_body": {"password": "secret"}
+            })),
+            required_capabilities: Some(json!({
+                "streaming": "true",
+                "internal_capability": "secret"
+            })),
+            created_at_unix_ms: 100,
+            started_at_unix_ms: Some(100),
+            finished_at_unix_ms: Some(110),
+        };
+        let repository = InMemoryRequestCandidateRepository::seed(vec![raw_candidate.clone()]);
+
+        {
+            let stored = repository
+                .rows
+                .read()
+                .expect("request candidate repository lock");
+            let candidate = stored
+                .by_id
+                .get("cand-raw")
+                .expect("seeded candidate should exist");
+            assert_eq!(
+                candidate.error_message.as_deref(),
+                Some("Bearer secret-token")
+            );
+            assert_eq!(candidate.skip_reason.as_deref(), Some("unclassified_skip"));
+            assert_eq!(candidate.error_type.as_deref(), Some("unclassified_error"));
+            assert_eq!(
+                candidate.extra_data,
+                Some(json!({"gateway_execution_runtime": true}))
+            );
+            assert_eq!(
+                candidate.required_capabilities,
+                Some(json!({"streaming": true}))
+            );
+        }
+
+        let mut bypassed_candidate = raw_candidate;
+        bypassed_candidate.id = "cand-bypassed".to_string();
+        bypassed_candidate.request_id = "req-bypassed".to_string();
+        repository
+            .rows
+            .write()
+            .expect("request candidate repository lock")
+            .insert(bypassed_candidate);
+
+        let rows = repository
+            .list_recent(10)
+            .await
+            .expect("list recent should succeed");
+        let candidate = rows
+            .iter()
+            .find(|candidate| candidate.id == "cand-bypassed")
+            .expect("bypassed candidate should be returned");
+        assert_eq!(
+            candidate.error_message.as_deref(),
+            Some("Bearer secret-token")
+        );
+        assert_eq!(
+            candidate.extra_data,
+            Some(json!({"gateway_execution_runtime": true}))
+        );
+        assert_eq!(
+            candidate.required_capabilities,
+            Some(json!({"streaming": true}))
+        );
+
+        let merged = repository
+            .upsert(UpsertRequestCandidateRecord {
+                id: "cand-merged".to_string(),
+                request_id: "req-bypassed".to_string(),
+                user_id: None,
+                api_key_id: None,
+                username: None,
+                api_key_name: None,
+                candidate_index: 0,
+                retry_index: 0,
+                provider_id: None,
+                endpoint_id: None,
+                key_id: None,
+                status: RequestCandidateStatus::Success,
+                skip_reason: None,
+                is_cached: None,
+                status_code: Some(200),
+                error_type: None,
+                error_message: Some("Bearer new-secret".to_string()),
+                latency_ms: Some(12),
+                concurrent_requests: None,
+                extra_data: Some(json!({
+                    "stream_completed": true,
+                    "request_body": {"password": "new-secret"}
+                })),
+                required_capabilities: Some(json!({
+                    "vision": 1,
+                    "internal_capability": "new-secret"
+                })),
+                created_at_unix_ms: Some(100),
+                started_at_unix_ms: Some(100),
+                finished_at_unix_ms: Some(112),
+            })
+            .await
+            .expect("candidate merge should succeed");
+        assert_eq!(merged.id, "cand-bypassed");
+        assert_eq!(merged.error_message.as_deref(), Some("Bearer secret-token"));
+        assert_eq!(
+            merged.extra_data,
+            Some(json!({
+                "gateway_execution_runtime": true,
+                "stream_completed": true
+            }))
+        );
+        assert_eq!(merged.required_capabilities, Some(json!({"vision": true})));
     }
 
     #[tokio::test]
@@ -594,7 +892,7 @@ mod tests {
                     "execution_strategy": "local_cross_format",
                     "provider_name": "primary",
                 })),
-                required_capabilities: None,
+                required_capabilities: Some(json!({"streaming": true})),
                 created_at_unix_ms: Some(100),
                 started_at_unix_ms: None,
                 finished_at_unix_ms: None,
@@ -608,15 +906,15 @@ mod tests {
             .upsert(UpsertRequestCandidateRecord {
                 id: "cand-1-replacement".to_string(),
                 request_id: "req-1".to_string(),
-                user_id: None,
-                api_key_id: None,
-                username: None,
-                api_key_name: None,
+                user_id: Some("attacker-user".to_string()),
+                api_key_id: Some("attacker-api-key".to_string()),
+                username: Some("mallory".to_string()),
+                api_key_name: Some("attacker-key".to_string()),
                 candidate_index: 0,
                 retry_index: 0,
-                provider_id: None,
-                endpoint_id: None,
-                key_id: None,
+                provider_id: Some("attacker-provider".to_string()),
+                endpoint_id: Some("attacker-endpoint".to_string()),
+                key_id: Some("attacker-provider-key".to_string()),
                 status: RequestCandidateStatus::Success,
                 skip_reason: None,
                 is_cached: None,
@@ -629,7 +927,7 @@ mod tests {
                     "provider_api_format": "openai:responses",
                     "provider_name": "updated",
                 })),
-                required_capabilities: None,
+                required_capabilities: Some(json!({"vision": true})),
                 created_at_unix_ms: None,
                 started_at_unix_ms: Some(101),
                 finished_at_unix_ms: Some(102),
@@ -638,6 +936,14 @@ mod tests {
             .expect("update should succeed");
         assert_eq!(updated.id, "cand-1");
         assert_eq!(updated.status, RequestCandidateStatus::Success);
+        assert_eq!(updated.user_id.as_deref(), Some("user-1"));
+        assert_eq!(updated.api_key_id.as_deref(), Some("api-key-1"));
+        assert!(updated.username.is_none());
+        assert!(updated.api_key_name.is_none());
+        assert_eq!(updated.provider_id.as_deref(), Some("provider-1"));
+        assert_eq!(updated.endpoint_id.as_deref(), Some("endpoint-1"));
+        assert_eq!(updated.key_id.as_deref(), Some("key-1"));
+        assert_eq!(updated.required_capabilities, Some(json!({"vision": true})));
         assert_eq!(updated.status_code, Some(200));
         assert_eq!(updated.latency_ms, Some(25));
         assert_eq!(
@@ -659,13 +965,13 @@ mod tests {
                 .extra_data
                 .as_ref()
                 .and_then(|value| value.get("provider_name")),
-            Some(&json!("updated"))
+            None
         );
         assert_eq!(updated.started_at_unix_ms, Some(101));
     }
 
     #[tokio::test]
-    async fn upsert_keeps_terminal_candidate_state_when_streaming_arrives_late() {
+    async fn upsert_keeps_first_terminal_candidate_fact_when_another_terminal_arrives_late() {
         let existing = StoredRequestCandidate::new(
             "cand-1".to_string(),
             "req-1".to_string(),
@@ -686,7 +992,13 @@ mod tests {
             Some("retryable upstream failure".to_string()),
             Some(45),
             Some(1),
-            Some(json!({"terminal": true})),
+            Some(json!({
+                "stream_completed": true,
+                "upstream_response": {
+                    "status_code": 503,
+                    "body": {"error": {"message": "original upstream failure"}}
+                }
+            })),
             None,
             100,
             Some(101),
@@ -708,7 +1020,7 @@ mod tests {
                 provider_id: None,
                 endpoint_id: None,
                 key_id: None,
-                status: RequestCandidateStatus::Streaming,
+                status: RequestCandidateStatus::Success,
                 skip_reason: None,
                 is_cached: None,
                 status_code: Some(200),
@@ -716,7 +1028,10 @@ mod tests {
                 error_message: None,
                 latency_ms: Some(9_999),
                 concurrent_requests: Some(2),
-                extra_data: Some(json!({"late": true})),
+                extra_data: Some(json!({
+                    "gateway_execution_runtime": true,
+                    "upstream_response": {"status_code": 200, "body": "late unrelated response"}
+                })),
                 required_capabilities: None,
                 created_at_unix_ms: None,
                 started_at_unix_ms: Some(102),
@@ -738,7 +1053,14 @@ mod tests {
         assert_eq!(updated.finished_at_unix_ms, Some(145));
         assert_eq!(
             updated.extra_data,
-            Some(json!({"terminal": true, "late": true}))
+            Some(json!({
+                "gateway_execution_runtime": true,
+                "stream_completed": true,
+                "upstream_response": {
+                    "status_code": 503,
+                    "body": {"error": {"message": "original upstream failure"}}
+                }
+            }))
         );
     }
 

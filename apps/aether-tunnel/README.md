@@ -4,6 +4,15 @@ Aether Tunnel 代理节点，部署在海外 VPS 上，通过 WebSocket 隧道�
 
 Tunnel 模式下代理节点**无需对外监听端口**，仅需出站连接到 Aether 服务器。
 
+## 流式传输与升级注意事项
+
+- 协议 v3 连接在 `HELLO` / `SETTINGS` 协商后才接收业务请求。实际双向流窗口取 gateway 与 agent 配置的较小值，信用更新阈值不超过该窗口的四分之一；单帧也不会超过协商窗口。
+- 响应缓冲按字节限额并合并小帧，结束和错误状态独立保存。慢消费者不会阻塞同一隧道其他流的读取；超出窗口或缓冲预算的流会被明确终止，不会静默截断。
+- 信用更新在消费数据后可靠入队；启用重定向重放时，进入有界重放缓存也视为请求体消费。持续无法投递关键控制帧时会关闭连接并向在途请求报告错误。
+- 客户端取消会终止对应上游请求，断连会回收 session 的 writer、heartbeat 和请求任务。正常 drain 在配置期限内继续处理已有流，期限到达后终止残留任务。
+- 建议先升级 gateway，再升级 agent。既有 v3 agent 已发送 `HELLO` / `SETTINGS`，可连接新 gateway；自定义 v3 节点必须完成这两步握手。协议 v1/v2 保留旧握手。与旧 gateway 混用时应保持默认窗口配置，不能依赖旧 gateway 应用新的窗口协商。
+- 自动重连恢复后续请求，不会自动续传已经输出的 SSE，也不会无条件重放已经发送的请求。
+
 ## 安装
 
 `aether-tunnel` 会根据宿主机自动选择服务管理器：
@@ -15,13 +24,13 @@ Tunnel 模式下代理节点**无需对外监听端口**，仅需出站连接到
 <!-- DOWNLOAD_TABLE_START -->
 | Platform | Download |
 |----------|----------|
-| Linux x86_64 (GNU) | [aether-tunnel-linux-amd64.tar.gz](https://github.com/fawney19/Aether/releases/download/tunnel-v0.3.16/aether-tunnel-linux-amd64.tar.gz) |
-| Linux ARM64 (GNU) | [aether-tunnel-linux-arm64.tar.gz](https://github.com/fawney19/Aether/releases/download/tunnel-v0.3.16/aether-tunnel-linux-arm64.tar.gz) |
-| Linux x86_64 (musl) | [aether-tunnel-linux-musl-amd64.tar.gz](https://github.com/fawney19/Aether/releases/download/tunnel-v0.3.16/aether-tunnel-linux-musl-amd64.tar.gz) |
-| Linux ARM64 (musl) | [aether-tunnel-linux-musl-arm64.tar.gz](https://github.com/fawney19/Aether/releases/download/tunnel-v0.3.16/aether-tunnel-linux-musl-arm64.tar.gz) |
-| macOS x86_64 | [aether-tunnel-macos-amd64.tar.gz](https://github.com/fawney19/Aether/releases/download/tunnel-v0.3.16/aether-tunnel-macos-amd64.tar.gz) |
-| macOS ARM64 | [aether-tunnel-macos-arm64.tar.gz](https://github.com/fawney19/Aether/releases/download/tunnel-v0.3.16/aether-tunnel-macos-arm64.tar.gz) |
-| Windows x86_64 | [aether-tunnel-windows-amd64.zip](https://github.com/fawney19/Aether/releases/download/tunnel-v0.3.16/aether-tunnel-windows-amd64.zip) |
+| Linux x86_64 (GNU) | [aether-tunnel-linux-amd64.tar.gz](https://github.com/fawney19/Aether/releases/download/tunnel-v0.3.17/aether-tunnel-linux-amd64.tar.gz) |
+| Linux ARM64 (GNU) | [aether-tunnel-linux-arm64.tar.gz](https://github.com/fawney19/Aether/releases/download/tunnel-v0.3.17/aether-tunnel-linux-arm64.tar.gz) |
+| Linux x86_64 (musl) | [aether-tunnel-linux-musl-amd64.tar.gz](https://github.com/fawney19/Aether/releases/download/tunnel-v0.3.17/aether-tunnel-linux-musl-amd64.tar.gz) |
+| Linux ARM64 (musl) | [aether-tunnel-linux-musl-arm64.tar.gz](https://github.com/fawney19/Aether/releases/download/tunnel-v0.3.17/aether-tunnel-linux-musl-arm64.tar.gz) |
+| macOS x86_64 | [aether-tunnel-macos-amd64.tar.gz](https://github.com/fawney19/Aether/releases/download/tunnel-v0.3.17/aether-tunnel-macos-amd64.tar.gz) |
+| macOS ARM64 | [aether-tunnel-macos-arm64.tar.gz](https://github.com/fawney19/Aether/releases/download/tunnel-v0.3.17/aether-tunnel-macos-arm64.tar.gz) |
+| Windows x86_64 | [aether-tunnel-windows-amd64.zip](https://github.com/fawney19/Aether/releases/download/tunnel-v0.3.17/aether-tunnel-windows-amd64.zip) |
 <!-- DOWNLOAD_TABLE_END -->
 
 上表展示的是最新已发布版本的下载链接。从下一次 `tunnel-v*` 发布开始，表格会自动补上 `Linux x86_64 (musl)` / `Linux ARM64 (musl)` 包，供 Alpine 等 musl 系统直接使用。
@@ -68,10 +77,14 @@ irm https://raw.githubusercontent.com/fawney19/Aether/main/apps/aether-tunnel/in
 可选变量：`AETHER_TUNNEL_RELEASE_TAG` 固定安装某个 `tunnel-v*` tag，`AETHER_TUNNEL_CONFIG` 指定配置文件路径，`AETHER_TUNNEL_INSTALL_DIR` 指定二进制安装目录。
 
 ```bash
-# 1. 首次安装配置（TUI 向导，勾选 Install Service 随系统启动服务）
-sudo ./aether-tunnel setup
+# 1. 注册 root 系统服务前，先把二进制和凭据配置放入 root 管理的路径
+sudo install -o root -g root -m 0755 ./aether-tunnel /usr/local/bin/aether-tunnel
+sudo install -o root -g root -m 0700 -d /etc/aether-tunnel
 
-# 2. 日常管理 (勾选 Install Service 作为系统服务的情况下)
+# 2. 首次安装配置（TUI 向导，勾选 Install Service 随系统启动服务）
+sudo /usr/local/bin/aether-tunnel setup /etc/aether-tunnel/aether-tunnel.toml
+
+# 3. 日常管理 (勾选 Install Service 作为系统服务的情况下)
 aether-tunnel status          # 看状态
 sudo aether-tunnel logs       # 看日志
 
@@ -79,14 +92,14 @@ sudo aether-tunnel start      # 启动服务
 sudo aether-tunnel stop       # 停止服务
 sudo aether-tunnel restart    # 重启服务
 
-# 3. 重新配置（改完自动重启服务）
-sudo aether-tunnel setup
+# 4. 重新配置（改完自动重启服务）
+sudo aether-tunnel setup /etc/aether-tunnel/aether-tunnel.toml
 
-# 4. 彻底卸载
+# 5. 彻底卸载
 sudo aether-tunnel uninstall
 ```
 
-完成向导后, 配置自动保存到 `aether-tunnel.toml`，如果启用了 Install Service，将自动注册并启动当前系统支持的服务（`systemd` 或 `OpenRC`）。
+完成向导后，如果启用了 Install Service，将自动注册并启动当前系统支持的服务（`systemd` 或 `OpenRC`）。为避免 root 服务被普通用户替换二进制或凭据配置，服务模式只接受 root 所有、父目录不可由组或其他用户写入的二进制，以及权限为 `0600` 的单硬链接配置文件；直接运行模式不受此限制。
 
 ### 直接运行
 
@@ -95,6 +108,10 @@ sudo aether-tunnel uninstall
 ```bash
 ./aether-tunnel
 ```
+
+### 安全更新
+
+Linux/macOS 可运行 `sudo aether-tunnel upgrade [version]`。自更新只接受本仓库的非草稿 `tunnel-v*` / `proxy-v*` SemVer Release，下载当前平台的固定资产和同一 tag 下的 `SHA256SUMS.txt`，校验后在受保护的二进制目录内原子替换，并保留上一版本用于失败回滚。Windows 不执行进程内自更新；请重新运行上面的 PowerShell 安装脚本完成手工替换，避免二段重命名产生二进制缺失窗口。
 
 ## 配置
 
@@ -119,7 +136,7 @@ sudo aether-tunnel uninstall
 | `--node-region` | `AETHER_TUNNEL_NODE_REGION` | 自动检测 | 地区标识 |
 | `--heartbeat-interval` | `AETHER_TUNNEL_HEARTBEAT_INTERVAL` | `5` | 心跳间隔（秒） |
 | `--allowed-ports` | `AETHER_TUNNEL_ALLOWED_PORTS` | `80,443,8080,8443` | 允许代理的目标端口 |
-| `--allow-private-targets` | `AETHER_TUNNEL_ALLOW_PRIVATE_TARGETS` | `true` | 允许 private/reserved 目标地址，通过后仍受 `allowed_ports` 限制；设为 `false` 可恢复严格拦截 |
+| `--allow-private-targets` | `AETHER_TUNNEL_ALLOW_PRIVATE_TARGETS` | `false` | 默认拦截 private/reserved 目标地址；仅在明确需要访问内网服务时设为 `true`，通过后仍受 `allowed_ports` 限制 |
 
 #### Tunnel 连接
 
@@ -153,14 +170,15 @@ sudo aether-tunnel uninstall
 
 | 参数 | 环境变量 | 默认值 | 说明 |
 |------|----------|--------|------|
-| `--upstream-connect-timeout-secs` | `AETHER_TUNNEL_UPSTREAM_CONNECT_TIMEOUT_SECS` | `30` | 上游建连超时（秒） |
+| `--upstream-connect-timeout-secs` | `AETHER_TUNNEL_UPSTREAM_CONNECT_TIMEOUT` | `30` | 上游建连超时（秒） |
 | `--upstream-pool-max-idle-per-host` | `AETHER_TUNNEL_UPSTREAM_POOL_MAX_IDLE_PER_HOST` | `64` | 每 Host 最大空闲连接数 |
-| `--upstream-pool-idle-timeout-secs` | `AETHER_TUNNEL_UPSTREAM_POOL_IDLE_TIMEOUT_SECS` | `300` | 连接池空闲超时（秒） |
-| `--upstream-tcp-keepalive-secs` | `AETHER_TUNNEL_UPSTREAM_TCP_KEEPALIVE_SECS` | `60` | TCP keepalive（秒，0 关闭） |
+| `--upstream-pool-idle-timeout-secs` | `AETHER_TUNNEL_UPSTREAM_POOL_IDLE_TIMEOUT` | `300` | 连接池空闲超时（秒） |
+| `--upstream-tcp-keepalive-secs` | `AETHER_TUNNEL_UPSTREAM_TCP_KEEPALIVE` | `60` | TCP keepalive（秒，0 关闭） |
 | `--upstream-tcp-nodelay` | `AETHER_TUNNEL_UPSTREAM_TCP_NODELAY` | `true` | 启用 TCP_NODELAY |
 | `--upstream-proxy-url` | `AETHER_TUNNEL_UPSTREAM_PROXY_URL` | 空 | 仅 provider 上游请求使用的出口代理 |
+| `--upstream-proxy-remote-dns` | `AETHER_TUNNEL_UPSTREAM_PROXY_REMOTE_DNS` | `false` | 显式信任 HTTP/SOCKS5h 代理解析供应商域名并执行目标 IP 访问控制；需重启 |
 
-启用 `follow_redirects` 后，307/308 请求体重放不设置累计大小上限。
+启用 `follow_redirects` 后，同源 307/308 会在请求体不超过 5 MiB 时重放。首个上游请求始终流式传输；超过重放预算时不会拒绝或截断原请求，而是将 307/308 响应原样返回给调用方。
 
 出口代理支持 `http://`、`socks5://`、`socks5h://`。配合 WARP sidecar 时可填写：
 
@@ -168,14 +186,38 @@ sudo aether-tunnel uninstall
 upstream_proxy_url = "socks5h://microwarp:1080"
 ```
 
+默认仍由隧道本机解析供应商域名、执行端口/IP ACL，再把已校验的 IP 交给代理；仅配置
+`socks5h://` 不会跳过本地 DNS。这保留现有的防 DNS 重绑定及内网访问边界。
+
+如果隧道本机 DNS 不可用、被污染或返回不可路由的 Fake-IP，可显式委托**受信任且配置了
+目的地址访问控制的代理**解析域名。在 TOML 顶层（第一个 `[[servers]]` 之前）配置：
+
+```toml
+upstream_proxy_url = "socks5h://microwarp:1080"
+upstream_proxy_remote_dns = true
+```
+
+也可启用环境变量 `AETHER_TUNNEL_UPSTREAM_PROXY_REMOTE_DNS=true`、CLI 参数
+`--upstream-proxy-remote-dns` 或 setup 中的 `Proxy Remote DNS` 开关，保存后重启。
+该模式仅支持 `http://` 和 `socks5h://`，不支持本地解析语义的 `socks5://`；未配置代理时
+启动会报错。域名原样交给 HTTP CONNECT/SOCKS5h，HTTP Host 和 TLS SNI/证书校验仍使用
+原域名，不会在失败时偷偷回退到本地 DNS。
+
+**安全边界：**普通 HTTP CONNECT/SOCKS5 不能让隧道校验代理最终解析出的目标 IP，因此
+启用该模式代表把域名目标的 IP ACL 委托给代理，而不只是换一个 DNS 服务器。隧道仍检查
+端口、URL 凭据/fragment、`localhost` 和 IP 字面地址；默认继续拒绝私网/保留 IP 字面地址。
+这不需要打开 `allow_private_targets`。代理本身的域名仍需本地解析；如果本地 DNS 完全
+不可用，使用代理 IP 地址或修复本地解析。代理 DNS、TCP、CONNECT/SOCKS 和 TLS 握手共同
+受 `upstream_connect_timeout_secs` 限制。
+
 如果需要让 Aether 管理 API 和 WebSocket tunnel 也走代理，使用 `aether_outbound_proxy_url`。
 
 #### Aether API 客户端
 
 | 参数 | 环境变量 | 默认值 | 说明 |
 |------|----------|--------|------|
-| `--aether-request-timeout-secs` | `AETHER_TUNNEL_AETHER_REQUEST_TIMEOUT_SECS` | `10` | 请求总超时（秒） |
-| `--aether-connect-timeout-secs` | `AETHER_TUNNEL_AETHER_CONNECT_TIMEOUT_SECS` | `10` | 建连超时（秒） |
+| `--aether-request-timeout-secs` | `AETHER_TUNNEL_AETHER_REQUEST_TIMEOUT` | `10` | 请求总超时（秒） |
+| `--aether-connect-timeout-secs` | `AETHER_TUNNEL_AETHER_CONNECT_TIMEOUT` | `10` | 建连超时（秒） |
 | `--aether-outbound-proxy-url` | `AETHER_TUNNEL_AETHER_OUTBOUND_PROXY_URL` | 空 | Aether 注册、心跳和 WebSocket tunnel 回连使用的出口代理（默认不走代理） |
 | `--aether-retry-max-attempts` | `AETHER_TUNNEL_AETHER_RETRY_MAX_ATTEMPTS` | `3` | 最大重试次数 |
 
@@ -183,8 +225,8 @@ upstream_proxy_url = "socks5h://microwarp:1080"
 
 | 参数 | 环境变量 | 默认值 | 说明 |
 |------|----------|--------|------|
-| `--allow-private-targets` | `AETHER_TUNNEL_ALLOW_PRIVATE_TARGETS` | `true` | 默认允许 private/reserved 目标地址；设为 `false` 可恢复拦截，且仅影响重启后的进程 |
-| `--dns-cache-ttl-secs` | `AETHER_TUNNEL_DNS_CACHE_TTL_SECS` | `60` | DNS 缓存 TTL（秒） |
+| `--allow-private-targets` | `AETHER_TUNNEL_ALLOW_PRIVATE_TARGETS` | `false` | 默认拦截 private/reserved 目标地址；仅在明确需要访问内网服务时设为 `true`，且仅影响重启后的进程 |
+| `--dns-cache-ttl-secs` | `AETHER_TUNNEL_DNS_CACHE_TTL` | `60` | DNS 缓存 TTL（秒） |
 | `--dns-cache-capacity` | `AETHER_TUNNEL_DNS_CACHE_CAPACITY` | `1024` | DNS 缓存容量（条目数） |
 
 #### 日志
@@ -227,15 +269,15 @@ node_name = "jp-proxy-01"
 tunnel_security = "off"
 
 [[servers]]
-aether_url = "http://aether-2.example.com"
+aether_url = "http://127.0.0.1:8084"
 management_token = "ae_yyy"
-node_name = "jp-proxy-02"
+node_name = "local-dev-proxy"
 tunnel_encryption_key = "base64-32-bytes"
 ```
 
-`tunnel_security = "non_tls_required"` 是非 TLS secure tunnel 的 MVP 配置面：它要求同时提供当前 `[[servers]]` 条目的 `tunnel_encryption_key`，后续握手使用 `node_name` / `X-Node-Id` 查找对应 PSK，不引入 `tunnel_encryption_key_id`。`wss://` 仍是推荐方案；`ws:// + secure tunnel` 只加密注册完成后的 WebSocket tunnel frame，不保护安装脚本、注册请求、`management_token` 或 PSK 的首次分发；这些 bootstrap 凭据仍必须通过 HTTPS 或其他可信通道交付。它不等价于 HTTPS 伪装，也不覆盖 tunnel ↔ origin/provider 这段链路。
+`tunnel_security = "non_tls_required"` 是本机非 TLS secure tunnel 的兼容配置面：它要求同时提供当前 `[[servers]]` 条目的 `tunnel_encryption_key`，后续握手使用 `node_name` / `X-Node-Id` 查找对应 PSK，不引入 `tunnel_encryption_key_id`。公网或局域网 `aether_url` 必须使用 HTTPS；`http://` 只允许字面量 `localhost`、`127.0.0.0/8` 或 `::1`，避免明文泄漏 `management_token`。secure tunnel 只加密注册完成后的 WebSocket tunnel frame，不保护注册请求或 bootstrap 凭据，因此不能替代 HTTPS。
 
-如果 `aether_url` 使用 `http://` 且当前 `[[servers]]` 条目提供了 `tunnel_encryption_key`，省略 `tunnel_security` 时运行时会自动按 `non_tls_required` 生效；显式配置 `tunnel_security = "off"` 会关闭该自动推断。secure tunnel 会在 WebSocket tunnel 上加密所有二进制 tunnel frame；未配置 key 或显式关闭的旧节点仍按原明文协议工作。
+如果 loopback `aether_url` 使用 `http://` 且当前 `[[servers]]` 条目提供了 `tunnel_encryption_key`，省略 `tunnel_security` 时运行时会自动按 `non_tls_required` 生效；显式配置 `tunnel_security = "off"` 会关闭该自动推断。secure tunnel 会在 WebSocket tunnel 上加密所有二进制 tunnel frame；未配置 key 或显式关闭的旧节点仍按原明文协议工作。
 
 ## 发布新版本
 

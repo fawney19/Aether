@@ -26,7 +26,7 @@
           />
         </div>
 
-        <div class="grid grid-cols-2 gap-4">
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div class="space-y-1.5">
             <Label>{{ legacyT('提供商类型') }}</Label>
             <Select
@@ -123,53 +123,14 @@
         </div>
       </div>
 
-      <!-- 计费与限流 / 请求配置 -->
+      <!-- 请求配置 -->
       <div class="space-y-3">
-        <div class="grid grid-cols-2 gap-4">
-          <h3 class="text-sm font-medium border-b pb-2">
-            {{ legacyT('计费与限流') }}
-          </h3>
-          <h3 class="text-sm font-medium border-b pb-2">
-            {{ legacyT('请求配置') }}
-          </h3>
-        </div>
-        <div class="grid grid-cols-2 gap-4">
-          <div class="space-y-1.5">
-            <Label>{{ legacyT('计费类型') }}</Label>
-            <Select
-              v-model="form.billing_type"
-            >
-              <SelectTrigger>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="monthly_quota">
-                  {{ legacyT('月卡额度') }}
-                </SelectItem>
-                <SelectItem value="pay_as_you_go">
-                  {{ legacyT('按量付费') }}
-                </SelectItem>
-                <SelectItem value="free_tier">
-                  {{ legacyT('免费套餐') }}
-                </SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-          <div class="space-y-1.5">
-            <Label>{{ legacyT('最大重试次数') }}</Label>
-            <Input
-              :model-value="form.max_retries ?? ''"
-              type="number"
-              min="0"
-              max="999"
-              :placeholder="legacyT('默认 2')"
-              @update:model-value="(v) => form.max_retries = parseNumberInput(v)"
-            />
-          </div>
-        </div>
+        <h3 class="text-sm font-medium border-b pb-2">
+          {{ legacyT('请求配置') }}
+        </h3>
 
         <!-- 超时配置 -->
-        <div class="grid grid-cols-2 gap-4">
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div class="space-y-1.5">
             <Label>
               {{ legacyT('流式首字节超时') }}
@@ -203,11 +164,11 @@
         </div>
 
         <!-- 提供商内转移限制 -->
-        <div class="grid grid-cols-2 gap-2 sm:gap-4">
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div class="min-w-0 space-y-1.5">
             <Label
               for="max-transfer-count"
-              class="whitespace-nowrap text-xs sm:text-sm"
+              class="text-xs sm:text-sm"
             >
               {{ legacyT('最大转移次数') }}
             </Label>
@@ -224,7 +185,7 @@
           <div class="min-w-0 space-y-1.5">
             <Label
               for="max-transfer-timeout-seconds"
-              class="whitespace-nowrap text-xs sm:text-sm"
+              class="text-xs sm:text-sm"
             >
               {{ legacyT('最大转移超时') }}
               <span class="text-xs text-muted-foreground">{{ legacyT('(秒)') }}</span>
@@ -240,49 +201,6 @@
             />
           </div>
         </div>
-
-        <!-- 月卡配置 -->
-        <div
-          v-if="form.billing_type === 'monthly_quota'"
-          class="grid grid-cols-2 gap-4 p-3 border rounded-lg bg-muted/50"
-        >
-          <div class="space-y-1.5">
-            <Label class="text-xs">{{ legacyT('周期额度 (USD)') }}</Label>
-            <Input
-              :model-value="form.monthly_quota_usd ?? ''"
-              type="number"
-              step="0.01"
-              min="0"
-              @update:model-value="(v) => form.monthly_quota_usd = parseNumberInput(v, { allowFloat: true })"
-            />
-          </div>
-          <div class="space-y-1.5">
-            <Label class="text-xs">{{ legacyT('重置周期 (天)') }}</Label>
-            <Input
-              :model-value="form.quota_reset_day ?? ''"
-              type="number"
-              min="1"
-              max="365"
-              @update:model-value="(v) => form.quota_reset_day = parseNumberInput(v) ?? 30"
-            />
-          </div>
-          <div class="space-y-1.5">
-            <Label class="text-xs">
-              {{ legacyT('周期开始时间') }} <span class="text-red-500">*</span>
-            </Label>
-            <Input
-              v-model="form.quota_last_reset_at"
-              type="datetime-local"
-            />
-          </div>
-          <div class="space-y-1.5">
-            <Label class="text-xs">{{ legacyT('过期时间') }}</Label>
-            <Input
-              v-model="form.quota_expires_at"
-              type="datetime-local"
-            />
-          </div>
-        </div>
       </div>
 
       <!-- 功能开关 -->
@@ -290,19 +208,6 @@
         <h3 class="text-sm font-medium border-b pb-2">
           {{ legacyT('功能开关') }}
         </h3>
-
-        <div class="flex items-center justify-between p-3 border rounded-lg bg-muted/50">
-          <div class="space-y-0.5">
-            <span class="text-sm font-medium">{{ legacyT('格式转换保持优先级') }}</span>
-            <p class="text-xs text-muted-foreground">
-              {{ legacyT('跨格式请求时保持原优先级排名，不降级到格式匹配的提供商之后') }}
-            </p>
-          </div>
-          <Switch
-            :model-value="form.keep_priority_on_conversion"
-            @update:model-value="(v: boolean) => form.keep_priority_on_conversion = v"
-          />
-        </div>
 
         <div class="flex items-center justify-between p-3 border rounded-lg bg-muted/50">
           <div class="space-y-0.5">
@@ -343,16 +248,16 @@
               for="codex-fingerprint-convergence"
               class="text-sm font-medium"
             >
-              {{ legacyT('Codex OAuth 指纹收敛') }}
+              {{ legacyT('Codex 指纹收敛') }}
             </Label>
             <p class="text-xs text-muted-foreground leading-relaxed">
-              {{ legacyT('统一同一 OAuth 账号的设备与会话标识；关闭时保持现有透传行为。') }}
+              {{ legacyT('统一同一 Codex 身份的设备与会话标识；关闭时保持现有透传行为。') }}
             </p>
           </div>
           <Switch
             id="codex-fingerprint-convergence"
             :model-value="form.codex_fingerprint_convergence_enabled"
-            :aria-label="legacyT('Codex OAuth 指纹收敛')"
+            :aria-label="legacyT('Codex 指纹收敛')"
             @update:model-value="(v: boolean) => form.codex_fingerprint_convergence_enabled = v"
           />
         </div>
@@ -437,7 +342,6 @@ import {
 } from '@/api/endpoints'
 import { parseApiError } from '@/utils/errorParser'
 import { parseNumberInput } from '@/utils/form'
-import { dateTimeLocalToRfc3339, formatDateTimeLocalInput } from '@/utils/date'
 
 const props = defineProps<{
   modelValue: boolean
@@ -479,14 +383,7 @@ const form = ref({
   provider_type: 'custom' as ProviderType,
   description: '',
   website: '',
-  // 计费配置
-  billing_type: 'pay_as_you_go' as 'monthly_quota' | 'pay_as_you_go' | 'free_tier',
-  monthly_quota_usd: undefined as number | undefined,
-  quota_reset_day: 30,
-  quota_last_reset_at: '',  // 周期开始时间
-  quota_expires_at: '',
   provider_priority: 100,
-  keep_priority_on_conversion: false,  // 格式转换时是否保持优先级
   // 状态配置
   is_active: true,
   rate_limit: undefined as number | undefined,
@@ -515,13 +412,7 @@ function resetForm() {
     provider_type: 'custom',
     description: '',
     website: '',
-    billing_type: 'pay_as_you_go',
-    monthly_quota_usd: undefined,
-    quota_reset_day: 30,
-    quota_last_reset_at: '',
-    quota_expires_at: '',
     provider_priority: defaultPriority.value,
-    keep_priority_on_conversion: false,
     is_active: true,
     rate_limit: undefined,
     concurrent_limit: undefined,
@@ -553,13 +444,7 @@ function loadProviderData() {
     provider_type: props.provider.provider_type || 'custom',
     description: props.provider.description || '',
     website: props.provider.website || '',
-    billing_type: (props.provider.billing_type as 'monthly_quota' | 'pay_as_you_go' | 'free_tier') || 'pay_as_you_go',
-    monthly_quota_usd: props.provider.monthly_quota_usd || undefined,
-    quota_reset_day: props.provider.quota_reset_day || 30,
-    quota_last_reset_at: formatDateTimeLocalInput(props.provider.quota_last_reset_at),
-    quota_expires_at: formatDateTimeLocalInput(props.provider.quota_expires_at),
     provider_priority: props.provider.provider_priority || 999,
-    keep_priority_on_conversion: props.provider.keep_priority_on_conversion ?? false,
     is_active: props.provider.is_active,
     rate_limit: undefined,
     concurrent_limit: undefined,
@@ -606,23 +491,6 @@ watch(() => form.value.provider_type, () => {
 
 // 提交表单
 const handleSubmit = async () => {
-  // 月卡类型必须设置周期开始时间
-  if (form.value.billing_type === 'monthly_quota' && !form.value.quota_last_reset_at) {
-    showError(legacyT('月卡类型必须设置周期开始时间'), legacyT('验证失败'))
-    return
-  }
-
-  const quotaLastResetAt = dateTimeLocalToRfc3339(form.value.quota_last_reset_at)
-  if (form.value.billing_type === 'monthly_quota' && !quotaLastResetAt) {
-    showError(legacyT('周期开始时间必须是合法时间'), legacyT('验证失败'))
-    return
-  }
-  const quotaExpiresAt = dateTimeLocalToRfc3339(form.value.quota_expires_at)
-  if (form.value.quota_expires_at && !quotaExpiresAt) {
-    showError(legacyT('过期时间必须是合法时间'), legacyT('验证失败'))
-    return
-  }
-
   loading.value = true
   try {
     const currentPoolAdvanced = normalizePoolAdvancedConfig(props.provider?.pool_advanced)
@@ -631,12 +499,6 @@ const handleSubmit = async () => {
       provider_type: form.value.provider_type,
       description: form.value.description || undefined,
       website: form.value.website || undefined,
-      billing_type: form.value.billing_type,
-      monthly_quota_usd: form.value.monthly_quota_usd,
-      quota_reset_day: form.value.quota_reset_day,
-      quota_last_reset_at: quotaLastResetAt,
-      quota_expires_at: quotaExpiresAt,
-      keep_priority_on_conversion: form.value.keep_priority_on_conversion,
       responses_websocket_enabled: form.value.responses_websocket_enabled,
       is_active: form.value.is_active,
       // 请求配置

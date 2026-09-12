@@ -1,5 +1,6 @@
 mod adaptation;
 pub(crate) mod api;
+pub(crate) mod codex_context;
 mod finalize;
 mod planner;
 mod pure;

@@ -41,7 +41,7 @@ describe('user management demo contracts', () => {
       feature_settings: null,
       is_standalone: false,
     })
-    expect(created?.data?.key).toMatch(/^sk-ae-demo-/)
+    expect(created?.data).toHaveProperty('key', expect.stringMatching(/^sk-ae-demo-/))
 
     const aliceKeys = await handleMockRequest({
       method: 'GET',
@@ -53,10 +53,9 @@ describe('user management demo contracts', () => {
     })
 
     expect(aliceKeys?.data).toMatchObject({ total: 1 })
-    expect(aliceKeys?.data?.api_keys).toHaveLength(1)
-    expect(aliceKeys?.data?.api_keys[0]).toMatchObject({ name: 'Alice inherited key' })
-    expect(aliceKeys?.data?.api_keys[0]).not.toHaveProperty('key')
-    expect(aliceKeys?.data?.api_keys[0]).not.toHaveProperty('fullKey')
+    expect(aliceKeys?.data).toHaveProperty('api_keys', [expect.objectContaining({ name: 'Alice inherited key' })])
+        expect(aliceKeys?.data).not.toHaveProperty('api_keys.0.key')
+    expect(aliceKeys?.data).not.toHaveProperty('api_keys.0.fullKey')
     expect(bobKeys?.data).toEqual({ api_keys: [], total: 0 })
   })
 })

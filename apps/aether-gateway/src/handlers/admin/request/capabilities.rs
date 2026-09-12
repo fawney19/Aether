@@ -22,6 +22,18 @@ impl<'a> AdminAppState<'a> {
         crate::handlers::admin::shared::encrypt_catalog_secret_with_fallbacks(self.app, secret)
     }
 
+    pub(crate) fn encrypt_system_config_secret(&self, key: &str, secret: &str) -> Option<String> {
+        crate::handlers::shared::encrypt_system_config_secret(self.app, key, secret)
+    }
+
+    pub(crate) fn encrypt_ldap_bind_password(
+        &self,
+        config: &aether_data::repository::auth_modules::StoredLdapModuleConfig,
+        secret: &str,
+    ) -> Option<String> {
+        crate::handlers::shared::encrypt_ldap_bind_password(self.app, config, secret)
+    }
+
     pub(crate) fn decrypt_catalog_secret_with_fallbacks(&self, ciphertext: &str) -> Option<String> {
         crate::handlers::admin::shared::decrypt_catalog_secret_with_fallbacks(
             self.app.encryption_key(),

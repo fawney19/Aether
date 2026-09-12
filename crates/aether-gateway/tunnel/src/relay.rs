@@ -12,6 +12,8 @@ pub const DEFAULT_TUNNEL_PROBE_BODY_LIMIT_BYTES: usize = 64 * 1024;
 pub struct TunnelAttachmentRecord {
     pub gateway_instance_id: String,
     pub relay_base_url: String,
+    #[serde(default)]
+    pub tunnel_generation: String,
     pub conn_count: usize,
     pub observed_at_unix_secs: u64,
 }
@@ -20,6 +22,7 @@ impl TunnelAttachmentRecord {
     pub fn is_routable(&self, now_unix_secs: u64, ttl_secs: u64) -> bool {
         self.conn_count > 0
             && !self.relay_base_url.trim().is_empty()
+            && !self.tunnel_generation.trim().is_empty()
             && self.observed_at_unix_secs.saturating_add(ttl_secs) >= now_unix_secs
     }
 
@@ -44,6 +47,7 @@ mod tests {
         TunnelAttachmentRecord {
             gateway_instance_id: "gateway-a".to_string(),
             relay_base_url: "http://gateway-a.internal".to_string(),
+            tunnel_generation: "generation-a".to_string(),
             conn_count: 1,
             observed_at_unix_secs: 100,
         }

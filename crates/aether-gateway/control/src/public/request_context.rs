@@ -8,6 +8,7 @@ pub struct PublicRequestContext<Decision> {
     pub request_query_string: Option<String>,
     pub request_content_type: Option<String>,
     pub host_header: Option<String>,
+    pub client_ip: Option<String>,
     pub control_decision: Option<Decision>,
 }
 
@@ -32,6 +33,7 @@ impl<Decision> PublicRequestContext<Decision> {
             request_query_string: uri.query().map(ToOwned::to_owned),
             request_content_type: header_value(headers, http::header::CONTENT_TYPE),
             host_header: header_value(headers, http::header::HOST),
+            client_ip: None,
             control_decision,
         }
     }

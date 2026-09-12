@@ -31,6 +31,32 @@ export interface CandidateResponseBoundary {
   body_state?: string | null
 }
 
+export interface CandidateProxyTiming {
+  body_read_ms?: number | null
+  decompress_ms?: number | null
+  wire_size?: number | null
+  body_size?: number | null
+  ttfb_ms?: number | null
+  upstream_ms?: number | null
+  response_wait_ms?: number | null
+  connection_acquire_ms?: number | null
+  upstream_processing_ms?: number | null
+  connect_ms?: number | null
+  tls_ms?: number | null
+  dns_ms?: number | null
+  total_ms?: number | null
+  connection_reused?: boolean | null
+}
+
+export interface CandidateProxy {
+  node_name?: string | null
+  node_id?: string | null
+  url?: string | null
+  source?: string | null
+  ttfb_ms?: number | null
+  timing?: CandidateProxyTiming | null
+}
+
 export interface CandidateRecord {
   id: string
   request_id: string
@@ -70,6 +96,22 @@ export interface CandidateRecord {
   ranking?: CandidateRankingMetadata | null
   image_progress?: ImageProgress | null
   extra_data?: Record<string, unknown> & {
+    first_byte_time_ms?: number | null
+    needs_conversion?: boolean
+    provider_api_format?: string | null
+    proxy?: CandidateProxy | null
+    pool_selection?: {
+      reason: string
+      cost_soft_threshold?: number | boolean | null
+      cost_window_usage?: number | null
+      cost_limit?: number | null
+    } | null
+    pool_skip?: {
+      type: string
+      cooldown_reason?: string | null
+      cooldown_ttl?: number | null
+      cost_window_usage?: number | null
+    } | null
     upstream_response?: CandidateResponseBoundary
     image_progress?: ImageProgress | null
   }
@@ -79,6 +121,8 @@ export interface CandidateRecord {
 }
 
 export interface RequestTrace {
+  gateway_version?: string | null
+  diagnostic_request?: { usage_id: string, body_state?: string | null } | null
   request_id: string
   request_path?: string
   request_query_string?: string
@@ -112,7 +156,7 @@ export const requestTraceApi = {
     const response = await apiClient.get<RequestTrace>(`/api/admin/monitoring/trace/${requestId}`, {
       params: { attempted_only: attemptedOnly },
     })
-    return response.data
+    return { ...response.data, gateway_version: response.headers?.['x-aether-build-version'] ?? response.data.gateway_version ?? null }
   },
 
   /**

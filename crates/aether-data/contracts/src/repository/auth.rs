@@ -1,5 +1,9 @@
 use async_trait::async_trait;
 
+fn redacted_optional_secret<T>(value: &Option<T>) -> Option<&'static str> {
+    value.as_ref().map(|_| "[REDACTED]")
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct StoredAuthApiKeySnapshot {
     pub user_id: String,
@@ -124,7 +128,7 @@ impl StoredAuthApiKeySnapshot {
             return false;
         }
         if let Some(expires_at_unix_secs) = self.api_key_expires_at_unix_secs {
-            if expires_at_unix_secs < now_unix_secs {
+            if expires_at_unix_secs <= now_unix_secs {
                 return false;
             }
         }
@@ -374,7 +378,7 @@ pub async fn read_resolved_auth_api_key_snapshot_by_user_api_key_ids(
     .await
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct StoredAuthApiKeyExportRecord {
     pub user_id: String,
     pub api_key_id: String,
@@ -399,6 +403,22 @@ pub struct StoredAuthApiKeyExportRecord {
     pub created_at_unix_secs: Option<u64>,
     pub updated_at_unix_secs: Option<u64>,
     pub is_standalone: bool,
+}
+
+impl std::fmt::Debug for StoredAuthApiKeyExportRecord {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("StoredAuthApiKeyExportRecord")
+            .field("user_id", &self.user_id)
+            .field("api_key_id", &self.api_key_id)
+            .field("key_hash", &self.key_hash)
+            .field(
+                "key_encrypted",
+                &redacted_optional_secret(&self.key_encrypted),
+            )
+            .field("is_standalone", &self.is_standalone)
+            .finish_non_exhaustive()
+    }
 }
 
 impl StoredAuthApiKeyExportRecord {
@@ -521,7 +541,7 @@ pub struct StandaloneApiKeyExportListQuery {
     pub is_active: Option<bool>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct CreateUserApiKeyRecord {
     pub user_id: String,
     pub api_key_id: String,
@@ -535,6 +555,7 @@ pub struct CreateUserApiKeyRecord {
     pub rate_limit: i32,
     pub concurrent_limit: Option<i32>,
     pub force_capabilities: Option<serde_json::Value>,
+    pub feature_settings: Option<serde_json::Value>,
     pub is_active: bool,
     pub expires_at_unix_secs: Option<u64>,
     pub auto_delete_on_expiry: bool,
@@ -543,17 +564,61 @@ pub struct CreateUserApiKeyRecord {
     pub total_cost_usd: f64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+impl std::fmt::Debug for CreateUserApiKeyRecord {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CreateUserApiKeyRecord")
+            .field("user_id", &self.user_id)
+            .field("api_key_id", &self.api_key_id)
+            .field("key_hash", &self.key_hash)
+            .field(
+                "key_encrypted",
+                &redacted_optional_secret(&self.key_encrypted),
+            )
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
 pub struct UpdateUserApiKeyBasicRecord {
     pub user_id: String,
     pub api_key_id: String,
+    pub key_encrypted: Option<String>,
+    /// Whether `key_encrypted` is an explicit replacement, including an explicit `NULL`.
+    /// Ordinary callers should leave this false to retain the existing value.
+    pub key_encrypted_present: bool,
     pub name: Option<String>,
+    /// Whether `name` is an explicit replacement, including an explicit `NULL`.
+    pub name_present: bool,
     pub rate_limit: Option<i32>,
+    /// Whether `rate_limit` is an explicit replacement, including an explicit `NULL`.
+    pub rate_limit_present: bool,
     pub concurrent_limit: Option<i32>,
+    /// Whether `concurrent_limit` is an explicit replacement, including an explicit `NULL`.
+    pub concurrent_limit_present: bool,
     pub ip_rules: Option<Option<Vec<String>>>,
+    /// `Some(Some(value))` replaces the settings; `Some(None)` clears them; `None` leaves them
+    /// unchanged. Keeping this patch in the basic mutation record lets repositories apply the
+    /// complete user-key update in one atomic write.
+    pub feature_settings: Option<Option<serde_json::Value>>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+impl std::fmt::Debug for UpdateUserApiKeyBasicRecord {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("UpdateUserApiKeyBasicRecord")
+            .field("user_id", &self.user_id)
+            .field("api_key_id", &self.api_key_id)
+            .field(
+                "key_encrypted",
+                &redacted_optional_secret(&self.key_encrypted),
+            )
+            .field("key_encrypted_present", &self.key_encrypted_present)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Clone, PartialEq)]
 pub struct CreateStandaloneApiKeyRecord {
     pub user_id: String,
     pub api_key_id: String,
@@ -575,10 +640,35 @@ pub struct CreateStandaloneApiKeyRecord {
     pub total_cost_usd: f64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+impl std::fmt::Debug for CreateStandaloneApiKeyRecord {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CreateStandaloneApiKeyRecord")
+            .field("user_id", &self.user_id)
+            .field("api_key_id", &self.api_key_id)
+            .field("key_hash", &self.key_hash)
+            .field(
+                "key_encrypted",
+                &redacted_optional_secret(&self.key_encrypted),
+            )
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
 pub struct UpdateStandaloneApiKeyBasicRecord {
     pub api_key_id: String,
+    pub key_encrypted: Option<String>,
+    /// Whether `key_encrypted` is an explicit replacement, including an explicit `NULL`.
+    /// Ordinary callers should leave this false to retain the existing value.
+    pub key_encrypted_present: bool,
     pub name: Option<String>,
+    /// Whether `name` is an explicit replacement, including an explicit `NULL`.
+    /// Ordinary callers should leave this false to retain the existing value.
+    pub name_present: bool,
+    /// `Some(Some(value))` sets the capability map; `Some(None)` clears it; `None` leaves it
+    /// unchanged.
+    pub force_capabilities: Option<Option<serde_json::Value>>,
     pub rate_limit_present: bool,
     pub rate_limit: Option<i32>,
     pub concurrent_limit_present: bool,
@@ -591,6 +681,48 @@ pub struct UpdateStandaloneApiKeyBasicRecord {
     pub expires_at_unix_secs: Option<u64>,
     pub auto_delete_on_expiry_present: bool,
     pub auto_delete_on_expiry: bool,
+}
+
+impl std::fmt::Debug for UpdateStandaloneApiKeyBasicRecord {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("UpdateStandaloneApiKeyBasicRecord")
+            .field("api_key_id", &self.api_key_id)
+            .field(
+                "key_encrypted",
+                &redacted_optional_secret(&self.key_encrypted),
+            )
+            .field("key_encrypted_present", &self.key_encrypted_present)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Replace only the recoverable API-key ciphertext when the complete immutable identity and the
+/// exact ciphertext observed by the caller still match. This is intentionally narrower than the
+/// ordinary admin update records so lazy envelope migration cannot overwrite a concurrent secret
+/// restore or move ciphertext between owners, scopes, hashes, or key IDs.
+#[derive(Clone, PartialEq, Eq)]
+pub struct CompareAndSwapAuthApiKeyCiphertext {
+    pub user_id: String,
+    pub api_key_id: String,
+    pub key_hash: String,
+    pub is_standalone: bool,
+    pub expected_key_encrypted: String,
+    pub key_encrypted: String,
+}
+
+impl std::fmt::Debug for CompareAndSwapAuthApiKeyCiphertext {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CompareAndSwapAuthApiKeyCiphertext")
+            .field("user_id", &self.user_id)
+            .field("api_key_id", &self.api_key_id)
+            .field("key_hash", &self.key_hash)
+            .field("is_standalone", &self.is_standalone)
+            .field("expected_key_encrypted", &"[REDACTED]")
+            .field("key_encrypted", &"[REDACTED]")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -674,6 +806,20 @@ pub trait AuthApiKeyReadRepository: Send + Sync {
 pub trait AuthApiKeyWriteRepository: Send + Sync {
     async fn touch_last_used_at(&self, api_key_id: &str) -> Result<bool, crate::DataLayerError>;
 
+    /// Synchronize an authoritative user snapshot for repositories used by gateway tests.
+    ///
+    /// Production database repositories validate the API-key owner in the same transaction as
+    /// key creation and deliberately keep the default no-op implementation.  Test repositories
+    /// may override this hook, but must derive owner state exclusively from `StoredUserAuthRecord`
+    /// rather than from an API-key mutation request.
+    async fn synchronize_user_api_key_owner_for_tests(
+        &self,
+        user: &crate::repository::users::StoredUserAuthRecord,
+    ) -> Result<(), crate::DataLayerError> {
+        let _ = user;
+        Ok(())
+    }
+
     async fn create_user_api_key(
         &self,
         record: CreateUserApiKeyRecord,
@@ -684,15 +830,52 @@ pub trait AuthApiKeyWriteRepository: Send + Sync {
         record: CreateStandaloneApiKeyRecord,
     ) -> Result<Option<StoredAuthApiKeyExportRecord>, crate::DataLayerError>;
 
+    async fn compare_and_swap_api_key_ciphertext(
+        &self,
+        mutation: &CompareAndSwapAuthApiKeyCiphertext,
+    ) -> Result<bool, crate::DataLayerError> {
+        let _ = mutation;
+        Err(crate::DataLayerError::InvalidInput(
+            "atomic API-key ciphertext migration is not available".to_string(),
+        ))
+    }
+
     async fn update_user_api_key_basic(
         &self,
         record: UpdateUserApiKeyBasicRecord,
     ) -> Result<Option<StoredAuthApiKeyExportRecord>, crate::DataLayerError>;
 
+    /// Apply a user-owned key update only while the key remains unlocked.
+    /// Implementations must test ownership, non-standalone status, and
+    /// `is_locked = false` in the same atomic write as the mutation.
+    async fn update_user_api_key_basic_if_unlocked(
+        &self,
+        record: UpdateUserApiKeyBasicRecord,
+    ) -> Result<Option<StoredAuthApiKeyExportRecord>, crate::DataLayerError> {
+        let _ = record;
+        Err(crate::DataLayerError::InvalidInput(
+            "atomic unlocked user API key update is not available".to_string(),
+        ))
+    }
+
     async fn update_standalone_api_key_basic(
         &self,
         record: UpdateStandaloneApiKeyBasicRecord,
     ) -> Result<Option<StoredAuthApiKeyExportRecord>, crate::DataLayerError>;
+
+    /// Restore an API-key export row only when its complete exported post-state still matches
+    /// `expected`. Implementations must perform the compare and update atomically so a failed
+    /// import cannot overwrite a concurrent administrator change.
+    async fn restore_api_key_if_matches(
+        &self,
+        expected: &StoredAuthApiKeyExportRecord,
+        restored: &StoredAuthApiKeyExportRecord,
+    ) -> Result<bool, crate::DataLayerError> {
+        let _ = (expected, restored);
+        Err(crate::DataLayerError::InvalidInput(
+            "atomic API key restore is not available".to_string(),
+        ))
+    }
 
     async fn set_user_api_key_active(
         &self,
@@ -700,6 +883,18 @@ pub trait AuthApiKeyWriteRepository: Send + Sync {
         api_key_id: &str,
         is_active: bool,
     ) -> Result<Option<StoredAuthApiKeyExportRecord>, crate::DataLayerError>;
+
+    async fn set_user_api_key_active_if_unlocked(
+        &self,
+        user_id: &str,
+        api_key_id: &str,
+        is_active: bool,
+    ) -> Result<Option<StoredAuthApiKeyExportRecord>, crate::DataLayerError> {
+        let _ = (user_id, api_key_id, is_active);
+        Err(crate::DataLayerError::InvalidInput(
+            "atomic unlocked user API key status update is not available".to_string(),
+        ))
+    }
 
     async fn set_standalone_api_key_active(
         &self,
@@ -721,6 +916,18 @@ pub trait AuthApiKeyWriteRepository: Send + Sync {
         allowed_providers: Option<Vec<String>>,
     ) -> Result<Option<StoredAuthApiKeyExportRecord>, crate::DataLayerError>;
 
+    async fn set_user_api_key_allowed_providers_if_unlocked(
+        &self,
+        user_id: &str,
+        api_key_id: &str,
+        allowed_providers: Option<Vec<String>>,
+    ) -> Result<Option<StoredAuthApiKeyExportRecord>, crate::DataLayerError> {
+        let _ = (user_id, api_key_id, allowed_providers);
+        Err(crate::DataLayerError::InvalidInput(
+            "atomic unlocked user API key provider update is not available".to_string(),
+        ))
+    }
+
     async fn set_user_api_key_force_capabilities(
         &self,
         user_id: &str,
@@ -728,12 +935,36 @@ pub trait AuthApiKeyWriteRepository: Send + Sync {
         force_capabilities: Option<serde_json::Value>,
     ) -> Result<Option<StoredAuthApiKeyExportRecord>, crate::DataLayerError>;
 
+    async fn set_user_api_key_force_capabilities_if_unlocked(
+        &self,
+        user_id: &str,
+        api_key_id: &str,
+        force_capabilities: Option<serde_json::Value>,
+    ) -> Result<Option<StoredAuthApiKeyExportRecord>, crate::DataLayerError> {
+        let _ = (user_id, api_key_id, force_capabilities);
+        Err(crate::DataLayerError::InvalidInput(
+            "atomic unlocked user API key capability update is not available".to_string(),
+        ))
+    }
+
     async fn set_user_api_key_feature_settings(
         &self,
         user_id: &str,
         api_key_id: &str,
         feature_settings: Option<serde_json::Value>,
     ) -> Result<Option<StoredAuthApiKeyExportRecord>, crate::DataLayerError>;
+
+    async fn set_user_api_key_feature_settings_if_unlocked(
+        &self,
+        user_id: &str,
+        api_key_id: &str,
+        feature_settings: Option<serde_json::Value>,
+    ) -> Result<Option<StoredAuthApiKeyExportRecord>, crate::DataLayerError> {
+        let _ = (user_id, api_key_id, feature_settings);
+        Err(crate::DataLayerError::InvalidInput(
+            "atomic unlocked user API key feature update is not available".to_string(),
+        ))
+    }
 
     async fn set_api_key_usage_totals(
         &self,
@@ -748,6 +979,17 @@ pub trait AuthApiKeyWriteRepository: Send + Sync {
         user_id: &str,
         api_key_id: &str,
     ) -> Result<bool, crate::DataLayerError>;
+
+    async fn delete_user_api_key_if_unlocked(
+        &self,
+        user_id: &str,
+        api_key_id: &str,
+    ) -> Result<bool, crate::DataLayerError> {
+        let _ = (user_id, api_key_id);
+        Err(crate::DataLayerError::InvalidInput(
+            "atomic unlocked user API key deletion is not available".to_string(),
+        ))
+    }
 
     async fn delete_standalone_api_key(
         &self,
@@ -786,7 +1028,9 @@ fn parse_string_list_value(
     field_name: &str,
 ) -> Result<Option<Vec<String>>, crate::DataLayerError> {
     match value {
-        serde_json::Value::Null => Ok(None),
+        serde_json::Value::Null => Err(crate::DataLayerError::UnexpectedValue(format!(
+            "{field_name} contains JSON null; use SQL NULL for an unset policy"
+        ))),
         serde_json::Value::Array(array) => parse_string_list_array(array, field_name).map(Some),
         serde_json::Value::String(raw) => parse_embedded_string_list(raw, field_name),
         _ => Err(crate::DataLayerError::UnexpectedValue(format!(
@@ -800,8 +1044,15 @@ fn parse_embedded_string_list(
     field_name: &str,
 ) -> Result<Option<Vec<String>>, crate::DataLayerError> {
     let raw = raw.trim();
-    if raw.is_empty() || raw.eq_ignore_ascii_case("null") {
-        return Ok(None);
+    if raw.is_empty() {
+        return Err(crate::DataLayerError::UnexpectedValue(format!(
+            "{field_name} contains an empty string"
+        )));
+    }
+    if raw.eq_ignore_ascii_case("null") {
+        return Err(crate::DataLayerError::UnexpectedValue(format!(
+            "{field_name} contains stringified JSON null; use SQL NULL for an unset policy"
+        )));
     }
 
     if let Ok(decoded) = serde_json::from_str::<serde_json::Value>(raw) {
@@ -823,9 +1074,12 @@ fn parse_string_list_array(
             )));
         };
         let item = item.trim();
-        if !item.is_empty() {
-            items.push(item.to_string());
+        if item.is_empty() {
+            return Err(crate::DataLayerError::UnexpectedValue(format!(
+                "{field_name} contains an empty item"
+            )));
         }
+        items.push(item.to_string());
     }
     Ok(items)
 }
@@ -850,9 +1104,79 @@ mod tests {
     use super::{
         read_resolved_auth_api_key_snapshot_by_key_hash,
         read_resolved_auth_api_key_snapshot_by_user_api_key_ids, AuthApiKeyLookupKey,
-        ResolvedAuthApiKeySnapshot, ResolvedAuthApiKeySnapshotReader, StoredAuthApiKeyExportRecord,
-        StoredAuthApiKeySnapshot,
+        CompareAndSwapAuthApiKeyCiphertext, ResolvedAuthApiKeySnapshot,
+        ResolvedAuthApiKeySnapshotReader, StoredAuthApiKeyExportRecord, StoredAuthApiKeySnapshot,
     };
+
+    #[test]
+    fn api_key_record_debug_output_redacts_recoverable_ciphertext() {
+        let ciphertext = "debug-secret-api-key-ciphertext";
+        let replacement = "debug-secret-api-key-replacement";
+        let record = StoredAuthApiKeyExportRecord::new(
+            "user-1".to_string(),
+            "key-1".to_string(),
+            "key-hash".to_string(),
+            Some(ciphertext.to_string()),
+            Some("test key".to_string()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            true,
+            None,
+            false,
+            0,
+            0,
+            0.0,
+            false,
+        )
+        .expect("API key export record should build");
+        let mutation = CompareAndSwapAuthApiKeyCiphertext {
+            user_id: "user-1".to_string(),
+            api_key_id: "key-1".to_string(),
+            key_hash: "key-hash".to_string(),
+            is_standalone: false,
+            expected_key_encrypted: ciphertext.to_string(),
+            key_encrypted: replacement.to_string(),
+        };
+
+        for rendered in [format!("{record:?}"), format!("{mutation:?}")] {
+            assert!(!rendered.contains(ciphertext));
+            assert!(!rendered.contains(replacement));
+            assert!(rendered.contains("[REDACTED]"));
+        }
+    }
+
+    #[test]
+    fn stored_security_lists_distinguish_sql_null_from_malformed_json_null() {
+        assert_eq!(
+            super::parse_string_list(None, "api_keys.allowed_providers")
+                .expect("SQL NULL should remain an unset policy"),
+            None
+        );
+        assert!(super::parse_string_list(
+            Some(serde_json::Value::Null),
+            "api_keys.allowed_providers"
+        )
+        .is_err());
+        assert!(super::parse_string_list(
+            Some(serde_json::json!("null")),
+            "api_keys.allowed_providers"
+        )
+        .is_err());
+        assert!(super::parse_string_list(
+            Some(serde_json::json!([" "])),
+            "api_keys.allowed_providers"
+        )
+        .is_err());
+        assert_eq!(
+            super::parse_string_list(Some(serde_json::json!([])), "api_keys.allowed_providers")
+                .expect("an intentional empty policy should preserve its existing semantics"),
+            Some(Vec::new())
+        );
+    }
 
     #[test]
     fn api_format_policy_intersection_preserves_companion_scope() {
@@ -1012,6 +1336,8 @@ mod tests {
         )
         .expect("snapshot should build");
 
+        assert!(snapshot.is_currently_usable(99));
+        assert!(!snapshot.is_currently_usable(100));
         assert!(!snapshot.is_currently_usable(101));
     }
 

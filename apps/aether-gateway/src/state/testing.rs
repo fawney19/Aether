@@ -9,14 +9,64 @@ use aether_data_contracts::repository::usage::{UsageReadRepository, UsageReposit
 use aether_data_contracts::repository::video_tasks::{
     VideoTaskReadRepository, VideoTaskRepository,
 };
+use hmac::Mac;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 
 use super::{AppState, FrontdoorRuntimeGuardConfig, GatewayDataState};
 use crate::{provider_transport, usage};
 
+fn auth_email_storage_key_digest_for_tests(domain: &str, parts: &[&str]) -> String {
+    let secret = std::env::var("JWT_SECRET_KEY")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "aether-rust-test-jwt-secret-32-bytes-minimum".to_string());
+    let mut mac = hmac::Hmac::<Sha256>::new_from_slice(secret.as_bytes())
+        .expect("HMAC should accept the test auth key");
+    mac.update(b"aether-auth-email-storage-v1\0");
+    mac.update(domain.as_bytes());
+    for part in parts {
+        mac.update(b"\0");
+        mac.update(part.as_bytes());
+    }
+    mac.finalize()
+        .into_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 #[cfg(test)]
 impl AppState {
+    pub(crate) fn with_internal_gateway_auth_secret_for_tests(mut self, secret: &str) -> Self {
+        self.internal_gateway_auth = Arc::new(
+            crate::internal_gateway_auth::InternalGatewayAuthConfig::with_secret_for_tests(secret),
+        );
+        self
+    }
+
+    pub(crate) fn without_internal_gateway_for_tests(mut self) -> Self {
+        self.internal_gateway_auth =
+            Arc::new(crate::internal_gateway_auth::InternalGatewayAuthConfig::disabled_for_tests());
+        self
+    }
+
     pub(crate) fn with_data_state_for_tests(mut self, data_state: GatewayDataState) -> Self {
+        // Request-execution fixtures provide candidate and provider data but
+        // bypass the production startup bootstrap that creates the enabled
+        // system-default routing group. Keep those isolated states aligned
+        // with the real gateway contract while leaving intentionally disabled
+        // or routing-only fixtures untouched.
+        let data_state = if data_state.has_minimal_candidate_selection_reader()
+            && data_state.has_provider_catalog_reader()
+            && !data_state.has_routing_group_reader()
+            && !data_state.has_routing_group_writer()
+        {
+            data_state.with_system_default_routing_group_for_tests()
+        } else {
+            data_state
+        };
         self.replace_data_state(Arc::new(data_state));
         self.request_candidate_queue = None;
         self
@@ -54,6 +104,38 @@ impl AppState {
             Arc::clone(&self.data),
             crate::tunnel::TunnelAttachmentDirectory::for_tests(instance_id, relay_base_url, 90),
         );
+        self
+    }
+
+    pub(crate) fn with_tunnel_identity_and_relay_secret_for_tests(
+        mut self,
+        instance_id: &str,
+        relay_base_url: Option<&str>,
+        relay_auth_secret: &str,
+    ) -> Self {
+        self.tunnel = crate::tunnel::EmbeddedTunnelState::with_data_and_directory_for_tests(
+            Arc::clone(&self.data),
+            crate::tunnel::TunnelAttachmentDirectory::for_tests(instance_id, relay_base_url, 90),
+            relay_auth_secret,
+        );
+        self
+    }
+
+    pub(crate) fn with_tunnel_identity_runtime_state_and_relay_secret_for_tests(
+        mut self,
+        instance_id: &str,
+        relay_base_url: Option<&str>,
+        runtime_state: Arc<aether_runtime_state::RuntimeState>,
+        relay_auth_secret: &str,
+    ) -> Self {
+        self.tunnel =
+            crate::tunnel::EmbeddedTunnelState::with_data_identity_runtime_state_and_relay_secret_for_tests(
+                Arc::clone(&self.data),
+                instance_id,
+                relay_base_url,
+                runtime_state,
+                relay_auth_secret,
+            );
         self
     }
 
@@ -225,16 +307,22 @@ impl AppState {
         nonce: &str,
         payload: serde_json::Value,
     ) -> Self {
+        let key = aether_data::repository::provider_oauth::provider_oauth_state_storage_key(nonce);
+        let plaintext = payload.to_string();
+        let purpose = format!("provider-oauth-state:{key}");
+        let sealed =
+            crate::handlers::shared::seal_runtime_secret_payload(&self, &purpose, &plaintext)
+                .expect("test provider OAuth state should seal");
         let store = self
             .provider_oauth_state_store
             .get_or_insert_with(|| Arc::new(StdMutex::new(HashMap::new())));
         store
             .lock()
             .expect("provider oauth state store should lock")
-            .insert(format!("provider_oauth_state:{nonce}"), payload.to_string());
+            .insert(key.clone(), plaintext);
         self.runtime_state.kv_set_local_nowait(
-            &format!("provider_oauth_state:{nonce}"),
-            payload.to_string(),
+            &key,
+            sealed,
             Some(Duration::from_secs(
                 aether_data::repository::provider_oauth::PROVIDER_OAUTH_STATE_TTL_SECS,
             )),
@@ -245,23 +333,43 @@ impl AppState {
     pub(crate) fn with_provider_oauth_device_session_entry_for_tests(
         mut self,
         session_id: &str,
-        payload: serde_json::Value,
+        mut payload: serde_json::Value,
     ) -> Self {
+        if let Some(payload) = payload.as_object_mut() {
+            payload
+                .entry("session_id".to_string())
+                .or_insert_with(|| json!(session_id));
+            payload
+                .entry("initiated_by_user_id".to_string())
+                .or_insert_with(|| json!("admin-user-123"));
+            payload
+                .entry("initiated_by_session_id".to_string())
+                .or_insert_with(|| json!("session-123"));
+            payload
+                .entry("initiated_by_management_token_id".to_string())
+                .or_insert_with(|| json!("management-token-123"));
+        }
+        let key =
+            aether_data::repository::provider_oauth::provider_oauth_device_session_storage_key(
+                session_id,
+            );
+        let plaintext = payload.to_string();
+        let purpose =
+            aether_data::repository::provider_oauth::provider_oauth_device_session_secret_purpose(
+                session_id,
+            );
+        let sealed =
+            crate::handlers::shared::seal_runtime_secret_payload(&self, &purpose, &plaintext)
+                .expect("test provider OAuth device session should seal");
         let store = self
             .provider_oauth_device_session_store
             .get_or_insert_with(|| Arc::new(StdMutex::new(HashMap::new())));
         store
             .lock()
             .expect("provider oauth device session store should lock")
-            .insert(
-                format!("device_auth_session:{session_id}"),
-                payload.to_string(),
-            );
-        self.runtime_state.kv_set_local_nowait(
-            &format!("device_auth_session:{session_id}"),
-            payload.to_string(),
-            Some(Duration::from_secs(3600)),
-        );
+            .insert(key.clone(), plaintext);
+        self.runtime_state
+            .kv_set_local_nowait(&key, sealed, Some(Duration::from_secs(3600)));
         self
     }
 
@@ -270,19 +378,26 @@ impl AppState {
         task_id: &str,
         payload: serde_json::Value,
     ) -> Self {
+        let key =
+            aether_data::repository::provider_oauth::provider_oauth_batch_task_storage_key(task_id);
+        let plaintext = payload.to_string();
+        let purpose =
+            aether_data::repository::provider_oauth::provider_oauth_batch_task_secret_purpose(
+                task_id,
+            );
+        let sealed =
+            crate::handlers::shared::seal_runtime_secret_payload(&self, &purpose, &plaintext)
+                .expect("test provider OAuth batch task should seal");
         let store = self
             .provider_oauth_batch_task_store
             .get_or_insert_with(|| Arc::new(StdMutex::new(HashMap::new())));
         store
             .lock()
             .expect("provider oauth batch task store should lock")
-            .insert(
-                format!("provider_oauth_batch_task:{task_id}"),
-                payload.to_string(),
-            );
+            .insert(key.clone(), plaintext);
         self.runtime_state.kv_set_local_nowait(
-            &format!("provider_oauth_batch_task:{task_id}"),
-            payload.to_string(),
+            &key,
+            sealed,
             Some(Duration::from_secs(
                 aether_data::repository::provider_oauth::PROVIDER_OAUTH_BATCH_TASK_TTL_SECS,
             )),
@@ -329,6 +444,11 @@ impl AppState {
 
     pub(crate) fn without_auth_user_store_for_tests(mut self) -> Self {
         self.auth_user_store = None;
+        self
+    }
+
+    pub(crate) fn without_auth_session_store_for_tests(mut self) -> Self {
+        self.auth_session_store = None;
         self
     }
 
@@ -587,47 +707,67 @@ impl AppState {
         mut self,
         email: &str,
         code: &str,
+        verification_token: &str,
         created_at: chrono::DateTime<chrono::Utc>,
     ) -> Self {
+        let code_hash = format!(
+            "{:x}",
+            Sha256::digest(
+                format!(
+                    "aether-email-verification\0{}\0{}",
+                    verification_token.trim(),
+                    code.trim()
+                )
+                .as_bytes()
+            )
+        );
+        let verification_token_hash =
+            format!("{:x}", Sha256::digest(verification_token.trim().as_bytes()));
+        let normalized_email = email.trim().to_ascii_lowercase();
+        let key = format!(
+            "email:verification:{}",
+            auth_email_storage_key_digest_for_tests("pending", &[normalized_email.as_str()])
+        );
+        let value = json!({
+            "code_hash": code_hash,
+            "created_at": created_at.to_rfc3339(),
+            "verification_token_hash": verification_token_hash,
+        })
+        .to_string();
         let store = self
             .auth_email_verification_store
             .get_or_insert_with(|| Arc::new(StdMutex::new(HashMap::new())));
         store
             .lock()
             .expect("auth email verification store should lock")
-            .insert(
-                format!("email:verification:{}", email.trim().to_ascii_lowercase()),
-                json!({
-                    "code": code,
-                    "created_at": created_at.to_rfc3339(),
-                })
-                .to_string(),
-            );
-        self.runtime_state.kv_set_local_nowait(
-            &format!("email:verification:{}", email.trim().to_ascii_lowercase()),
-            json!({
-                "code": code,
-                "created_at": created_at.to_rfc3339(),
-            })
-            .to_string(),
-            Some(Duration::from_secs(600)),
-        );
+            .insert(key.clone(), value.clone());
+        self.runtime_state
+            .kv_set_local_nowait(&key, value, Some(Duration::from_secs(600)));
         self
     }
 
-    pub(crate) fn with_auth_email_verified_for_tests(mut self, email: &str) -> Self {
+    pub(crate) fn with_auth_email_verified_for_tests(
+        mut self,
+        email: &str,
+        verification_token: &str,
+    ) -> Self {
+        let normalized_email = email.trim().to_ascii_lowercase();
+        let key = format!(
+            "email:verified:{}",
+            auth_email_storage_key_digest_for_tests(
+                "registration-proof",
+                &[normalized_email.as_str(), verification_token.trim()]
+            )
+        );
         let store = self
             .auth_email_verification_store
             .get_or_insert_with(|| Arc::new(StdMutex::new(HashMap::new())));
         store
             .lock()
             .expect("auth email verification store should lock")
-            .insert(
-                format!("email:verified:{}", email.trim().to_ascii_lowercase()),
-                "verified".to_string(),
-            );
+            .insert(key.clone(), "verified".to_string());
         self.runtime_state.kv_set_local_nowait(
-            &format!("email:verified:{}", email.trim().to_ascii_lowercase()),
+            &key,
             "verified".to_string(),
             Some(Duration::from_secs(3600)),
         );

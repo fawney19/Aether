@@ -182,6 +182,7 @@ pub fn build_upsert_usage_record_from_event(
         finalized_at_unix_secs,
         created_at_unix_ms: Some(now_unix_secs),
         updated_at_unix_secs: now_unix_secs,
+        capture_retention: data.capture_retention,
     })
 }
 
@@ -221,6 +222,13 @@ fn lifecycle_status_and_billing(
         }
         UsageEventType::Completed => ("completed", "pending"),
         UsageEventType::Failed => ("failed", "void"),
+        UsageEventType::Cancelled
+            if aether_data_contracts::repository::usage::cancelled_request_fee_is_billable(
+                request_metadata,
+            ) =>
+        {
+            ("cancelled", "pending")
+        }
         UsageEventType::Cancelled => ("cancelled", "void"),
     }
 }
@@ -254,6 +262,49 @@ mod tests {
     use crate::{UsageEvent, UsageEventData, UsageEventType};
 
     use super::build_upsert_usage_record_from_event;
+
+    #[test]
+    fn capture_retention_follows_event_bodies_into_record_and_its_clones() {
+        use aether_data_contracts::repository::usage::{
+            usage_json_heap_estimate, UsageCaptureMemoryBudget,
+        };
+        use std::sync::Arc;
+
+        let body = serde_json::Value::String("retained diagnostic".repeat(8));
+        let estimate =
+            4 * (std::mem::size_of::<serde_json::Value>() + usage_json_heap_estimate(&body));
+        let budget = Arc::new(UsageCaptureMemoryBudget::new(3 * estimate));
+        let mut event = UsageEvent::new(
+            UsageEventType::Completed,
+            "retained-record",
+            UsageEventData {
+                provider_name: "provider".to_owned(),
+                model: "model".to_owned(),
+                input_tokens: Some(5),
+                output_tokens: Some(7),
+                cache_read_input_tokens: Some(0),
+                request_body: Some(body.clone()),
+                provider_request_body: Some(body.clone()),
+                response_body: Some(body.clone()),
+                client_response_body: Some(body),
+                ..UsageEventData::default()
+            },
+        );
+        event.data.apply_capture_memory_budget(Arc::clone(&budget));
+        assert_eq!(budget.retained_bytes(), estimate);
+        let record = build_upsert_usage_record_from_event(&event).unwrap();
+        assert_eq!(budget.retained_bytes(), 2 * estimate);
+        drop(event);
+        assert_eq!(budget.retained_bytes(), estimate);
+        let cloned = record.clone();
+        assert_eq!(budget.retained_bytes(), 2 * estimate);
+        assert_eq!(cloned.cache_read_input_tokens, Some(0));
+        assert_eq!(cloned.response_body, record.response_body);
+        drop(record);
+        assert_eq!(budget.retained_bytes(), estimate);
+        drop(cloned);
+        assert_eq!(budget.retained_bytes(), 0);
+    }
 
     #[test]
     fn builds_upsert_record_from_terminal_event() {
@@ -492,6 +543,31 @@ mod tests {
     }
 
     #[test]
+    fn cancelled_request_fee_keeps_cancelled_status_and_pending_billing() {
+        let event = UsageEvent::new(
+            UsageEventType::Cancelled,
+            "req-cancelled-fee",
+            UsageEventData {
+                provider_name: "OpenAI".to_string(),
+                model: "gpt-5".to_string(),
+                total_cost_usd: Some(0.02),
+                actual_total_cost_usd: Some(0.01),
+                request_metadata: Some(serde_json::json!({"cancelled_request_fee": true})),
+                ..Default::default()
+            },
+        );
+        let record = build_upsert_usage_record_from_event(&event).unwrap();
+        assert_eq!(record.status, "cancelled");
+        assert_eq!(record.billing_status, "pending");
+        assert_eq!(record.total_cost_usd, Some(0.02));
+        assert_eq!(record.actual_total_cost_usd, Some(0.01));
+        assert_eq!(
+            record.request_metadata.unwrap()["cancelled_request_fee"],
+            true
+        );
+    }
+
+    #[test]
     fn completed_unmetered_session_audit_is_void_without_fabricated_usage() {
         let record = build_upsert_usage_record_from_event(&UsageEvent {
             event_type: UsageEventType::Completed,
@@ -608,7 +684,8 @@ mod tests {
         assert_eq!(
             record.request_metadata,
             Some(serde_json::json!({
-                "billing_snapshot": { "status": "complete" }
+                "billing_snapshot": { "status": "complete" },
+                "billing_snapshot_status": "complete"
             }))
         );
     }

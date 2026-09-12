@@ -533,6 +533,7 @@
 </template>
 
 <script setup lang="ts">
+import { getI18nLocale } from '@/i18n'
 import { ref, watch, computed } from 'vue'
 import {
   X,
@@ -566,7 +567,7 @@ import { getGlobalModelRoutingPreview } from '@/api/global-models'
 
 // 使用外部类型定义
 import type { GlobalModelResponse } from '@/api/global-models'
-import type { TieredPricingConfig, PricingTier, ModelRoutingPreviewResponse } from '@/api/endpoints/types'
+import type { ModelProviderReference, TieredPricingConfig, PricingTier, ModelRoutingPreviewResponse } from '@/api/endpoints/types'
 import type { RoutingProviderInfo } from '@/api/global-models'
 
 const props = withDefaults(defineProps<Props>(), {
@@ -577,9 +578,9 @@ const emit = defineEmits<{
   'editModel': [model: GlobalModelResponse]
   'toggleModelStatus': [model: GlobalModelResponse]
   'addProvider': []
-  'editProvider': [provider: Record<string, unknown>]
-  'deleteProvider': [provider: Record<string, unknown>]
-  'toggleProviderStatus': [provider: Record<string, unknown>]
+  'editProvider': [provider: ModelProviderReference]
+  'deleteProvider': [provider: ModelProviderReference]
+  'toggleProviderStatus': [provider: ModelProviderReference]
   'refreshModel': []
   'linkProvider': [providerId: string]
   'linkProviders': [providerIds: string[]]
@@ -760,7 +761,7 @@ function handleClose() {
 function formatDate(dateStr: string): string {
   if (!dateStr) return '-'
   const date = new Date(dateStr)
-  return date.toLocaleDateString('zh-CN', {
+  return date.toLocaleDateString(getI18nLocale(), {
     year: 'numeric',
     month: '2-digit',
     day: '2-digit'

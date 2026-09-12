@@ -28,8 +28,12 @@
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value="api_key">API Key</SelectItem>
-            <SelectItem value="bearer">Bearer Token</SelectItem>
+            <SelectItem value="api_key">
+              API Key
+            </SelectItem>
+            <SelectItem value="bearer">
+              Bearer Token
+            </SelectItem>
           </SelectContent>
         </Select>
       </div>
@@ -94,7 +98,7 @@
       <div class="space-y-1.5">
         <Label class="text-xs">代理节点</Label>
         <ProxyNodeSelect
-          :model-value="settings.proxy_node_id"
+          :model-value="settings.proxy_node_id ?? ''"
           trigger-class="h-10"
           @update:model-value="updateSetting('proxy_node_id', $event)"
         />
@@ -102,7 +106,7 @@
       <div class="space-y-1.5">
         <Label class="text-xs">备注</Label>
         <Input
-          :model-value="settings.note"
+          :model-value="settings.note ?? ''"
           class="h-10"
           placeholder="可选"
           @update:model-value="updateSetting('note', String($event))"
@@ -112,8 +116,12 @@
 
     <div class="flex min-h-12 items-center justify-between gap-3 rounded-lg bg-background px-3 shadow-[0_0_0_1px_rgb(0_0_0/0.06),0_1px_2px_rgb(0_0_0/0.04)] dark:shadow-[0_0_0_1px_rgb(255_255_255/0.08)]">
       <div>
-        <div class="text-xs font-medium">导入后立即启用</div>
-        <div class="text-[11px] text-muted-foreground">关闭后仍会创建，但不会进入调度</div>
+        <div class="text-xs font-medium">
+          导入后立即启用
+        </div>
+        <div class="text-[11px] text-muted-foreground">
+          关闭后仍会创建，但不会进入调度
+        </div>
       </div>
       <Switch
         :model-value="settings.is_active"

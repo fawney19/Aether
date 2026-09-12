@@ -9,19 +9,17 @@ import { onMounted, onErrorCaptured, onUnmounted } from 'vue'
 import { useAuthStore } from '@/stores/auth'
 import ToastContainer from '@/components/ToastContainer.vue'
 import ConfirmContainer from '@/components/ConfirmContainer.vue'
-import apiClient, { AUTH_STATE_CHANGE_EVENT } from '@/api/client'
+import {
+  AUTH_SESSION_SIGNAL_KEY,
+  AUTH_STATE_CHANGE_EVENT,
+  parseAuthSessionSignal,
+  type AuthStateChangeDetail,
+} from '@/api/client'
 import { NETWORK_CONFIG, AUTH_CONFIG } from '@/config/constants'
 import router from '@/router'
-import { hasAuthIdentityChanged } from '@/utils/authToken'
 import { log } from '@/utils/logger'
 
 const authStore = useAuthStore()
-
-// 立即检查token,如果存在就设置到store中
-const storedToken = apiClient.getToken()
-if (storedToken) {
-  authStore.token = storedToken
-}
 
 // 全局错误处理器 - 只处理特定错误,避免完全吞掉所有错误
 onErrorCaptured((error: Error) => {
@@ -88,32 +86,16 @@ if (typeof window !== 'undefined') {
   })
 }
 
-async function syncExternalAuthState(nextToken: string | null): Promise<void> {
-  const previousToken = authStore.token
-  const previousUser = authStore.user
-    ? {
-        id: authStore.user.id,
-        role: authStore.user.role,
-      }
-    : null
-
-  authStore.syncToken()
-
-  if (!nextToken) {
-    if (previousToken || previousUser) {
+async function syncExternalAuthState(authenticated: boolean): Promise<void> {
+  if (!authenticated) {
+    if (authStore.token || authStore.user) {
       authStore.applyExternalLogout()
       await router.replace('/')
     }
     return
   }
 
-  const identityChanged = hasAuthIdentityChanged(previousToken, nextToken, previousUser)
-  if (!identityChanged && previousUser) {
-    return
-  }
-
-  const user = await authStore.fetchCurrentUser()
-  if (!user) {
+  if (!await authStore.applyExternalLogin()) {
     return
   }
 
@@ -123,16 +105,27 @@ async function syncExternalAuthState(nextToken: string | null): Promise<void> {
 }
 
 function handleAuthStorageChange(event: StorageEvent): void {
-  if (event.key !== 'access_token') {
+  if (event.key !== AUTH_SESSION_SIGNAL_KEY) {
     return
   }
 
-  syncExternalAuthState(event.newValue).catch((err) => log.error('syncExternalAuthState failed', err))
+  const signal = parseAuthSessionSignal(event.newValue)
+  if (!signal) {
+    return
+  }
+  syncExternalAuthState(signal.authenticated).catch((err) => log.error('syncExternalAuthState failed', err))
 }
 
 function handleLocalAuthStateChange(event: Event): void {
-  const authEvent = event as CustomEvent<{ token: string | null }>
-  syncExternalAuthState(authEvent.detail?.token ?? apiClient.getToken()).catch((err) => log.error('syncExternalAuthState failed', err))
+  const authEvent = event as CustomEvent<AuthStateChangeDetail>
+  if (!authEvent.detail) {
+    return
+  }
+  if (!authEvent.detail.authenticated) {
+    syncExternalAuthState(false).catch((err) => log.error('syncExternalAuthState failed', err))
+  } else {
+    authStore.syncToken()
+  }
 }
 
 onMounted(async () => {

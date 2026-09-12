@@ -344,6 +344,7 @@ import { normalizeReleaseNotesForDisplay } from '@/utils/releaseNotes'
 import { formatDisplayVersion } from '@/utils/version'
 import { describeUpdateStatus } from '@/utils/updateStatus'
 import { sanitizeMarkdown } from '@/utils/sanitize'
+import { safeExternalHttpsUrl } from '@/utils/navigationSecurity'
 import { useI18n } from '@/i18n'
 import { marked } from 'marked'
 import { ChevronRight, ExternalLink, Info, RefreshCw } from 'lucide-vue-next'
@@ -573,8 +574,9 @@ function handleOpenRelease() {
 }
 
 function handleOpenSelectedReleasePage() {
-  if (selectedRelease.value?.release_url) {
-    window.open(selectedRelease.value.release_url, '_blank', 'noopener,noreferrer')
+  const releaseUrl = safeExternalHttpsUrl(selectedRelease.value?.release_url)
+  if (releaseUrl) {
+    window.open(releaseUrl, '_blank', 'noopener,noreferrer')
   }
 }
 

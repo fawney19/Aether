@@ -55,10 +55,11 @@ pub(crate) fn build_admin_reveal_key_payload(
                 "auth_config": auth_config,
             }));
         }
-        let decrypted = key
-            .encrypted_api_key
-            .as_deref()
-            .and_then(|ciphertext| state.decrypt_catalog_secret_with_fallbacks(ciphertext))
+        let decrypted = state
+            .app()
+            .decrypt_provider_catalog_key_api_key(key)
+            .ok()
+            .flatten()
             .ok_or_else(|| {
                 "无法解密认证配置，可能是加密密钥已更改。请重新添加该密钥。".to_string()
             })?;
@@ -73,7 +74,9 @@ pub(crate) fn build_admin_reveal_key_payload(
 
     let decrypted = match key.encrypted_api_key.as_deref().map(str::trim) {
         Some(ciphertext) if !ciphertext.is_empty() => state
-            .decrypt_catalog_secret_with_fallbacks(ciphertext)
+            .app()
+            .decrypt_provider_catalog_key_api_key(key)
+            .map_err(|_| "无法解密 API Key，可能是加密密钥已更改。请重新添加该密钥。".to_string())?
             .ok_or_else(|| {
                 "无法解密 API Key，可能是加密密钥已更改。请重新添加该密钥。".to_string()
             })?,
@@ -179,14 +182,16 @@ pub(crate) async fn build_admin_export_key_payload(
     state: &AdminAppState<'_>,
     key: &StoredProviderCatalogKey,
 ) -> Result<serde_json::Value, String> {
-    let ciphertext = key
+    let _ciphertext = key
         .encrypted_auth_config
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .ok_or_else(|| "缺少认证配置，无法导出".to_string())?;
     let plaintext = state
-        .decrypt_catalog_secret_with_fallbacks(ciphertext)
+        .app()
+        .decrypt_provider_catalog_key_auth_config(key)
+        .map_err(|_| "无法解密认证配置".to_string())?
         .ok_or_else(|| "无法解密认证配置".to_string())?;
     let auth_config = serde_json::from_str::<serde_json::Value>(&plaintext)
         .ok()
@@ -229,7 +234,13 @@ pub(crate) async fn build_admin_export_key_payload(
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .and_then(|ciphertext| state.decrypt_catalog_secret_with_fallbacks(ciphertext));
+        .and_then(|_| {
+            state
+                .app()
+                .decrypt_provider_catalog_key_api_key(key)
+                .ok()
+                .flatten()
+        });
     let mut payload = provider_oauth_export_payload(
         &provider_type,
         &auth_config,

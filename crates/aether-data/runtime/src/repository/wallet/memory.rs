@@ -1,22 +1,35 @@
 use std::collections::BTreeMap;
-use std::sync::RwLock;
+use std::sync::{Mutex, RwLock};
 
 use async_trait::async_trait;
 
 #[cfg(test)]
 use super::WalletReadSeed;
 use super::{
-    redeem_code_credits_recharge_balance, redeem_code_payment_method,
-    redeem_code_refundable_amount, AdjustWalletBalanceInput, AdminPaymentOrderListQuery,
-    AdminRedeemCodeBatchListQuery, AdminRedeemCodeListQuery, AdminWalletLedgerQuery,
-    AdminWalletListQuery, AdminWalletRefundRequestListQuery, CompleteAdminWalletRefundInput,
-    CreateAdminRedeemCodeBatchInput, CreateAdminRedeemCodeBatchResult,
-    CreateManualWalletRechargeInput, CreatePlanPurchaseOrderInput, CreatePlanPurchaseOrderOutcome,
-    CreateWalletRechargeOrderInput, CreateWalletRechargeOrderOutcome,
-    CreateWalletRefundRequestInput, CreateWalletRefundRequestOutcome,
-    CreatedAdminRedeemCodePlaintext, CreditAdminPaymentOrderInput, DeleteAdminRedeemCodeBatchInput,
+    canonicalize_payment_method, canonicalize_wallet_refund_fields,
+    payment_order_refund_amounts_are_consistent,
+    payment_order_stripe_client_secret_cas_replacement, project_wallet_gateway_response,
+    project_wallet_recharge_gateway_response, redeem_code_payment_method,
+    redeem_code_refundable_amount, validate_admin_redeem_code_batch_input,
+    validate_plan_purchase_order_input, validate_plan_wallet_credit_entitlements,
+    validate_redeem_wallet_credit, validate_wallet_recharge_order_input,
+    wallet_recharge_checkout_claim_response, wallet_recharge_checkout_claim_token,
+    wallet_recharge_checkout_failed_response, wallet_recharge_checkout_uncertain_response,
+    wallet_recharge_order_is_checkout_placeholder,
+    wallet_recharge_order_is_reclaimable_placeholder, wallet_recharge_replay_matches,
+    wallet_recharge_response_is_checkout_placeholder, wallet_refund_proof_is_success,
+    AdjustWalletBalanceInput, AdminPaymentOrderListQuery, AdminRedeemCodeBatchListQuery,
+    AdminRedeemCodeListQuery, AdminWalletLedgerQuery, AdminWalletListQuery,
+    AdminWalletRefundRequestListQuery, CompareAndSwapPaymentOrderStripeClientSecretInput,
+    CompleteAdminWalletRefundInput, CreateAdminRedeemCodeBatchInput,
+    CreateAdminRedeemCodeBatchResult, CreateManualWalletRechargeInput,
+    CreatePlanPurchaseOrderInput, CreatePlanPurchaseOrderOutcome, CreateWalletRechargeOrderInput,
+    CreateWalletRechargeOrderOutcome, CreateWalletRefundRequestInput,
+    CreateWalletRefundRequestOutcome, CreatedAdminRedeemCodePlaintext,
+    CreditAdminPaymentOrderInput, DeleteAdminRedeemCodeBatchInput,
     DisableAdminRedeemCodeBatchInput, DisableAdminRedeemCodeInput, FailAdminWalletRefundInput,
-    ProcessAdminWalletRefundInput, ProcessPaymentCallbackInput, ProcessPaymentCallbackOutcome,
+    FailWalletRechargeCheckoutInput, InitializeAuthWalletOutcome, ProcessAdminWalletRefundInput,
+    ProcessPaymentCallbackInput, ProcessPaymentCallbackOutcome, ReclaimWalletRechargeCheckoutInput,
     RedeemWalletCodeInput, RedeemWalletCodeOutcome, StoredAdminPaymentCallback,
     StoredAdminPaymentCallbackPage, StoredAdminPaymentOrder, StoredAdminPaymentOrderPage,
     StoredAdminRedeemCode, StoredAdminRedeemCodeBatch, StoredAdminRedeemCodeBatchPage,
@@ -24,7 +37,8 @@ use super::{
     StoredAdminWalletListPage, StoredAdminWalletRefund, StoredAdminWalletRefundPage,
     StoredAdminWalletRefundRequestPage, StoredAdminWalletTransaction,
     StoredAdminWalletTransactionPage, StoredWalletDailyUsageLedger,
-    StoredWalletDailyUsageLedgerPage, StoredWalletSnapshot, WalletLookupKey, WalletMutationOutcome,
+    StoredWalletDailyUsageLedgerPage, StoredWalletSnapshot, UpdateAdminWalletRefundGatewayInput,
+    UpdateWalletRechargeCheckoutInput, WalletLookupKey, WalletMutationOutcome,
     WalletReadRepository, WalletWriteRepository,
 };
 use crate::DataLayerError;
@@ -39,9 +53,222 @@ pub struct InMemoryWalletRepository {
     redeem_batches_by_id: RwLock<BTreeMap<String, StoredAdminRedeemCodeBatch>>,
     redeem_codes_by_id: RwLock<BTreeMap<String, StoredAdminRedeemCode>>,
     redeem_code_hash_to_id: RwLock<BTreeMap<String, String>>,
+    refund_idempotency_to_id: RwLock<BTreeMap<(String, String), String>>,
+    refund_creation_lock: Mutex<()>,
+    // Wallet creation, order attachment, and compensation cleanup must be
+    // serialized together.  Separate map locks cannot make the
+    // "check references, then delete" sequence atomic.
+    wallet_lifecycle_lock: Mutex<()>,
+}
+
+fn wallet_recharge_metadata_value<'a>(
+    record: &'a StoredAdminPaymentOrder,
+    key: &str,
+) -> Option<&'a str> {
+    record
+        .gateway_response
+        .as_ref()
+        .and_then(serde_json::Value::as_object)
+        .and_then(|object| object.get(key))
+        .and_then(serde_json::Value::as_str)
+}
+
+/// A compensation path may remove only a freshly initialized wallet that has
+/// never carried funds or a financial reference.  Keep this predicate in one
+/// place so the initial check and the final compare use exactly the same
+/// definition even when another in-memory writer updates the row between
+/// those checks.
+fn wallet_is_untouched_for_compensation(wallet: &StoredWalletSnapshot) -> bool {
+    wallet.balance == 0.0
+        && wallet.gift_balance == 0.0
+        && wallet.total_recharged == 0.0
+        && wallet.total_consumed == 0.0
+        && wallet.total_refunded == 0.0
+        && wallet.total_adjusted == 0.0
+        && matches!(wallet.limit_mode.as_str(), "finite" | "unlimited")
+        && wallet.currency == "USD"
+        && wallet.status == "active"
+}
+
+fn provisional_auth_wallet_transactions_match(
+    transactions: &BTreeMap<String, StoredAdminWalletTransaction>,
+    wallet: &StoredWalletSnapshot,
+    user_id: &str,
+) -> bool {
+    let wallet_transactions = transactions
+        .values()
+        .filter(|transaction| transaction.wallet_id == wallet.id)
+        .collect::<Vec<_>>();
+    if wallet.gift_balance == 0.0 {
+        return wallet_transactions.is_empty();
+    }
+    if wallet_transactions.len() != 1 {
+        return false;
+    }
+    let transaction = wallet_transactions[0];
+    transaction.category == "gift"
+        && transaction.reason_code == "gift_initial"
+        && transaction.amount == wallet.gift_balance
+        && transaction.balance_before == 0.0
+        && transaction.balance_after == wallet.gift_balance
+        && transaction.recharge_balance_before == 0.0
+        && transaction.recharge_balance_after == 0.0
+        && transaction.gift_balance_before == 0.0
+        && transaction.gift_balance_after == wallet.gift_balance
+        && transaction.link_type.as_deref() == Some("system_task")
+        && transaction.link_id.as_deref() == Some(user_id)
+        && transaction.operator_id.is_none()
 }
 
 impl InMemoryWalletRepository {
+    fn insert_payment_order_unique(
+        &self,
+        order: StoredAdminPaymentOrder,
+    ) -> Result<(), DataLayerError> {
+        let mut orders = self.payment_orders_by_id.write().expect("wallet repo lock");
+        if orders.contains_key(&order.id)
+            || orders
+                .values()
+                .any(|existing| existing.order_no == order.order_no)
+        {
+            return Err(DataLayerError::InvalidInput(
+                "payment order number already belongs to another order".to_string(),
+            ));
+        }
+        if let Some(gateway_order_id) = order.gateway_order_id.as_deref() {
+            if orders.values().any(|existing| {
+                existing.payment_method == order.payment_method
+                    && existing.gateway_order_id.as_deref() == Some(gateway_order_id)
+            }) {
+                return Err(DataLayerError::InvalidInput(
+                    "payment gateway order already belongs to another order".to_string(),
+                ));
+            }
+        }
+        orders.insert(order.id.clone(), order);
+        Ok(())
+    }
+
+    fn insert_wallet_recharge_order_unique(
+        &self,
+        order: StoredAdminPaymentOrder,
+        now_unix_secs: u64,
+        input: &CreateWalletRechargeOrderInput,
+    ) -> Result<(Option<StoredAdminPaymentOrder>, bool), DataLayerError> {
+        let mut orders = self.payment_orders_by_id.write().expect("wallet repo lock");
+        if let Some(existing) = orders
+            .values()
+            .find(|existing| existing.order_no == order.order_no)
+        {
+            let existing_kind = existing
+                .gateway_response
+                .as_ref()
+                .and_then(serde_json::Value::as_object)
+                .and_then(|object| object.get("order_kind"))
+                .and_then(serde_json::Value::as_str);
+            if existing.user_id == order.user_id && existing_kind == Some("wallet_recharge") {
+                let existing_provider =
+                    wallet_recharge_metadata_value(existing, "payment_provider")
+                        .or_else(|| wallet_recharge_metadata_value(existing, "gateway"));
+                // A seeded legacy order can outlive a deleted/provisioning
+                // wallet. In that read-model-only case the incoming wallet
+                // id is provisional and cannot be treated as an immutable
+                // field; a real wallet remains strictly bound below.
+                let replay_wallet_id = if self
+                    .wallets_by_id
+                    .read()
+                    .expect("wallet repo lock")
+                    .contains_key(&existing.wallet_id)
+                {
+                    order.wallet_id.as_str()
+                } else {
+                    existing.wallet_id.as_str()
+                };
+                if !wallet_recharge_replay_matches(
+                    &existing.wallet_id,
+                    existing.amount_usd,
+                    existing.pay_amount,
+                    existing.pay_currency.as_deref(),
+                    existing.exchange_rate,
+                    &existing.payment_method,
+                    existing_provider,
+                    wallet_recharge_metadata_value(existing, "payment_channel"),
+                    replay_wallet_id,
+                    input,
+                ) {
+                    return Err(DataLayerError::InvalidInput(
+                        "wallet recharge replay changes immutable order fields".to_string(),
+                    ));
+                }
+                if wallet_recharge_order_is_reclaimable_placeholder(existing, now_unix_secs) {
+                    let Some(candidate_token) = order
+                        .gateway_response
+                        .as_ref()
+                        .and_then(wallet_recharge_checkout_claim_token)
+                    else {
+                        return Ok((Some(existing.clone()), false));
+                    };
+                    let claimed = wallet_recharge_checkout_claim_response(
+                        order.gateway_response.as_ref().expect("gateway response"),
+                        candidate_token,
+                        now_unix_secs,
+                    )
+                    .map_err(DataLayerError::InvalidInput)?;
+                    let existing_id = existing.id.clone();
+                    let existing = orders
+                        .get_mut(&existing_id)
+                        .expect("recharge order should remain present");
+                    existing.gateway_response = Some(claimed);
+                    existing.gateway_order_id = Some(existing.order_no.clone());
+                    existing.status = "pending".to_string();
+                    existing.expires_at_unix_secs = order.expires_at_unix_secs;
+                    return Ok((Some(existing.clone()), true));
+                }
+                return Ok((Some(existing.clone()), false));
+            }
+            return Err(DataLayerError::InvalidInput(
+                "payment order number already belongs to another user".to_string(),
+            ));
+        }
+        if let Some(gateway_order_id) = order.gateway_order_id.as_deref() {
+            if orders.values().any(|existing| {
+                existing.payment_method == order.payment_method
+                    && existing.gateway_order_id.as_deref() == Some(gateway_order_id)
+            }) {
+                return Err(DataLayerError::InvalidInput(
+                    "payment gateway order already belongs to another order".to_string(),
+                ));
+            }
+        }
+        orders.insert(order.id.clone(), order);
+        Ok((None, false))
+    }
+
+    fn remove_created_wallet_if_unreferenced(&self, wallet_id: &str) {
+        // The caller holds wallet_lifecycle_lock, as do all in-memory paths
+        // that attach a payment order.  The reference check and compensation
+        // delete are therefore atomic with respect to a new order attachment.
+        let wallet_is_referenced = self
+            .payment_orders_by_id
+            .read()
+            .expect("wallet repo lock")
+            .values()
+            .any(|existing| existing.wallet_id == wallet_id);
+        if !wallet_is_referenced {
+            let mut wallets = self.wallets_by_id.write().expect("wallet repo lock");
+            // A regular wallet snapshot update does not need the lifecycle
+            // lock. Re-check the complete pristine shape while holding the
+            // write lock so a concurrent credit cannot be deleted as part of
+            // compensation.
+            if wallets
+                .get(wallet_id)
+                .is_some_and(wallet_is_untouched_for_compensation)
+            {
+                wallets.remove(wallet_id);
+            }
+        }
+    }
+
     pub fn seed<I>(items: I) -> Self
     where
         I: IntoIterator<Item = StoredWalletSnapshot>,
@@ -59,6 +286,9 @@ impl InMemoryWalletRepository {
             redeem_batches_by_id: RwLock::new(BTreeMap::new()),
             redeem_codes_by_id: RwLock::new(BTreeMap::new()),
             redeem_code_hash_to_id: RwLock::new(BTreeMap::new()),
+            refund_idempotency_to_id: RwLock::new(BTreeMap::new()),
+            refund_creation_lock: Mutex::new(()),
+            wallet_lifecycle_lock: Mutex::new(()),
         }
     }
 
@@ -84,6 +314,11 @@ impl InMemoryWalletRepository {
         for item in seed.refunds {
             refunds_by_id.insert(item.id.clone(), item);
         }
+        let refund_idempotency_to_id = seed
+            .refund_idempotency
+            .into_iter()
+            .map(|(user_id, idempotency_key, refund_id)| ((user_id, idempotency_key), refund_id))
+            .collect();
         let mut redeem_batches_by_id = BTreeMap::new();
         for item in seed.redeem_batches {
             redeem_batches_by_id.insert(item.id.clone(), item);
@@ -102,6 +337,9 @@ impl InMemoryWalletRepository {
             redeem_batches_by_id: RwLock::new(redeem_batches_by_id),
             redeem_codes_by_id: RwLock::new(redeem_codes_by_id),
             redeem_code_hash_to_id: RwLock::new(BTreeMap::new()),
+            refund_idempotency_to_id: RwLock::new(refund_idempotency_to_id),
+            refund_creation_lock: Mutex::new(()),
+            wallet_lifecycle_lock: Mutex::new(()),
         }
     }
 
@@ -176,7 +414,40 @@ fn initialize_auth_wallet_in_memory(
     api_key_id: Option<&str>,
     initial_gift_usd: f64,
     unlimited: bool,
-) -> Result<Option<StoredWalletSnapshot>, DataLayerError> {
+) -> Result<Option<(StoredWalletSnapshot, bool)>, DataLayerError> {
+    let owner_id = user_id
+        .or(api_key_id)
+        .filter(|value| !value.trim().is_empty());
+    if owner_id.is_none() || (user_id.is_some() && api_key_id.is_some()) {
+        return Err(DataLayerError::InvalidInput(
+            "wallet owner must be exactly one non-empty user or API-key id".to_string(),
+        ));
+    }
+    if !initial_gift_usd.is_finite() {
+        return Err(DataLayerError::InvalidInput(
+            "initial gift amount must be finite".to_string(),
+        ));
+    }
+
+    // Initialization is intentionally idempotent. Database backends enforce this
+    // with the owner unique indexes; perform the same lookup before creating the
+    // in-memory row so retries cannot mint another wallet or gift transaction.
+    {
+        let wallets = wallets_by_id.read().expect("wallet repo lock");
+        let existing = wallets.values().find(|wallet| {
+            if let Some(user_id) = user_id {
+                wallet.user_id.as_deref() == Some(user_id) && wallet.api_key_id.is_none()
+            } else if let Some(api_key_id) = api_key_id {
+                wallet.api_key_id.as_deref() == Some(api_key_id) && wallet.user_id.is_none()
+            } else {
+                false
+            }
+        });
+        if let Some(wallet) = existing {
+            return Ok(Some((wallet.clone(), false)));
+        }
+    }
+
     let gift_amount = if unlimited {
         0.0
     } else {
@@ -235,7 +506,7 @@ fn initialize_auth_wallet_in_memory(
             .insert(transaction.id.clone(), transaction);
     }
 
-    Ok(Some(wallet))
+    Ok(Some((wallet, true)))
 }
 
 fn normalize_redeem_code(value: &str) -> Option<String> {
@@ -335,6 +606,15 @@ impl WalletReadRepository for InMemoryWalletRepository {
         initial_gift_usd: f64,
         unlimited: bool,
     ) -> Result<Option<StoredWalletSnapshot>, DataLayerError> {
+        if user_id.trim().is_empty() {
+            return Err(DataLayerError::InvalidInput(
+                "user id is required to initialize a wallet".to_string(),
+            ));
+        }
+        let _lifecycle_guard = self
+            .wallet_lifecycle_lock
+            .lock()
+            .expect("wallet lifecycle lock");
         initialize_auth_wallet_in_memory(
             &self.wallets_by_id,
             &self.wallet_transactions_by_id,
@@ -343,6 +623,35 @@ impl WalletReadRepository for InMemoryWalletRepository {
             initial_gift_usd,
             unlimited,
         )
+        .map(|result| result.map(|(wallet, _created)| wallet))
+    }
+
+    async fn initialize_auth_user_wallet_with_outcome(
+        &self,
+        user_id: &str,
+        initial_gift_usd: f64,
+        unlimited: bool,
+    ) -> Result<Option<InitializeAuthWalletOutcome>, DataLayerError> {
+        if user_id.trim().is_empty() {
+            return Err(DataLayerError::InvalidInput(
+                "user id is required to initialize a wallet".to_string(),
+            ));
+        }
+        let _lifecycle_guard = self
+            .wallet_lifecycle_lock
+            .lock()
+            .expect("wallet lifecycle lock");
+        initialize_auth_wallet_in_memory(
+            &self.wallets_by_id,
+            &self.wallet_transactions_by_id,
+            Some(user_id),
+            None,
+            initial_gift_usd,
+            unlimited,
+        )
+        .map(|result| {
+            result.map(|(wallet, created)| InitializeAuthWalletOutcome { wallet, created })
+        })
     }
 
     async fn initialize_auth_api_key_wallet(
@@ -351,6 +660,15 @@ impl WalletReadRepository for InMemoryWalletRepository {
         initial_gift_usd: f64,
         unlimited: bool,
     ) -> Result<Option<StoredWalletSnapshot>, DataLayerError> {
+        if api_key_id.trim().is_empty() {
+            return Err(DataLayerError::InvalidInput(
+                "api key id is required to initialize a wallet".to_string(),
+            ));
+        }
+        let _lifecycle_guard = self
+            .wallet_lifecycle_lock
+            .lock()
+            .expect("wallet lifecycle lock");
         initialize_auth_wallet_in_memory(
             &self.wallets_by_id,
             &self.wallet_transactions_by_id,
@@ -359,6 +677,35 @@ impl WalletReadRepository for InMemoryWalletRepository {
             initial_gift_usd,
             unlimited,
         )
+        .map(|result| result.map(|(wallet, _created)| wallet))
+    }
+
+    async fn initialize_auth_api_key_wallet_with_outcome(
+        &self,
+        api_key_id: &str,
+        initial_gift_usd: f64,
+        unlimited: bool,
+    ) -> Result<Option<InitializeAuthWalletOutcome>, DataLayerError> {
+        if api_key_id.trim().is_empty() {
+            return Err(DataLayerError::InvalidInput(
+                "api key id is required to initialize a wallet".to_string(),
+            ));
+        }
+        let _lifecycle_guard = self
+            .wallet_lifecycle_lock
+            .lock()
+            .expect("wallet lifecycle lock");
+        initialize_auth_wallet_in_memory(
+            &self.wallets_by_id,
+            &self.wallet_transactions_by_id,
+            None,
+            Some(api_key_id),
+            initial_gift_usd,
+            unlimited,
+        )
+        .map(|result| {
+            result.map(|(wallet, created)| InitializeAuthWalletOutcome { wallet, created })
+        })
     }
 
     async fn update_auth_user_wallet_snapshot(
@@ -534,7 +881,7 @@ impl WalletReadRepository for InMemoryWalletRepository {
         &self,
         query: &AdminWalletRefundRequestListQuery,
     ) -> Result<StoredAdminWalletRefundRequestPage, DataLayerError> {
-        let wallets = self.wallets_by_id.read().expect("wallet repo lock");
+        let wallets = self.wallets_by_id.read().expect("wallet repo lock").clone();
         let mut items = self
             .refunds_by_id
             .read()
@@ -660,7 +1007,7 @@ impl WalletReadRepository for InMemoryWalletRepository {
             .filter(|order| {
                 query.status.as_deref().is_none_or(|expected| {
                     let effective = if order.status == "pending"
-                        && order.expires_at_unix_secs.is_some_and(|value| value < now)
+                        && order.expires_at_unix_secs.is_some_and(|value| value <= now)
                     {
                         "expired"
                     } else {
@@ -707,7 +1054,15 @@ impl WalletReadRepository for InMemoryWalletRepository {
             .read()
             .expect("wallet repo lock")
             .values()
-            .filter(|order| order.user_id.as_deref() == Some(user_id))
+            .filter(|order| {
+                order.user_id.as_deref() == Some(user_id)
+                    && order
+                        .gateway_response
+                        .as_ref()
+                        .and_then(|value| value.get("order_kind"))
+                        .and_then(serde_json::Value::as_str)
+                        != Some("plan_purchase")
+            })
             .cloned()
             .collect::<Vec<_>>();
         items.sort_by_key(|item| std::cmp::Reverse(item.created_at_unix_ms));
@@ -757,7 +1112,39 @@ impl WalletReadRepository for InMemoryWalletRepository {
             .read()
             .expect("wallet repo lock")
             .get(order_id)
-            .filter(|order| order.user_id.as_deref() == Some(user_id))
+            .filter(|order| {
+                order.user_id.as_deref() == Some(user_id)
+                    && order
+                        .gateway_response
+                        .as_ref()
+                        .and_then(|value| value.get("order_kind"))
+                        .and_then(serde_json::Value::as_str)
+                        != Some("plan_purchase")
+            })
+            .cloned())
+    }
+
+    async fn find_wallet_recharge_order_by_order_no(
+        &self,
+        user_id: &str,
+        order_no: &str,
+    ) -> Result<Option<StoredAdminPaymentOrder>, DataLayerError> {
+        Ok(self
+            .payment_orders_by_id
+            .read()
+            .expect("wallet repo lock")
+            .values()
+            .find(|order| {
+                order.user_id.as_deref() == Some(user_id)
+                    && order.order_no == order_no
+                    && order
+                        .gateway_response
+                        .as_ref()
+                        .and_then(serde_json::Value::as_object)
+                        .and_then(|object| object.get("order_kind"))
+                        .and_then(serde_json::Value::as_str)
+                        == Some("wallet_recharge")
+            })
             .cloned())
     }
 
@@ -793,6 +1180,19 @@ impl WalletReadRepository for InMemoryWalletRepository {
                         })
             })
             .max_by_key(|order| order.created_at_unix_ms)
+            .cloned())
+    }
+
+    async fn find_payment_order_by_order_no(
+        &self,
+        order_no: &str,
+    ) -> Result<Option<StoredAdminPaymentOrder>, DataLayerError> {
+        Ok(self
+            .payment_orders_by_id
+            .read()
+            .expect("wallet repo lock")
+            .values()
+            .find(|order| order.order_no == order_no)
             .cloned())
     }
 
@@ -902,30 +1302,402 @@ impl WalletReadRepository for InMemoryWalletRepository {
 
 #[async_trait]
 impl WalletWriteRepository for InMemoryWalletRepository {
+    async fn delete_wallet_if_unreferenced(
+        &self,
+        wallet_id: &str,
+        owner: WalletLookupKey<'_>,
+    ) -> Result<bool, DataLayerError> {
+        if wallet_id.trim().is_empty() {
+            return Ok(false);
+        }
+        let owner_matches = |wallet: &StoredWalletSnapshot| match owner {
+            WalletLookupKey::UserId(user_id) => {
+                !user_id.trim().is_empty()
+                    && wallet.id == wallet_id
+                    && wallet.user_id.as_deref() == Some(user_id)
+                    && wallet.api_key_id.is_none()
+            }
+            WalletLookupKey::ApiKeyId(api_key_id) => {
+                !api_key_id.trim().is_empty()
+                    && wallet.id == wallet_id
+                    && wallet.api_key_id.as_deref() == Some(api_key_id)
+                    && wallet.user_id.is_none()
+            }
+            WalletLookupKey::WalletId(_) => false,
+        };
+        if matches!(owner, WalletLookupKey::WalletId(_)) {
+            return Err(DataLayerError::InvalidInput(
+                "wallet compensation requires an explicit user or API-key owner".to_string(),
+            ));
+        }
+        let _lifecycle_guard = self
+            .wallet_lifecycle_lock
+            .lock()
+            .expect("wallet lifecycle lock");
+
+        let wallet = {
+            let wallets = self.wallets_by_id.read().expect("wallet repo lock");
+            wallets
+                .values()
+                .find(|wallet| owner_matches(wallet))
+                .cloned()
+        };
+        let Some(wallet) = wallet else {
+            return Ok(false);
+        };
+
+        // Compensation is only allowed for an untouched, freshly-created wallet.  A journal
+        // entry can race with an existing wallet lookup, and deleting a zero-reference wallet
+        // with persisted funds would otherwise destroy those funds.
+        if !wallet_is_untouched_for_compensation(&wallet) {
+            return Ok(false);
+        }
+        let referenced = self
+            .payment_orders_by_id
+            .read()
+            .expect("wallet repo lock")
+            .values()
+            .any(|order| order.wallet_id == wallet.id)
+            || self
+                .refunds_by_id
+                .read()
+                .expect("wallet repo lock")
+                .values()
+                .any(|refund| refund.wallet_id == wallet.id)
+            || self
+                .wallet_transactions_by_id
+                .read()
+                .expect("wallet repo lock")
+                .values()
+                .any(|transaction| transaction.wallet_id == wallet.id)
+            || self
+                .redeem_codes_by_id
+                .read()
+                .expect("wallet repo lock")
+                .values()
+                .any(|code| code.redeemed_wallet_id.as_deref() == Some(wallet.id.as_str()));
+        if referenced {
+            return Ok(false);
+        }
+
+        let mut wallets = self.wallets_by_id.write().expect("wallet repo lock");
+        let removable = wallets.get(&wallet.id).is_some_and(|current| {
+            owner_matches(current)
+                && current == &wallet
+                && wallet_is_untouched_for_compensation(current)
+        });
+        if !removable {
+            return Ok(false);
+        }
+        Ok(wallets.remove(&wallet.id).is_some())
+    }
+
+    async fn delete_wallet_if_snapshot_matches_and_unreferenced(
+        &self,
+        expected: &StoredWalletSnapshot,
+        owner: WalletLookupKey<'_>,
+    ) -> Result<bool, DataLayerError> {
+        if expected.id.trim().is_empty() {
+            return Ok(false);
+        }
+        let owner_matches = |wallet: &StoredWalletSnapshot| match owner {
+            WalletLookupKey::UserId(user_id) => {
+                !user_id.trim().is_empty()
+                    && wallet.id == expected.id
+                    && wallet.user_id.as_deref() == Some(user_id)
+                    && wallet.api_key_id.is_none()
+            }
+            WalletLookupKey::ApiKeyId(api_key_id) => {
+                !api_key_id.trim().is_empty()
+                    && wallet.id == expected.id
+                    && wallet.api_key_id.as_deref() == Some(api_key_id)
+                    && wallet.user_id.is_none()
+            }
+            WalletLookupKey::WalletId(_) => false,
+        };
+        if matches!(owner, WalletLookupKey::WalletId(_)) {
+            return Err(DataLayerError::InvalidInput(
+                "wallet compensation requires an explicit user or API-key owner".to_string(),
+            ));
+        }
+        let _lifecycle_guard = self
+            .wallet_lifecycle_lock
+            .lock()
+            .expect("wallet lifecycle lock");
+
+        let current = {
+            let wallets = self.wallets_by_id.read().expect("wallet repo lock");
+            wallets
+                .get(&expected.id)
+                .filter(|wallet| owner_matches(wallet))
+                .cloned()
+        };
+        // Compare every field, including the owner and update timestamp.  A
+        // mismatch means another operation touched the wallet, so compensation
+        // must fail closed and preserve its funds.
+        if current.as_ref() != Some(expected) {
+            return Ok(false);
+        }
+
+        let referenced = self
+            .payment_orders_by_id
+            .read()
+            .expect("wallet repo lock")
+            .values()
+            .any(|order| order.wallet_id == expected.id)
+            || self
+                .refunds_by_id
+                .read()
+                .expect("wallet repo lock")
+                .values()
+                .any(|refund| refund.wallet_id == expected.id)
+            || self
+                .wallet_transactions_by_id
+                .read()
+                .expect("wallet repo lock")
+                .values()
+                .any(|transaction| transaction.wallet_id == expected.id)
+            || self
+                .redeem_codes_by_id
+                .read()
+                .expect("wallet repo lock")
+                .values()
+                .any(|code| code.redeemed_wallet_id.as_deref() == Some(expected.id.as_str()));
+        if referenced {
+            return Ok(false);
+        }
+
+        let mut wallets = self.wallets_by_id.write().expect("wallet repo lock");
+        if wallets
+            .get(&expected.id)
+            .is_some_and(|wallet| owner_matches(wallet) && wallet == expected)
+        {
+            return Ok(wallets.remove(&expected.id).is_some());
+        }
+        Ok(false)
+    }
+
+    async fn restore_wallet_if_snapshot_matches(
+        &self,
+        before: &StoredWalletSnapshot,
+        after: &StoredWalletSnapshot,
+        owner: WalletLookupKey<'_>,
+    ) -> Result<bool, DataLayerError> {
+        if before.id.trim().is_empty() || after.id.trim().is_empty() {
+            return Ok(false);
+        }
+        if before.id != after.id {
+            return Err(DataLayerError::InvalidInput(
+                "wallet restore snapshots must reference the same wallet".to_string(),
+            ));
+        }
+        let owner_matches = |wallet: &StoredWalletSnapshot| match owner {
+            WalletLookupKey::UserId(user_id) => {
+                !user_id.trim().is_empty()
+                    && wallet.user_id.as_deref() == Some(user_id)
+                    && wallet.api_key_id.is_none()
+            }
+            WalletLookupKey::ApiKeyId(api_key_id) => {
+                !api_key_id.trim().is_empty()
+                    && wallet.api_key_id.as_deref() == Some(api_key_id)
+                    && wallet.user_id.is_none()
+            }
+            WalletLookupKey::WalletId(_) => false,
+        };
+        if matches!(owner, WalletLookupKey::WalletId(_)) {
+            return Err(DataLayerError::InvalidInput(
+                "wallet restore requires an explicit user or API-key owner".to_string(),
+            ));
+        }
+
+        // Keep the compare and replacement atomic with the lifecycle operations. The map write
+        // lock also prevents an ordinary wallet mutation from interleaving between the compare
+        // and restore; a changed snapshot therefore fails closed instead of being overwritten.
+        let _lifecycle_guard = self
+            .wallet_lifecycle_lock
+            .lock()
+            .expect("wallet lifecycle lock");
+        let mut wallets = self.wallets_by_id.write().expect("wallet repo lock");
+        let Some(current) = wallets.get(&after.id) else {
+            return Ok(false);
+        };
+        if current != after || !owner_matches(current) || !owner_matches(before) {
+            return Ok(false);
+        }
+        wallets.insert(before.id.clone(), before.clone());
+        Ok(true)
+    }
+
+    async fn delete_provisional_auth_user_wallet(
+        &self,
+        wallet_id: &str,
+        user_id: &str,
+    ) -> Result<bool, DataLayerError> {
+        if wallet_id.trim().is_empty() || user_id.trim().is_empty() {
+            return Ok(false);
+        }
+        let _lifecycle_guard = self
+            .wallet_lifecycle_lock
+            .lock()
+            .expect("wallet lifecycle lock");
+
+        // Provisioning rollback is deliberately fail-closed. The only
+        // transaction that may exist is the deterministic initial gift entry;
+        // any other financial artifact makes the wallet ineligible for purge.
+        let wallet = {
+            let wallets = self.wallets_by_id.read().expect("wallet repo lock");
+            wallets
+                .values()
+                .find(|wallet| {
+                    wallet.id == wallet_id
+                        && wallet.user_id.as_deref() == Some(user_id)
+                        && wallet.api_key_id.is_none()
+                        && wallet.balance == 0.0
+                        && wallet.total_recharged == 0.0
+                        && wallet.total_consumed == 0.0
+                        && wallet.total_refunded == 0.0
+                        && wallet.total_adjusted == wallet.gift_balance
+                        && wallet.gift_balance >= 0.0
+                        && wallet.status == "active"
+                        && matches!(wallet.limit_mode.as_str(), "finite" | "unlimited")
+                        && wallet.currency == "USD"
+                })
+                .cloned()
+        };
+        let Some(wallet) = wallet else {
+            return Ok(false);
+        };
+
+        let transactions = self
+            .wallet_transactions_by_id
+            .read()
+            .expect("wallet repo lock");
+        let transaction_matches =
+            provisional_auth_wallet_transactions_match(&transactions, &wallet, user_id);
+        drop(transactions);
+        if !transaction_matches {
+            return Ok(false);
+        }
+
+        if self
+            .payment_orders_by_id
+            .read()
+            .expect("wallet repo lock")
+            .values()
+            .any(|order| order.wallet_id == wallet.id)
+            || self
+                .refunds_by_id
+                .read()
+                .expect("wallet repo lock")
+                .values()
+                .any(|refund| refund.wallet_id == wallet.id)
+            || self
+                .redeem_codes_by_id
+                .read()
+                .expect("wallet repo lock")
+                .values()
+                .any(|code| code.redeemed_wallet_id.as_deref() == Some(wallet.id.as_str()))
+        {
+            return Ok(false);
+        }
+
+        // Snapshot updates do not take `wallet_lifecycle_lock`; hold the
+        // wallet write lock through the final compare and removal so a credit
+        // cannot land after the check but before deletion. Re-check the
+        // transaction set under its write lock as well, since a concurrent
+        // financial entry must make this compensation fail closed.
+        let mut wallets = self.wallets_by_id.write().expect("wallet repo lock");
+        if wallets.get(&wallet.id) != Some(&wallet) {
+            return Ok(false);
+        }
+        let mut transactions = self
+            .wallet_transactions_by_id
+            .write()
+            .expect("wallet repo lock");
+        if !provisional_auth_wallet_transactions_match(&transactions, &wallet, user_id) {
+            return Ok(false);
+        }
+        transactions.retain(|_, transaction| transaction.wallet_id != wallet.id);
+        Ok(wallets.remove(&wallet.id).is_some())
+    }
+
     async fn create_wallet_recharge_order(
         &self,
-        input: CreateWalletRechargeOrderInput,
+        mut input: CreateWalletRechargeOrderInput,
     ) -> Result<CreateWalletRechargeOrderOutcome, DataLayerError> {
+        input.payment_method = canonicalize_payment_method(&input.payment_method)
+            .map_err(DataLayerError::InvalidInput)?;
+        validate_wallet_recharge_order_input(&input).map_err(DataLayerError::InvalidInput)?;
+        if !input.amount_usd.is_finite()
+            || input.amount_usd <= 0.0
+            || input
+                .pay_amount
+                .is_some_and(|value| !value.is_finite() || value <= 0.0)
+            || input
+                .exchange_rate
+                .is_some_and(|value| !value.is_finite() || value <= 0.0)
+            || input.expires_at_unix_secs > i64::MAX as u64
+        {
+            return Err(DataLayerError::InvalidInput(
+                "invalid wallet recharge numeric fields".to_string(),
+            ));
+        }
+        let mut gateway_response =
+            project_wallet_recharge_gateway_response(&input.gateway_response)
+                .map_err(DataLayerError::InvalidInput)?;
+        if !gateway_response.is_object() {
+            return Err(DataLayerError::InvalidInput(
+                "wallet recharge gateway response must be an object".to_string(),
+            ));
+        }
+        let gateway_object = gateway_response
+            .as_object_mut()
+            .expect("validated wallet recharge gateway response");
+        if let Some(provider) = input.payment_provider.as_deref() {
+            gateway_object.insert(
+                "payment_provider".to_string(),
+                serde_json::Value::String(provider.trim().to_ascii_lowercase()),
+            );
+        }
+        if let Some(channel) = input.payment_channel.as_deref() {
+            gateway_object.insert(
+                "payment_channel".to_string(),
+                serde_json::Value::String(channel.trim().to_ascii_lowercase()),
+            );
+        }
+        let _lifecycle_guard = self
+            .wallet_lifecycle_lock
+            .lock()
+            .expect("wallet lifecycle lock");
         let now_secs = current_unix_secs();
-        let wallet_id = {
+        // Keep the wallet and payment-order locks in separate scopes.  The
+        // repository stores them in independent maps, and holding one while
+        // acquiring the other can deadlock with refund/order readers.
+        let (wallet_id, created_wallet) = {
             let mut wallets = self.wallets_by_id.write().expect("wallet repo lock");
-            let wallet = wallets
-                .values_mut()
-                .find(|wallet| wallet.user_id.as_deref() == Some(input.user_id.as_str()));
-            if wallet
+            let existing_wallet = wallets
+                .values()
+                .find(|wallet| wallet.user_id.as_deref() == Some(input.user_id.as_str()))
+                .map(|wallet| (wallet.id.clone(), wallet.status.clone()));
+            if existing_wallet
                 .as_ref()
-                .is_some_and(|wallet| wallet.status != "active")
+                .is_some_and(|(_, status)| status != "active")
             {
                 return Ok(CreateWalletRechargeOrderOutcome::WalletInactive);
             }
 
-            match wallet {
-                Some(wallet) => wallet.id.clone(),
+            match existing_wallet {
+                Some((wallet_id, _)) => (wallet_id, false),
                 None => {
                     let wallet_id = input
                         .preferred_wallet_id
                         .clone()
                         .unwrap_or_else(|| format!("wallet-{}", uuid::Uuid::new_v4()));
+                    if wallets.contains_key(&wallet_id) {
+                        return Err(DataLayerError::InvalidInput(
+                            "wallet identifier already belongs to another owner".to_string(),
+                        ));
+                    }
                     let wallet = StoredWalletSnapshot::new(
                         wallet_id.clone(),
                         Some(input.user_id.clone()),
@@ -942,15 +1714,16 @@ impl WalletWriteRepository for InMemoryWalletRepository {
                         now_secs as i64,
                     )?;
                     wallets.insert(wallet_id.clone(), wallet);
-                    wallet_id
+                    (wallet_id, true)
                 }
             }
         };
 
+        let replay_input = input.clone();
         let order = StoredAdminPaymentOrder {
             id: format!("payment-order-{}", uuid::Uuid::new_v4()),
             order_no: input.order_no,
-            wallet_id,
+            wallet_id: wallet_id.clone(),
             user_id: Some(input.user_id),
             amount_usd: input.amount_usd,
             pay_amount: input.pay_amount,
@@ -959,25 +1732,277 @@ impl WalletWriteRepository for InMemoryWalletRepository {
             refunded_amount_usd: 0.0,
             refundable_amount_usd: 0.0,
             payment_method: input.payment_method,
+            payment_provider: input.payment_provider,
+            order_kind: "wallet_recharge".to_string(),
             gateway_order_id: Some(input.gateway_order_id),
-            gateway_response: Some(input.gateway_response),
+            gateway_response: Some(gateway_response),
             status: "pending".to_string(),
             created_at_unix_ms: current_unix_ms(),
             paid_at_unix_secs: None,
             credited_at_unix_secs: None,
             expires_at_unix_secs: Some(input.expires_at_unix_secs),
         };
-        self.payment_orders_by_id
-            .write()
-            .expect("wallet repo lock")
-            .insert(order.id.clone(), order.clone());
+        match self.insert_wallet_recharge_order_unique(order.clone(), now_secs, &replay_input) {
+            Ok((Some(existing), true)) => {
+                if created_wallet {
+                    self.remove_created_wallet_if_unreferenced(&wallet_id);
+                }
+                return Ok(CreateWalletRechargeOrderOutcome::Created(existing));
+            }
+            Ok((Some(existing), false)) => {
+                if created_wallet {
+                    self.remove_created_wallet_if_unreferenced(&wallet_id);
+                }
+                return Ok(CreateWalletRechargeOrderOutcome::Existing(existing));
+            }
+            Ok((None, false)) => {}
+            Ok((None, true)) => {
+                if created_wallet {
+                    self.remove_created_wallet_if_unreferenced(&wallet_id);
+                }
+                return Err(DataLayerError::InvalidInput(
+                    "reclaimed recharge order disappeared".to_string(),
+                ));
+            }
+            Err(error) => {
+                if created_wallet {
+                    self.remove_created_wallet_if_unreferenced(&wallet_id);
+                }
+                return Err(error);
+            }
+        }
         Ok(CreateWalletRechargeOrderOutcome::Created(order))
+    }
+
+    async fn update_wallet_recharge_checkout(
+        &self,
+        input: UpdateWalletRechargeCheckoutInput,
+    ) -> Result<WalletMutationOutcome<StoredAdminPaymentOrder>, DataLayerError> {
+        if input.order_id.trim().is_empty() || input.gateway_order_id.trim().is_empty() {
+            return Ok(WalletMutationOutcome::Invalid(
+                "wallet recharge checkout identifiers are required".to_string(),
+            ));
+        }
+        let gateway_response =
+            match project_wallet_recharge_gateway_response(&input.gateway_response) {
+                Ok(value) => value,
+                Err(error) => return Ok(WalletMutationOutcome::Invalid(error)),
+            };
+        let mut orders = self.payment_orders_by_id.write().expect("wallet repo lock");
+        let Some(current_order) = orders.get(&input.order_id) else {
+            return Ok(WalletMutationOutcome::NotFound);
+        };
+        let is_wallet_recharge = current_order
+            .gateway_response
+            .as_ref()
+            .and_then(serde_json::Value::as_object)
+            .and_then(|object| object.get("order_kind"))
+            .and_then(serde_json::Value::as_str)
+            == Some("wallet_recharge");
+        if !is_wallet_recharge {
+            return Ok(WalletMutationOutcome::Invalid(
+                "payment order is not a wallet recharge".to_string(),
+            ));
+        }
+        let current_is_checkout_placeholder =
+            wallet_recharge_order_is_checkout_placeholder(current_order);
+        let current_token = current_order
+            .gateway_response
+            .as_ref()
+            .and_then(wallet_recharge_checkout_claim_token);
+        let requested_token = wallet_recharge_checkout_claim_token(&gateway_response);
+        if current_token.is_some() && current_token != requested_token {
+            return Ok(WalletMutationOutcome::Invalid(
+                "wallet recharge checkout claim is no longer current".to_string(),
+            ));
+        }
+        if current_order.status != "pending" {
+            if current_order.gateway_order_id.as_deref() == Some(input.gateway_order_id.as_str()) {
+                return Ok(WalletMutationOutcome::Applied(current_order.clone()));
+            }
+            return Ok(WalletMutationOutcome::Invalid(
+                "wallet recharge order is no longer pending".to_string(),
+            ));
+        }
+        let now_secs = current_unix_secs();
+        if current_order
+            .expires_at_unix_secs
+            .is_none_or(|expires_at| expires_at <= now_secs)
+        {
+            return Ok(WalletMutationOutcome::Invalid(
+                "wallet recharge order is expired".to_string(),
+            ));
+        }
+        // The initial row stores the order number as a temporary gateway id.
+        // Once a provider checkout is persisted, a concurrent creator must
+        // not overwrite that evidence with a second provider checkout.
+        if current_order
+            .gateway_order_id
+            .as_deref()
+            .is_some_and(|existing| {
+                existing != input.gateway_order_id.as_str()
+                    && existing != current_order.order_no.as_str()
+                    && !current_is_checkout_placeholder
+            })
+        {
+            return Ok(WalletMutationOutcome::Invalid(
+                "wallet recharge checkout is already bound".to_string(),
+            ));
+        }
+        let payment_method = current_order.payment_method.clone();
+        if orders.values().any(|existing| {
+            existing.id != input.order_id
+                && existing.payment_method == payment_method
+                && existing.gateway_order_id.as_deref() == Some(input.gateway_order_id.as_str())
+        }) {
+            return Ok(WalletMutationOutcome::Invalid(
+                "payment gateway order already belongs to another order".to_string(),
+            ));
+        }
+        let order = orders
+            .get_mut(&input.order_id)
+            .expect("wallet recharge order disappeared while write lock held");
+        order.gateway_order_id = Some(input.gateway_order_id);
+        order.gateway_response = Some(gateway_response);
+        Ok(WalletMutationOutcome::Applied(order.clone()))
+    }
+
+    async fn compare_and_swap_payment_order_stripe_client_secret(
+        &self,
+        input: CompareAndSwapPaymentOrderStripeClientSecretInput,
+    ) -> Result<bool, DataLayerError> {
+        let mut orders = self.payment_orders_by_id.write().expect("wallet repo lock");
+        let Some(current) = orders.get(&input.order_id) else {
+            return Ok(false);
+        };
+        let Some(replacement) = payment_order_stripe_client_secret_cas_replacement(current, &input)
+            .map_err(DataLayerError::InvalidInput)?
+        else {
+            return Ok(false);
+        };
+        let current = orders
+            .get_mut(&input.order_id)
+            .expect("payment order disappeared while write lock held");
+        current.gateway_response = Some(replacement);
+        Ok(true)
+    }
+
+    async fn fail_wallet_recharge_checkout(
+        &self,
+        input: FailWalletRechargeCheckoutInput,
+    ) -> Result<WalletMutationOutcome<StoredAdminPaymentOrder>, DataLayerError> {
+        if input.order_id.trim().is_empty()
+            || input.claim_token.trim().is_empty()
+            || input.claim_token.len() > 128
+        {
+            return Ok(WalletMutationOutcome::Invalid(
+                "wallet recharge checkout failure identifiers are required".to_string(),
+            ));
+        }
+        let mut orders = self.payment_orders_by_id.write().expect("wallet repo lock");
+        let Some(order) = orders.get_mut(&input.order_id) else {
+            return Ok(WalletMutationOutcome::NotFound);
+        };
+        if !wallet_recharge_order_is_checkout_placeholder(order) {
+            return Ok(WalletMutationOutcome::Invalid(
+                "payment order is not a checkout placeholder".to_string(),
+            ));
+        }
+        let current_token = order
+            .gateway_response
+            .as_ref()
+            .and_then(wallet_recharge_checkout_claim_token);
+        if current_token != Some(input.claim_token.trim()) {
+            return Ok(WalletMutationOutcome::Invalid(
+                "wallet recharge checkout claim is no longer current".to_string(),
+            ));
+        }
+        if order.status != "pending" {
+            return Ok(WalletMutationOutcome::Applied(order.clone()));
+        }
+        let failed = if input.provider_request_may_have_succeeded {
+            wallet_recharge_checkout_uncertain_response(
+                order.gateway_response.as_ref(),
+                &input.reason,
+                current_unix_secs(),
+            )
+        } else {
+            wallet_recharge_checkout_failed_response(
+                order.gateway_response.as_ref(),
+                &input.reason,
+                current_unix_secs(),
+            )
+        };
+        order.gateway_response = Some(failed);
+        order.status = "failed".to_string();
+        Ok(WalletMutationOutcome::Applied(order.clone()))
+    }
+
+    async fn reclaim_wallet_recharge_checkout(
+        &self,
+        input: ReclaimWalletRechargeCheckoutInput,
+    ) -> Result<WalletMutationOutcome<StoredAdminPaymentOrder>, DataLayerError> {
+        if input.order_id.trim().is_empty()
+            || input.claim_token.trim().is_empty()
+            || input.claim_token.len() > 128
+            || input.expires_at_unix_secs <= current_unix_secs()
+        {
+            return Ok(WalletMutationOutcome::Invalid(
+                "wallet recharge checkout reclaim identifiers are invalid".to_string(),
+            ));
+        }
+        // Keep the in-memory backend aligned with SQL backends: a reclaim may
+        // only install a server-created placeholder, never provider checkout
+        // evidence supplied by an internal caller.
+        if !wallet_recharge_response_is_checkout_placeholder(&input.gateway_response) {
+            return Ok(WalletMutationOutcome::Invalid(
+                "wallet recharge reclaim response must be a placeholder".to_string(),
+            ));
+        }
+        let now = current_unix_secs();
+        let response = wallet_recharge_checkout_claim_response(
+            &input.gateway_response,
+            &input.claim_token,
+            now,
+        )
+        .map_err(DataLayerError::InvalidInput)?;
+        let mut orders = self.payment_orders_by_id.write().expect("wallet repo lock");
+        let Some(order) = orders.get_mut(&input.order_id) else {
+            return Ok(WalletMutationOutcome::NotFound);
+        };
+        if !wallet_recharge_order_is_reclaimable_placeholder(order, now) {
+            return Ok(WalletMutationOutcome::Invalid(
+                "wallet recharge checkout is still in progress or already completed".to_string(),
+            ));
+        }
+        order.gateway_response = Some(response);
+        order.gateway_order_id = Some(order.order_no.clone());
+        order.status = "pending".to_string();
+        order.expires_at_unix_secs = Some(input.expires_at_unix_secs);
+        Ok(WalletMutationOutcome::Applied(order.clone()))
     }
 
     async fn create_plan_purchase_order(
         &self,
-        input: CreatePlanPurchaseOrderInput,
+        mut input: CreatePlanPurchaseOrderInput,
     ) -> Result<CreatePlanPurchaseOrderOutcome, DataLayerError> {
+        input.payment_method = canonicalize_payment_method(&input.payment_method)
+            .map_err(DataLayerError::InvalidInput)?;
+        validate_plan_purchase_order_input(&input).map_err(DataLayerError::InvalidInput)?;
+        let projected_gateway_response = project_wallet_gateway_response(&input.gateway_response)
+            .map_err(DataLayerError::InvalidInput)?;
+        let entitlements = input
+            .product_snapshot
+            .get("entitlements")
+            .or_else(|| input.product_snapshot.get("entitlements_json"))
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!([]));
+        validate_plan_wallet_credit_entitlements(&entitlements)
+            .map_err(DataLayerError::InvalidInput)?;
+        let _lifecycle_guard = self
+            .wallet_lifecycle_lock
+            .lock()
+            .expect("wallet lifecycle lock");
         let wallet_id = {
             let wallets = self.wallets_by_id.read().expect("wallet repo lock");
             let Some(wallet) = wallets
@@ -1042,7 +2067,7 @@ impl WalletWriteRepository for InMemoryWalletRepository {
                 return Ok(CreatePlanPurchaseOrderOutcome::ActivePlanLimitReached);
             }
         }
-        let mut gateway_response = match input.gateway_response {
+        let mut gateway_response = match projected_gateway_response {
             serde_json::Value::Object(map) => map,
             value => {
                 let mut map = serde_json::Map::new();
@@ -1071,6 +2096,8 @@ impl WalletWriteRepository for InMemoryWalletRepository {
             refunded_amount_usd: 0.0,
             refundable_amount_usd: 0.0,
             payment_method: input.payment_method,
+            payment_provider: input.payment_provider,
+            order_kind: "plan_purchase".to_string(),
             gateway_order_id: Some(input.gateway_order_id),
             gateway_response: Some(serde_json::Value::Object(gateway_response)),
             status: "pending".to_string(),
@@ -1079,10 +2106,7 @@ impl WalletWriteRepository for InMemoryWalletRepository {
             credited_at_unix_secs: None,
             expires_at_unix_secs: Some(input.expires_at_unix_secs),
         };
-        self.payment_orders_by_id
-            .write()
-            .expect("wallet repo lock")
-            .insert(order.id.clone(), order.clone());
+        self.insert_payment_order_unique(order.clone())?;
         Ok(CreatePlanPurchaseOrderOutcome::Created(order))
     }
 
@@ -1090,10 +2114,70 @@ impl WalletWriteRepository for InMemoryWalletRepository {
         &self,
         input: CreateWalletRefundRequestInput,
     ) -> Result<CreateWalletRefundRequestOutcome, DataLayerError> {
-        let wallets = self.wallets_by_id.read().expect("wallet repo lock");
-        let Some(wallet) = wallets.get(&input.wallet_id) else {
-            return Ok(CreateWalletRefundRequestOutcome::WalletMissing);
+        if !input.amount_usd.is_finite() || input.amount_usd <= 0.0 {
+            return Ok(CreateWalletRefundRequestOutcome::InvalidInput(
+                "refund amount must be finite and greater than zero".to_string(),
+            ));
+        }
+        if input
+            .idempotency_key
+            .as_deref()
+            .is_some_and(|key| key.trim().is_empty() || key.chars().count() > 128)
+        {
+            return Ok(CreateWalletRefundRequestOutcome::InvalidInput(
+                "refund idempotency key is invalid".to_string(),
+            ));
+        }
+        // SQL backends lock the wallet row while reserving a refund. Serialize
+        // the in-memory equivalent so concurrent requests cannot both spend
+        // the same available balance or race compensation cleanup. Keep both
+        // locks in this order everywhere: lifecycle first, reservation second.
+        let _lifecycle_guard = self
+            .wallet_lifecycle_lock
+            .lock()
+            .expect("wallet lifecycle lock");
+        let _reservation_guard = self
+            .refund_creation_lock
+            .lock()
+            .expect("wallet refund creation lock");
+        let wallet = {
+            let wallets = self.wallets_by_id.read().expect("wallet repo lock");
+            let Some(wallet) = wallets.get(&input.wallet_id) else {
+                return Ok(CreateWalletRefundRequestOutcome::WalletMissing);
+            };
+            if wallet.user_id.as_deref() != Some(input.user_id.as_str()) {
+                return Ok(CreateWalletRefundRequestOutcome::WalletMissing);
+            }
+            wallet.clone()
         };
+        if !wallet.balance.is_finite() {
+            return Ok(CreateWalletRefundRequestOutcome::InvalidInput(
+                "wallet recharge balance is invalid".to_string(),
+            ));
+        }
+
+        if let Some(idempotency_key) = input.idempotency_key.as_deref() {
+            let key = (input.user_id.clone(), idempotency_key.to_string());
+            if let Some(refund_id) = self
+                .refund_idempotency_to_id
+                .read()
+                .expect("wallet repo lock")
+                .get(&key)
+                .cloned()
+            {
+                if let Some(refund) = self
+                    .refunds_by_id
+                    .read()
+                    .expect("wallet repo lock")
+                    .get(&refund_id)
+                    .cloned()
+                {
+                    return Ok(CreateWalletRefundRequestOutcome::Duplicate(refund));
+                }
+                return Ok(CreateWalletRefundRequestOutcome::DuplicateRejected);
+            }
+        }
+
         let reserved_amount = self
             .refunds_by_id
             .read()
@@ -1103,20 +2187,36 @@ impl WalletWriteRepository for InMemoryWalletRepository {
                 refund.wallet_id == input.wallet_id
                     && matches!(refund.status.as_str(), "pending_approval" | "approved")
             })
-            .map(|refund| refund.amount_usd)
-            .sum::<f64>();
-        if input.amount_usd > (wallet.balance - reserved_amount) {
+            .try_fold(0.0_f64, |total, refund| {
+                let amount = refund.amount_usd;
+                if !amount.is_finite() || amount <= 0.0 {
+                    return None;
+                }
+                let next = total + amount;
+                next.is_finite().then_some(next)
+            });
+        let Some(reserved_amount) = reserved_amount else {
+            return Ok(CreateWalletRefundRequestOutcome::InvalidInput(
+                "wallet refund reservation is invalid".to_string(),
+            ));
+        };
+        let available_balance = wallet.balance - reserved_amount;
+        if !available_balance.is_finite() || input.amount_usd > available_balance {
             return Ok(CreateWalletRefundRequestOutcome::RefundAmountExceedsAvailableBalance);
         }
 
+        let mut resolved_payment_method: Option<String> = None;
         if let Some(order_id) = input.payment_order_id.as_deref() {
-            let orders = self.payment_orders_by_id.read().expect("wallet repo lock");
-            let Some(order) = orders.get(order_id) else {
-                return Ok(CreateWalletRefundRequestOutcome::PaymentOrderNotFound);
+            let order = {
+                let orders = self.payment_orders_by_id.read().expect("wallet repo lock");
+                let Some(order) = orders.get(order_id) else {
+                    return Ok(CreateWalletRefundRequestOutcome::PaymentOrderNotFound);
+                };
+                if order.wallet_id != input.wallet_id || order.status != "credited" {
+                    return Ok(CreateWalletRefundRequestOutcome::PaymentOrderNotRefundable);
+                }
+                order.clone()
             };
-            if order.wallet_id != input.wallet_id || order.status != "credited" {
-                return Ok(CreateWalletRefundRequestOutcome::PaymentOrderNotRefundable);
-            }
             let reserved_for_order = self
                 .refunds_by_id
                 .read()
@@ -1126,14 +2226,47 @@ impl WalletWriteRepository for InMemoryWalletRepository {
                     refund.payment_order_id.as_deref() == Some(order_id)
                         && matches!(refund.status.as_str(), "pending_approval" | "approved")
                 })
-                .map(|refund| refund.amount_usd)
-                .sum::<f64>();
-            if input.amount_usd > (order.refundable_amount_usd - reserved_for_order) {
+                .try_fold(0.0_f64, |total, refund| {
+                    let amount = refund.amount_usd;
+                    if !amount.is_finite() || amount <= 0.0 {
+                        return None;
+                    }
+                    let next = total + amount;
+                    next.is_finite().then_some(next)
+                });
+            if !payment_order_refund_amounts_are_consistent(
+                order.amount_usd,
+                order.refunded_amount_usd,
+                order.refundable_amount_usd,
+            ) {
+                return Ok(CreateWalletRefundRequestOutcome::InvalidInput(
+                    "payment order refund amounts are invalid".to_string(),
+                ));
+            }
+            let Some(reserved_for_order) = reserved_for_order else {
+                return Ok(CreateWalletRefundRequestOutcome::InvalidInput(
+                    "payment order refund reservation is invalid".to_string(),
+                ));
+            };
+            let available_order_amount = order.refundable_amount_usd - reserved_for_order;
+            if !available_order_amount.is_finite() || input.amount_usd > available_order_amount {
                 return Ok(
                     CreateWalletRefundRequestOutcome::RefundAmountExceedsAvailableOrderAmount,
                 );
             }
+            resolved_payment_method = Some(order.payment_method.clone());
         }
+
+        let canonical = canonicalize_wallet_refund_fields(
+            input.payment_order_id.as_deref(),
+            input.source_type.as_deref(),
+            input.source_id.as_deref(),
+            input.refund_mode.as_deref(),
+            resolved_payment_method.as_deref(),
+        )
+        .map_err(DataLayerError::InvalidInput)?;
+        let idempotency_key = input.idempotency_key.clone();
+        let user_id = input.user_id.clone();
 
         let refund = StoredAdminWalletRefund {
             id: format!("refund-{}", uuid::Uuid::new_v4()),
@@ -1141,23 +2274,16 @@ impl WalletWriteRepository for InMemoryWalletRepository {
             wallet_id: input.wallet_id,
             user_id: Some(input.user_id),
             payment_order_id: input.payment_order_id.clone(),
-            source_type: input
-                .payment_order_id
-                .clone()
-                .map(|_| "payment_order".to_string())
-                .or(input.source_type)
-                .unwrap_or_else(|| "wallet_balance".to_string()),
-            source_id: input.payment_order_id.clone().or(input.source_id),
-            refund_mode: input
-                .refund_mode
-                .unwrap_or_else(|| "offline_payout".to_string()),
+            source_type: canonical.source_type,
+            source_id: canonical.source_id,
+            refund_mode: canonical.refund_mode,
             amount_usd: input.amount_usd,
             status: "pending_approval".to_string(),
             reason: input.reason,
             failure_reason: None,
             gateway_refund_id: None,
             payout_method: None,
-            payout_reference: input.idempotency_key,
+            payout_reference: None,
             payout_proof: None,
             requested_by: None,
             approved_by: None,
@@ -1171,13 +2297,22 @@ impl WalletWriteRepository for InMemoryWalletRepository {
             .write()
             .expect("wallet repo lock")
             .insert(refund.id.clone(), refund.clone());
+        if let Some(idempotency_key) = idempotency_key {
+            self.refund_idempotency_to_id
+                .write()
+                .expect("wallet repo lock")
+                .insert((user_id, idempotency_key), refund.id.clone());
+        }
         Ok(CreateWalletRefundRequestOutcome::Created(refund))
     }
 
     async fn process_payment_callback(
         &self,
-        _input: ProcessPaymentCallbackInput,
+        mut input: ProcessPaymentCallbackInput,
     ) -> Result<ProcessPaymentCallbackOutcome, DataLayerError> {
+        input
+            .canonicalize_and_validate()
+            .map_err(DataLayerError::InvalidInput)?;
         Ok(ProcessPaymentCallbackOutcome::Failed {
             duplicate: false,
             error: "payment callback is not supported in memory wallet repository".to_string(),
@@ -1211,6 +2346,68 @@ impl WalletWriteRepository for InMemoryWalletRepository {
         DataLayerError,
     > {
         Ok(WalletMutationOutcome::NotFound)
+    }
+
+    async fn update_admin_wallet_refund_gateway(
+        &self,
+        input: UpdateAdminWalletRefundGatewayInput,
+    ) -> Result<WalletMutationOutcome<super::StoredAdminWalletRefund>, DataLayerError> {
+        if input.gateway_refund_id.trim().is_empty() || input.gateway_refund_id.len() > 128 {
+            return Ok(WalletMutationOutcome::Invalid(
+                "gateway refund identifier is invalid".to_string(),
+            ));
+        }
+        if input
+            .payout_proof
+            .as_ref()
+            .is_some_and(|proof| !proof.is_object())
+        {
+            return Ok(WalletMutationOutcome::Invalid(
+                "gateway refund proof must be an object".to_string(),
+            ));
+        }
+        let mut refunds = self.refunds_by_id.write().expect("wallet repo lock");
+        let Some(refund) = refunds.get_mut(&input.refund_id) else {
+            return Ok(WalletMutationOutcome::NotFound);
+        };
+        if refund.wallet_id != input.wallet_id {
+            return Ok(WalletMutationOutcome::NotFound);
+        }
+        if !refund.amount_usd.is_finite() || refund.amount_usd <= 0.0 {
+            return Ok(WalletMutationOutcome::Invalid(
+                "refund amount must be finite and greater than zero".to_string(),
+            ));
+        }
+        if let Some(existing_id) = refund.gateway_refund_id.as_deref() {
+            if existing_id != input.gateway_refund_id {
+                return Ok(WalletMutationOutcome::Invalid(
+                    "gateway refund identifier conflicts with existing evidence".to_string(),
+                ));
+            }
+        }
+        if refund.status == "succeeded" {
+            return Ok(WalletMutationOutcome::Applied(refund.clone()));
+        }
+        if refund.status != "processing" {
+            return Ok(WalletMutationOutcome::Invalid(
+                "refund status must be processing before gateway update".to_string(),
+            ));
+        }
+        if refund.gateway_refund_id.is_none() {
+            refund.gateway_refund_id = Some(input.gateway_refund_id);
+        }
+        // Preserve a processing proof for ordinary replays, but allow an
+        // explicit successful gateway proof to upgrade it.
+        if refund.payout_proof.is_none()
+            || input
+                .payout_proof
+                .as_ref()
+                .is_some_and(wallet_refund_proof_is_success)
+        {
+            refund.payout_proof = input.payout_proof;
+        }
+        refund.updated_at_unix_secs = current_unix_secs();
+        Ok(WalletMutationOutcome::Applied(refund.clone()))
     }
 
     async fn complete_admin_wallet_refund(
@@ -1259,6 +2456,7 @@ impl WalletWriteRepository for InMemoryWalletRepository {
         &self,
         input: CreateAdminRedeemCodeBatchInput,
     ) -> Result<CreateAdminRedeemCodeBatchResult, DataLayerError> {
+        validate_admin_redeem_code_batch_input(&input).map_err(DataLayerError::InvalidInput)?;
         let now_ms = current_unix_ms();
         let now_secs = current_unix_secs();
         let batch_id = format!("redeem-batch-{}", uuid::Uuid::new_v4());
@@ -1480,6 +2678,10 @@ impl WalletWriteRepository for InMemoryWalletRepository {
         &self,
         input: RedeemWalletCodeInput,
     ) -> Result<RedeemWalletCodeOutcome, DataLayerError> {
+        let _lifecycle_guard = self
+            .wallet_lifecycle_lock
+            .lock()
+            .expect("wallet lifecycle lock");
         let Some(normalized) = normalize_redeem_code(&input.code) else {
             return Ok(RedeemWalletCodeOutcome::InvalidCode);
         };
@@ -1532,12 +2734,10 @@ impl WalletWriteRepository for InMemoryWalletRepository {
                 batch.amount_usd,
             )
         };
-        let credits_recharge_balance = redeem_code_credits_recharge_balance(&balance_bucket);
-
         let (wallet, balance_before, gift_before) = {
-            let mut wallets = self.wallets_by_id.write().expect("wallet repo lock");
+            let wallets = self.wallets_by_id.read().expect("wallet repo lock");
             if let Some(wallet) = wallets
-                .values_mut()
+                .values()
                 .find(|wallet| wallet.user_id.as_deref() == Some(input.user_id.as_str()))
             {
                 if wallet.status != "active" {
@@ -1545,39 +2745,40 @@ impl WalletWriteRepository for InMemoryWalletRepository {
                 }
                 let balance_before = wallet.balance;
                 let gift_before = wallet.gift_balance;
-                if credits_recharge_balance {
-                    wallet.balance += amount_usd;
-                } else {
-                    wallet.gift_balance += amount_usd;
-                }
-                wallet.total_recharged += amount_usd;
+                let (after_recharge, after_gift, after_total_recharged) =
+                    validate_redeem_wallet_credit(
+                        &balance_bucket,
+                        amount_usd,
+                        balance_before,
+                        gift_before,
+                        wallet.total_recharged,
+                    )
+                    .map_err(DataLayerError::UnexpectedValue)?;
+                let mut wallet = wallet.clone();
+                wallet.balance = after_recharge;
+                wallet.gift_balance = after_gift;
+                wallet.total_recharged = after_total_recharged;
                 wallet.updated_at_unix_secs = now_secs;
-                (wallet.clone(), balance_before, gift_before)
+                (wallet, balance_before, gift_before)
             } else {
+                let (after_recharge, after_gift, after_total_recharged) =
+                    validate_redeem_wallet_credit(&balance_bucket, amount_usd, 0.0, 0.0, 0.0)
+                        .map_err(DataLayerError::UnexpectedValue)?;
                 let wallet = StoredWalletSnapshot::new(
                     format!("wallet-{}", uuid::Uuid::new_v4()),
                     Some(input.user_id.clone()),
                     None,
-                    if credits_recharge_balance {
-                        amount_usd
-                    } else {
-                        0.0
-                    },
-                    if credits_recharge_balance {
-                        0.0
-                    } else {
-                        amount_usd
-                    },
+                    after_recharge,
+                    after_gift,
                     "finite".to_string(),
                     "USD".to_string(),
                     "active".to_string(),
-                    amount_usd,
+                    after_total_recharged,
                     0.0,
                     0.0,
                     0.0,
                     now_secs as i64,
                 )?;
-                wallets.insert(wallet.id.clone(), wallet.clone());
                 (wallet, 0.0, 0.0)
             }
         };
@@ -1594,6 +2795,8 @@ impl WalletWriteRepository for InMemoryWalletRepository {
             refunded_amount_usd: 0.0,
             refundable_amount_usd: redeem_code_refundable_amount(&balance_bucket, amount_usd),
             payment_method: redeem_code_payment_method(&balance_bucket).to_string(),
+            payment_provider: Some("redeem_code".to_string()),
+            order_kind: "wallet_recharge".to_string(),
             gateway_order_id: Some(format!("card_{}", uuid::Uuid::new_v4().simple())),
             gateway_response: Some(serde_json::json!({
                 "source": "redeem_code",
@@ -1607,10 +2810,14 @@ impl WalletWriteRepository for InMemoryWalletRepository {
             credited_at_unix_secs: Some(now_secs),
             expires_at_unix_secs: None,
         };
-        self.payment_orders_by_id
+        // Reserve the globally unique payment identity before publishing any
+        // wallet mutation. Every operation after this point is infallible map
+        // replacement, so a duplicate order cannot leave credited funds.
+        self.insert_payment_order_unique(order.clone())?;
+        self.wallets_by_id
             .write()
             .expect("wallet repo lock")
-            .insert(order.id.clone(), order.clone());
+            .insert(wallet.id.clone(), wallet.clone());
 
         let tx = StoredAdminWalletTransaction {
             id: format!("wallet-tx-{}", uuid::Uuid::new_v4()),
@@ -1657,7 +2864,7 @@ impl WalletWriteRepository for InMemoryWalletRepository {
             .expect("wallet repo lock")
             .get_mut(&batch_id)
         {
-            batch.redeemed_count += 1;
+            batch.redeemed_count = batch.redeemed_count.saturating_add(1);
             batch.active_count = batch.active_count.saturating_sub(1);
             batch.updated_at_unix_secs = now_secs;
         }
@@ -1675,11 +2882,17 @@ impl WalletWriteRepository for InMemoryWalletRepository {
 mod tests {
     use super::{InMemoryWalletRepository, WalletReadSeed};
     use crate::repository::wallet::{
-        AdminWalletListQuery, CreatePlanPurchaseOrderInput, CreatePlanPurchaseOrderOutcome,
-        StoredAdminPaymentOrder, StoredAdminWalletRefund, StoredWalletSnapshot, WalletLookupKey,
-        WalletReadRepository, WalletWriteRepository,
+        AdminWalletListQuery, CompareAndSwapPaymentOrderStripeClientSecretInput,
+        CreatePlanPurchaseOrderInput, CreatePlanPurchaseOrderOutcome,
+        CreateWalletRechargeOrderInput, CreateWalletRechargeOrderOutcome,
+        CreateWalletRefundRequestInput, CreateWalletRefundRequestOutcome,
+        FailWalletRechargeCheckoutInput, StoredAdminPaymentOrder, StoredAdminWalletRefund,
+        StoredWalletSnapshot, UpdateWalletRechargeCheckoutInput, WalletLookupKey,
+        WalletMutationOutcome, WalletReadRepository, WalletWriteRepository,
     };
+    use crate::DataLayerError;
     use serde_json::json;
+    use std::sync::Arc;
 
     fn sample_wallet() -> StoredWalletSnapshot {
         StoredWalletSnapshot::new(
@@ -1698,6 +2911,197 @@ mod tests {
             100,
         )
         .expect("wallet should build")
+    }
+
+    #[tokio::test]
+    async fn compensation_delete_preserves_wallet_with_persisted_balance_in_memory() {
+        let wallet = StoredWalletSnapshot::new(
+            "funded-wallet".to_string(),
+            Some("funded-user".to_string()),
+            None,
+            1.0,
+            0.0,
+            "finite".to_string(),
+            "USD".to_string(),
+            "active".to_string(),
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            100,
+        )
+        .expect("wallet should build");
+        let repository = InMemoryWalletRepository::seed(vec![wallet]);
+
+        assert!(!repository
+            .delete_wallet_if_unreferenced("funded-wallet", WalletLookupKey::UserId("funded-user"))
+            .await
+            .expect("funded wallet must not be deleted"));
+        assert!(repository
+            .find(WalletLookupKey::UserId("funded-user"))
+            .await
+            .expect("wallet lookup should succeed")
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn provisional_recharge_cleanup_preserves_wallet_changed_after_initial_check_in_memory() {
+        let wallet = StoredWalletSnapshot::new(
+            "provisional-recharge-wallet".to_string(),
+            Some("provisional-recharge-user".to_string()),
+            None,
+            0.0,
+            0.0,
+            "finite".to_string(),
+            "USD".to_string(),
+            "active".to_string(),
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            100,
+        )
+        .expect("wallet should build");
+        let repository = InMemoryWalletRepository::seed(vec![wallet]);
+        repository.with_wallets_mut(|wallets| {
+            let wallet = wallets
+                .get_mut("provisional-recharge-wallet")
+                .expect("wallet should be seeded");
+            wallet.balance = 2.0;
+            wallet.total_recharged = 2.0;
+            wallet.updated_at_unix_secs = 200;
+        });
+
+        // This is the same cleanup helper used when a recharge order loses a
+        // uniqueness race after creating a provisional wallet. A wallet that
+        // acquired funds must survive the compensation attempt.
+        repository.remove_created_wallet_if_unreferenced("provisional-recharge-wallet");
+        let retained = repository
+            .find(WalletLookupKey::UserId("provisional-recharge-user"))
+            .await
+            .expect("wallet lookup should succeed")
+            .expect("changed wallet should remain");
+        assert_eq!(retained.balance, 2.0);
+        assert_eq!(retained.total_recharged, 2.0);
+    }
+
+    #[tokio::test]
+    async fn snapshot_compensation_deletes_matching_funded_wallet_and_preserves_changed_one() {
+        let wallet = StoredWalletSnapshot::new(
+            "import-funded-wallet".to_string(),
+            Some("import-funded-user".to_string()),
+            None,
+            12.5,
+            3.25,
+            "finite".to_string(),
+            "USD".to_string(),
+            "active".to_string(),
+            12.5,
+            0.0,
+            0.0,
+            0.0,
+            4242,
+        )
+        .expect("wallet should build");
+        let repository = InMemoryWalletRepository::seed(vec![wallet.clone()]);
+        assert!(repository
+            .delete_wallet_if_snapshot_matches_and_unreferenced(
+                &wallet,
+                WalletLookupKey::UserId("import-funded-user"),
+            )
+            .await
+            .expect("matching snapshot should delete"));
+        assert!(repository
+            .find(WalletLookupKey::WalletId("import-funded-wallet"))
+            .await
+            .expect("wallet lookup should succeed")
+            .is_none());
+
+        let repository = InMemoryWalletRepository::seed(vec![wallet.clone()]);
+        repository.with_wallets_mut(|wallets| {
+            wallets
+                .get_mut("import-funded-wallet")
+                .expect("wallet should be seeded")
+                .balance = 99.0;
+        });
+        assert!(!repository
+            .delete_wallet_if_snapshot_matches_and_unreferenced(
+                &wallet,
+                WalletLookupKey::UserId("import-funded-user"),
+            )
+            .await
+            .expect("changed snapshot should be retained"));
+        assert!(repository
+            .find(WalletLookupKey::WalletId("import-funded-wallet"))
+            .await
+            .expect("wallet lookup should succeed")
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn snapshot_restore_is_compare_and_swap_in_memory() {
+        let before = StoredWalletSnapshot::new(
+            "existing-wallet".to_string(),
+            Some("existing-user".to_string()),
+            None,
+            4.0,
+            2.0,
+            "finite".to_string(),
+            "USD".to_string(),
+            "active".to_string(),
+            7.0,
+            3.0,
+            0.0,
+            0.0,
+            100,
+        )
+        .expect("wallet should build");
+        let mut after = before.clone();
+        after.balance = 25.0;
+        after.gift_balance = 5.0;
+        after.total_recharged = 28.0;
+        after.updated_at_unix_secs = 200;
+
+        let repository = InMemoryWalletRepository::seed(vec![after.clone()]);
+        assert!(repository
+            .restore_wallet_if_snapshot_matches(
+                &before,
+                &after,
+                WalletLookupKey::UserId("existing-user"),
+            )
+            .await
+            .expect("matching post-state should restore"));
+        assert_eq!(
+            repository
+                .find(WalletLookupKey::UserId("existing-user"))
+                .await
+                .expect("wallet lookup should succeed"),
+            Some(before.clone())
+        );
+
+        let repository = InMemoryWalletRepository::seed(vec![after.clone()]);
+        repository.with_wallets_mut(|wallets| {
+            let wallet = wallets
+                .get_mut("existing-wallet")
+                .expect("wallet should be seeded");
+            wallet.balance = 99.0;
+            wallet.updated_at_unix_secs = 300;
+        });
+        assert!(!repository
+            .restore_wallet_if_snapshot_matches(
+                &before,
+                &after,
+                WalletLookupKey::UserId("existing-user"),
+            )
+            .await
+            .expect("changed post-state should fail closed"));
+        let retained = repository
+            .find(WalletLookupKey::UserId("existing-user"))
+            .await
+            .expect("wallet lookup should succeed")
+            .expect("changed wallet should remain");
+        assert_eq!(retained.balance, 99.0);
+        assert_eq!(retained.updated_at_unix_secs, 300);
     }
 
     #[tokio::test]
@@ -1778,6 +3182,8 @@ mod tests {
             refunded_amount_usd: 0.0,
             refundable_amount_usd: 10.0,
             payment_method: "stripe".to_string(),
+            payment_provider: Some("stripe".to_string()),
+            order_kind: "wallet_recharge".to_string(),
             gateway_order_id: None,
             gateway_response: None,
             status: status.to_string(),
@@ -1786,6 +3192,151 @@ mod tests {
             credited_at_unix_secs: None,
             expires_at_unix_secs: None,
         }
+    }
+
+    fn stripe_secret_cas_input(
+        order: &StoredAdminPaymentOrder,
+        expected_gateway_response: serde_json::Value,
+        expected_ciphertext: &str,
+        replacement_ciphertext: &str,
+    ) -> CompareAndSwapPaymentOrderStripeClientSecretInput {
+        CompareAndSwapPaymentOrderStripeClientSecretInput {
+            order_id: order.id.clone(),
+            order_no: order.order_no.clone(),
+            wallet_id: order.wallet_id.clone(),
+            user_id: order.user_id.clone(),
+            payment_method: order.payment_method.clone(),
+            payment_provider: order.payment_provider.clone(),
+            order_kind: order.order_kind.clone(),
+            gateway_order_id: order.gateway_order_id.clone(),
+            expected_status: order.status.clone(),
+            expected_expires_at_unix_secs: order.expires_at_unix_secs,
+            expected_gateway_response,
+            expected_client_secret_encrypted: expected_ciphertext.to_string(),
+            replacement_client_secret_encrypted: replacement_ciphertext.to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn stripe_secret_cas_is_exact_and_never_overwrites_a_newer_value_in_memory() {
+        let legacy = "gAAAAABlegacy";
+        let replacement = concat!(
+            "aether-payment-order-stripe-client-secret-v2:",
+            "aether-runtime-secret-v1:gAAAAABreplacement"
+        );
+        let mut order = sample_payment_order("stripe-cas-order", Some("user-1"), "pending");
+        order.gateway_order_id = Some("pi-cas".to_string());
+        order.expires_at_unix_secs = Some(4_102_444_800);
+        order.gateway_response = Some(json!({
+            "gateway": "stripe",
+            "publishable_key": "pk_test_public",
+            "_stripe_client_secret_encrypted": legacy,
+        }));
+        let observed = order
+            .gateway_response
+            .clone()
+            .expect("fixture response should exist");
+        let repository = InMemoryWalletRepository::seed_read_model(WalletReadSeed {
+            payment_orders: vec![order.clone()],
+            ..WalletReadSeed::default()
+        });
+        let input = stripe_secret_cas_input(&order, observed.clone(), legacy, replacement);
+
+        let mut stale_json = input.clone();
+        stale_json.expected_gateway_response["publishable_key"] = json!("pk_test_changed");
+        assert!(!repository
+            .compare_and_swap_payment_order_stripe_client_secret(stale_json)
+            .await
+            .expect("stale JSON should be a normal CAS miss"));
+
+        let mut stale_ciphertext = input.clone();
+        stale_ciphertext.expected_client_secret_encrypted = "gAAAAABother".to_string();
+        assert!(!repository
+            .compare_and_swap_payment_order_stripe_client_secret(stale_ciphertext)
+            .await
+            .expect("stale ciphertext should be a normal CAS miss"));
+
+        let mut foreign_identity = input.clone();
+        foreign_identity.order_no = "order-no-foreign".to_string();
+        assert!(!repository
+            .compare_and_swap_payment_order_stripe_client_secret(foreign_identity)
+            .await
+            .expect("foreign identity should be a normal CAS miss"));
+
+        assert!(repository
+            .compare_and_swap_payment_order_stripe_client_secret(input.clone())
+            .await
+            .expect("exact CAS should succeed"));
+        assert!(!repository
+            .compare_and_swap_payment_order_stripe_client_secret(input)
+            .await
+            .expect("an old migration must not overwrite the new value"));
+
+        let stored = repository
+            .find_admin_payment_order(&order.id)
+            .await
+            .expect("stored order should be readable")
+            .expect("stored order should remain");
+        let response = stored
+            .gateway_response
+            .expect("stored response should remain");
+        assert_eq!(
+            response["_stripe_client_secret_encrypted"].as_str(),
+            Some(replacement)
+        );
+        assert_eq!(response["publishable_key"], "pk_test_public");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_stripe_secret_migrations_have_exactly_one_winner_in_memory() {
+        let legacy = "gAAAAABlegacy-race";
+        let mut order = sample_payment_order("stripe-cas-race", Some("user-1"), "pending");
+        order.expires_at_unix_secs = Some(4_102_444_800);
+        order.gateway_response = Some(json!({
+            "gateway": "stripe",
+            "_stripe_client_secret_encrypted": legacy,
+        }));
+        let observed = order
+            .gateway_response
+            .clone()
+            .expect("fixture response should exist");
+        let repository = Arc::new(InMemoryWalletRepository::seed_read_model(WalletReadSeed {
+            payment_orders: vec![order.clone()],
+            ..WalletReadSeed::default()
+        }));
+        let barrier = Arc::new(tokio::sync::Barrier::new(3));
+        let mut tasks = Vec::new();
+        for suffix in ["winner-a", "winner-b"] {
+            let repository = Arc::clone(&repository);
+            let barrier = Arc::clone(&barrier);
+            let input = stripe_secret_cas_input(
+                &order,
+                observed.clone(),
+                legacy,
+                &format!(
+                    "aether-payment-order-stripe-client-secret-v2:aether-runtime-secret-v1:gAAAAAB{suffix}"
+                ),
+            );
+            tasks.push(tokio::spawn(async move {
+                barrier.wait().await;
+                repository
+                    .compare_and_swap_payment_order_stripe_client_secret(input)
+                    .await
+            }));
+        }
+        barrier.wait().await;
+
+        let mut winners = 0;
+        for task in tasks {
+            if task
+                .await
+                .expect("migration task should join")
+                .expect("migration should not error")
+            {
+                winners += 1;
+            }
+        }
+        assert_eq!(winners, 1);
     }
 
     fn sample_refund(id: &str, user_id: Option<&str>, status: &str) -> StoredAdminWalletRefund {
@@ -1899,6 +3450,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn deletes_only_untouched_provisional_auth_wallets_in_memory() {
+        let repository = InMemoryWalletRepository::seed(Vec::new());
+        let provisional_wallet = repository
+            .initialize_auth_user_wallet("provisional-user", 10.0, false)
+            .await
+            .expect("wallet initialization should succeed")
+            .expect("provisional wallet should exist");
+
+        assert!(repository
+            .delete_provisional_auth_user_wallet(&provisional_wallet.id, "provisional-user")
+            .await
+            .expect("provisional cleanup should succeed"));
+        assert!(repository
+            .find(WalletLookupKey::UserId("provisional-user"))
+            .await
+            .expect("wallet lookup should succeed")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn provisional_cleanup_keeps_wallet_with_financial_activity_in_memory() {
+        let wallet = StoredWalletSnapshot::new(
+            "active-wallet".to_string(),
+            Some("active-user".to_string()),
+            None,
+            0.0,
+            10.0,
+            "finite".to_string(),
+            "USD".to_string(),
+            "active".to_string(),
+            0.0,
+            1.0,
+            0.0,
+            10.0,
+            1,
+        )
+        .expect("wallet should build");
+        let repository = InMemoryWalletRepository::seed([wallet]);
+
+        assert!(!repository
+            .delete_provisional_auth_user_wallet("active-wallet", "active-user")
+            .await
+            .expect("provisional cleanup should succeed"));
+        assert!(repository
+            .find(WalletLookupKey::UserId("active-user"))
+            .await
+            .expect("wallet lookup should succeed")
+            .is_some());
+    }
+
+    #[tokio::test]
     async fn lifetime_plan_purchase_blocks_duplicate_pending_order_in_memory() {
         let repository = InMemoryWalletRepository::seed(vec![sample_wallet()]);
         let snapshot = json!({
@@ -2003,6 +3605,607 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn plan_purchase_rejects_malformed_wallet_credit_in_memory() {
+        let repository = InMemoryWalletRepository::seed(vec![sample_wallet()]);
+        let result = repository
+            .create_plan_purchase_order(CreatePlanPurchaseOrderInput {
+                preferred_wallet_id: None,
+                user_id: "user-1".to_string(),
+                amount_usd: 1.0,
+                pay_amount: 1.0,
+                pay_currency: "USD".to_string(),
+                exchange_rate: 1.0,
+                payment_method: "stripe".to_string(),
+                payment_provider: Some("stripe".to_string()),
+                payment_channel: Some("card".to_string()),
+                gateway_order_id: "gateway-invalid-wallet-credit".to_string(),
+                gateway_response: json!({ "checkout": true }),
+                order_no: "order-invalid-wallet-credit".to_string(),
+                product_id: "invalid-wallet-credit-plan".to_string(),
+                product_snapshot: json!({
+                    "id": "invalid-wallet-credit-plan",
+                    "purchase_limit_scope": "unlimited",
+                    "entitlements": [{
+                        "type": "wallet_credit",
+                        "amount_usd": 1.0,
+                        "balance_bucket": "unknown"
+                    }]
+                }),
+                expires_at_unix_secs: 4_102_444_800,
+            })
+            .await;
+        assert!(matches!(result, Err(DataLayerError::InvalidInput(_))));
+        assert!(repository
+            .payment_orders_by_id
+            .read()
+            .expect("wallet repo lock")
+            .is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn gateway_order_uniqueness_is_atomic_in_memory() {
+        let repository = Arc::new(InMemoryWalletRepository::seed(Vec::new()));
+        let barrier = Arc::new(tokio::sync::Barrier::new(3));
+        let mut tasks = Vec::new();
+        for index in 0..2 {
+            let repository = Arc::clone(&repository);
+            let barrier = Arc::clone(&barrier);
+            tasks.push(tokio::spawn(async move {
+                barrier.wait().await;
+                repository
+                    .create_wallet_recharge_order(CreateWalletRechargeOrderInput {
+                        preferred_wallet_id: Some(format!("wallet-concurrent-{index}")),
+                        user_id: format!("user-concurrent-{index}"),
+                        amount_usd: 1.0,
+                        pay_amount: Some(1.0),
+                        pay_currency: Some("USD".to_string()),
+                        exchange_rate: Some(1.0),
+                        payment_method: " EPAY ".to_string(),
+                        payment_provider: None,
+                        payment_channel: None,
+                        gateway_order_id: "shared-memory-gateway-id".to_string(),
+                        gateway_response: json!({ "checkout": true }),
+                        order_no: format!("order-concurrent-{index}"),
+                        expires_at_unix_secs: 4_102_444_800,
+                    })
+                    .await
+            }));
+        }
+        barrier.wait().await;
+
+        let mut created = 0;
+        let mut rejected = 0;
+        for task in tasks {
+            match task.await.expect("order task should join") {
+                Ok(CreateWalletRechargeOrderOutcome::Created(order)) => {
+                    assert_eq!(order.payment_method, "epay");
+                    created += 1;
+                }
+                Err(DataLayerError::InvalidInput(_)) => rejected += 1,
+                other => panic!("unexpected concurrent order result: {other:?}"),
+            }
+        }
+        assert_eq!((created, rejected), (1, 1));
+        assert_eq!(
+            repository
+                .payment_orders_by_id
+                .read()
+                .expect("wallet repo lock")
+                .len(),
+            1
+        );
+        assert_eq!(
+            repository
+                .wallets_by_id
+                .read()
+                .expect("wallet repo lock")
+                .len(),
+            1,
+            "the rejected order must not leave a provisional wallet behind"
+        );
+        let orders = repository
+            .payment_orders_by_id
+            .read()
+            .expect("wallet repo lock");
+        let wallets = repository.wallets_by_id.read().expect("wallet repo lock");
+        let stored_order = orders.values().next().expect("winning order should remain");
+        let stored_wallet = wallets
+            .get(&stored_order.wallet_id)
+            .expect("winning order must not reference a removed wallet");
+        assert_eq!(stored_wallet.user_id, stored_order.user_id);
+    }
+
+    #[tokio::test]
+    async fn recharge_order_conflict_removes_unreferenced_provisional_wallet_in_memory() {
+        let mut existing = sample_payment_order(
+            "existing-recharge-order",
+            Some("recharge-conflict-user"),
+            "pending",
+        );
+        existing.order_no = "recharge-conflict-order-no".to_string();
+        existing.wallet_id = "wallet-from-old-read-model".to_string();
+        existing.payment_method = "epay".to_string();
+        existing.gateway_order_id = Some("gateway-from-old-read-model".to_string());
+        existing.gateway_response = Some(json!({
+            "order_kind": "wallet_recharge",
+            "integration_status": "checkout_pending"
+        }));
+        let repository = InMemoryWalletRepository::seed_read_model(WalletReadSeed {
+            payment_orders: vec![existing.clone()],
+            ..WalletReadSeed::default()
+        });
+
+        let outcome = repository
+            .create_wallet_recharge_order(CreateWalletRechargeOrderInput {
+                preferred_wallet_id: Some("wallet-provisional-conflict".to_string()),
+                user_id: "recharge-conflict-user".to_string(),
+                amount_usd: 10.0,
+                pay_amount: None,
+                pay_currency: None,
+                exchange_rate: None,
+                payment_method: "epay".to_string(),
+                payment_provider: Some("epay".to_string()),
+                payment_channel: None,
+                gateway_order_id: "gateway-retry".to_string(),
+                gateway_response: json!({ "integration_status": "checkout_pending" }),
+                order_no: "recharge-conflict-order-no".to_string(),
+                expires_at_unix_secs: 4_102_444_800,
+            })
+            .await
+            .expect("existing recharge order should be returned");
+
+        assert!(matches!(
+            outcome,
+            CreateWalletRechargeOrderOutcome::Existing(order)
+                if order.id == "existing-recharge-order"
+        ));
+        assert!(repository
+            .find(WalletLookupKey::UserId("recharge-conflict-user"))
+            .await
+            .expect("wallet lookup should succeed")
+            .is_none());
+        assert_eq!(
+            repository
+                .payment_orders_by_id
+                .read()
+                .expect("wallet repo lock")
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn recharge_rejects_preferred_wallet_id_owned_by_another_user_in_memory() {
+        let repository = InMemoryWalletRepository::seed(vec![sample_wallet()]);
+
+        let result = repository
+            .create_wallet_recharge_order(CreateWalletRechargeOrderInput {
+                preferred_wallet_id: Some("wallet-1".to_string()),
+                user_id: "different-owner".to_string(),
+                amount_usd: 5.0,
+                pay_amount: Some(5.0),
+                pay_currency: Some("USD".to_string()),
+                exchange_rate: Some(1.0),
+                payment_method: "stripe".to_string(),
+                payment_provider: Some("stripe".to_string()),
+                payment_channel: Some("card".to_string()),
+                gateway_order_id: "gateway-wallet-id-collision".to_string(),
+                gateway_response: json!({ "checkout": true }),
+                order_no: "order-wallet-id-collision".to_string(),
+                expires_at_unix_secs: 4_102_444_800,
+            })
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(DataLayerError::InvalidInput(message))
+                if message.contains("wallet identifier already belongs")
+        ));
+        let original = repository
+            .find(WalletLookupKey::UserId("user-1"))
+            .await
+            .expect("original wallet lookup should succeed")
+            .expect("original wallet should remain present");
+        assert_eq!(original.id, "wallet-1");
+        assert!(repository
+            .find(WalletLookupKey::UserId("different-owner"))
+            .await
+            .expect("new owner lookup should succeed")
+            .is_none());
+        assert!(repository
+            .payment_orders_by_id
+            .read()
+            .expect("wallet repo lock")
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn recharge_checkout_update_preserves_order_kind_in_memory() {
+        let repository = InMemoryWalletRepository::seed(Vec::new());
+        let created = repository
+            .create_wallet_recharge_order(CreateWalletRechargeOrderInput {
+                preferred_wallet_id: None,
+                user_id: "user-recharge-kind".to_string(),
+                amount_usd: 3.0,
+                pay_amount: Some(3.0),
+                pay_currency: Some("USD".to_string()),
+                exchange_rate: Some(1.0),
+                payment_method: "epay".to_string(),
+                payment_provider: Some("epay".to_string()),
+                payment_channel: Some("alipay".to_string()),
+                gateway_order_id: "placeholder-order-kind".to_string(),
+                gateway_response: json!({
+                    "gateway": "epay",
+                    "integration_status": "checkout_pending"
+                }),
+                order_no: "order-recharge-kind".to_string(),
+                expires_at_unix_secs: 4_102_444_800,
+            })
+            .await
+            .expect("recharge order should be created");
+        let CreateWalletRechargeOrderOutcome::Created(order) = created else {
+            panic!("expected a newly created recharge order");
+        };
+
+        let updated = repository
+            .update_wallet_recharge_checkout(UpdateWalletRechargeCheckoutInput {
+                order_id: order.id.clone(),
+                gateway_order_id: "provider-order-kind".to_string(),
+                gateway_response: json!({
+                    "gateway": "epay",
+                    "payment_url": "https://pay.example.test/order"
+                }),
+            })
+            .await
+            .expect("checkout update should succeed");
+        assert!(matches!(updated, WalletMutationOutcome::Applied(_)));
+
+        let replay = repository
+            .find_wallet_recharge_order_by_order_no("user-recharge-kind", "order-recharge-kind")
+            .await
+            .expect("recharge lookup should succeed")
+            .expect("updated order should remain discoverable");
+        assert_eq!(
+            replay.gateway_order_id.as_deref(),
+            Some("provider-order-kind")
+        );
+        assert_eq!(
+            replay
+                .gateway_response
+                .as_ref()
+                .and_then(|value| value.get("order_kind"))
+                .and_then(serde_json::Value::as_str),
+            Some("wallet_recharge")
+        );
+    }
+
+    #[tokio::test]
+    async fn recharge_checkout_update_rejects_expired_order_in_memory() {
+        let repository = InMemoryWalletRepository::seed(Vec::new());
+        let created = repository
+            .create_wallet_recharge_order(CreateWalletRechargeOrderInput {
+                preferred_wallet_id: None,
+                user_id: "user-expired-checkout".to_string(),
+                amount_usd: 3.0,
+                pay_amount: Some(3.0),
+                pay_currency: Some("USD".to_string()),
+                exchange_rate: Some(1.0),
+                payment_method: "epay".to_string(),
+                payment_provider: Some("epay".to_string()),
+                payment_channel: Some("alipay".to_string()),
+                gateway_order_id: "order-expired-checkout".to_string(),
+                gateway_response: serde_json::json!({
+                    "order_kind": "wallet_recharge",
+                    "integration_status": "checkout_pending"
+                }),
+                order_no: "order-expired-checkout".to_string(),
+                expires_at_unix_secs: 1,
+            })
+            .await
+            .expect("expired recharge order should be creatable for regression setup");
+        let CreateWalletRechargeOrderOutcome::Created(order) = created else {
+            panic!("expected a newly created recharge order");
+        };
+
+        let result = repository
+            .update_wallet_recharge_checkout(UpdateWalletRechargeCheckoutInput {
+                order_id: order.id.clone(),
+                gateway_order_id: "provider-expired-checkout".to_string(),
+                gateway_response: serde_json::json!({
+                    "order_kind": "wallet_recharge",
+                    "payment_url": "https://pay.example.test/expired"
+                }),
+            })
+            .await
+            .expect("expired checkout update should resolve");
+        assert!(matches!(result, WalletMutationOutcome::Invalid(_)));
+
+        let replay = repository
+            .find_wallet_recharge_order_by_order_no(
+                "user-expired-checkout",
+                "order-expired-checkout",
+            )
+            .await
+            .expect("expired recharge lookup should succeed")
+            .expect("expired recharge order should remain stored");
+        assert_eq!(
+            replay.gateway_order_id.as_deref(),
+            Some("order-expired-checkout")
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_recharge_without_channel_can_be_reclaimed_in_memory() {
+        let repository = InMemoryWalletRepository::seed(Vec::new());
+        let first = repository
+            .create_wallet_recharge_order(CreateWalletRechargeOrderInput {
+                preferred_wallet_id: None,
+                user_id: "user-reclaim-no-channel".to_string(),
+                amount_usd: 3.0,
+                pay_amount: None,
+                pay_currency: None,
+                exchange_rate: None,
+                payment_method: "stripe".to_string(),
+                payment_provider: Some("stripe".to_string()),
+                payment_channel: None,
+                gateway_order_id: "order-reclaim-no-channel".to_string(),
+                gateway_response: json!({
+                    "gateway": "stripe",
+                    "order_kind": "wallet_recharge",
+                    "integration_status": "checkout_pending",
+                    "checkout_claim_token": "first-claim"
+                }),
+                order_no: "order-reclaim-no-channel".to_string(),
+                expires_at_unix_secs: 4_102_444_800,
+            })
+            .await
+            .expect("initial recharge should be created");
+        let CreateWalletRechargeOrderOutcome::Created(first) = first else {
+            panic!("expected initial recharge order");
+        };
+
+        let failed = repository
+            .fail_wallet_recharge_checkout(FailWalletRechargeCheckoutInput {
+                order_id: first.id.clone(),
+                claim_token: "first-claim".to_string(),
+                reason: "provider unavailable".to_string(),
+                provider_request_may_have_succeeded: false,
+            })
+            .await
+            .expect("checkout failure should resolve");
+        assert!(matches!(failed, WalletMutationOutcome::Applied(_)));
+
+        let retry = repository
+            .create_wallet_recharge_order(CreateWalletRechargeOrderInput {
+                preferred_wallet_id: None,
+                user_id: "user-reclaim-no-channel".to_string(),
+                amount_usd: 3.0,
+                pay_amount: None,
+                pay_currency: None,
+                exchange_rate: None,
+                payment_method: "stripe".to_string(),
+                payment_provider: Some("stripe".to_string()),
+                payment_channel: None,
+                gateway_order_id: "order-reclaim-no-channel".to_string(),
+                gateway_response: json!({
+                    "gateway": "stripe",
+                    "order_kind": "wallet_recharge",
+                    "integration_status": "checkout_pending",
+                    "checkout_claim_token": "retry-claim"
+                }),
+                order_no: "order-reclaim-no-channel".to_string(),
+                expires_at_unix_secs: 4_102_444_800,
+            })
+            .await
+            .expect("failed placeholder should be reclaimable");
+
+        let CreateWalletRechargeOrderOutcome::Created(reclaimed) = retry else {
+            panic!("expected failed placeholder to be reclaimed");
+        };
+        assert_eq!(reclaimed.id, first.id);
+        assert_eq!(
+            reclaimed
+                .gateway_response
+                .as_ref()
+                .and_then(|value| value.get("checkout_claim_token"))
+                .and_then(serde_json::Value::as_str),
+            Some("retry-claim")
+        );
+        assert_eq!(reclaimed.status, "pending");
+    }
+
+    #[tokio::test]
+    async fn recharge_order_rejects_non_finite_numeric_fields_in_memory() {
+        let invalid_inputs = [
+            (f64::NAN, Some(1.0), Some(1.0), 4_102_444_800),
+            (1.0, Some(f64::INFINITY), Some(1.0), 4_102_444_800),
+            (1.0, Some(1.0), Some(0.0), 4_102_444_800),
+            (1.0, Some(1.0), Some(1.0), i64::MAX as u64 + 1),
+        ];
+        for (index, (amount_usd, pay_amount, exchange_rate, expires_at)) in
+            invalid_inputs.into_iter().enumerate()
+        {
+            let repository = InMemoryWalletRepository::seed(Vec::new());
+            let result = repository
+                .create_wallet_recharge_order(CreateWalletRechargeOrderInput {
+                    preferred_wallet_id: None,
+                    user_id: format!("invalid-recharge-user-{index}"),
+                    amount_usd,
+                    pay_amount,
+                    pay_currency: Some("USD".to_string()),
+                    exchange_rate,
+                    payment_method: "stripe".to_string(),
+                    payment_provider: Some("stripe".to_string()),
+                    payment_channel: Some("card".to_string()),
+                    gateway_order_id: format!("invalid-recharge-gateway-{index}"),
+                    gateway_response: json!({"payment_url": "https://pay.example.test"}),
+                    order_no: format!("invalid-recharge-order-{index}"),
+                    expires_at_unix_secs: expires_at,
+                })
+                .await;
+            assert!(matches!(result, Err(DataLayerError::InvalidInput(_))));
+            assert!(repository
+                .find(WalletLookupKey::UserId(&format!(
+                    "invalid-recharge-user-{index}"
+                )))
+                .await
+                .expect("wallet lookup should succeed")
+                .is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn refund_creation_is_idempotent_and_rejects_corrupt_wallet_balance_in_memory() {
+        let repository = InMemoryWalletRepository::seed(vec![sample_wallet()]);
+        let first = repository
+            .create_wallet_refund_request(CreateWalletRefundRequestInput {
+                wallet_id: "wallet-1".to_string(),
+                user_id: "user-1".to_string(),
+                amount_usd: 4.0,
+                payment_order_id: None,
+                source_type: None,
+                source_id: None,
+                refund_mode: None,
+                reason: Some("first request".to_string()),
+                idempotency_key: Some("memory-refund-idempotency".to_string()),
+                refund_no: "memory-refund-1".to_string(),
+            })
+            .await
+            .expect("first refund should resolve");
+        let CreateWalletRefundRequestOutcome::Created(first) = first else {
+            panic!("expected first refund to be created");
+        };
+        let replay = repository
+            .create_wallet_refund_request(CreateWalletRefundRequestInput {
+                wallet_id: "wallet-1".to_string(),
+                user_id: "user-1".to_string(),
+                amount_usd: 9.0,
+                payment_order_id: None,
+                source_type: None,
+                source_id: None,
+                refund_mode: None,
+                reason: Some("replayed request".to_string()),
+                idempotency_key: Some("memory-refund-idempotency".to_string()),
+                refund_no: "memory-refund-2".to_string(),
+            })
+            .await
+            .expect("refund replay should resolve");
+        assert!(matches!(
+            replay,
+            CreateWalletRefundRequestOutcome::Duplicate(refund) if refund.id == first.id
+        ));
+        assert_eq!(
+            repository
+                .refunds_by_id
+                .read()
+                .expect("wallet repo lock")
+                .len(),
+            1
+        );
+
+        repository.with_wallets_mut(|wallets| {
+            wallets
+                .get_mut("wallet-1")
+                .expect("sample wallet should exist")
+                .balance = f64::NAN;
+        });
+        let corrupt = repository
+            .create_wallet_refund_request(CreateWalletRefundRequestInput {
+                wallet_id: "wallet-1".to_string(),
+                user_id: "user-1".to_string(),
+                amount_usd: 1.0,
+                payment_order_id: None,
+                source_type: None,
+                source_id: None,
+                refund_mode: None,
+                reason: None,
+                idempotency_key: Some("memory-refund-corrupt".to_string()),
+                refund_no: "memory-refund-corrupt".to_string(),
+            })
+            .await
+            .expect("corrupt wallet refund should resolve");
+        assert!(matches!(
+            corrupt,
+            CreateWalletRefundRequestOutcome::InvalidInput(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn seeded_refund_idempotency_replays_only_explicit_mappings_in_memory() {
+        let seeded = sample_refund("refund-seeded-idempotency", Some("user-1"), "approved");
+        let mapped_repository = InMemoryWalletRepository::seed_read_model(WalletReadSeed {
+            wallets: vec![sample_wallet()],
+            refunds: vec![seeded.clone()],
+            refund_idempotency: vec![(
+                "user-1".to_string(),
+                "seeded-refund-key".to_string(),
+                seeded.id.clone(),
+            )],
+            ..WalletReadSeed::default()
+        });
+        let replay = mapped_repository
+            .create_wallet_refund_request(CreateWalletRefundRequestInput {
+                wallet_id: "wallet-1".to_string(),
+                user_id: "user-1".to_string(),
+                amount_usd: 1.0,
+                payment_order_id: None,
+                source_type: None,
+                source_id: None,
+                refund_mode: None,
+                reason: Some("seeded replay".to_string()),
+                idempotency_key: Some("seeded-refund-key".to_string()),
+                refund_no: "seeded-refund-replay".to_string(),
+            })
+            .await
+            .expect("seeded refund replay should resolve");
+        assert!(matches!(
+            replay,
+            CreateWalletRefundRequestOutcome::Duplicate(refund) if refund.id == seeded.id
+        ));
+        assert_eq!(
+            mapped_repository
+                .refunds_by_id
+                .read()
+                .expect("wallet repo lock")
+                .len(),
+            1
+        );
+
+        let unmapped_repository = InMemoryWalletRepository::seed_read_model(WalletReadSeed {
+            wallets: vec![sample_wallet()],
+            refunds: vec![seeded],
+            ..WalletReadSeed::default()
+        });
+        let created = unmapped_repository
+            .create_wallet_refund_request(CreateWalletRefundRequestInput {
+                wallet_id: "wallet-1".to_string(),
+                user_id: "user-1".to_string(),
+                amount_usd: 1.0,
+                payment_order_id: None,
+                source_type: None,
+                source_id: None,
+                refund_mode: None,
+                reason: Some("unmapped seed".to_string()),
+                idempotency_key: Some("seeded-refund-key".to_string()),
+                refund_no: "seeded-refund-unmapped".to_string(),
+            })
+            .await
+            .expect("unmapped seeded refund request should resolve");
+        assert!(matches!(
+            created,
+            CreateWalletRefundRequestOutcome::Created(_)
+        ));
+        assert_eq!(
+            unmapped_repository
+                .refunds_by_id
+                .read()
+                .expect("wallet repo lock")
+                .len(),
+            2
+        );
+    }
+
+    #[tokio::test]
     async fn counts_pending_user_refunds_and_payment_orders() {
         let repository = InMemoryWalletRepository::seed_read_model(WalletReadSeed {
             wallets: vec![sample_wallet()],
@@ -2020,6 +4223,7 @@ mod tests {
                 sample_refund("refund-3", Some("user-1"), "completed"),
                 sample_refund("refund-4", Some("user-2"), "approved"),
             ],
+            refund_idempotency: Vec::new(),
             redeem_batches: Vec::new(),
             redeem_codes: Vec::new(),
         });
@@ -2038,5 +4242,74 @@ mod tests {
                 .expect("refund count should succeed"),
             2
         );
+    }
+
+    #[tokio::test]
+    async fn refund_reservation_rejects_invalid_active_amounts_in_memory() {
+        for (label, amount) in [
+            ("negative", -100.0),
+            ("zero", 0.0),
+            ("infinite", f64::INFINITY),
+            ("nan", f64::NAN),
+        ] {
+            let mut invalid = sample_refund(
+                &format!("refund-invalid-{label}"),
+                Some("user-1"),
+                "pending_approval",
+            );
+            invalid.amount_usd = amount;
+            let repository = InMemoryWalletRepository::seed_read_model(WalletReadSeed {
+                wallets: vec![sample_wallet()],
+                refunds: vec![invalid],
+                ..WalletReadSeed::default()
+            });
+            let outcome = repository
+                .create_wallet_refund_request(CreateWalletRefundRequestInput {
+                    wallet_id: "wallet-1".to_string(),
+                    user_id: "user-1".to_string(),
+                    amount_usd: 1.0,
+                    payment_order_id: None,
+                    source_type: None,
+                    source_id: None,
+                    refund_mode: None,
+                    reason: Some(format!("invalid reservation: {label}")),
+                    idempotency_key: Some(format!("reservation-invalid-{label}")),
+                    refund_no: format!("reservation-invalid-{label}"),
+                })
+                .await
+                .expect("reservation request should resolve");
+            assert!(
+                matches!(outcome, CreateWalletRefundRequestOutcome::InvalidInput(_)),
+                "active {label} reservation must fail closed: {outcome:?}"
+            );
+        }
+
+        // Completed refunds do not reserve balance and remain ignored.
+        let mut completed = sample_refund("refund-completed", Some("user-1"), "completed");
+        completed.amount_usd = 100.0;
+        let repository = InMemoryWalletRepository::seed_read_model(WalletReadSeed {
+            wallets: vec![sample_wallet()],
+            refunds: vec![completed],
+            ..WalletReadSeed::default()
+        });
+        let outcome = repository
+            .create_wallet_refund_request(CreateWalletRefundRequestInput {
+                wallet_id: "wallet-1".to_string(),
+                user_id: "user-1".to_string(),
+                amount_usd: 1.0,
+                payment_order_id: None,
+                source_type: None,
+                source_id: None,
+                refund_mode: None,
+                reason: Some("completed reservation is ignored".to_string()),
+                idempotency_key: Some("reservation-completed-ignored".to_string()),
+                refund_no: "reservation-completed-ignored".to_string(),
+            })
+            .await
+            .expect("completed reservation should not block request");
+        assert!(matches!(
+            outcome,
+            CreateWalletRefundRequestOutcome::Created(_)
+        ));
     }
 }

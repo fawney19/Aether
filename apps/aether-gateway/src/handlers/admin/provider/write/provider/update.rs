@@ -11,6 +11,9 @@ use crate::handlers::admin::provider::write::normalize::set_responses_websocket_
 use crate::handlers::admin::provider::write::normalize::validate_responses_websocket_config;
 use crate::handlers::admin::request::AdminAppState;
 use crate::handlers::admin::shared::normalize_json_object;
+use aether_admin::provider::redaction::{
+    admin_restore_secret_safe_json, admin_restore_secret_safe_proxy,
+};
 use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogProvider;
 use serde_json::json;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -202,7 +205,8 @@ pub(crate) async fn build_admin_update_provider_record(
     }
 
     if fields.contains("proxy") {
-        updated.proxy = normalize_json_object(payload.proxy, "proxy")?;
+        updated.proxy = normalize_json_object(payload.proxy, "proxy")?
+            .map(|value| admin_restore_secret_safe_proxy(existing.proxy.as_ref(), &value));
     }
 
     if fields.contains("stream_first_byte_timeout") {
@@ -233,6 +237,7 @@ pub(crate) async fn build_admin_update_provider_record(
         } else {
             let value = normalize_json_object(payload.config, "config")?
                 .ok_or_else(|| "config 必须是 JSON 对象".to_string())?;
+            let value = admin_restore_secret_safe_json(existing.config.as_ref(), &value);
             let serde_json::Value::Object(patch_map) = value else {
                 return Err("config 必须是 JSON 对象".to_string());
             };
@@ -306,6 +311,13 @@ pub(crate) async fn build_admin_update_provider_record(
             let value =
                 normalize_json_object(payload.claude_code_advanced, "claude_code_advanced")?
                     .ok_or_else(|| "claude_code_advanced 必须是 JSON 对象".to_string())?;
+            let value = admin_restore_secret_safe_json(
+                existing
+                    .config
+                    .as_ref()
+                    .and_then(|config| config.get("claude_code_advanced")),
+                &value,
+            );
             config_map.insert("claude_code_advanced".to_string(), value);
         }
     } else if target_provider_type != "claude_code" {
@@ -318,6 +330,13 @@ pub(crate) async fn build_admin_update_provider_record(
         } else {
             let value = normalize_pool_advanced_config(payload.pool_advanced)?
                 .ok_or_else(|| "pool_advanced 必须是 JSON 对象".to_string())?;
+            let value = admin_restore_secret_safe_json(
+                existing
+                    .config
+                    .as_ref()
+                    .and_then(|config| config.get("pool_advanced")),
+                &value,
+            );
             config_map.insert("pool_advanced".to_string(), value);
         }
     }
@@ -328,6 +347,13 @@ pub(crate) async fn build_admin_update_provider_record(
         } else {
             let value = normalize_json_object(payload.failover_rules, "failover_rules")?
                 .ok_or_else(|| "failover_rules 必须是 JSON 对象".to_string())?;
+            let value = admin_restore_secret_safe_json(
+                existing
+                    .config
+                    .as_ref()
+                    .and_then(|config| config.get("failover_rules")),
+                &value,
+            );
             config_map.insert("failover_rules".to_string(), value);
         }
     }

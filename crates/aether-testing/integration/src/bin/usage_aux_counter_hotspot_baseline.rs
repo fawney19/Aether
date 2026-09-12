@@ -17,6 +17,7 @@ use sqlx::{PgPool, Row};
 use tokio::sync::Mutex;
 
 const PROXY_NODE_ID: &str = "proxy-node-hotspot";
+const PROXY_NODE_TUNNEL_GENERATION: &str = "usage-aux-hotspot-generation";
 const MANAGEMENT_TOKEN_ID: &str = "management-token-hotspot";
 const API_KEY_ID: &str = "api-key-last-used-hotspot";
 const USER_ID: &str = "usage-aux-hotspot-user";
@@ -122,8 +123,13 @@ struct LockSample {
     oldest_lock_wait_ms: i64,
 }
 
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let _log_shutdown = aether_runtime::LogShutdownGuard::new();
+    run()
+}
+
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn run() -> Result<(), Box<dyn std::error::Error>> {
     init_test_runtime_for("usage-aux-counter-hotspot-baseline");
     let config = parse_args(std::env::args().skip(1).collect())?;
 
@@ -324,6 +330,7 @@ async fn enqueue_aux_counter_deltas(
 fn proxy_delta_for_index(index: usize) -> ProxyNodeCounterDelta {
     ProxyNodeCounterDelta {
         node_id: PROXY_NODE_ID.to_string(),
+        expected_tunnel_generation: Some(PROXY_NODE_TUNNEL_GENERATION.to_string()),
         total_requests_delta: 1,
         failed_requests_delta: if index.is_multiple_of(10) { 1 } else { 0 },
         dns_failures_delta: if index.is_multiple_of(25) { 1 } else { 0 },
@@ -457,10 +464,13 @@ ON CONFLICT (id) DO UPDATE SET
     sqlx::query(
         r#"
 INSERT INTO proxy_nodes (
-  id, name, ip, port, status, total_requests, failed_requests,
+  id, tunnel_generation, name, ip, port, status, total_requests, failed_requests,
   dns_failures, stream_errors
 )
-VALUES ($1, 'usage aux hotspot proxy', '127.0.0.1', 8080, 'online', 0, 0, 0, 0)
+VALUES (
+  $1, 'usage-aux-hotspot-generation', 'usage aux hotspot proxy',
+  '127.0.0.1', 8080, 'online', 0, 0, 0, 0
+)
 ON CONFLICT (id) DO UPDATE SET
   total_requests = 0,
   failed_requests = 0,

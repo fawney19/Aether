@@ -1,5 +1,5 @@
 <template>
-  <div class="max-h-[500px] overflow-y-auto">
+  <div :class="{ 'max-h-[500px] overflow-y-auto': !embedded }">
     <div class="flex flex-col gap-2 p-2">
       <!-- 渲染错误提示 -->
       <div
@@ -17,6 +17,17 @@
       >
         {{ emptyMessage }}
       </div>
+
+      <template v-else-if="embedded">
+        <BlockRenderer :blocks="renderResult.blocks" />
+        <div
+          v-if="renderResult.isStream"
+          class="flex items-center gap-1.5 px-3 py-2 text-xs text-muted-foreground bg-muted/30 rounded-lg w-fit"
+        >
+          <Zap class="w-4 h-4" />
+          <span>流式响应</span>
+        </div>
+      </template>
 
       <!-- 轮次视图 -->
       <template v-else>
@@ -110,12 +121,14 @@
 import { ref, computed, watch, nextTick } from 'vue'
 import { AlertCircle, Zap, Settings, ChevronRight, ChevronDown } from 'lucide-vue-next'
 import TurnCard from './TurnCard.vue'
+import BlockRenderer from './BlockRenderer.vue'
 import type { RenderResult } from '../../conversation'
 import { groupRenderBlocksIntoTurns } from '../../conversation/grouper'
 
 const props = defineProps<{
   renderResult: RenderResult
   emptyMessage: string
+  embedded?: boolean
 }>()
 
 // 状态

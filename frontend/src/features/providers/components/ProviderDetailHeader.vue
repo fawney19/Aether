@@ -24,6 +24,17 @@
             <Shuffle class="w-4 h-4" />
           </Button>
         </span>
+        <span :title="keepPriorityTitle">
+          <Button
+            variant="ghost"
+            size="icon"
+            :class="provider.keep_priority_on_conversion ? 'text-primary' : ''"
+            :disabled="!formatConversionAvailable"
+            @click="$emit('toggleKeepPriorityOnConversion')"
+          >
+            <Layers class="w-4 h-4" />
+          </Button>
+        </span>
         <span :title="legacyT(hasFailoverRules ? '已配置故障转移规则（点击编辑）' : '配置故障转移规则')">
           <Button
             variant="ghost"
@@ -109,16 +120,16 @@
     </div>
 
     <div
-      v-if="provider.website"
+      v-if="safeProviderWebsite"
       class="-mt-0.5"
     >
       <a
-        :href="provider.website"
+        :href="safeProviderWebsite"
         target="_blank"
         rel="noopener noreferrer"
         class="text-xs text-muted-foreground hover:text-primary hover:underline transition-colors truncate block"
-        :title="provider.website"
-      >{{ provider.website }}</a>
+        :title="safeProviderWebsite"
+      >{{ safeProviderWebsite }}</a>
     </div>
 
     <div class="flex items-center gap-1.5 flex-wrap mt-3">
@@ -163,13 +174,14 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
-import { Edit, GitBranch, Globe, Loader2, Plus, Power, Shuffle, X } from 'lucide-vue-next'
+import { Edit, GitBranch, Globe, Layers, Loader2, Plus, Power, Shuffle, X } from 'lucide-vue-next'
 import Button from '@/components/ui/button.vue'
 import Badge from '@/components/ui/badge.vue'
 import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui'
 import { useI18n } from '@/i18n'
 import { formatApiFormat } from '@/api/endpoints/types/api-format'
 import type { ProviderEndpoint, ProviderWithEndpointsSummary } from '@/api/endpoints'
+import { safeExternalWebUrl } from '@/utils/navigationSecurity'
 import ProxyNodeSelect from './ProxyNodeSelect.vue'
 
 const props = defineProps<{
@@ -185,6 +197,7 @@ const props = defineProps<{
 
 defineEmits<{
   (e: 'toggleFormatConversion'): void
+  (e: 'toggleKeepPriorityOnConversion'): void
   (e: 'openFailoverRules'): void
   (e: 'update:providerProxyPopoverOpen', value: boolean): void
   (e: 'setProviderProxy', value: string): void
@@ -197,10 +210,22 @@ defineEmits<{
 }>()
 
 const { legacyT } = useI18n()
+const safeProviderWebsite = computed(() => safeExternalWebUrl(props.provider.website))
 
 const formatConversionTitle = computed(() => {
   if (props.systemFormatConversionEnabled) return legacyT('系统级格式转换已启用')
   if (props.provider.enable_format_conversion) return legacyT('已启用格式转换（点击关闭）')
   return legacyT('启用格式转换')
+})
+
+const formatConversionAvailable = computed(() => (
+  props.provider.enable_format_conversion || props.systemFormatConversionEnabled
+))
+
+const keepPriorityTitle = computed(() => {
+  if (!formatConversionAvailable.value) return legacyT('请先启用格式转换')
+  return props.provider.keep_priority_on_conversion
+    ? legacyT('已启用格式转换保持优先级（点击关闭）')
+    : legacyT('启用格式转换保持优先级')
 })
 </script>

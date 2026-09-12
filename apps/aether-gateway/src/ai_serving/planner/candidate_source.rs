@@ -174,6 +174,9 @@ impl AiCandidatePreselectionPort for GatewayLocalCandidatePreselectionPort<'_> {
                 self.ranking_seed,
                 false,
                 self.request_operation,
+                super::candidate_ranking::scheduler_ordering_config_for_routing_policy(
+                    self.routing_policy,
+                ),
             )
             .await?;
 
@@ -427,11 +430,7 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
         );
 
         let ordering_config =
-            super::candidate_ranking::scheduler_ordering_config_for_routing_policy(
-                state,
-                routing_policy,
-            )
-            .await;
+            super::candidate_ranking::scheduler_ordering_config_for_routing_policy(routing_policy);
 
         Self {
             state,
@@ -1293,6 +1292,7 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
                     .then_some(self.client_session_affinity.as_ref())
                     .flatten(),
                 self.ranking_seed,
+                self.ordering_config,
             )
             .await?;
         let skipped_candidates = skipped_candidates
@@ -1488,6 +1488,7 @@ mod tests {
     use super::*;
     use crate::data::GatewayDataState;
     use crate::AppState;
+    use aether_crypto::DEVELOPMENT_ENCRYPTION_KEY;
     use aether_data::repository::candidate_selection::InMemoryMinimalCandidateSelectionReadRepository;
     use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
     use aether_data::DataLayerError;
@@ -1900,6 +1901,8 @@ mod tests {
             priority_mode: aether_routing_core::RoutingSetPriorityMode::Provider,
             scheduling_mode: aether_routing_core::RoutingSchedulingMode::FixedOrder,
             keep_priority_on_conversion: false,
+            sticky_key_attempts: aether_routing_core::DEFAULT_STICKY_KEY_ATTEMPTS,
+            execution_policy: Default::default(),
             ranking_overlay: Default::default(),
             mutation_plan: Default::default(),
             pool_policy_overrides: Default::default(),
@@ -1963,6 +1966,8 @@ mod tests {
             priority_mode: aether_routing_core::RoutingSetPriorityMode::Provider,
             scheduling_mode: aether_routing_core::RoutingSchedulingMode::FixedOrder,
             keep_priority_on_conversion: false,
+            sticky_key_attempts: aether_routing_core::DEFAULT_STICKY_KEY_ATTEMPTS,
+            execution_policy: Default::default(),
             ranking_overlay: Default::default(),
             mutation_plan: Default::default(),
             pool_policy_overrides: Default::default(),
@@ -2188,6 +2193,19 @@ mod tests {
             None,
         )
         .expect("endpoint transport should build");
+        let credential_state = AppState::new()
+            .expect("credential state should build")
+            .with_data_state_for_tests(
+                GatewayDataState::disabled()
+                    .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+            );
+        let encrypted_api_key = credential_state
+            .seal_provider_catalog_key_api_key(
+                row.provider_id.as_str(),
+                row.key_id.as_str(),
+                "plain-upstream-key",
+            )
+            .expect("api key should encrypt");
         let key = StoredProviderCatalogKey::new(
             row.key_id.clone(),
             row.provider_id.clone(),
@@ -2199,7 +2217,7 @@ mod tests {
         .expect("key should build")
         .with_transport_fields(
             Some(serde_json::json!([row.endpoint_api_format.clone()])),
-            "plain-upstream-key".to_string(),
+            encrypted_api_key,
             None,
             None,
             None,
@@ -2555,7 +2573,7 @@ mod tests {
                 provider_repository,
                 candidate_repository,
             )
-            .with_encryption_key_for_tests("development-key");
+            .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY);
         let app = AppState::new()
             .expect("gateway state should build")
             .with_data_state_for_tests(data_state);
@@ -2675,15 +2693,17 @@ mod tests {
                 provider_repository,
                 candidate_repository,
             )
-            .with_encryption_key_for_tests("development-key")
+            .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY)
+            // Legacy keys deliberately disagree with the routing policy: the
+            // resolved policy must be the only source of scheduler ordering.
             .with_system_config_values_for_tests([
                 (
                     "scheduling_mode".to_string(),
-                    serde_json::json!("fixed_order"),
+                    serde_json::json!("cache_affinity"),
                 ),
                 (
                     "keep_priority_on_conversion".to_string(),
-                    serde_json::json!(true),
+                    serde_json::json!(false),
                 ),
             ]);
         let app = AppState::new()
@@ -2700,7 +2720,9 @@ mod tests {
             resolved_model: "gpt-5.4-mini".to_string(),
             priority_mode: aether_routing_core::RoutingSetPriorityMode::Provider,
             scheduling_mode: aether_routing_core::RoutingSchedulingMode::FixedOrder,
-            keep_priority_on_conversion: false,
+            keep_priority_on_conversion: true,
+            sticky_key_attempts: aether_routing_core::DEFAULT_STICKY_KEY_ATTEMPTS,
+            execution_policy: Default::default(),
             ranking_overlay: Default::default(),
             mutation_plan: Default::default(),
             pool_policy_overrides: Default::default(),

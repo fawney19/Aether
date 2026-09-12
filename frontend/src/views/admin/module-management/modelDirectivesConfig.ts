@@ -133,9 +133,9 @@ export function modelDirectiveBuiltInMappingPreview(
       : undefined
   }
 
-  const isReasoningEffort = REASONING_EFFORTS.some(effort => effort === normalizedSuffix)
+  const reasoningEffort = REASONING_EFFORTS.find(effort => effort === normalizedSuffix)
   const isCodexUltra = normalizedSuffix === 'ultra'
-  if (!isReasoningEffort && !isCodexUltra) return undefined
+  if (!reasoningEffort && !isCodexUltra) return undefined
 
   switch (apiFormat) {
     case 'openai:chat':
@@ -145,22 +145,22 @@ export function modelDirectiveBuiltInMappingPreview(
     case 'openai:search':
       return { reasoning: { effort: normalizedSuffix } }
     case 'claude:messages': {
-      if (!isReasoningEffort) return undefined
+      if (!reasoningEffort) return undefined
       return {
-        output_config: { effort: claudeEffortValue(normalizedSuffix) },
+        output_config: { effort: claudeEffortValue(reasoningEffort) },
         thinking: {
           type: 'enabled',
-          budget_tokens: thinkingBudgetTokens(normalizedSuffix),
+          budget_tokens: thinkingBudgetTokens(reasoningEffort),
         },
       }
     }
     case 'gemini:generate_content': {
-      if (!isReasoningEffort) return undefined
+      if (!reasoningEffort) return undefined
       return {
         generationConfig: {
           thinkingConfig: {
             includeThoughts: true,
-            thinkingBudget: thinkingBudgetTokens(normalizedSuffix),
+            thinkingBudget: thinkingBudgetTokens(reasoningEffort),
           },
         },
       }

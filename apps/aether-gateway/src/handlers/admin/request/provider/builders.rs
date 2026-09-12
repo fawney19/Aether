@@ -141,7 +141,7 @@ impl<'a> AdminAppState<'a> {
     pub(crate) async fn build_admin_provider_summary_payload(
         &self,
         provider_id: &str,
-    ) -> Option<serde_json::Value> {
+    ) -> Result<Option<serde_json::Value>, GatewayError> {
         crate::handlers::admin::provider::summary::build_admin_provider_summary_payload(
             self,
             provider_id,

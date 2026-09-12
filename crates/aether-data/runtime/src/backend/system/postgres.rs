@@ -18,6 +18,15 @@ WHERE key = $1
 LIMIT 1
 "#;
 
+const COMPARE_AND_SET_SYSTEM_CONFIG_STRING_VALUE_SQL: &str = r#"
+UPDATE system_configs
+SET value = TO_JSON($3::text),
+    updated_at = NOW()
+WHERE key = $1
+  AND JSON_TYPEOF(value) = 'string'
+  AND value #>> '{}' = $2
+"#;
+
 const UPSERT_SYSTEM_CONFIG_VALUE_SQL: &str = r#"
 INSERT INTO system_configs (id, key, value, description, created_at, updated_at)
 VALUES ($1, $2, $3, $4, NOW(), NOW())
@@ -437,7 +446,11 @@ SET api_key_name = EXCLUDED.api_key_name,
         add_aggregate_import_count(&mut summary.stats_daily_api_key, existing.is_some());
     }
 
-    tx.commit().await.map_postgres_err()?;
+    if mode == AdminSystemUsageAggregateImportMode::ValidateError {
+        tx.rollback().await.map_postgres_err()?;
+    } else {
+        tx.commit().await.map_postgres_err()?;
+    }
     Ok(summary)
 }
 
@@ -1155,6 +1168,22 @@ impl PostgresBackend {
         row.map(|row| row.try_get("value"))
             .transpose()
             .map_postgres_err()
+    }
+
+    pub async fn compare_and_set_system_config_string_value(
+        &self,
+        key: &str,
+        expected: &str,
+        replacement: &str,
+    ) -> Result<bool, DataLayerError> {
+        let result = sqlx::query(COMPARE_AND_SET_SYSTEM_CONFIG_STRING_VALUE_SQL)
+            .bind(key)
+            .bind(expected)
+            .bind(replacement)
+            .execute(self.pool())
+            .await
+            .map_postgres_err()?;
+        Ok(result.rows_affected() > 0)
     }
 
     pub async fn upsert_system_config_value(

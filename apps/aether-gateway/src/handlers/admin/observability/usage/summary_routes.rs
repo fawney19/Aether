@@ -14,7 +14,9 @@ use aether_admin::observability::usage::{
 };
 use aether_data::repository::users::StoredUserSummary;
 use aether_data_contracts::repository::{
-    candidates::{RequestCandidateStatus, StoredRequestCandidate},
+    candidates::{
+        sanitize_request_candidate_extra_data, RequestCandidateStatus, StoredRequestCandidate,
+    },
     usage::{
         StoredRequestUsageAudit, UsageAuditKeywordSearchQuery, UsageAuditListQuery,
         UsageAuditSummaryQuery,
@@ -255,10 +257,8 @@ fn latest_admin_usage_image_progress(
     candidates
         .iter()
         .filter_map(|candidate| {
-            let progress = candidate
-                .extra_data
-                .as_ref()
-                .and_then(|value| value.get("image_progress"))?
+            let progress = sanitize_request_candidate_extra_data(candidate.extra_data.clone())?
+                .get("image_progress")?
                 .clone();
             Some((
                 candidate
@@ -347,9 +347,6 @@ pub(super) fn admin_usage_terminal_candidate_state_override(
     }
     if let Some(status_code) = candidate.status_code {
         payload["status_code"] = json!(status_code);
-    }
-    if let Some(error_message) = candidate.error_message.as_ref() {
-        payload["error_message"] = json!(error_message);
     }
     Some(payload)
 }
@@ -1038,7 +1035,8 @@ mod tests {
 
     use super::{
         admin_usage_terminal_candidate_state_override, build_admin_usage_keyword_search_query,
-        build_admin_usage_records_query, AdminUsageSearchContext,
+        build_admin_usage_records_query, latest_admin_usage_image_progress,
+        AdminUsageSearchContext,
     };
 
     fn sample_candidate(
@@ -1138,6 +1136,32 @@ mod tests {
         let payload = admin_usage_terminal_candidate_state_override(&[failed]);
 
         assert!(payload.is_none());
+    }
+
+    #[test]
+    fn admin_usage_image_progress_sanitizes_untrusted_candidate_data() {
+        let mut candidate =
+            sample_candidate(0, RequestCandidateStatus::Streaming, None, None, None);
+        candidate.extra_data = Some(json!({
+            "image_progress": {
+                "phase": "upstream_streaming",
+                "upstream_sse_frame_count": 3,
+                "message": "Bearer candidate-secret",
+                "request_body": {"token": "candidate-secret"}
+            }
+        }));
+
+        let progress = latest_admin_usage_image_progress(&[candidate])
+            .expect("safe progress summary should remain");
+
+        assert_eq!(
+            progress,
+            json!({
+                "phase": "upstream_streaming",
+                "upstream_sse_frame_count": 3
+            })
+        );
+        assert!(!progress.to_string().contains("candidate-secret"));
     }
 
     #[test]

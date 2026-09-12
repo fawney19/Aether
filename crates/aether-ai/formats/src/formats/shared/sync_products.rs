@@ -7,8 +7,10 @@ use aether_ai_formats::formats::conversion::response::{
     convert_openai_chat_response_to_openai_responses,
     convert_openai_responses_response_to_openai_chat,
 };
-use aether_ai_formats::formats::openai::responses::openai_responses_synthetic_reasoning_item_id;
 use aether_ai_formats::formats::openai::responses::response::ensure_modern_openai_responses_response_fields;
+use aether_ai_formats::formats::openai::responses::{
+    openai_responses_message_item_id, openai_responses_synthetic_reasoning_item_id,
+};
 use aether_ai_formats::formats::registry::{convert_response, FormatContext, FormatError};
 use aether_ai_formats::{
     canonical_response_unknown_block_count, canonical_to_claude_response,
@@ -21,7 +23,7 @@ use aether_ai_formats::{
 };
 use serde_json::{json, Map, Value};
 
-use super::AiSurfaceFinalizeError;
+use super::{decode_sync_report_body_base64, AiSurfaceFinalizeError};
 use crate::formats::claude::messages::stream::ClaudeProviderState;
 use crate::formats::gemini::generate_content::stream::GeminiProviderState;
 use crate::formats::openai::chat::stream::{OpenAIChatProviderState, OpenAIResponsesProviderState};
@@ -77,7 +79,7 @@ pub fn maybe_build_standard_cross_format_sync_product_from_normalized_payload(
 
     let (aggregated_stream_body, aggregated_stream_api_format) = match body_base64 {
         Some(body_base64) => {
-            let body_bytes = base64::engine::general_purpose::STANDARD.decode(body_base64)?;
+            let body_bytes = decode_sync_report_body_base64(body_base64)?;
             let provider_stream_event_api_format =
                 provider_stream_event_api_format_for_report_context(
                     report_context,
@@ -469,6 +471,20 @@ pub fn maybe_build_standard_sync_finalize_product_from_normalized_payload(
     };
     let body_base64 = body_base64.or(capture_stream_body_base64.as_deref());
 
+    // Cross-format sync attempts can contain raw bytes because the plan requested a stream even
+    // though the provider returned one complete JSON response. Do not feed that response into an
+    // SSE aggregator. Capture envelopes and same-format responses retain their existing precedence.
+    let non_stream_capture_body_json =
+        if capture_envelope_used || !sync_finalize_needs_conversion(report_context) {
+            None
+        } else {
+            body_base64.and_then(decode_non_stream_sync_capture_body)
+        };
+    let (body_json, body_base64) = match non_stream_capture_body_json.as_ref() {
+        Some(capture_body_json) => (body_json.or(Some(capture_body_json)), None),
+        None => (body_json, body_base64),
+    };
+
     if let Some(body_json) = maybe_build_standard_same_format_sync_body_from_normalized_payload(
         report_kind,
         status_code,
@@ -596,7 +612,7 @@ pub fn maybe_build_embedding_cross_format_sync_product_from_normalized_payload(
 
     let provider_body_json = match body_base64 {
         Some(body_base64) => {
-            let body_bytes = base64::engine::general_purpose::STANDARD.decode(body_base64)?;
+            let body_bytes = decode_sync_report_body_base64(body_base64)?;
             serde_json::from_slice::<Value>(&body_bytes).ok()
         }
         None => body_json.cloned(),
@@ -741,7 +757,7 @@ fn maybe_build_standard_same_format_stream_sync_body(
     let Some(body_base64) = body_base64 else {
         return Ok(None);
     };
-    let body_bytes = base64::engine::general_purpose::STANDARD.decode(body_base64)?;
+    let body_bytes = decode_sync_report_body_base64(body_base64)?;
     let provider_stream_event_api_format =
         provider_stream_event_api_format_for_report_context(report_context, &provider_api_format);
     let Some(mut body) = try_aggregate_standard_chat_stream_sync_response(
@@ -890,7 +906,7 @@ fn maybe_build_openai_responses_same_family_stream_sync_body(
     let Some(body_base64) = body_base64 else {
         return Ok(None);
     };
-    let body_bytes = base64::engine::general_purpose::STANDARD.decode(body_base64)?;
+    let body_bytes = decode_sync_report_body_base64(body_base64)?;
     // Same-family clients retain the authoritative terminal body verbatim, including future
     // output item fields, but unknown intermediate event types still fail closed.
     ensure_no_unknown_openai_responses_stream_events(&body_bytes, true)?;
@@ -982,7 +998,7 @@ fn maybe_build_openai_cross_format_provider_body_from_normalized_payload(
 ) -> Result<Option<OpenAiCrossFormatProviderBody>, AiSurfaceFinalizeError> {
     let aggregated_stream_body = match body_base64 {
         Some(body_base64) => {
-            let body_bytes = base64::engine::general_purpose::STANDARD.decode(body_base64)?;
+            let body_bytes = decode_sync_report_body_base64(body_base64)?;
             let normalized_provider_api_format =
                 normalize_openai_responses_family_api_format(provider_api_format);
             match normalized_provider_api_format.as_str() {
@@ -1007,6 +1023,48 @@ fn maybe_build_openai_cross_format_provider_body_from_normalized_payload(
             body_json,
             aggregated_from_stream,
         }))
+}
+
+fn sync_finalize_needs_conversion(report_context: Option<&Value>) -> bool {
+    report_context
+        .and_then(|report_context| report_context.get("needs_conversion"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn decode_non_stream_sync_capture_body(body_base64: &str) -> Option<Value> {
+    let body_bytes = base64::engine::general_purpose::STANDARD
+        .decode(body_base64)
+        .ok()?;
+    serde_json::from_slice::<Value>(&body_bytes)
+        .ok()
+        .filter(Value::is_object)
+        .filter(|body_json| !is_stream_event_object(body_json))
+}
+
+/// Unframed JSON events are accepted by the stream parsers and must not be mistaken for complete
+/// provider response bodies merely because the entire capture parses as one JSON object.
+fn is_stream_event_object(value: &Value) -> bool {
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    if object
+        .get("object")
+        .and_then(Value::as_str)
+        .is_some_and(|object| object.ends_with(".chunk"))
+    {
+        return true;
+    }
+
+    object
+        .get("type")
+        .and_then(Value::as_str)
+        .is_some_and(|event_type| {
+            event_type.contains('.')
+                || ["response", "message", "item", "delta", "content_block"]
+                    .iter()
+                    .any(|nested| object.contains_key(*nested))
+        })
 }
 
 fn is_error_like_sync_body(value: &Value) -> bool {
@@ -2696,6 +2754,7 @@ fn aggregate_openai_responses_stream_sync_response_from_validated_terminal(
             if let Some(state) = message_states.remove(&output_index) {
                 output.push(materialize_openai_responses_message_item(
                     &response_id,
+                    output_index,
                     state,
                 ));
             }
@@ -3152,13 +3211,31 @@ fn resolve_openai_responses_tool_output_index(
 
 fn materialize_openai_responses_message_item(
     response_id: &str,
+    output_index: usize,
     state: OpenAIResponsesSyncMessageState,
 ) -> Value {
     let mut item = state.item;
     item.entry("type".to_string())
         .or_insert_with(|| Value::String("message".to_string()));
-    item.entry("id".to_string())
-        .or_insert_with(|| Value::String(format!("{response_id}_msg")));
+    let message_id_is_valid = item
+        .get("id")
+        .and_then(Value::as_str)
+        .is_some_and(|id| id.starts_with("msg"));
+    if !message_id_is_valid {
+        let source_id = item
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.trim().is_empty())
+            .unwrap_or(response_id)
+            .to_string();
+        item.insert(
+            "id".to_string(),
+            Value::String(openai_responses_message_item_id(
+                source_id.as_str(),
+                output_index,
+            )),
+        );
+    }
     item.entry("role".to_string())
         .or_insert_with(|| Value::String("assistant".to_string()));
     item.entry("status".to_string())
@@ -3958,7 +4035,8 @@ mod tests {
         aggregate_claude_stream_sync_response, aggregate_gemini_stream_sync_response,
         aggregate_openai_chat_stream_sync_response,
         aggregate_openai_responses_stream_sync_response, convert_standard_chat_response,
-        convert_standard_cli_response, materialize_openai_responses_reasoning_item,
+        convert_standard_cli_response, decode_non_stream_sync_capture_body,
+        materialize_openai_responses_reasoning_item,
         maybe_build_openai_chat_cross_format_sync_product_from_normalized_payload,
         maybe_build_openai_responses_cross_format_sync_product_from_normalized_payload,
         maybe_build_openai_responses_same_family_sync_body_from_normalized_payload,
@@ -4237,6 +4315,57 @@ mod tests {
     }
 
     #[test]
+    fn aggregates_antigravity_signature_only_reasoning_exhaustion() {
+        let body = concat!(
+            "data: {\"response\":{\"responseId\":\"resp_signature_only_123\",\"modelVersion\":\"gemini-3.7-flash-tiered\",",
+            "\"candidates\":[{\"index\":0,\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"\",\"thoughtSignature\":\"opaque-thought-signature\"}]},\"finishReason\":\"MAX_TOKENS\"}],",
+            "\"usageMetadata\":{\"promptTokenCount\":22,\"thoughtsTokenCount\":29,\"totalTokenCount\":51}},",
+            "\"traceId\":\"trace-signature-only\"}\n\n",
+        );
+
+        let aggregated = aggregate_gemini_stream_sync_response(body.as_bytes())
+            .expect("signature-only reasoning terminal should aggregate");
+
+        assert_eq!(
+            aggregated["candidates"][0]["content"]["parts"][0]["thought"],
+            true
+        );
+        assert_eq!(
+            aggregated["candidates"][0]["content"]["parts"][0]["thoughtSignature"],
+            "opaque-thought-signature"
+        );
+        assert_eq!(aggregated["candidates"][0]["finishReason"], "MAX_TOKENS");
+        assert_eq!(aggregated["usageMetadata"]["thoughtsTokenCount"], 29);
+        assert!(
+            crate::formats::gemini::generate_content::response::from_raw(&aggregated).is_some()
+        );
+
+        let report_context = json!({
+            "provider_api_format": "gemini:generate_content",
+            "client_api_format": "openai:chat",
+            "mapped_model": "gemini-3.7-flash-tiered",
+        });
+        let product = maybe_build_standard_cross_format_sync_product_from_normalized_payload(
+            "openai_chat_sync_finalize",
+            200,
+            Some(&report_context),
+            None,
+            Some(&base64::engine::general_purpose::STANDARD.encode(body)),
+        )
+        .expect("signature-only reasoning terminal should convert")
+        .expect("cross-format product should exist");
+
+        assert_eq!(
+            product.client_body_json["choices"][0]["finish_reason"],
+            "length"
+        );
+        assert_eq!(
+            product.client_body_json["usage"]["completion_tokens_details"]["reasoning_tokens"],
+            29
+        );
+    }
+
+    #[test]
     fn gemini_stream_aggregation_rejects_unknown_parts() {
         let body = "data: {\"responseId\":\"resp_gem_unknown_123\",\"modelVersion\":\"gemini-2.5-pro\",\"candidates\":[{\"index\":0,\"content\":{\"role\":\"model\",\"parts\":[{\"futurePart\":{\"kept\":true}}]}}]}\n\n";
 
@@ -4453,6 +4582,132 @@ mod tests {
             product.expect("product should exist").provider_body_json,
             provider_body_json
         );
+    }
+
+    #[test]
+    fn unframed_stream_events_are_not_mistaken_for_provider_bodies() {
+        for event in [
+            json!({"type": "response.completed", "response": {"status": "completed"}}),
+            json!({"type": "response.output_text.delta", "delta": "hi"}),
+            json!({"type": "message_start", "message": {"id": "msg_1"}}),
+            json!({"type": "content_block_delta", "index": 0, "delta": {"text": "hi"}}),
+            json!({"object": "chat.completion.chunk", "choices": []}),
+        ] {
+            let body_base64 = base64::engine::general_purpose::STANDARD
+                .encode(serde_json::to_vec(&event).expect("serialize event"));
+            assert!(
+                decode_non_stream_sync_capture_body(&body_base64).is_none(),
+                "stream events belong to the aggregators: {event}"
+            );
+        }
+    }
+
+    #[test]
+    fn complete_provider_bodies_are_recovered_from_cross_format_captures() {
+        for body in [
+            json!({"id": "resp_1", "object": "response", "status": "completed", "output": []}),
+            json!({"id": "chatcmpl_1", "object": "chat.completion", "choices": []}),
+            json!({"id": "msg_1", "type": "message", "role": "assistant", "content": []}),
+            json!({"candidates": [], "modelVersion": "probe-model"}),
+        ] {
+            let body_base64 = base64::engine::general_purpose::STANDARD
+                .encode(serde_json::to_vec(&body).expect("serialize provider body"));
+            assert_eq!(
+                decode_non_stream_sync_capture_body(&body_base64),
+                Some(body.clone()),
+                "a complete provider body is not a stream: {body}"
+            );
+        }
+    }
+
+    #[test]
+    fn recovers_cross_format_capture_that_is_a_complete_json_body() {
+        let report_context = json!({
+            "provider_api_format": "openai:responses",
+            "client_api_format": "claude:messages",
+            "needs_conversion": true,
+            "upstream_is_stream": true,
+        });
+        let provider_body_json = json!({
+            "id": "resp_1",
+            "object": "response",
+            "status": "completed",
+            "error": null,
+            "model": "probe-model",
+            "output": [{
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{"type": "output_text", "text": "hello"}]
+            }],
+            "usage": {"input_tokens": 5, "output_tokens": 7, "total_tokens": 12}
+        });
+        let body_base64 = base64::engine::general_purpose::STANDARD
+            .encode(serde_json::to_vec(&provider_body_json).expect("serialize provider body"));
+
+        let product = maybe_build_standard_sync_finalize_product_from_normalized_payload(
+            "claude_chat_sync_finalize",
+            200,
+            Some(&report_context),
+            None,
+            Some(&body_base64),
+        )
+        .expect("a complete provider body must not fail the stream aggregator")
+        .expect("product should exist");
+
+        let StandardSyncFinalizeNormalizedProduct::CrossFormat(product) = product else {
+            panic!("cross-format attempt should produce a cross-format product");
+        };
+        assert_eq!(product.provider_body_json, provider_body_json);
+        assert_eq!(product.client_body_json["type"], "message");
+        assert_eq!(product.client_body_json["content"][0]["text"], "hello");
+    }
+
+    #[test]
+    fn keeps_unframed_stream_event_on_the_aggregation_path() {
+        let report_context = json!({
+            "provider_api_format": "openai:responses",
+            "client_api_format": "claude:messages",
+            "needs_conversion": true,
+            "upstream_is_stream": true,
+        });
+        let provider_body_json = json!({
+            "id": "resp_1",
+            "object": "response",
+            "status": "completed",
+            "model": "probe-model",
+            "output": [{
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{"type": "output_text", "text": "hello"}]
+            }],
+            "usage": {"input_tokens": 5, "output_tokens": 7, "total_tokens": 12}
+        });
+        let event = json!({
+            "type": "response.completed",
+            "response": provider_body_json.clone(),
+        });
+        let body_base64 = base64::engine::general_purpose::STANDARD
+            .encode(serde_json::to_vec(&event).expect("serialize stream event"));
+
+        let product = maybe_build_standard_sync_finalize_product_from_normalized_payload(
+            "claude_chat_sync_finalize",
+            200,
+            Some(&report_context),
+            None,
+            Some(&body_base64),
+        )
+        .expect("unframed stream event should aggregate")
+        .expect("product should exist");
+
+        let StandardSyncFinalizeNormalizedProduct::CrossFormat(product) = product else {
+            panic!("cross-format attempt should produce a cross-format product");
+        };
+        assert_eq!(product.provider_body_json["id"], provider_body_json["id"]);
+        assert_eq!(product.provider_body_json["object"], "response");
+        assert!(product.provider_body_json.get("response").is_none());
+        assert_eq!(product.client_body_json["type"], "message");
     }
 
     #[test]

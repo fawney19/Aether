@@ -9,4 +9,4 @@ Do not edit files in this directory by hand. Update `../logical/*.toml`, then ru
 bash crates/aether-data/runtime/schema/compose_schema.sh generate
 ```
 
-Runtime migrations are not loaded from this directory. The executable SQL lives under `crates/aether-data/adapters/{postgres,mysql,sqlite}/migrations`, and the Postgres bootstrap snapshot is generated at build time from `crates/aether-data/runtime/schema/bootstrap/postgres` into the crate build output until a generated fragment is deliberately promoted into the driver-specific schema manifests.
+Runtime migrations are not loaded from this directory. The executable SQL lives under `crates/aether-data/adapters/postgres/migrations`, and the Postgres bootstrap snapshot is generated at build time from `crates/aether-data/runtime/schema/bootstrap/postgres` into the crate build output until a generated fragment is deliberately promoted into the driver-specific schema manifests.

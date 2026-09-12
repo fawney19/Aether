@@ -44,7 +44,9 @@ pub fn build_http_client_with_headers(
     config: &HttpClientConfig,
     default_headers: HeaderMap,
 ) -> Result<reqwest::Client, reqwest::Error> {
-    let mut builder = apply_http_client_config(reqwest::Client::builder(), config);
+    // Shared clients must not silently inherit HTTP(S)_PROXY. Callers that
+    // need a proxy install the explicitly configured URL below.
+    let mut builder = apply_http_client_config(reqwest::Client::builder().no_proxy(), config);
     if let Some(proxy_url) = config
         .proxy_url
         .as_deref()

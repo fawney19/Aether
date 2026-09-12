@@ -802,6 +802,7 @@
 </template>
 
 <script setup lang="ts">
+import { getI18nLocale } from '@/i18n'
 import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useToast } from '@/composables/useToast'
 import { useConfirm } from '@/composables/useConfirm'
@@ -1018,6 +1019,7 @@ function buildAdminWalletFromApiKey(apiKey: AdminApiKey): AdminWallet | null {
     owner_type: 'api_key',
     owner_name: apiKey.name || apiKey.key_display || null,
     created_at: apiKey.created_at || apiKey.wallet.updated_at || '',
+    updated_at: apiKey.wallet.updated_at || apiKey.created_at || '',
   }
 }
 
@@ -1349,7 +1351,7 @@ function isExpiringSoon(apiKey: AdminApiKey): boolean {
 }
 
 function formatDate(dateString: string): string {
-  return new Date(dateString).toLocaleString('zh-CN', {
+  return new Date(dateString).toLocaleString(getI18nLocale(), {
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',

@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -7,80 +7,11 @@ use tokio::sync::RwLock;
 
 /// Check if an IP address belongs to a private/reserved network.
 pub fn is_private_ip(ip: &IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => is_private_ipv4(v4),
-        IpAddr::V6(v6) => is_private_ipv6(v6),
-    }
-}
-
-fn is_private_ipv4(ip: &Ipv4Addr) -> bool {
-    let octets = ip.octets();
-    // 10.0.0.0/8
-    if octets[0] == 10 {
-        return true;
-    }
-    // 172.16.0.0/12
-    if octets[0] == 172 && (16..=31).contains(&octets[1]) {
-        return true;
-    }
-    // 192.168.0.0/16
-    if octets[0] == 192 && octets[1] == 168 {
-        return true;
-    }
-    // 127.0.0.0/8
-    if octets[0] == 127 {
-        return true;
-    }
-    // 169.254.0.0/16 (link-local)
-    if octets[0] == 169 && octets[1] == 254 {
-        return true;
-    }
-    // 0.0.0.0/8
-    if octets[0] == 0 {
-        return true;
-    }
-    // 100.64.0.0/10 (CGNAT / shared address space)
-    if octets[0] == 100 && (64..=127).contains(&octets[1]) {
-        return true;
-    }
-    // 192.0.0.0/24 (IETF protocol assignments)
-    if octets[0] == 192 && octets[1] == 0 && octets[2] == 0 {
-        return true;
-    }
-    // 198.18.0.0/15 (benchmark testing)
-    if octets[0] == 198 && (18..=19).contains(&octets[1]) {
-        return true;
-    }
-    // 240.0.0.0/4 (reserved for future use)
-    if octets[0] >= 240 {
-        return true;
-    }
-    false
-}
-
-fn is_private_ipv6(ip: &Ipv6Addr) -> bool {
-    // ::1 loopback
-    if ip.is_loopback() {
-        return true;
-    }
-    // :: unspecified
-    if ip.is_unspecified() {
-        return true;
-    }
-    let segments = ip.segments();
-    // fc00::/7 (ULA) - first byte is 0xfc or 0xfd
-    if segments[0] & 0xfe00 == 0xfc00 {
-        return true;
-    }
-    // fe80::/10 (link-local)
-    if segments[0] & 0xffc0 == 0xfe80 {
-        return true;
-    }
-    // IPv4-mapped IPv6 (::ffff:x.x.x.x) - check the embedded IPv4
-    if let Some(v4) = ip.to_ipv4_mapped() {
-        return is_private_ipv4(&v4);
-    }
-    false
+    // Keep every egress path on the same conservative classification as the
+    // gateway. This includes documentation, benchmarking, transition, and
+    // other reserved ranges that the standard `IpAddr::is_private` helpers do
+    // not cover.
+    aether_http::is_private_or_reserved_ip(*ip)
 }
 
 #[derive(Debug)]
@@ -108,6 +39,13 @@ impl std::fmt::Display for FilterError {
     }
 }
 
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct DnsCacheKey {
+    host: String,
+    port: u16,
+    allow_private: bool,
+}
+
 struct DnsCacheEntry {
     addrs: Arc<Vec<SocketAddr>>,
     expires_at: Instant,
@@ -115,12 +53,12 @@ struct DnsCacheEntry {
 }
 
 /// Lightweight DNS cache with TTL + capacity bounds.
-/// Stores all public resolved addresses per host (used by SafeDnsResolver
-/// to ensure reqwest connects to the same validated addresses).
+/// Stores validated addresses per host and port so ACL checks and connection
+/// setup can reuse the same resolution result.
 pub struct DnsCache {
     ttl: Duration,
     capacity: usize,
-    entries: RwLock<HashMap<String, DnsCacheEntry>>,
+    entries: RwLock<HashMap<DnsCacheKey, DnsCacheEntry>>,
 }
 
 impl DnsCache {
@@ -132,31 +70,30 @@ impl DnsCache {
         }
     }
 
-    /// Look up cached public addresses for a host (any port).
+    /// Look up cached public addresses for a host + port.
     ///
-    /// Used by `SafeDnsResolver` which only knows the hostname — returns the
-    /// first unexpired entry whose key starts with `host:`.
-    pub async fn get_by_host(&self, host: &str) -> Option<Arc<Vec<SocketAddr>>> {
-        if self.capacity == 0 || self.ttl.is_zero() {
-            return None;
-        }
-        let prefix = format!("{}:", host.to_ascii_lowercase());
-        let now = Instant::now();
-        let entries = self.entries.read().await;
-        for (key, entry) in entries.iter() {
-            if key.starts_with(&prefix) && entry.expires_at > now {
-                return Some(Arc::clone(&entry.addrs));
-            }
-        }
-        None
+    /// This compatibility wrapper uses the restrictive (public-only) policy.
+    /// Callers that explicitly allow private targets must use
+    /// [`Self::get_for_policy`] so entries cannot cross the policy boundary.
+    #[allow(dead_code)]
+    pub async fn get(&self, host: &str, port: u16) -> Option<Arc<Vec<SocketAddr>>> {
+        self.get_for_policy(host, port, false).await
     }
 
-    /// Look up cached public addresses for a host + port.
-    pub async fn get(&self, host: &str, port: u16) -> Option<Arc<Vec<SocketAddr>>> {
+    /// Look up a cached resolution under the exact target policy used to
+    /// validate it.  Private-target and public-only resolutions are kept in
+    /// separate entries; otherwise a cache populated while private targets
+    /// are enabled could bypass filtering after a policy change.
+    pub async fn get_for_policy(
+        &self,
+        host: &str,
+        port: u16,
+        allow_private: bool,
+    ) -> Option<Arc<Vec<SocketAddr>>> {
         if self.capacity == 0 || self.ttl.is_zero() {
             return None;
         }
-        let key = Self::key(host, port);
+        let key = Self::key(host, port, allow_private);
         let now = Instant::now();
 
         // Fast path: read lock for cache hit
@@ -175,12 +112,26 @@ impl DnsCache {
         None
     }
 
-    /// Insert resolved public addresses into cache.
+    /// Insert resolved public addresses into the restrictive (public-only)
+    /// cache.  This compatibility wrapper preserves the original API;
+    /// policy-aware callers should use [`Self::insert_for_policy`].
+    #[allow(dead_code)]
     pub async fn insert(&self, host: &str, port: u16, addrs: Arc<Vec<SocketAddr>>) {
+        self.insert_for_policy(host, port, false, addrs).await;
+    }
+
+    /// Insert addresses under the exact target policy that produced them.
+    pub async fn insert_for_policy(
+        &self,
+        host: &str,
+        port: u16,
+        allow_private: bool,
+        addrs: Arc<Vec<SocketAddr>>,
+    ) {
         if self.capacity == 0 || self.ttl.is_zero() || addrs.is_empty() {
             return;
         }
-        let key = Self::key(host, port);
+        let key = Self::key(host, port, allow_private);
         let now = Instant::now();
         let mut entries = self.entries.write().await;
         entries.retain(|_, entry| entry.expires_at > now);
@@ -205,8 +156,12 @@ impl DnsCache {
         );
     }
 
-    fn key(host: &str, port: u16) -> String {
-        format!("{}:{}", host.to_ascii_lowercase(), port)
+    fn key(host: &str, port: u16, allow_private: bool) -> DnsCacheKey {
+        DnsCacheKey {
+            host: host.to_ascii_lowercase(),
+            port,
+            allow_private,
+        }
     }
 }
 
@@ -222,16 +177,16 @@ pub async fn resolve_public_addrs(
     dns_cache: &DnsCache,
 ) -> Result<Vec<SocketAddr>, FilterError> {
     // Cache hit
-    if let Some(addrs) = dns_cache.get(host, port).await {
+    if let Some(addrs) = dns_cache.get_for_policy(host, port, allow_private).await {
         return Ok((*addrs).clone());
     }
 
-    // Async DNS resolution
-    let addr_str = format!("{}:{}", host, port);
-    let resolved: Vec<SocketAddr> = tokio::net::lookup_host(&addr_str)
-        .await
-        .map_err(|_| FilterError::DnsResolutionFailed(host.to_string()))?
-        .collect();
+    // Async DNS resolution.  Keep resolver wait time and answer count
+    // bounded before applying the private-address policy below.
+    let resolved: Vec<SocketAddr> =
+        aether_http::lookup_host_with_limits(host, port, aether_http::DEFAULT_DNS_LOOKUP_TIMEOUT)
+            .await
+            .map_err(|_| FilterError::DnsResolutionFailed(host.to_string()))?;
 
     if resolved.is_empty() {
         return Err(FilterError::DnsResolutionFailed(host.to_string()));
@@ -253,15 +208,17 @@ pub async fn resolve_public_addrs(
 
     // Cache the validated public addresses
     let arc_addrs = Arc::new(public);
-    dns_cache.insert(host, port, Arc::clone(&arc_addrs)).await;
+    dns_cache
+        .insert_for_policy(host, port, allow_private, Arc::clone(&arc_addrs))
+        .await;
     Ok((*arc_addrs).clone())
 }
 
 /// Validate that the target host:port is allowed.
 ///
 /// Performs port whitelist check, private IP filtering, and DNS resolution
-/// with caching. The resolved addresses are stored in the shared DnsCache
-/// so that the SafeDnsResolver can reuse them, eliminating the TOCTTOU gap.
+/// with caching. The caller must use the returned addresses for the actual
+/// connection rather than resolving the hostname again.
 pub async fn validate_target(
     host: &str,
     port: u16,
@@ -269,25 +226,40 @@ pub async fn validate_target(
     allow_private: bool,
     dns_cache: &DnsCache,
 ) -> Result<Vec<SocketAddr>, FilterError> {
-    // Port whitelist check
+    if let Some(address) = validate_target_literal(host, port, allowed_ports, allow_private)? {
+        return Ok(vec![address]);
+    }
+
+    resolve_public_addrs(host, port, allow_private, dns_cache).await
+}
+
+pub(crate) fn validate_target_literal(
+    host: &str,
+    port: u16,
+    allowed_ports: &HashSet<u16>,
+    allow_private: bool,
+) -> Result<Option<SocketAddr>, FilterError> {
     if !allowed_ports.contains(&port) {
         return Err(FilterError::PortNotAllowed(port));
     }
 
     // Try parsing as IP directly (no DNS needed)
-    if let Ok(ip) = host.parse::<IpAddr>() {
+    if let Some(ip) = aether_http::parse_ip_literal_host(host) {
         if !allow_private && is_private_ip(&ip) {
             return Err(FilterError::PrivateIp(ip));
         }
-        return Ok(vec![SocketAddr::new(ip, port)]);
+        return Ok(Some(SocketAddr::new(ip, port)));
     }
-
-    // Resolve and validate DNS (populates cache for SafeDnsResolver)
-    resolve_public_addrs(host, port, allow_private, dns_cache).await
+    if !allow_private && host.trim_end_matches('.').eq_ignore_ascii_case("localhost") {
+        return Err(FilterError::NoPublicAddrs(host.to_string()));
+    }
+    Ok(None)
 }
 
 #[cfg(test)]
 mod tests {
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
     use super::*;
 
     fn ports() -> HashSet<u16> {
@@ -318,9 +290,11 @@ mod tests {
         assert!(is_private_ip(&IpAddr::V4(Ipv4Addr::new(198, 18, 0, 1))));
         // Reserved
         assert!(is_private_ip(&IpAddr::V4(Ipv4Addr::new(240, 0, 0, 1))));
+        // Multicast
+        assert!(is_private_ip(&IpAddr::V4(Ipv4Addr::new(224, 0, 0, 1))));
         // Public
         assert!(!is_private_ip(&IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))));
-        assert!(!is_private_ip(&IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1))));
+        assert!(is_private_ip(&IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1))));
     }
 
     #[test]
@@ -335,6 +309,47 @@ mod tests {
         assert!(is_private_ip(&IpAddr::V6(Ipv6Addr::new(
             0xfe80, 0, 0, 0, 0, 0, 0, 1
         ))));
+        // fec0::/10 (deprecated site-local)
+        assert!(is_private_ip(&"fec0::1".parse().unwrap()));
+        assert!(is_private_ip(
+            &"feff:ffff:ffff:ffff:ffff:ffff:ffff:ffff".parse().unwrap()
+        ));
+        // ff00::/8 (multicast)
+        assert!(is_private_ip(&IpAddr::V6(Ipv6Addr::new(
+            0xff02, 0, 0, 0, 0, 0, 0, 1
+        ))));
+        // NAT64 well-known and local-use prefixes.
+        assert!(is_private_ip(&"64:ff9b::10.0.0.1".parse().unwrap()));
+        assert!(is_private_ip(&"64:ff9b::ffff:ffff".parse().unwrap()));
+        assert!(is_private_ip(&"64:ff9b:1::10.0.0.1".parse().unwrap()));
+        assert!(is_private_ip(
+            &"64:ff9b:1:ffff:ffff:ffff:ffff:ffff".parse().unwrap()
+        ));
+        assert!(!is_private_ip(&"64:ff9a:ffff::1".parse().unwrap()));
+        assert!(!is_private_ip(&"64:ff9b:0:1::1".parse().unwrap()));
+        assert!(!is_private_ip(&"64:ff9b:2::1".parse().unwrap()));
+
+        // IPv6 transition formats with embedded IPv4 addresses.
+        assert!(is_private_ip(&"2002:0a00:0001::1".parse().unwrap()));
+        assert!(is_private_ip(
+            &"2002:ffff:ffff:ffff:ffff:ffff:ffff:ffff".parse().unwrap()
+        ));
+        assert!(!is_private_ip(&"2003::1".parse().unwrap()));
+        assert!(is_private_ip(
+            &"2001:0000:4136:e378:8000:63bf:3fff:fdd2".parse().unwrap()
+        ));
+        assert!(!is_private_ip(&"2001:1::1".parse().unwrap()));
+        assert!(is_private_ip(&"::192.0.2.1".parse().unwrap()));
+        assert!(is_private_ip(&"::ffff:0:192.0.2.1".parse().unwrap()));
+        assert!(is_private_ip(&"2001:db8::5efe:10.0.0.1".parse().unwrap()));
+        assert!(is_private_ip(
+            &"2001:db8::200:5efe:192.0.2.1".parse().unwrap()
+        ));
+
+        // IPv4-mapped public addresses remain allowed, while private mapped
+        // addresses continue through the IPv4 classification.
+        assert!(!is_private_ip(&"::ffff:8.8.8.8".parse().unwrap()));
+        assert!(is_private_ip(&"::ffff:127.0.0.1".parse().unwrap()));
     }
 
     #[tokio::test]
@@ -349,6 +364,24 @@ mod tests {
         let cache = cache();
         let result = validate_target("127.0.0.1", 80, &ports(), false, &cache).await;
         assert!(matches!(result, Err(FilterError::PrivateIp(_))));
+    }
+
+    #[tokio::test]
+    async fn test_ipv6_site_local_blocked_unless_private_targets_allowed() {
+        let cache = cache();
+        let result = validate_target("fec0::1", 443, &ports(), false, &cache).await;
+        assert!(matches!(
+            result,
+            Err(FilterError::PrivateIp(IpAddr::V6(ip))) if ip == "fec0::1".parse::<Ipv6Addr>().unwrap()
+        ));
+
+        let result = validate_target("fec0::1", 443, &ports(), true, &cache)
+            .await
+            .unwrap();
+        assert_eq!(
+            result,
+            vec![SocketAddr::new(IpAddr::V6("fec0::1".parse().unwrap()), 443)]
+        );
     }
 
     #[tokio::test]
@@ -411,5 +444,41 @@ mod tests {
             .await;
         let cached = cache.get("example.com", 443).await.unwrap();
         assert_eq!(*cached, addrs);
+    }
+
+    #[tokio::test]
+    async fn test_cache_does_not_cross_private_target_policy() {
+        let cache = cache();
+        let private = Arc::new(vec![SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 80)]);
+        let public = Arc::new(vec![SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)),
+            80,
+        )]);
+
+        cache
+            .insert_for_policy("example.com", 80, true, Arc::clone(&private))
+            .await;
+        assert!(cache
+            .get_for_policy("example.com", 80, false)
+            .await
+            .is_none());
+        assert_eq!(
+            *cache
+                .get_for_policy("example.com", 80, true)
+                .await
+                .expect("private-policy entry"),
+            *private
+        );
+
+        cache
+            .insert_for_policy("example.com", 80, false, Arc::clone(&public))
+            .await;
+        assert_eq!(
+            *cache
+                .get_for_policy("EXAMPLE.COM", 80, false)
+                .await
+                .expect("public-policy entry"),
+            *public
+        );
     }
 }

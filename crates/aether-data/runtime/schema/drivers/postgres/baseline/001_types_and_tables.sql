@@ -706,7 +706,7 @@ CREATE TABLE IF NOT EXISTS public.proxy_nodes (
     is_manual boolean DEFAULT false NOT NULL,
     proxy_url character varying(500),
     proxy_username character varying(255),
-    proxy_password character varying(500),
+    proxy_password text,
     created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
     updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
     remote_config json,

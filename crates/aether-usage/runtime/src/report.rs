@@ -1,12 +1,23 @@
 use std::collections::BTreeMap;
 
 use aether_contracts::{ExecutionStreamTerminalSummary, ExecutionTelemetry};
-use aether_data_contracts::repository::usage::UsageBodyCaptureState;
+use aether_data_contracts::repository::{
+    gemini_file_mappings::{
+        GEMINI_FILE_MAPPING_MAX_DISPLAY_NAME_CHARS, GEMINI_FILE_MAPPING_MAX_FILE_NAME_CHARS,
+        GEMINI_FILE_MAPPING_MAX_MIME_TYPE_CHARS,
+    },
+    usage::UsageBodyCaptureState,
+};
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub const GEMINI_FILE_MAPPING_TTL_SECONDS: u64 = 60 * 60 * 48;
+/// Maximum decoded size accepted for a body carried in an internal usage
+/// report.  Execution transports already cap normal response bodies at this
+/// size; keeping the same ceiling here prevents a base64 field from causing a
+/// second, unchecked allocation while preserving large image responses.
+pub const MAX_INTERNAL_REPORT_BODY_BYTES: usize = 64 * 1024 * 1024;
 const GEMINI_FILE_MAPPING_CACHE_PREFIX: &str = "gemini_files:key";
 pub const STREAM_MISSING_TERMINAL_EVENT_CATEGORY: &str = "stream_missing_terminal_event";
 pub const STREAM_TERMINAL_ERROR_CATEGORY: &str = "stream_terminal_error";
@@ -60,6 +71,40 @@ pub struct GatewayStreamReportRequest {
     pub terminal_summary: Option<ExecutionStreamTerminalSummary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub telemetry: Option<ExecutionTelemetry>,
+}
+
+/// Decode an internal report body only after checking the decoded-size bound.
+/// The report payload itself is JSON, so the base64 text may be larger than the
+/// raw body by roughly one third.  Checking the encoded length first avoids
+/// asking the base64 engine to allocate for an attacker-controlled oversized
+/// value.
+pub fn decode_internal_report_body_base64(body_base64: &str) -> Result<Vec<u8>, String> {
+    if body_base64.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let max_encoded_len = MAX_INTERNAL_REPORT_BODY_BYTES
+        .checked_add(2)
+        .and_then(|value| value.checked_div(3))
+        .and_then(|value| value.checked_mul(4))
+        .unwrap_or(usize::MAX);
+    if body_base64.len() > max_encoded_len {
+        return Err(format!(
+            "internal report body exceeds {} decoded bytes",
+            MAX_INTERNAL_REPORT_BODY_BYTES
+        ));
+    }
+
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(body_base64)
+        .map_err(|error| error.to_string())?;
+    if bytes.len() > MAX_INTERNAL_REPORT_BODY_BYTES {
+        return Err(format!(
+            "internal report body exceeds {} decoded bytes",
+            MAX_INTERNAL_REPORT_BODY_BYTES
+        ));
+    }
+    Ok(bytes)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -192,7 +237,12 @@ pub fn normalize_gemini_file_name(file_name: &str) -> Option<String> {
     if file_name.is_empty() {
         return None;
     }
-    if file_name.starts_with("files/") {
+    let prefix_chars = usize::from(!file_name.starts_with("files/")) * "files/".len();
+    let allowed_input_chars = GEMINI_FILE_MAPPING_MAX_FILE_NAME_CHARS.checked_sub(prefix_chars)?;
+    if file_name.chars().nth(allowed_input_chars).is_some() {
+        return None;
+    }
+    if prefix_chars == 0 {
         Some(file_name.to_string())
     } else {
         Some(format!("files/{file_name}"))
@@ -537,9 +587,7 @@ fn stream_capture_terminal_state_from_base64(
     body_state: Option<UsageBodyCaptureState>,
 ) -> Option<StreamCapturedTerminalState> {
     let body_base64 = body_base64?;
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(body_base64)
-        .ok()?;
+    let bytes = decode_internal_report_body_base64(body_base64).ok()?;
     let state = if let Ok(value) = serde_json::from_slice::<Value>(&bytes) {
         stream_capture_terminal_state(&value)
     } else {
@@ -766,6 +814,12 @@ fn maybe_push_gemini_file_mapping_entry(
             .and_then(Value::as_str)
             .map(str::trim)
             .filter(|value| !value.is_empty())
+            .filter(|value| {
+                value
+                    .chars()
+                    .nth(GEMINI_FILE_MAPPING_MAX_DISPLAY_NAME_CHARS)
+                    .is_none()
+            })
             .map(ToOwned::to_owned),
         mime_type: object
             .get("mimeType")
@@ -773,6 +827,12 @@ fn maybe_push_gemini_file_mapping_entry(
             .and_then(Value::as_str)
             .map(str::trim)
             .filter(|value| !value.is_empty())
+            .filter(|value| {
+                value
+                    .chars()
+                    .nth(GEMINI_FILE_MAPPING_MAX_MIME_TYPE_CHARS)
+                    .is_none()
+            })
             .map(ToOwned::to_owned),
     });
 }
@@ -789,9 +849,7 @@ fn extract_sync_report_body_json(payload: &GatewaySyncReportRequest) -> Option<V
     }
 
     let body_base64 = payload.body_base64.as_deref()?;
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(body_base64)
-        .ok()?;
+    let bytes = decode_internal_report_body_base64(body_base64).ok()?;
     serde_json::from_slice(&bytes).ok()
 }
 
@@ -808,7 +866,13 @@ mod tests {
     use std::collections::BTreeMap;
 
     use aether_contracts::ExecutionStreamTerminalSummary;
-    use aether_data_contracts::repository::usage::UsageBodyCaptureState;
+    use aether_data_contracts::repository::{
+        gemini_file_mappings::{
+            GEMINI_FILE_MAPPING_MAX_DISPLAY_NAME_CHARS, GEMINI_FILE_MAPPING_MAX_FILE_NAME_CHARS,
+            GEMINI_FILE_MAPPING_MAX_MIME_TYPE_CHARS,
+        },
+        usage::UsageBodyCaptureState,
+    };
     use base64::Engine as _;
     use serde_json::json;
 
@@ -1152,6 +1216,16 @@ mod tests {
             Some("files/abc123".to_string())
         );
         assert_eq!(normalize_gemini_file_name("   "), None);
+        assert!(normalize_gemini_file_name(
+            &"x".repeat(GEMINI_FILE_MAPPING_MAX_FILE_NAME_CHARS - "files/".len())
+        )
+        .is_some());
+        assert_eq!(
+            normalize_gemini_file_name(
+                &"x".repeat(GEMINI_FILE_MAPPING_MAX_FILE_NAME_CHARS - "files/".len() + 1)
+            ),
+            None
+        );
     }
 
     #[test]
@@ -1245,6 +1319,31 @@ mod tests {
     }
 
     #[test]
+    fn gemini_mapping_extraction_drops_oversized_persisted_metadata() {
+        let payload = GatewaySyncReportRequest {
+            trace_id: "trace-oversized-metadata".to_string(),
+            report_kind: "gemini_files_store_mapping".to_string(),
+            report_context: None,
+            status_code: 200,
+            headers: BTreeMap::new(),
+            body_json: Some(json!({
+                "name": "safe-file",
+                "displayName": "d".repeat(GEMINI_FILE_MAPPING_MAX_DISPLAY_NAME_CHARS + 1),
+                "mimeType": "m".repeat(GEMINI_FILE_MAPPING_MAX_MIME_TYPE_CHARS + 1),
+            })),
+            client_body_json: None,
+            body_base64: None,
+            telemetry: None,
+        };
+
+        let entries = extract_gemini_file_mapping_entries(&payload);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].file_name, "files/safe-file");
+        assert_eq!(entries[0].display_name, None);
+        assert_eq!(entries[0].mime_type, None);
+    }
+
+    #[test]
     fn reads_report_request_id_from_context() {
         assert_eq!(
             report_request_id(Some(&json!({"request_id": "req-123"}))),
@@ -1309,5 +1408,30 @@ mod tests {
             })),
             "openai_chat_stream_error"
         ));
+    }
+
+    #[test]
+    fn bounded_report_body_decode_rejects_oversized_encoded_values_before_allocation() {
+        let encoded = "A".repeat(
+            super::MAX_INTERNAL_REPORT_BODY_BYTES
+                .div_ceil(3)
+                .saturating_mul(4)
+                .saturating_add(4),
+        );
+        let error = super::decode_internal_report_body_base64(&encoded)
+            .expect_err("oversized report body must be rejected before decoding");
+        assert!(error.contains("internal report body exceeds"));
+    }
+
+    #[test]
+    fn bounded_report_body_decode_preserves_empty_and_valid_payloads() {
+        assert!(super::decode_internal_report_body_base64("")
+            .expect("empty report body should decode")
+            .is_empty());
+        let encoded = base64::engine::general_purpose::STANDARD.encode(b"report-body");
+        assert_eq!(
+            super::decode_internal_report_body_base64(&encoded).expect("valid body should decode"),
+            b"report-body"
+        );
     }
 }

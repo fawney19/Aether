@@ -239,15 +239,15 @@ async function loadRelated() {
       related_limit: 8,
       per_item_limit: 100
     }
-    if (!props.isAdmin && target.source.kind === 'provider') {
+    const dimension = target.source.kind
+    if (!props.isAdmin && dimension === 'provider') {
       throw new Error('公开健康监控不支持 provider 详情')
     }
     const data = props.isAdmin
       ? await getHealthRelatedMonitor(params)
-      : await getPublicHealthRelatedMonitor({
-          ...params,
-          dimension: target.source.kind
-        })
+      : dimension === 'provider'
+        ? null
+        : await getPublicHealthRelatedMonitor({ ...params, dimension })
     if (seq === requestSeq) {
       related.value = data
     }

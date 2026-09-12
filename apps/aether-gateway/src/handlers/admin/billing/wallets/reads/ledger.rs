@@ -6,6 +6,7 @@ use super::super::shared::{
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::handlers::admin::shared::{query_param_value, unix_secs_to_rfc3339};
 use crate::GatewayError;
+use aether_data::repository::wallet::stored_timestamp_unix_secs;
 use axum::{
     body::Body,
     response::{IntoResponse, Response},
@@ -69,7 +70,10 @@ pub(in super::super) async fn build_admin_wallet_ledger_response(
                 "operator_name": entry.operator_name,
                 "operator_email": entry.operator_email,
                 "description": entry.description,
-                "created_at": entry.created_at_unix_ms.and_then(unix_secs_to_rfc3339),
+                "created_at": entry
+                    .created_at_unix_ms
+                    .map(stored_timestamp_unix_secs)
+                    .and_then(unix_secs_to_rfc3339),
             })
         })
         .collect::<Vec<_>>();

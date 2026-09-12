@@ -1,11 +1,15 @@
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use aether_data::repository::management_tokens::InMemoryManagementTokenRepository;
+use aether_crypto::DEVELOPMENT_ENCRYPTION_KEY;
+use aether_data::repository::management_tokens::{
+    InMemoryManagementTokenRepository, ManagementTokenListQuery, ManagementTokenReadRepository,
+};
 use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
 use aether_data::repository::proxy_nodes::{
     InMemoryProxyNodeRepository, ProxyNodeHeartbeatMutation, StoredProxyNodeEvent,
 };
+use aether_data::repository::users::InMemoryUserReadRepository;
 use axum::body::Body;
 use axum::extract::ws::Message;
 use axum::routing::any;
@@ -16,8 +20,10 @@ use serde_json::json;
 use tokio::sync::watch;
 
 use super::super::{
-    build_router_with_state, hash_management_token, sample_endpoint, sample_key,
-    sample_management_token, sample_provider, sample_proxy_node, start_server, AppState,
+    authenticated_tunnel_control_plane_request, build_router_with_state, hash_management_token,
+    sample_endpoint, sample_key, sample_management_token, sample_provider, sample_proxy_node,
+    start_server, with_tunnel_control_plane_key, AppState, TUNNEL_CONTROL_PLANE_TEST_GENERATION,
+    TUNNEL_CONTROL_PLANE_TEST_PSK,
 };
 use crate::constants::{
     GATEWAY_HEADER, TRUSTED_ADMIN_SESSION_ID_HEADER, TRUSTED_ADMIN_USER_ID_HEADER,
@@ -29,6 +35,16 @@ use crate::maintenance::{
     start_proxy_upgrade_rollout,
 };
 use crate::tunnel::{tunnel_protocol, TunnelProxyConn};
+
+async fn recv_tunnel_test_frame(
+    proxy_rx: &mut aether_runtime::BoundedQueueReceiver<Message>,
+    description: &str,
+) -> Message {
+    tokio::time::timeout(Duration::from_secs(5), proxy_rx.recv())
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for {description}"))
+        .unwrap_or_else(|| panic!("proxy channel closed before {description}"))
+}
 
 #[tokio::test]
 async fn gateway_handles_admin_proxy_nodes_locally_with_trusted_admin_principal() {
@@ -103,7 +119,8 @@ async fn gateway_handles_admin_proxy_nodes_locally_with_trusted_admin_principal(
     assert_eq!(items[0]["is_manual"], true);
     assert_eq!(items[0]["proxy_url"], "http://proxy.example:8080");
     assert_eq!(items[0]["proxy_username"], "alice");
-    assert_eq!(items[0]["proxy_password"], "su****et");
+    assert_eq!(items[0]["has_proxy_password"], true);
+    assert!(items[0].get("proxy_password").is_none());
     assert!(items[0]["created_at"].is_string());
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
@@ -112,7 +129,7 @@ async fn gateway_handles_admin_proxy_nodes_locally_with_trusted_admin_principal(
 }
 
 #[tokio::test]
-async fn gateway_returns_full_manual_proxy_node_detail_locally_with_trusted_admin_principal() {
+async fn gateway_does_not_return_manual_proxy_password_in_node_detail() {
     let mut manual_node = sample_proxy_node("proxy-node-manual");
     manual_node.name = "alpha-manual".to_string();
     manual_node.status = "online".to_string();
@@ -149,7 +166,8 @@ async fn gateway_returns_full_manual_proxy_node_detail_locally_with_trusted_admi
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
     assert_eq!(payload["node"]["id"], "proxy-node-manual");
     assert_eq!(payload["node"]["proxy_username"], "alice");
-    assert_eq!(payload["node"]["proxy_password"], "supersecret");
+    assert_eq!(payload["node"]["has_proxy_password"], true);
+    assert!(payload["node"].get("proxy_password").is_none());
 
     gateway_handle.abort();
 }
@@ -191,6 +209,7 @@ async fn gateway_reports_active_proxy_upgrade_rollout_in_proxy_node_list() {
     data_state
         .apply_proxy_node_heartbeat(&ProxyNodeHeartbeatMutation {
             node_id: "node-alpha".to_string(),
+            expected_tunnel_generation: None,
             heartbeat_interval: None,
             active_connections: None,
             total_requests_delta: None,
@@ -354,6 +373,7 @@ async fn gateway_clears_proxy_upgrade_rollout_conflicts_locally() {
         .update_proxy_node_remote_config(
             &aether_data::repository::proxy_nodes::ProxyNodeRemoteConfigMutation {
                 node_id: "node-beta".to_string(),
+                expected_tunnel_generation: None,
                 node_name: None,
                 allowed_ports: None,
                 log_level: None,
@@ -932,7 +952,177 @@ async fn gateway_rejects_management_token_without_required_admin_route_permissio
 }
 
 #[tokio::test]
-async fn gateway_registers_proxy_node_with_management_token_when_allowed_ips_is_json_null() {
+async fn proxy_node_install_session_requires_admin_and_preserves_parent_token_constraints() {
+    let write_raw_token = "ae-proxy-install-write-only";
+    let admin_raw_token = "ae-proxy-install-admin";
+    let state = AppState::new().expect("gateway should build");
+    let admin_user = state
+        .create_local_auth_user_with_settings(
+            Some("proxy-install-admin@example.com".to_string()),
+            true,
+            "admin".to_string(),
+            "hash".to_string(),
+            "admin".to_string(),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("admin user should be created")
+        .expect("admin user should exist");
+
+    let parent_allowed_ips = json!(["127.0.0.1"]);
+    let parent_expires_at = 4_102_444_800;
+    let mut write_parent = sample_management_token(
+        "token-proxy-install-write",
+        &admin_user.id,
+        "proxy-install-write",
+        true,
+    );
+    write_parent.token.allowed_ips = Some(parent_allowed_ips.clone());
+    write_parent.token.permissions = Some(json!(["admin:proxy_nodes:write"]));
+    write_parent.token.expires_at_unix_secs = Some(parent_expires_at);
+    let mut admin_parent = sample_management_token(
+        "token-proxy-install-admin",
+        &admin_user.id,
+        "proxy-install-admin",
+        true,
+    );
+    admin_parent.token.allowed_ips = Some(parent_allowed_ips.clone());
+    admin_parent.token.permissions = Some(json!(["admin:proxy_nodes:admin"]));
+    admin_parent.token.expires_at_unix_secs = Some(parent_expires_at);
+
+    let management_token_repository =
+        Arc::new(InMemoryManagementTokenRepository::seed_with_hashes(
+            vec![write_parent, admin_parent],
+            vec![
+                (
+                    hash_management_token(write_raw_token),
+                    "token-proxy-install-write".to_string(),
+                ),
+                (
+                    hash_management_token(admin_raw_token),
+                    "token-proxy-install-admin".to_string(),
+                ),
+            ],
+        ));
+    let user_repository = Arc::new(InMemoryUserReadRepository::seed_auth_users([
+        admin_user.clone()
+    ]));
+    let state = state.with_data_state_for_tests(
+        GatewayDataState::with_management_token_repository_for_tests(Arc::clone(
+            &management_token_repository,
+        ))
+        .with_user_reader(user_repository),
+    );
+    let gateway = build_router_with_state(state);
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+    let client = reqwest::Client::new();
+
+    let denied = client
+        .post(format!(
+            "{gateway_url}/api/admin/proxy-nodes/install-sessions"
+        ))
+        .header(GATEWAY_HEADER, "rust-phase3b")
+        .bearer_auth(write_raw_token)
+        .json(&json!({ "node_name": "write-only-node" }))
+        .send()
+        .await
+        .expect("write-only install request should complete");
+    assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+    let denied_payload: serde_json::Value = denied.json().await.expect("denial should be json");
+    assert_eq!(
+        denied_payload["required_permission"],
+        json!("admin:proxy_nodes:admin")
+    );
+
+    let accepted = client
+        .post(format!(
+            "{gateway_url}/api/admin/proxy-nodes/install-sessions"
+        ))
+        .header(GATEWAY_HEADER, "rust-phase3b")
+        .bearer_auth(admin_raw_token)
+        .json(&json!({ "node_name": "constrained-node" }))
+        .send()
+        .await
+        .expect("admin install request should complete");
+    let accepted_status = accepted.status();
+    let accepted_body = accepted.text().await.expect("response body should read");
+    assert_eq!(
+        accepted_status,
+        StatusCode::OK,
+        "unexpected response body: {accepted_body}"
+    );
+    let accepted_payload: serde_json::Value =
+        serde_json::from_str(&accepted_body).expect("install response should be JSON");
+    let install_code = accepted_payload["install_code"]
+        .as_str()
+        .expect("install code should be returned")
+        .to_string();
+
+    let tokens = management_token_repository
+        .list_management_tokens(&ManagementTokenListQuery {
+            user_id: Some(admin_user.id.clone()),
+            is_active: None,
+            offset: 0,
+            limit: 10,
+        })
+        .await
+        .expect("management tokens should list");
+    assert_eq!(tokens.total, 3);
+    let child = tokens
+        .items
+        .iter()
+        .find(|item| {
+            !matches!(
+                item.token.id.as_str(),
+                "token-proxy-install-write" | "token-proxy-install-admin"
+            )
+        })
+        .expect("install session should create one child management token");
+    assert_eq!(child.token.allowed_ips, Some(parent_allowed_ips));
+    assert_eq!(child.token.expires_at_unix_secs, Some(parent_expires_at));
+    assert_eq!(
+        child.token.permissions,
+        Some(json!(["admin:proxy_nodes:write"]))
+    );
+    assert!(
+        !child.token.is_active,
+        "unused install-session token must remain disabled"
+    );
+    let child_id = child.token.id.clone();
+
+    // The in-memory repository cannot atomically verify the administrator row and therefore
+    // rejects one-time activation. SQL-backed repositories cover the successful atomic path.
+    let install_script = client
+        .get(format!("{gateway_url}/install-tunnel/{install_code}"))
+        .send()
+        .await
+        .expect("tunnel install script should receive a response");
+    assert_eq!(install_script.status(), StatusCode::NOT_FOUND);
+
+    let consumed = management_token_repository
+        .get_management_token_with_user(&child_id)
+        .await
+        .expect("consumed token lookup should succeed");
+    assert!(
+        consumed.is_none(),
+        "failed one-time activation must discard the pending bearer"
+    );
+
+    let replay = client
+        .get(format!("{gateway_url}/install-tunnel/{install_code}"))
+        .send()
+        .await
+        .expect("tunnel install replay should receive a response");
+    assert_eq!(replay.status(), StatusCode::NOT_FOUND);
+
+    gateway_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_rejects_proxy_node_registration_when_allowed_ips_is_json_null() {
     let raw_token = "ae_proxy_register_json_null";
     let proxy_node_repository = Arc::new(InMemoryProxyNodeRepository::default());
     let state = AppState::new().expect("gateway should build");
@@ -989,16 +1179,11 @@ async fn gateway_registers_proxy_node_with_management_token_when_allowed_ips_is_
         .await
         .expect("request should succeed");
 
-    assert_eq!(register_response.status(), StatusCode::OK);
-    let register_payload: serde_json::Value = register_response
-        .json()
+    assert_eq!(register_response.status(), StatusCode::UNAUTHORIZED);
+    let _ = register_response
+        .bytes()
         .await
-        .expect("json body should parse");
-    assert_eq!(register_payload["node"]["name"], "proxy-json-null");
-    assert_eq!(
-        register_payload["node"]["registered_by"],
-        json!(admin_user.id)
-    );
+        .expect("error body should be readable");
 
     gateway_handle.abort();
 }
@@ -1071,7 +1256,8 @@ async fn gateway_creates_updates_and_tests_manual_proxy_nodes_locally() {
     assert_eq!(create_payload["node"]["status"], "online");
     assert_eq!(create_payload["node"]["proxy_url"], proxy_url);
     assert_eq!(create_payload["node"]["proxy_username"], "alice");
-    assert_eq!(create_payload["node"]["proxy_password"], "su****et");
+    assert_eq!(create_payload["node"]["has_proxy_password"], true);
+    assert!(create_payload["node"].get("proxy_password").is_none());
 
     let test_url_response = client
         .post(format!("{gateway_url}/api/admin/proxy-nodes/test-url"))
@@ -1202,22 +1388,25 @@ async fn gateway_tests_connected_tunnel_proxy_nodes_with_active_probe() {
         "https://probe.example/cdn-cgi/trace",
     );
 
-    let mut node = sample_proxy_node("node-online");
+    let mut node = with_tunnel_control_plane_key(
+        sample_proxy_node("node-online"),
+        TUNNEL_CONTROL_PLANE_TEST_PSK,
+    );
     node.status = "online".to_string();
     node.tunnel_connected = true;
 
     let proxy_node_repository = Arc::new(InMemoryProxyNodeRepository::seed(vec![node]));
     let state = AppState::new()
         .expect("gateway should build")
-        .with_data_state_for_tests(GatewayDataState::with_proxy_node_repository_for_tests(
-            proxy_node_repository,
-        ));
+        .with_data_state_for_tests(
+            GatewayDataState::with_proxy_node_repository_for_tests(proxy_node_repository)
+                .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+        );
     let tunnel_state = state.tunnel.app_state();
     let (proxy_tx, mut proxy_rx) = aether_runtime::bounded_queue(8);
     let (proxy_close_tx, _) = watch::channel(false);
-    tunnel_state
-        .hub
-        .register_proxy(Arc::new(TunnelProxyConn::new(
+    tunnel_state.hub.register_proxy(Arc::new(
+        TunnelProxyConn::new(
             500,
             "node-online".to_string(),
             "Node Online".to_string(),
@@ -1225,7 +1414,10 @@ async fn gateway_tests_connected_tunnel_proxy_nodes_with_active_probe() {
             proxy_close_tx,
             16,
             2,
-        )));
+        )
+        .with_tunnel_generation(TUNNEL_CONTROL_PLANE_TEST_GENERATION.to_string())
+        .with_authenticated_key(TUNNEL_CONTROL_PLANE_TEST_PSK.to_string()),
+    ));
 
     let gateway = build_router_with_state(state);
     let (gateway_url, gateway_handle) = start_server(gateway).await;
@@ -1246,7 +1438,7 @@ async fn gateway_tests_connected_tunnel_proxy_nodes_with_active_probe() {
         }
     });
 
-    let request_headers = match proxy_rx.recv().await.expect("headers frame should arrive") {
+    let request_headers = match recv_tunnel_test_frame(&mut proxy_rx, "probe headers frame").await {
         Message::Binary(data) => data,
         other => panic!("unexpected message: {other:?}"),
     };
@@ -1261,7 +1453,7 @@ async fn gateway_tests_connected_tunnel_proxy_nodes_with_active_probe() {
     assert_eq!(meta.url, "https://probe.example/cdn-cgi/trace");
     assert_eq!(meta.follow_redirects, Some(false));
 
-    let request_body = match proxy_rx.recv().await.expect("body frame should arrive") {
+    let request_body = match recv_tunnel_test_frame(&mut proxy_rx, "probe body frame").await {
         Message::Binary(data) => data,
         other => panic!("unexpected message: {other:?}"),
     };
@@ -1602,10 +1794,9 @@ async fn gateway_handles_admin_proxy_node_events_locally_with_trusted_admin_prin
 
 #[tokio::test]
 async fn gateway_reports_proxy_node_metrics_and_filters_events_locally() {
-    let proxy_node_repository =
-        Arc::new(InMemoryProxyNodeRepository::seed(vec![sample_proxy_node(
-            "node-1",
-        )]));
+    let proxy_node_repository = Arc::new(InMemoryProxyNodeRepository::seed(vec![
+        with_tunnel_control_plane_key(sample_proxy_node("node-1"), TUNNEL_CONTROL_PLANE_TEST_PSK),
+    ]));
     let gateway = build_router_with_state(
         AppState::new()
             .expect("gateway should build")
@@ -1620,61 +1811,73 @@ async fn gateway_reports_proxy_node_metrics_and_filters_events_locally() {
         .expect("system time should be after epoch")
         .as_secs();
 
-    let baseline_heartbeat_response = client
-        .post(format!("{gateway_url}/api/internal/tunnel/heartbeat"))
-        .json(&json!({
-            "node_id": "node-1",
-            "heartbeat_id": 90,
-            "heartbeat_interval": 30,
-            "active_connections": 0,
-            "proxy_metadata": {
-                "tunnel_metrics": {
-                    "connect_errors": 0,
-                    "disconnects": 0,
-                    "error_events_total": 0,
-                    "ws_in_bytes": 0,
-                    "ws_out_bytes": 0,
-                    "ws_in_frames": 0,
-                    "ws_out_frames": 0,
-                    "heartbeat_rtt_last_ms": 0
-                }
-            },
-            "proxy_version": "2.0.0"
-        }))
-        .send()
-        .await
-        .expect("baseline heartbeat request should succeed");
+    let baseline_heartbeat = json!({
+        "node_id": "node-1",
+        "heartbeat_session_id": "node-1-session",
+        "heartbeat_id": 90,
+        "heartbeat_interval": 30,
+        "active_connections": 0,
+        "proxy_metadata": {
+            "tunnel_metrics": {
+                "connect_errors": 0,
+                "disconnects": 0,
+                "error_events_total": 0,
+                "ws_in_bytes": 0,
+                "ws_out_bytes": 0,
+                "ws_in_frames": 0,
+                "ws_out_frames": 0,
+                "heartbeat_rtt_last_ms": 0
+            }
+        },
+        "proxy_version": "2.0.0"
+    });
+    let baseline_heartbeat_response = authenticated_tunnel_control_plane_request(
+        &client,
+        format!("{gateway_url}/api/internal/tunnel/heartbeat"),
+        "/api/internal/tunnel/heartbeat",
+        "node-1",
+        &baseline_heartbeat,
+    )
+    .send()
+    .await
+    .expect("baseline heartbeat request should succeed");
     assert_eq!(baseline_heartbeat_response.status(), StatusCode::OK);
 
-    let heartbeat_response = client
-        .post(format!("{gateway_url}/api/internal/tunnel/heartbeat"))
-        .json(&json!({
-            "node_id": "node-1",
-            "heartbeat_id": 91,
-            "heartbeat_interval": 30,
-            "active_connections": 7,
-            "proxy_metadata": {
-                "tunnel_metrics": {
-                    "connect_errors": 3,
-                    "disconnects": 1,
-                    "error_events_total": 1,
-                    "ws_in_bytes": 1000,
-                    "ws_out_bytes": 2000,
-                    "ws_in_frames": 10,
-                    "ws_out_frames": 20,
-                    "heartbeat_rtt_last_ms": 42
-                },
-                "recent_tunnel_errors": [{
-                    "timestamp_unix_secs": now_unix_secs,
-                    "category": "tcp_connect_timeout",
-                    "message": "tunnel TCP connect timeout"
-                }]
+    let heartbeat = json!({
+        "node_id": "node-1",
+        "heartbeat_session_id": "node-1-session",
+        "heartbeat_id": 91,
+        "heartbeat_interval": 30,
+        "active_connections": 7,
+        "proxy_metadata": {
+            "tunnel_metrics": {
+                "connect_errors": 3,
+                "disconnects": 1,
+                "error_events_total": 1,
+                "ws_in_bytes": 1000,
+                "ws_out_bytes": 2000,
+                "ws_in_frames": 10,
+                "ws_out_frames": 20,
+                "heartbeat_rtt_last_ms": 42
             },
-            "proxy_version": "2.0.0"
-        }))
-        .send()
-        .await
-        .expect("heartbeat request should succeed");
+            "recent_tunnel_errors": [{
+                "timestamp_unix_secs": now_unix_secs,
+                "category": "tcp_connect_timeout",
+                "message": "tunnel TCP connect timeout"
+            }]
+        },
+        "proxy_version": "2.0.0"
+    });
+    let heartbeat_response = authenticated_tunnel_control_plane_request(
+        &client,
+        format!("{gateway_url}/api/internal/tunnel/heartbeat"),
+        "/api/internal/tunnel/heartbeat",
+        "node-1",
+        &heartbeat,
+    )
+    .send()
+    .await
+    .expect("heartbeat request should succeed");
     assert_eq!(heartbeat_response.status(), StatusCode::OK);
 
     let from = now_unix_secs.saturating_sub(120);
@@ -1794,6 +1997,7 @@ async fn gateway_updates_proxy_node_config_and_dispatches_upgrade_targets_locall
         );
 
     let mut online_node = sample_proxy_node("node-online");
+    online_node = with_tunnel_control_plane_key(online_node, TUNNEL_CONTROL_PLANE_TEST_PSK);
     online_node.status = "online".to_string();
     online_node.tunnel_connected = true;
     let mut online_node_2 = sample_proxy_node("node-zeta");
@@ -1895,21 +2099,27 @@ async fn gateway_updates_proxy_node_config_and_dispatches_upgrade_targets_locall
     assert_eq!(blocked_upgrade_payload["updated"], 0);
     assert_eq!(blocked_upgrade_payload["skipped"], 3);
 
-    let heartbeat_response = client
-        .post(format!("{gateway_url}/api/internal/tunnel/heartbeat"))
-        .json(&json!({
-            "node_id": "node-online",
-            "heartbeat_id": 77,
-            "heartbeat_interval": 45,
-            "active_connections": 3,
-            "total_requests": 5,
-            "avg_latency_ms": 10.0,
-            "proxy_metadata": { "arch": "arm64" },
-            "proxy_version": "2.0.0"
-        }))
-        .send()
-        .await
-        .expect("request should succeed");
+    let heartbeat = json!({
+        "node_id": "node-online",
+        "heartbeat_session_id": "node-online-session",
+        "heartbeat_id": 77,
+        "heartbeat_interval": 45,
+        "active_connections": 3,
+        "total_requests": 5,
+        "avg_latency_ms": 10.0,
+        "proxy_metadata": { "arch": "arm64" },
+        "proxy_version": "2.0.0"
+    });
+    let heartbeat_response = authenticated_tunnel_control_plane_request(
+        &client,
+        format!("{gateway_url}/api/internal/tunnel/heartbeat"),
+        "/api/internal/tunnel/heartbeat",
+        "node-online",
+        &heartbeat,
+    )
+    .send()
+    .await
+    .expect("request should succeed");
     assert_eq!(heartbeat_response.status(), StatusCode::OK);
     let heartbeat_payload: serde_json::Value = heartbeat_response
         .json()

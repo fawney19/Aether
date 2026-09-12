@@ -52,8 +52,13 @@ struct RedisWorkerBaselineReport {
     ack: OperationSummary,
 }
 
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let _log_shutdown = aether_runtime::LogShutdownGuard::new();
+    run()
+}
+
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn run() -> Result<(), Box<dyn std::error::Error>> {
     init_load_runtime_for("redis-worker-baseline");
     let config = parse_args(std::env::args().skip(1).collect())?;
     let report = run_suite(&config).await?;

@@ -6,7 +6,8 @@
 #   强制全部重建:  ./deploy.sh --force
 
 set -euo pipefail
-cd "$(dirname "$0")"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+cd -- "${SCRIPT_DIR}"
 
 LOCAL_APP_IMAGE="${LOCAL_APP_IMAGE:-aether-app:latest}"
 export LOCAL_APP_IMAGE
@@ -47,6 +48,17 @@ compose_up() {
 
 # 缓存文件
 CODE_HASH_FILE=".code-hash"
+
+validate_code_hash_file() {
+    if [ -L "${CODE_HASH_FILE}" ]; then
+        echo "Refusing symbolic-link build state: ${CODE_HASH_FILE}" >&2
+        return 1
+    fi
+    if [ -e "${CODE_HASH_FILE}" ] && [ ! -f "${CODE_HASH_FILE}" ]; then
+        echo "Build state is not a regular file: ${CODE_HASH_FILE}" >&2
+        return 1
+    fi
+}
 
 usage() {
     cat <<'EOF'
@@ -153,9 +165,10 @@ calc_code_hash() {
 check_code_changed() {
     local current_hash
     current_hash=$(calc_code_hash)
+    validate_code_hash_file || exit 1
     if [ -f "$CODE_HASH_FILE" ]; then
         local saved_hash
-        saved_hash=$(cat "$CODE_HASH_FILE")
+        saved_hash=$(<"$CODE_HASH_FILE")
         if [ "$current_hash" = "$saved_hash" ]; then
             return 1
         fi
@@ -163,7 +176,24 @@ check_code_changed() {
     return 0
 }
 
-save_code_hash() { calc_code_hash > "$CODE_HASH_FILE"; }
+save_code_hash() {
+    local staged
+    staged="$(mktemp "./.code-hash.tmp.XXXXXXXX")" \
+        || { echo "Could not create temporary build state" >&2; return 1; }
+    if ! calc_code_hash >"${staged}"; then
+        rm -f -- "${staged}"
+        return 1
+    fi
+    chmod 0600 "${staged}"
+    if ! validate_code_hash_file; then
+        rm -f -- "${staged}"
+        return 1
+    fi
+    if ! mv -f -- "${staged}" "${CODE_HASH_FILE}"; then
+        rm -f -- "${staged}"
+        return 1
+    fi
+}
 
 # 构建应用镜像
 build_app() {
@@ -228,6 +258,6 @@ docker image prune -f >/dev/null 2>&1 || true
 
 echo ">>> Done!"
 echo ">>> Note: empty databases auto-bootstrap on first start."
-echo ">>> Note: docker compose now defaults to auto-running pending migrations/backfills on app startup."
-echo ">>> Note: set AETHER_GATEWAY_AUTO_PREPARE_DATABASE=false if you want to keep manual rollout."
+echo ">>> Note: database schema and data preparation run automatically before app startup."
+echo ">>> Note: set AETHER_GATEWAY_DATABASE_MODE=verify-only to require a separate database prepare step."
 "${DC[@]}" ps

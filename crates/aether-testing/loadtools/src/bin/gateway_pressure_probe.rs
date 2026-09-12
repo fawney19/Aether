@@ -83,6 +83,9 @@ struct GatewayPressureReport {
     settle_drain_elapsed_ms: u64,
     settle_required_metrics_available: bool,
     settle_missing_required_metrics: Vec<String>,
+    settle_baseline: SettleDrainBaseline,
+    settle_final_metrics: BTreeMap<String, u64>,
+    settle_observations: Vec<SettleDrainObservation>,
     load: HttpLoadProbeResult,
     metrics: GatewayPressureMetricsSummary,
 }
@@ -573,9 +576,46 @@ struct SettleDrainResult {
     elapsed: Duration,
     required_metrics_available: bool,
     missing_required_metrics: Vec<String>,
+    observations: Vec<SettleDrainObservation>,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize)]
+struct SettleDrainObservation {
+    elapsed_ms: u64,
+    drained: bool,
+    metrics: BTreeMap<String, u64>,
+}
+
+fn observe_settle_drain(
+    observations: &mut Vec<SettleDrainObservation>,
+    elapsed: Duration,
+    samples: &[PrometheusSample],
+    drained: bool,
+) {
+    let observation = SettleDrainObservation {
+        elapsed_ms: elapsed.as_millis() as u64,
+        drained,
+        metrics: REQUIRED_SETTLE_DRAIN_METRICS
+            .iter()
+            .copied()
+            .chain([
+                "gateway_http_connections_in_flight",
+                "gateway_process_open_fds",
+                "usage_runtime_producers_in_flight",
+                "usage_runtime_delayed_lifecycle_pending",
+            ])
+            .filter(|name| metric_is_available(samples, name))
+            .map(|name| (name.to_string(), metric_max(samples, name)))
+            .collect(),
+    };
+    if observations.len() < 256 {
+        observations.push(observation);
+    } else {
+        observations[255] = observation;
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 struct SettleDrainBaseline {
     tokio_alive_tasks: u64,
     tokio_global_queue_depth: u64,
@@ -2302,6 +2342,8 @@ impl GatewayDbPoolPressureWindow {
 
 fn samples_are_drained(samples: &[PrometheusSample], baseline: SettleDrainBaseline) -> bool {
     missing_required_settle_drain_metrics(samples).is_empty()
+        && metric_max(samples, "usage_runtime_producers_in_flight") == 0
+        && metric_max(samples, "usage_runtime_delayed_lifecycle_pending") == 0
         && metric_max(samples, "request_candidate_queue_depth") == 0
         && metric_max(samples, "request_candidate_queue_pending_depth") == 0
         && metric_max(samples, "request_candidate_active_queue_depth") == 0
@@ -2403,6 +2445,7 @@ async fn wait_for_settle_drain(
 ) -> SettleDrainResult {
     if settle_after.is_zero() {
         return SettleDrainResult {
+            observations: Vec::new(),
             completed: false,
             elapsed: Duration::ZERO,
             required_metrics_available: false,
@@ -2422,12 +2465,14 @@ async fn wait_for_settle_drain(
         .min(Duration::from_millis(500))
         .max(Duration::from_millis(50));
     let mut stability = SettleDrainStability::default();
+    let mut observations = Vec::new();
 
     loop {
         match fetch_prometheus_samples(metrics_url).await {
             Ok(samples) => {
                 missing_required_metrics = missing_required_settle_drain_metrics(&samples);
                 let drained = samples_are_drained(&samples, baseline);
+                observe_settle_drain(&mut observations, started.elapsed(), &samples, drained);
                 let terminal_loss_detected = {
                     let mut snapshot = summary.lock().await;
                     snapshot.observe(&samples);
@@ -2435,6 +2480,7 @@ async fn wait_for_settle_drain(
                 };
                 if terminal_loss_detected {
                     return SettleDrainResult {
+                        observations,
                         completed: false,
                         elapsed: started.elapsed(),
                         required_metrics_available: missing_required_metrics.is_empty(),
@@ -2443,6 +2489,7 @@ async fn wait_for_settle_drain(
                 }
                 if stability.observe(started.elapsed(), drained) {
                     return SettleDrainResult {
+                        observations,
                         completed: true,
                         elapsed: started.elapsed(),
                         required_metrics_available: true,
@@ -2465,6 +2512,12 @@ async fn wait_for_settle_drain(
 
     let mut completed = false;
     if let Ok(samples) = fetch_prometheus_samples(metrics_url).await {
+        observe_settle_drain(
+            &mut observations,
+            started.elapsed(),
+            &samples,
+            samples_are_drained(&samples, baseline),
+        );
         missing_required_metrics = missing_required_settle_drain_metrics(&samples);
         completed = stability.observe(started.elapsed(), samples_are_drained(&samples, baseline));
         let mut snapshot = summary.lock().await;
@@ -2475,6 +2528,7 @@ async fn wait_for_settle_drain(
     }
 
     SettleDrainResult {
+        observations,
         completed,
         elapsed: started.elapsed(),
         required_metrics_available: missing_required_metrics.is_empty(),
@@ -2540,13 +2594,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         suite: "gateway_pressure_probe",
         acceptance_contract_version: ACCEPTANCE_CONTRACT_VERSION,
         target_url: config.load.url,
-        metrics_url: config.metrics_url,
+        metrics_url: config.metrics_url.clone(),
         sample_interval_ms: config.sample_interval.as_millis() as u64,
         settle_after_ms: config.settle_after.as_millis() as u64,
         settle_drain_completed: settle_drain.completed,
         settle_drain_elapsed_ms: settle_drain.elapsed.as_millis() as u64,
         settle_required_metrics_available: settle_drain.required_metrics_available,
         settle_missing_required_metrics: settle_drain.missing_required_metrics,
+        settle_baseline: settle_drain_baseline,
+        settle_observations: settle_drain.observations,
+        settle_final_metrics: fetch_prometheus_samples(&config.metrics_url)
+            .await
+            .map(|samples| {
+                REQUIRED_SETTLE_DRAIN_METRICS
+                    .iter()
+                    .filter(|name| metric_is_available(&samples, name))
+                    .map(|name| (name.to_string(), metric_max(&samples, name)))
+                    .collect()
+            })
+            .unwrap_or_default(),
         load,
         metrics: Arc::try_unwrap(summary)
             .unwrap_or_else(|_| panic!("metrics summary still referenced"))

@@ -10,7 +10,7 @@ use serde_json::json;
 
 use super::super::{
     any, build_router_with_state, build_state_with_execution_runtime_override, hash_api_key,
-    sample_currently_usable_auth_snapshot, sample_endpoint, sample_key, sample_provider,
+    sample_bound_key, sample_currently_usable_auth_snapshot, sample_endpoint, sample_provider,
     start_server, AppState, GatewayDataState, InMemoryAuthApiKeySnapshotRepository,
     InMemoryProviderCatalogReadRepository, Json, Router,
 };
@@ -69,7 +69,7 @@ fn rerank_success_state(execution_runtime_url: String) -> AppState {
             "openai:rerank",
             "https://api.openai.example",
         )],
-        vec![sample_key(
+        vec![sample_bound_key(
             "key-upstream-rerank",
             "provider-rerank",
             "openai:rerank",

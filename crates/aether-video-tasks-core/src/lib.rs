@@ -32,7 +32,10 @@ pub use path::{
     resolve_video_task_hydration_lookup_key, resolve_video_task_read_lookup_key,
     resolve_video_task_report_lookup, VideoTaskReportLookup,
 };
-pub use read_side::{read_data_backed_video_task_response, StoredVideoTaskReadSide};
+pub use read_side::{
+    read_data_backed_video_task_response, read_data_backed_video_task_response_for_user,
+    StoredVideoTaskReadSide,
+};
 pub use service::VideoTaskService;
 pub use store::VideoTaskStore;
 pub use store_backend::{FileVideoTaskStore, InMemoryVideoTaskStore};

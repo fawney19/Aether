@@ -717,6 +717,9 @@ fn ai_serving_crate_api_is_confined_to_root_seams() {
         if relative == "apps/aether-gateway/src/ai_serving/pure/mod.rs"
             || relative == "apps/aether-gateway/src/ai_serving/transport.rs"
             || relative == "apps/aether-gateway/src/ai_serving/api.rs"
+            // This module is included by the finalize implementation solely as a
+            // test fixture. Keep the architecture rule focused on production seams.
+            || relative == "apps/aether-gateway/src/ai_serving/finalize/tests_sync.rs"
             || relative.ends_with("/tests.rs")
             || relative.contains("/tests/")
             || relative.starts_with("apps/aether-gateway/src/tests/")
@@ -1714,7 +1717,6 @@ fn ai_serving_candidate_materialization_owns_affinity_and_candidate_runtime_pers
         "pub fn ai_should_persist_available_candidate_for_pool_key",
         "pub fn ai_should_persist_skipped_candidate_for_pool_membership",
         "pub fn ai_candidate_extra_data_with_ranking",
-        "attempt_slot_count",
         "should_persist_available_candidate",
         "persist_available_candidate",
         "build_attempt",
@@ -2891,6 +2893,22 @@ fn ai_serving_standard_attempts_consume_eligible_local_candidates_without_transp
         assert!(
             !openai_responses_request.contains(forbidden),
             "openai responses request preparation should not inline provider-private transport policy {forbidden}"
+        );
+    }
+
+    let standard_family_request = read_workspace_file(
+        "apps/aether-gateway/src/ai_serving/planner/standard/family/request.rs",
+    );
+    for pattern in [
+        "is_antigravity_provider_transport(",
+        "build_antigravity_v1internal_provider_request(",
+        "is_gemini_cli_provider_transport(",
+        "build_gemini_cli_v1internal_provider_request(",
+    ] {
+        assert!(
+            standard_family_request.contains(pattern),
+            "standard family request preparation should build v1internal envelopes through {pattern} \
+             so a cross-format client never posts a bare Gemini body to a v1internal URL"
         );
     }
 
@@ -4227,7 +4245,7 @@ fn ai_serving_finalize_standard_sync_products_are_owned_by_format_crate() {
         "pub struct OpenAiImageSyncFinalizeProduct",
         "OPENAI_IMAGE_SYNC_FINALIZE_REPORT_KIND",
         "CODEX_OPENAI_IMAGE_DEFAULT_OUTPUT_FORMAT",
-        "base64::engine::general_purpose::STANDARD.decode",
+        "decode_sync_report_body_base64",
     ] {
         assert!(
             surface_openai_image_stream.contains(expected),
@@ -4992,6 +5010,7 @@ fn retired_api_format_occurrences_are_whitelisted() {
         "crates/aether-ai/formats/src/formats/registry.rs",
         "crates/aether-data/runtime/src/migrate.rs",
         "crates/aether-data/runtime/src/lifecycle/migrate/tests.rs",
+        "crates/aether-data/runtime/src/lifecycle/migrate/tests/policy_nulls.rs",
         "crates/aether-usage/runtime/src/report.rs",
         "frontend/src/api/endpoints/types/__tests__/api-format.spec.ts",
         "frontend/src/views/admin/module-management/modelDirectivesConfig.ts",

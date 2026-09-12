@@ -18,6 +18,7 @@ pub(crate) async fn maybe_build_local_admin_auth_response(
         &request.state(),
         &request.request_context(),
         request.request_headers(),
+        request.remote_addr(),
         request.request_body(),
     )
     .await?

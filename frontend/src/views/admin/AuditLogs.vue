@@ -409,6 +409,7 @@
 </template>
 
 <script setup lang="ts">
+import { getI18nLocale } from '@/i18n'
 import { ref, onMounted, onBeforeUnmount, computed } from 'vue'
 import {
   Card,
@@ -728,7 +729,7 @@ function getStatusCodeVariant(statusCode: number): 'default' | 'success' | 'dest
 
 function formatDateTime(dateStr: string): string {
   const date = new Date(dateStr)
-  return date.toLocaleString('zh-CN', {
+  return date.toLocaleString(getI18nLocale(), {
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',

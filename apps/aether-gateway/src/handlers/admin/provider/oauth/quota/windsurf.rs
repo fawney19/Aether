@@ -6,6 +6,7 @@ use super::shared::{
 };
 use crate::handlers::admin::request::{AdminAppState, AdminGatewayProviderTransportSnapshot};
 use crate::GatewayError;
+use aether_admin::provider::redaction::admin_provider_metadata_bucket_safe_json;
 use aether_contracts::ProxySnapshot;
 use aether_data_contracts::repository::provider_catalog::{
     StoredProviderCatalogEndpoint, StoredProviderCatalogKey, StoredProviderCatalogProvider,
@@ -132,7 +133,7 @@ fn merge_windsurf_probe_metadata(
     user_status_metadata
 }
 
-fn append_windsurf_probe_warning(metadata: &mut serde_json::Value, probe: &str, message: String) {
+fn append_windsurf_probe_warning(metadata: &mut serde_json::Value, probe: &str, code: &str) {
     let Some(target) = metadata.as_object_mut() else {
         return;
     };
@@ -142,7 +143,7 @@ fn append_windsurf_probe_warning(metadata: &mut serde_json::Value, probe: &str, 
     if let Some(items) = warnings.as_array_mut() {
         items.push(json!({
             "probe": probe,
-            "message": message,
+            "code": code,
         }));
     }
 }
@@ -162,7 +163,13 @@ fn build_windsurf_metadata_update(
     for (key, value) in patch_object {
         merged_bucket.insert(key.clone(), value.clone());
     }
-    json!({ "windsurf": merged_bucket })
+    let merged_bucket = serde_json::Value::Object(merged_bucket);
+    json!({
+        "windsurf": admin_provider_metadata_bucket_safe_json(
+            "windsurf",
+            Some(&merged_bucket),
+        )
+    })
 }
 
 fn sanitize_windsurf_probe_detail(detail: impl AsRef<str>) -> String {
@@ -170,77 +177,7 @@ fn sanitize_windsurf_probe_detail(detail: impl AsRef<str>) -> String {
     if detail.is_empty() {
         return "-".to_string();
     }
-    if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(detail) {
-        redact_windsurf_sensitive_json(&mut value);
-        return value.to_string().chars().take(500).collect();
-    }
-    if contains_windsurf_sensitive_marker(detail) {
-        "[REDACTED upstream error body]".to_string()
-    } else {
-        detail.chars().take(500).collect()
-    }
-}
-
-fn redact_windsurf_sensitive_json(value: &mut serde_json::Value) {
-    match value {
-        serde_json::Value::Object(object) => {
-            for (key, value) in object {
-                if is_windsurf_sensitive_key(key) {
-                    *value = json!("[REDACTED]");
-                } else {
-                    redact_windsurf_sensitive_json(value);
-                }
-            }
-        }
-        serde_json::Value::Array(items) => {
-            for item in items {
-                redact_windsurf_sensitive_json(item);
-            }
-        }
-        serde_json::Value::String(text) if looks_like_windsurf_secret(text) => {
-            *text = "[REDACTED]".to_string();
-        }
-        _ => {}
-    }
-}
-
-fn is_windsurf_sensitive_key(key: &str) -> bool {
-    let normalized = key
-        .chars()
-        .filter(|ch| ch.is_ascii_alphanumeric())
-        .collect::<String>()
-        .to_ascii_lowercase();
-    normalized.contains("token")
-        || normalized.contains("apikey")
-        || normalized.contains("password")
-        || normalized.contains("authorization")
-        || normalized.contains("secret")
-}
-
-fn looks_like_windsurf_secret(value: &str) -> bool {
-    let value = value.trim();
-    value.starts_with("devin-session-token$")
-        || value.starts_with("sk-")
-        || (value.len() > 80 && value.split('.').count() == 3)
-}
-
-fn contains_windsurf_sensitive_marker(value: &str) -> bool {
-    let lowered = value.to_ascii_lowercase();
-    [
-        "token",
-        "api_key",
-        "apikey",
-        "sessiontoken",
-        "firebase_id_token",
-        "idtoken",
-        "authorization",
-        "password",
-        "secret",
-        "devin-session-token$",
-    ]
-    .iter()
-    .any(|marker| lowered.contains(marker))
-        || value.contains("sk-")
+    "[REDACTED upstream error body]".to_string()
 }
 
 pub(crate) async fn refresh_windsurf_provider_quota_locally(
@@ -293,14 +230,13 @@ pub(crate) async fn refresh_windsurf_provider_quota_locally(
         .await?
         {
             ProviderQuotaExecutionOutcome::Response(result) => result,
-            ProviderQuotaExecutionOutcome::Failure(detail) => {
+            ProviderQuotaExecutionOutcome::Failure(_) => {
                 failed_count += 1;
-                let detail = sanitize_windsurf_probe_detail(detail);
                 results.push(json!({
                     "key_id": key.id,
                     "key_name": key.name,
                     "status": "error",
-                    "message": format!("GetUserStatus 请求执行失败: {detail}"),
+                    "message": "GetUserStatus 请求执行失败",
                     "status_code": 502,
                 }));
                 continue;
@@ -353,22 +289,18 @@ pub(crate) async fn refresh_windsurf_provider_quota_locally(
                                 })
                         }
                         ProviderQuotaExecutionOutcome::Response(model_result) => {
-                            let detail = extract_execution_error_message(&model_result)
-                                .unwrap_or_else(|| format!("HTTP {}", model_result.status_code));
-                            let detail = sanitize_windsurf_probe_detail(detail);
                             append_windsurf_probe_warning(
                                 &mut metadata,
                                 "model_configs",
-                                format!("GetCascadeModelConfigs 返回: {detail}"),
+                                "response_failed",
                             );
                             None
                         }
-                        ProviderQuotaExecutionOutcome::Failure(detail) => {
-                            let detail = sanitize_windsurf_probe_detail(detail);
+                        ProviderQuotaExecutionOutcome::Failure(_) => {
                             append_windsurf_probe_warning(
                                 &mut metadata,
                                 "model_configs",
-                                format!("GetCascadeModelConfigs 执行失败: {detail}"),
+                                "execution_failed",
                             );
                             None
                         }
@@ -396,22 +328,18 @@ pub(crate) async fn refresh_windsurf_provider_quota_locally(
                                 })
                         }
                         ProviderQuotaExecutionOutcome::Response(rate_limit_result) => {
-                            let detail = extract_execution_error_message(&rate_limit_result)
-                                .unwrap_or_else(|| format!("HTTP {}", rate_limit_result.status_code));
-                            let detail = sanitize_windsurf_probe_detail(detail);
                             append_windsurf_probe_warning(
                                 &mut metadata,
                                 "rate_limit",
-                                format!("CheckUserMessageRateLimit 返回: {detail}"),
+                                "response_failed",
                             );
                             None
                         }
-                        ProviderQuotaExecutionOutcome::Failure(detail) => {
-                            let detail = sanitize_windsurf_probe_detail(detail);
+                        ProviderQuotaExecutionOutcome::Failure(_) => {
                             append_windsurf_probe_warning(
                                 &mut metadata,
                                 "rate_limit",
-                                format!("CheckUserMessageRateLimit 执行失败: {detail}"),
+                                "execution_failed",
                             );
                             None
                         }
@@ -457,7 +385,7 @@ pub(crate) async fn refresh_windsurf_provider_quota_locally(
                 401 | 403 => {
                     oauth_invalid_at_unix_secs = Some(now_unix_secs);
                     oauth_invalid_reason =
-                        Some(format!("Windsurf token 无效或已被拒绝: {}", detail));
+                        Some("Windsurf token is invalid or rejected".to_string());
                     metadata.insert("banned".to_string(), json!(result.status_code == 403));
                     status = if result.status_code == 401 {
                         "auth_invalid".to_string()
@@ -470,10 +398,6 @@ pub(crate) async fn refresh_windsurf_provider_quota_locally(
                         "rate_limit".to_string(),
                         json!({
                             "limited": true,
-                            "message": metadata
-                                .get("last_error")
-                                .cloned()
-                                .unwrap_or_else(|| json!("rate limited")),
                         }),
                     );
                     status = "rate_limited".to_string();
@@ -525,9 +449,11 @@ pub(crate) async fn refresh_windsurf_provider_quota_locally(
         if let Some(metadata) = metadata_update
             .as_ref()
             .and_then(|value| value.get("windsurf"))
-            .cloned()
         {
-            payload.insert("metadata".to_string(), metadata);
+            payload.insert(
+                "metadata".to_string(),
+                admin_provider_metadata_bucket_safe_json("windsurf", Some(metadata)),
+            );
         }
         if let Some(quota_snapshot) = build_quota_snapshot_payload(
             "windsurf",
@@ -592,7 +518,7 @@ mod tests {
             r#"{"error":{"message":"bad"},"apiKey":"sk-secret","sessionToken":"devin-session-token$secret"}"#,
         );
 
-        assert!(detail.contains("[REDACTED]"));
+        assert_eq!(detail, "[REDACTED upstream error body]");
         assert!(!detail.contains("sk-secret"));
         assert!(!detail.contains("devin-session-token$secret"));
     }

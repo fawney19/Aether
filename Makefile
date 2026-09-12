@@ -6,7 +6,7 @@ DEV_RUST_LOG := $(RUST_LOG)
 endif
 export DEV_RUST_LOG
 
-.PHONY: dev dev-backend dev-frontend migration backfill
+.PHONY: dev dev-backend dev-frontend db-status db-prepare migration backfill
 
 define DEV_BACKEND_SCRIPT
 set -euo pipefail
@@ -20,6 +20,13 @@ set -a
 source .env
 set +a
 
+if [[ -n "$${ADMIN_EMAIL:-}" || -n "$${ADMIN_USERNAME:-}" || -n "$${ADMIN_PASSWORD:-}" ]]; then
+	if [[ -z "$${ADMIN_USERNAME:-}" || -z "$${ADMIN_PASSWORD:-}" ]]; then
+		echo "=> 管理员自举配置不完整，请在 .env 中设置 ADMIN_USERNAME 和 ADMIN_PASSWORD"
+		exit 1
+	fi
+fi
+
 dotenv_has_key() {
 	local key="$$1"
 	grep -Eq "^[[:space:]]*$${key}=" .env
@@ -27,15 +34,6 @@ dotenv_has_key() {
 
 lowercase() {
 	printf '%s' "$$1" | tr '[:upper:]' '[:lower:]'
-}
-
-dev_uses_sqlite_database() {
-	local driver
-	local url
-	driver="$$(lowercase "$${AETHER_DATABASE_DRIVER:-}")"
-	url="$${AETHER_DATABASE_URL:-$${DATABASE_URL:-}}"
-
-	[[ "$${driver}" == "sqlite" || "$${url}" == sqlite:* ]]
 }
 
 dev_uses_postgres_database() {
@@ -60,9 +58,6 @@ dev_uses_redis_runtime() {
 	fi
 	if [[ "$${backend}" == "redis" ]]; then
 		return 0
-	fi
-	if dev_uses_sqlite_database; then
-		return 1
 	fi
 
 	return 0
@@ -201,12 +196,17 @@ print_startup_failure_hint() {
 
 	if [ -n "$${log_file}" ] && [ -f "$${log_file}" ]; then
 		if grep -Eq "database schema is behind" "$${log_file}"; then
-			echo "=> 检测到数据库 schema 落后，请执行: make migration"
+			echo "=> 检测到数据库尚未准备完成，请执行: make db-prepare"
 			return
 		fi
 
 		if grep -Eq "database backfills are behind" "$${log_file}"; then
-			echo "=> 检测到待执行 backfills，请执行: make backfill"
+			echo "=> 检测到数据库尚未准备完成，请执行: make db-prepare"
+			return
+		fi
+
+		if grep -Eq "bootstrap admin env is partially configured.*ADMIN_PASSWORD" "$${log_file}"; then
+			echo "=> 首次启动需要管理员密码，请在 .env 中设置 ADMIN_PASSWORD"
 			return
 		fi
 	fi
@@ -344,6 +344,9 @@ if ! ensure_dev_infra; then
 	exit 1
 fi
 
+echo "=> 编译 aether-gateway..."
+cargo build -p aether-gateway --bin aether-gateway
+
 GATEWAY_PID=""
 GATEWAY_LOG_DIR=""
 GATEWAY_LOG_FILE=""
@@ -352,8 +355,8 @@ create_gateway_log_file
 
 echo "=> 启动 aether-gateway (Rust frontdoor: 0.0.0.0:$${APP_PORT})..."
 echo "=> 日志过滤: $${RUST_LOG}"
-echo "=> 执行命令: cargo run -p aether-gateway -- --app-port $${APP_PORT}"
-cargo run -p aether-gateway -- --app-port "$${APP_PORT}" > >(
+echo "=> 执行命令: target/debug/aether-gateway --app-port $${APP_PORT}"
+target/debug/aether-gateway --app-port "$${APP_PORT}" > >(
 	tee -a "$${GATEWAY_LOG_FILE}"
 ) 2>&1 &
 GATEWAY_PID=$$!
@@ -444,7 +447,7 @@ if [ -f .env ]; then
 fi
 export APP_PORT="$${APP_PORT:-8084}"
 
-echo "=> 启动后端: RUST_LOG=$${DEV_RUST_LOG} cargo run -p aether-gateway -- --app-port $${APP_PORT:-8084}"
+echo "=> 启动后端: 先编译 aether-gateway，再运行 target/debug/aether-gateway --app-port $${APP_PORT:-8084}"
 /bin/bash -euo pipefail -c "$$DEV_BACKEND_SCRIPT" &
 backend_pid=$$!
 
@@ -494,8 +497,14 @@ export DEV_SCRIPT
 define DB_TASK_SCRIPT
 set -euo pipefail
 
-if [ -z "$${DB_TASK_FLAG:-}" ] || [ -z "$${DB_TASK_LABEL:-}" ]; then
-	echo "=> 内部错误: DB_TASK_FLAG / DB_TASK_LABEL 未设置"
+if [ -z "$${DB_TASK_COMMAND:-}" ] || [ -z "$${DB_TASK_LABEL:-}" ]; then
+	echo "=> 内部错误: DB_TASK_COMMAND / DB_TASK_LABEL 未设置"
+	exit 1
+fi
+
+read -r -a db_task_args <<< "$${DB_TASK_COMMAND}"
+if [ "$${#db_task_args[@]}" -eq 0 ]; then
+	echo "=> 内部错误: DB_TASK_COMMAND 为空"
 	exit 1
 fi
 
@@ -546,8 +555,8 @@ if ! command -v cargo >/dev/null 2>&1; then
 	exit 1
 fi
 
-echo "=> 执行 $${DB_TASK_LABEL}: cargo run -p aether-gateway -- $${DB_TASK_FLAG}"
-exec cargo run -p aether-gateway -- "$${DB_TASK_FLAG}"
+echo "=> 执行 $${DB_TASK_LABEL}: cargo run -p aether-gateway --bin aether-gateway -- $${db_task_args[*]}"
+exec cargo run -p aether-gateway --bin aether-gateway -- "$${db_task_args[@]}"
 endef
 export DB_TASK_SCRIPT
 
@@ -560,8 +569,14 @@ dev-backend:
 dev-frontend:
 	@cd frontend && npm run dev
 
+db-status:
+	@DB_TASK_COMMAND="db status" DB_TASK_LABEL="数据库状态检查" $(SHELL) -euo pipefail -c "$$DB_TASK_SCRIPT"
+
+db-prepare:
+	@DB_TASK_COMMAND="db prepare" DB_TASK_LABEL="数据库准备" $(SHELL) -euo pipefail -c "$$DB_TASK_SCRIPT"
+
 migration:
-	@DB_TASK_FLAG=--migrate DB_TASK_LABEL="数据库迁移" $(SHELL) -euo pipefail -c "$$DB_TASK_SCRIPT"
+	@DB_TASK_COMMAND="--migrate" DB_TASK_LABEL="数据库迁移" $(SHELL) -euo pipefail -c "$$DB_TASK_SCRIPT"
 
 backfill:
-	@DB_TASK_FLAG=--apply-backfills DB_TASK_LABEL="数据库 backfill" $(SHELL) -euo pipefail -c "$$DB_TASK_SCRIPT"
+	@DB_TASK_COMMAND="--apply-backfills" DB_TASK_LABEL="数据库 backfill" $(SHELL) -euo pipefail -c "$$DB_TASK_SCRIPT"

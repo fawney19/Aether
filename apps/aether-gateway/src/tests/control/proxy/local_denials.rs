@@ -1,9 +1,16 @@
 use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 
+use aether_contracts::tunnel::{
+    sign_tunnel_relay_request, tunnel_relay_payload_digest, TUNNEL_RELAY_AUTH_NONCE_HEADER,
+    TUNNEL_RELAY_AUTH_PAYLOAD_HEADER, TUNNEL_RELAY_AUTH_SENDER_HEADER,
+    TUNNEL_RELAY_AUTH_SIGNATURE_HEADER, TUNNEL_RELAY_AUTH_TIMESTAMP_HEADER,
+    TUNNEL_RELAY_FORWARDED_BY_HEADER, TUNNEL_RELAY_OWNER_INSTANCE_HEADER,
+};
 use axum::body::Body;
 use axum::routing::any;
 use axum::{extract::Request, Json, Router};
-use http::StatusCode;
+use http::{HeaderMap, HeaderValue, Method, StatusCode, Uri};
 use serde_json::json;
 
 use super::super::{
@@ -14,9 +21,143 @@ use super::super::{
 };
 use crate::constants::{
     CONTROL_ROUTE_CLASS_HEADER, EXECUTION_PATH_HEADER, EXECUTION_PATH_LOCAL_AUTH_DENIED,
-    GATEWAY_HEADER, TRACE_ID_HEADER, TRUSTED_AUTH_ACCESS_ALLOWED_HEADER,
+    FORWARDED_FOR_HEADER, GATEWAY_HEADER, TRACE_ID_HEADER, TRUSTED_AUTH_ACCESS_ALLOWED_HEADER,
     TRUSTED_AUTH_API_KEY_ID_HEADER, TRUSTED_AUTH_BALANCE_HEADER, TRUSTED_AUTH_USER_ID_HEADER,
+    TUNNEL_AFFINITY_FORWARDED_BY_HEADER, TUNNEL_AFFINITY_NODE_ID_HEADER,
+    TUNNEL_AFFINITY_OWNER_INSTANCE_HEADER,
 };
+
+const RELAY_TEST_SECRET: &str = "relay-test-secret-at-least-32-bytes";
+const RELAY_TEST_SENDER: &str = "gateway-a";
+const RELAY_TEST_OWNER: &str = "gateway-b";
+const RELAY_TEST_NODE_ID: &str = "node-1";
+const AFFINITY_TEST_BODY: &str = "{\"model\":\"gpt-5\",\"messages\":[]}";
+
+fn signed_affinity_headers(
+    method: &Method,
+    uri: &Uri,
+    user_id: &str,
+    api_key_id: &str,
+    access_allowed: bool,
+    balance: Option<&str>,
+    body: &[u8],
+) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        GATEWAY_HEADER,
+        HeaderValue::from_static("rust-phase3b-affinity"),
+    );
+    headers.insert(
+        TUNNEL_RELAY_FORWARDED_BY_HEADER,
+        HeaderValue::from_static(RELAY_TEST_SENDER),
+    );
+    headers.insert(
+        TUNNEL_AFFINITY_FORWARDED_BY_HEADER,
+        HeaderValue::from_static(RELAY_TEST_SENDER),
+    );
+    headers.insert(
+        TUNNEL_AFFINITY_OWNER_INSTANCE_HEADER,
+        HeaderValue::from_static(RELAY_TEST_OWNER),
+    );
+    headers.insert(
+        TUNNEL_AFFINITY_NODE_ID_HEADER,
+        HeaderValue::from_static(RELAY_TEST_NODE_ID),
+    );
+    headers.insert(
+        TRUSTED_AUTH_USER_ID_HEADER,
+        HeaderValue::from_str(user_id).expect("trusted user ID should be a valid header value"),
+    );
+    headers.insert(
+        TRUSTED_AUTH_API_KEY_ID_HEADER,
+        HeaderValue::from_str(api_key_id)
+            .expect("trusted API key ID should be a valid header value"),
+    );
+    headers.insert(
+        TRUSTED_AUTH_ACCESS_ALLOWED_HEADER,
+        HeaderValue::from_static(if access_allowed { "true" } else { "false" }),
+    );
+    headers.insert(
+        FORWARDED_FOR_HEADER,
+        HeaderValue::from_static("203.0.113.10"),
+    );
+    if let Some(balance) = balance {
+        headers.insert(
+            TRUSTED_AUTH_BALANCE_HEADER,
+            HeaderValue::from_str(balance).expect("trusted balance should be a valid header value"),
+        );
+    }
+
+    let metadata = crate::tunnel::build_tunnel_affinity_auth_metadata(method, uri, &headers)
+        .expect("affinity authentication metadata should build");
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock should be after epoch")
+        .as_secs();
+    let nonce = uuid::Uuid::new_v4().simple().to_string();
+    let payload_digest = tunnel_relay_payload_digest(&metadata, body);
+    let signature = sign_tunnel_relay_request(
+        RELAY_TEST_SECRET.as_bytes(),
+        RELAY_TEST_SENDER,
+        RELAY_TEST_OWNER,
+        RELAY_TEST_NODE_ID,
+        RELAY_TEST_SENDER,
+        false,
+        timestamp,
+        &nonce,
+        &payload_digest,
+    );
+    headers.insert(
+        TUNNEL_RELAY_AUTH_SENDER_HEADER,
+        HeaderValue::from_static(RELAY_TEST_SENDER),
+    );
+    headers.insert(
+        TUNNEL_RELAY_OWNER_INSTANCE_HEADER,
+        HeaderValue::from_static(RELAY_TEST_OWNER),
+    );
+    headers.insert(
+        TUNNEL_RELAY_AUTH_TIMESTAMP_HEADER,
+        HeaderValue::from_str(&timestamp.to_string()).expect("timestamp should be a valid header"),
+    );
+    headers.insert(
+        TUNNEL_RELAY_AUTH_NONCE_HEADER,
+        HeaderValue::from_str(&nonce).expect("nonce should be a valid header"),
+    );
+    headers.insert(
+        TUNNEL_RELAY_AUTH_PAYLOAD_HEADER,
+        HeaderValue::from_str(&payload_digest.encode_header_value())
+            .expect("payload digest should be a valid header"),
+    );
+    headers.insert(
+        TUNNEL_RELAY_AUTH_SIGNATURE_HEADER,
+        HeaderValue::from_str(&signature).expect("signature should be a valid header"),
+    );
+    headers
+}
+
+fn signed_affinity_request(
+    client: &reqwest::Client,
+    url: String,
+    path: &str,
+    user_id: &str,
+    api_key_id: &str,
+    access_allowed: bool,
+    balance: Option<&str>,
+    body: &[u8],
+) -> reqwest::RequestBuilder {
+    let method = Method::POST;
+    let uri = path.parse::<Uri>().expect("request path should be valid");
+    client
+        .request(method.clone(), url)
+        .headers(signed_affinity_headers(
+            &method,
+            &uri,
+            user_id,
+            api_key_id,
+            access_allowed,
+            balance,
+            body,
+        ))
+}
 
 #[tokio::test]
 async fn gateway_locally_denies_explicit_trusted_balance_failure_without_hitting_control_or_upstream(
@@ -63,23 +204,32 @@ async fn gateway_locally_denies_explicit_trusted_balance_failure_without_hitting
     let gateway = build_router_with_state(
         AppState::new()
             .expect("gateway state should build")
-            .with_auth_api_key_data_reader_for_tests(repository),
+            .with_auth_api_key_data_reader_for_tests(repository)
+            .with_tunnel_identity_and_relay_secret_for_tests(
+                RELAY_TEST_OWNER,
+                None,
+                RELAY_TEST_SECRET,
+            ),
     );
     let (gateway_url, gateway_handle) = start_server(gateway).await;
 
-    let response = reqwest::Client::new()
-        .post(format!("{gateway_url}/v1/chat/completions"))
-        .header(http::header::CONTENT_TYPE, "application/json")
-        .header(TRACE_ID_HEADER, "trace-control-balance-denied-1")
-        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
-        .header(TRUSTED_AUTH_USER_ID_HEADER, "user-123")
-        .header(TRUSTED_AUTH_API_KEY_ID_HEADER, "key-123")
-        .header(TRUSTED_AUTH_BALANCE_HEADER, "0")
-        .header(TRUSTED_AUTH_ACCESS_ALLOWED_HEADER, "false")
-        .body("{\"model\":\"gpt-5\",\"messages\":[]}")
-        .send()
-        .await
-        .expect("request should succeed");
+    let client = reqwest::Client::new();
+    let response = signed_affinity_request(
+        &client,
+        format!("{gateway_url}/v1/chat/completions"),
+        "/v1/chat/completions",
+        "user-123",
+        "key-123",
+        false,
+        Some("0"),
+        AFFINITY_TEST_BODY.as_bytes(),
+    )
+    .header(http::header::CONTENT_TYPE, "application/json")
+    .header(TRACE_ID_HEADER, "trace-control-balance-denied-1")
+    .body(AFFINITY_TEST_BODY)
+    .send()
+    .await
+    .expect("request should succeed");
 
     assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(
@@ -152,21 +302,32 @@ async fn gateway_locally_denies_invalid_trusted_snapshot_without_hitting_control
     let gateway = build_router_with_state(
         AppState::new()
             .expect("gateway state should build")
-            .with_auth_api_key_data_reader_for_tests(repository),
+            .with_auth_api_key_data_reader_for_tests(repository)
+            .with_tunnel_identity_and_relay_secret_for_tests(
+                RELAY_TEST_OWNER,
+                None,
+                RELAY_TEST_SECRET,
+            ),
     );
     let (gateway_url, gateway_handle) = start_server(gateway).await;
 
-    let response = reqwest::Client::new()
-        .post(format!("{gateway_url}/v1/chat/completions"))
-        .header(http::header::CONTENT_TYPE, "application/json")
-        .header(TRACE_ID_HEADER, "trace-control-invalid-trusted-1")
-        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
-        .header(TRUSTED_AUTH_USER_ID_HEADER, "user-123")
-        .header(TRUSTED_AUTH_API_KEY_ID_HEADER, "key-123")
-        .body("{\"model\":\"gpt-5\",\"messages\":[]}")
-        .send()
-        .await
-        .expect("request should succeed");
+    let client = reqwest::Client::new();
+    let response = signed_affinity_request(
+        &client,
+        format!("{gateway_url}/v1/chat/completions"),
+        "/v1/chat/completions",
+        "user-123",
+        "key-123",
+        true,
+        None,
+        AFFINITY_TEST_BODY.as_bytes(),
+    )
+    .header(http::header::CONTENT_TYPE, "application/json")
+    .header(TRACE_ID_HEADER, "trace-control-invalid-trusted-1")
+    .body(AFFINITY_TEST_BODY)
+    .send()
+    .await
+    .expect("request should succeed");
 
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     assert_eq!(
@@ -227,21 +388,32 @@ async fn gateway_locally_denies_missing_wallet_without_hitting_control_or_upstre
     let gateway = build_router_with_state(
         AppState::new()
             .expect("gateway state should build")
-            .with_data_state_for_tests(data_state),
+            .with_data_state_for_tests(data_state)
+            .with_tunnel_identity_and_relay_secret_for_tests(
+                RELAY_TEST_OWNER,
+                None,
+                RELAY_TEST_SECRET,
+            ),
     );
     let (gateway_url, gateway_handle) = start_server(gateway).await;
 
-    let response = reqwest::Client::new()
-        .post(format!("{gateway_url}/v1/chat/completions"))
-        .header(http::header::CONTENT_TYPE, "application/json")
-        .header(TRACE_ID_HEADER, "trace-control-wallet-missing-1")
-        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
-        .header(TRUSTED_AUTH_USER_ID_HEADER, "user-123")
-        .header(TRUSTED_AUTH_API_KEY_ID_HEADER, "key-123")
-        .body("{\"model\":\"gpt-5\",\"messages\":[]}")
-        .send()
-        .await
-        .expect("request should succeed");
+    let client = reqwest::Client::new();
+    let response = signed_affinity_request(
+        &client,
+        format!("{gateway_url}/v1/chat/completions"),
+        "/v1/chat/completions",
+        "user-123",
+        "key-123",
+        true,
+        None,
+        AFFINITY_TEST_BODY.as_bytes(),
+    )
+    .header(http::header::CONTENT_TYPE, "application/json")
+    .header(TRACE_ID_HEADER, "trace-control-wallet-missing-1")
+    .body(AFFINITY_TEST_BODY)
+    .send()
+    .await
+    .expect("request should succeed");
 
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
     assert_eq!(
@@ -757,21 +929,32 @@ async fn gateway_locally_denies_locked_trusted_snapshot_without_hitting_control_
     let gateway = build_router_with_state(
         AppState::new()
             .expect("gateway state should build")
-            .with_auth_api_key_data_reader_for_tests(repository),
+            .with_auth_api_key_data_reader_for_tests(repository)
+            .with_tunnel_identity_and_relay_secret_for_tests(
+                RELAY_TEST_OWNER,
+                None,
+                RELAY_TEST_SECRET,
+            ),
     );
     let (gateway_url, gateway_handle) = start_server(gateway).await;
 
-    let response = reqwest::Client::new()
-        .post(format!("{gateway_url}/v1/chat/completions"))
-        .header(http::header::CONTENT_TYPE, "application/json")
-        .header(TRACE_ID_HEADER, "trace-control-locked-trusted-1")
-        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
-        .header(TRUSTED_AUTH_USER_ID_HEADER, "user-locked-123")
-        .header(TRUSTED_AUTH_API_KEY_ID_HEADER, "key-locked-123")
-        .body("{\"model\":\"gpt-5\",\"messages\":[]}")
-        .send()
-        .await
-        .expect("request should succeed");
+    let client = reqwest::Client::new();
+    let response = signed_affinity_request(
+        &client,
+        format!("{gateway_url}/v1/chat/completions"),
+        "/v1/chat/completions",
+        "user-locked-123",
+        "key-locked-123",
+        true,
+        None,
+        AFFINITY_TEST_BODY.as_bytes(),
+    )
+    .header(http::header::CONTENT_TYPE, "application/json")
+    .header(TRACE_ID_HEADER, "trace-control-locked-trusted-1")
+    .body(AFFINITY_TEST_BODY)
+    .send()
+    .await
+    .expect("request should succeed");
 
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
     assert_eq!(

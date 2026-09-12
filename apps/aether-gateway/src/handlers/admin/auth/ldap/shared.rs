@@ -102,6 +102,14 @@ pub(super) fn admin_ldap_bad_request_response(detail: impl Into<String>) -> Resp
         .into_response()
 }
 
+pub(super) fn admin_ldap_conflict_response(detail: impl Into<String>) -> Response<Body> {
+    (
+        http::StatusCode::CONFLICT,
+        Json(json!({ "detail": detail.into() })),
+    )
+        .into_response()
+}
+
 pub(super) fn admin_ldap_unavailable_response() -> Response<Body> {
     (
         http::StatusCode::SERVICE_UNAVAILABLE,
@@ -110,13 +118,9 @@ pub(super) fn admin_ldap_unavailable_response() -> Response<Body> {
         .into_response()
 }
 
-pub(super) fn admin_ldap_normalize_server_url(server_url: &str) -> Option<String> {
-    let server_url = server_url.trim();
-    if server_url.is_empty() {
-        return None;
-    }
-    if server_url.contains("://") {
-        return Some(server_url.to_string());
-    }
-    Some(format!("ldap://{server_url}"))
+pub(super) fn admin_ldap_normalize_server_url(
+    server_url: &str,
+    use_starttls: bool,
+) -> Option<String> {
+    crate::handlers::shared::normalize_ldap_transport_server_url(server_url, use_starttls)
 }

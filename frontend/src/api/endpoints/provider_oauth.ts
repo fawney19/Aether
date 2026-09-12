@@ -230,14 +230,14 @@ export function normalizeBatchImportCredentials(text: string): BatchImportCreden
 }
 
 export async function refreshProviderOAuth(keyId: string): Promise<ProviderOAuthCompleteResponse> {
-  const resp = await client.post(`/api/admin/provider-oauth/keys/${keyId}/refresh`)
+  const resp = await client.post<ProviderOAuthCompleteResponse>(`/api/admin/provider-oauth/keys/${keyId}/refresh`)
   return resp.data
 }
 
 // Provider-level OAuth (不需要预先创建 key)
 
 export async function startProviderLevelOAuth(providerId: string): Promise<ProviderOAuthStartResponse> {
-  const resp = await client.post(`/api/admin/provider-oauth/providers/${providerId}/start`)
+  const resp = await client.post<ProviderOAuthStartResponse>(`/api/admin/provider-oauth/providers/${providerId}/start`)
   return resp.data
 }
 
@@ -245,7 +245,7 @@ export async function completeProviderLevelOAuth(
   providerId: string,
   data: ProviderOAuthCompleteRequest
 ): Promise<ProviderOAuthCompleteResponseWithKey> {
-  const resp = await client.post(`/api/admin/provider-oauth/providers/${providerId}/complete`, data)
+  const resp = await client.post<ProviderOAuthCompleteResponseWithKey>(`/api/admin/provider-oauth/providers/${providerId}/complete`, data)
   return resp.data
 }
 
@@ -253,7 +253,7 @@ export async function authorizeProviderWithCookie(
   providerId: string,
   data: ProviderCookieAuthorizeRequest
 ): Promise<ProviderOAuthCompleteResponseWithKey> {
-  const resp = await client.post(
+  const resp = await client.post<ProviderOAuthCompleteResponseWithKey>(
     `/api/admin/provider-oauth/providers/${providerId}/cookie-authorize`,
     data,
     { timeout: CLAUDE_COOKIE_AUTHORIZE_TIMEOUT_MS },
@@ -265,7 +265,7 @@ export async function startProviderCookieAuthorizeTask(
   providerId: string,
   data: ProviderCookieAuthorizeBatchTaskRequest,
 ): Promise<OAuthBatchImportTaskStartResponse> {
-  const resp = await client.post(
+  const resp = await client.post<OAuthBatchImportTaskStartResponse>(
     `/api/admin/provider-oauth/providers/${providerId}/cookie-authorize/tasks`,
     data,
   )
@@ -276,7 +276,7 @@ export async function getProviderCookieAuthorizeTaskStatus(
   providerId: string,
   taskId: string,
 ): Promise<OAuthBatchImportTaskStatusResponse> {
-  const resp = await client.get(
+  const resp = await client.get<OAuthBatchImportTaskStatusResponse>(
     `/api/admin/provider-oauth/providers/${providerId}/cookie-authorize/tasks/${taskId}`,
   )
   return resp.data
@@ -313,7 +313,7 @@ export async function importProviderRefreshToken(
     headers?: Record<string, string>
   }
 ): Promise<ProviderOAuthCompleteResponseWithKey> {
-  const resp = await client.post(`/api/admin/provider-oauth/providers/${providerId}/import-refresh-token`, data)
+  const resp = await client.post<ProviderOAuthCompleteResponseWithKey>(`/api/admin/provider-oauth/providers/${providerId}/import-refresh-token`, data)
   return resp.data
 }
 
@@ -325,7 +325,7 @@ export async function startBatchImportOAuthTask(
   const route = containsAgentIdentityImport(credentials)
     ? 'agent-identity-import/tasks'
     : 'batch-import/tasks'
-  const resp = await client.post(`/api/admin/provider-oauth/providers/${providerId}/${route}`, {
+  const resp = await client.post<OAuthBatchImportTaskStartResponse>(`/api/admin/provider-oauth/providers/${providerId}/${route}`, {
     credentials,
     proxy_node_id: proxyNodeId || undefined,
   })
@@ -339,7 +339,7 @@ export async function getBatchImportOAuthTaskStatus(
   const route = taskId.startsWith('agent-identity-')
     ? 'agent-identity-import/tasks'
     : 'batch-import/tasks'
-  const resp = await client.get(`/api/admin/provider-oauth/providers/${providerId}/${route}/${taskId}`)
+  const resp = await client.get<OAuthBatchImportTaskStatusResponse>(`/api/admin/provider-oauth/providers/${providerId}/${route}/${taskId}`)
   return resp.data
 }
 
@@ -412,7 +412,7 @@ export async function startDeviceAuthorize(
   providerId: string,
   data: DeviceAuthorizeRequest
 ): Promise<DeviceAuthorizeResponse> {
-  const resp = await client.post(`/api/admin/provider-oauth/providers/${providerId}/device-authorize`, data)
+  const resp = await client.post<DeviceAuthorizeResponse>(`/api/admin/provider-oauth/providers/${providerId}/device-authorize`, data)
   return resp.data
 }
 
@@ -420,6 +420,6 @@ export async function pollDeviceAuthorize(
   providerId: string,
   data: DevicePollRequest
 ): Promise<DevicePollResponse> {
-  const resp = await client.post(`/api/admin/provider-oauth/providers/${providerId}/device-poll`, data)
+  const resp = await client.post<DevicePollResponse>(`/api/admin/provider-oauth/providers/${providerId}/device-poll`, data)
   return resp.data
 }

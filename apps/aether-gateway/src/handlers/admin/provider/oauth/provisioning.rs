@@ -353,13 +353,20 @@ pub(crate) async fn create_provider_oauth_catalog_key(
     proxy: Option<serde_json::Value>,
     expires_at_unix_secs: Option<u64>,
 ) -> Result<Option<StoredProviderCatalogKey>, GatewayError> {
-    let Some(encrypted_api_key) = state.encrypt_catalog_secret_with_fallbacks(access_token) else {
+    let key_id = Uuid::new_v4().to_string();
+    let Ok(encrypted_api_key) =
+        state
+            .app()
+            .seal_provider_catalog_key_api_key(provider_id, &key_id, access_token)
+    else {
         return Ok(None);
     };
     let auth_config_json = serde_json::to_string(&serde_json::Value::Object(auth_config.clone()))
         .map_err(|err| GatewayError::Internal(err.to_string()))?;
-    let Some(encrypted_auth_config) =
-        state.encrypt_catalog_secret_with_fallbacks(&auth_config_json)
+    let Ok(encrypted_auth_config) =
+        state
+            .app()
+            .seal_provider_catalog_key_auth_config(provider_id, &key_id, &auth_config_json)
     else {
         return Ok(None);
     };
@@ -369,7 +376,7 @@ pub(crate) async fn create_provider_oauth_catalog_key(
         .map(|duration| duration.as_secs())
         .unwrap_or(0);
     let mut record = StoredProviderCatalogKey::new(
-        Uuid::new_v4().to_string(),
+        key_id,
         provider_id.to_string(),
         name.to_string(),
         "oauth".to_string(),
@@ -422,14 +429,20 @@ pub(crate) async fn update_existing_provider_oauth_catalog_key(
     proxy: Option<serde_json::Value>,
     expires_at_unix_secs: Option<u64>,
 ) -> Result<Option<StoredProviderCatalogKey>, GatewayError> {
-    let Some(encrypted_api_key) = state.encrypt_catalog_secret_with_fallbacks(access_token) else {
+    let Ok(encrypted_api_key) = state.app().seal_provider_catalog_key_api_key(
+        &existing_key.provider_id,
+        &existing_key.id,
+        access_token,
+    ) else {
         return Ok(None);
     };
     let auth_config_json = serde_json::to_string(&serde_json::Value::Object(auth_config.clone()))
         .map_err(|err| GatewayError::Internal(err.to_string()))?;
-    let Some(encrypted_auth_config) =
-        state.encrypt_catalog_secret_with_fallbacks(&auth_config_json)
-    else {
+    let Ok(encrypted_auth_config) = state.app().seal_provider_catalog_key_auth_config(
+        &existing_key.provider_id,
+        &existing_key.id,
+        &auth_config_json,
+    ) else {
         return Ok(None);
     };
     let now_unix_secs = SystemTime::now()
@@ -492,11 +505,10 @@ pub(super) async fn seed_provider_oauth_pool_score(
         .await
     {
         Ok(mut providers) => providers.pop(),
-        Err(err) => {
+        Err(_) => {
             tracing::debug!(
                 provider_id = %provider_id,
                 key_id = %key.id,
-                error = ?err,
                 "gateway provider oauth provisioning: failed to read provider for pool score seed"
             );
             return;
@@ -524,11 +536,10 @@ pub(super) async fn seed_provider_oauth_pool_score(
         .await
     {
         Ok(mut scores) => scores.pop(),
-        Err(err) => {
+        Err(_) => {
             tracing::debug!(
                 provider_id = %provider_id,
                 key_id = %key.id,
-                error = ?err,
                 "gateway provider oauth provisioning: failed to read existing pool score"
             );
             return;
@@ -541,11 +552,16 @@ pub(super) async fn seed_provider_oauth_pool_score(
         now_unix_secs,
         pool_config.score_rules,
     );
-    if let Err(err) = state.app().data.upsert_pool_member_score(upsert).await {
+    if state
+        .app()
+        .data
+        .upsert_pool_member_score(upsert)
+        .await
+        .is_err()
+    {
         tracing::debug!(
             provider_id = %provider_id,
             key_id = %key.id,
-            error = ?err,
             "gateway provider oauth provisioning: failed to refresh pool score row"
         );
     }

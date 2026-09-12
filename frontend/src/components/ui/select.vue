@@ -4,7 +4,7 @@ import { SelectRoot as SelectRootPrimitive } from 'radix-vue'
 
 interface Props {
   defaultValue?: string
-  modelValue?: string
+  modelValue?: string | null
   open?: boolean
   defaultOpen?: boolean
   dir?: 'ltr' | 'rtl'
@@ -35,7 +35,7 @@ const openProp = computed(() =>
 
 // modelValue 未传入时不绑定，让 radix-vue 走 uncontrolled 模式
 const modelValueProp = computed(() =>
-  props.modelValue !== undefined ? { modelValue: props.modelValue } : {}
+  props.modelValue !== undefined ? { modelValue: props.modelValue ?? '' } : {}
 )
 </script>
 

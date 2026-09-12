@@ -9,7 +9,10 @@
     @update:model-value="handleDialogUpdate"
   >
     <div class="space-y-3.5">
-      <nav class="grid grid-cols-3 gap-1.5 rounded-xl bg-muted/40 p-1.5" aria-label="批量导入步骤">
+      <nav
+        class="grid grid-cols-3 gap-1.5 rounded-xl bg-muted/40 p-1.5"
+        aria-label="批量导入步骤"
+      >
         <button
           v-for="step in steps"
           :key="step.id"
@@ -37,8 +40,12 @@
           <div class="flex min-w-0 items-center gap-3">
             <span class="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-foreground text-xs font-semibold text-background">1</span>
             <div class="min-w-0">
-              <h3 class="text-balance text-sm font-semibold text-foreground">粘贴名称与 Key</h3>
-              <p class="text-pretty text-[11px] leading-4 text-muted-foreground">每行一条，仅接受四个短横线分隔</p>
+              <h3 class="text-balance text-sm font-semibold text-foreground">
+                粘贴名称与 Key
+              </h3>
+              <p class="text-pretty text-[11px] leading-4 text-muted-foreground">
+                每行一条，仅接受四个短横线分隔
+              </p>
             </div>
           </div>
           <Badge
@@ -50,34 +57,40 @@
         </header>
 
         <div class="min-w-0">
-            <Label for="provider-key-batch-input" class="sr-only">Key 列表</Label>
-            <Textarea
-              id="provider-key-batch-input"
-              v-model="inputText"
-              class="h-[280px] min-h-[220px] max-h-[520px] !resize-y !rounded-none !border-0 !bg-transparent !px-4 !py-4 font-mono text-[13px] leading-6 !shadow-none !ring-0 focus-visible:!ring-0"
-              spellcheck="false"
-              placeholder="主账号----sk-xxxx&#10;备用账号----sk-yyyy"
-            />
+          <Label
+            for="provider-key-batch-input"
+            class="sr-only"
+          >Key 列表</Label>
+          <Textarea
+            id="provider-key-batch-input"
+            v-model="inputText"
+            class="h-[280px] min-h-[220px] max-h-[520px] !resize-y !rounded-none !border-0 !bg-transparent !px-4 !py-4 font-mono text-[13px] leading-6 !shadow-none !ring-0 focus-visible:!ring-0"
+            spellcheck="false"
+            placeholder="主账号----sk-xxxx&#10;备用账号----sk-yyyy"
+          />
+          <div
+            v-if="parsed.errors.length > 0"
+            class="mx-4 mb-3 space-y-1 rounded-lg bg-destructive/5 px-3 py-2 text-[11px] text-destructive ring-1 ring-destructive/20"
+          >
             <div
-              v-if="parsed.errors.length > 0"
-              class="mx-4 mb-3 space-y-1 rounded-lg bg-destructive/5 px-3 py-2 text-[11px] text-destructive ring-1 ring-destructive/20"
+              v-for="(item, index) in parsed.errors.slice(0, 6)"
+              :key="`${item.lineNumber}-${index}`"
             >
-              <div
-                v-for="(item, index) in parsed.errors.slice(0, 6)"
-                :key="`${item.lineNumber}-${index}`"
-              >
-                {{ item.lineNumber ? `第 ${item.lineNumber} 行：` : '' }}{{ item.message }}
-              </div>
-              <div v-if="parsed.errors.length > 6" class="font-medium">
-                另有 {{ parsed.errors.length - 6 }} 个问题
-              </div>
+              {{ item.lineNumber ? `第 ${item.lineNumber} 行：` : '' }}{{ item.message }}
             </div>
-            <div class="flex flex-wrap items-center gap-2 border-t border-border/50 bg-muted/10 px-4 py-2.5 text-[11px] text-muted-foreground">
-              <span class="rounded-md bg-muted px-2 py-1 font-mono text-foreground/80">名称----Key</span>
-              <span>名称和 Key 都不能为空</span>
-              <span class="ml-auto hidden tabular-nums sm:inline">已识别 {{ parsed.items.length }} 条</span>
+            <div
+              v-if="parsed.errors.length > 6"
+              class="font-medium"
+            >
+              另有 {{ parsed.errors.length - 6 }} 个问题
             </div>
           </div>
+          <div class="flex flex-wrap items-center gap-2 border-t border-border/50 bg-muted/10 px-4 py-2.5 text-[11px] text-muted-foreground">
+            <span class="rounded-md bg-muted px-2 py-1 font-mono text-foreground/80">名称----Key</span>
+            <span>名称和 Key 都不能为空</span>
+            <span class="ml-auto hidden tabular-nums sm:inline">已识别 {{ parsed.items.length }} 条</span>
+          </div>
+        </div>
       </section>
 
       <section
@@ -98,7 +111,10 @@
               >{{ item }}</span>
             </span>
           </span>
-          <Badge :variant="selectedApiFormats.length > 0 ? 'success' : 'destructive'" class="ml-auto shrink-0 tabular-nums">
+          <Badge
+            :variant="selectedApiFormats.length > 0 ? 'success' : 'destructive'"
+            class="ml-auto shrink-0 tabular-nums"
+          >
             {{ selectedApiFormats.length }} 种格式
           </Badge>
         </header>
@@ -123,12 +139,18 @@
         <header class="flex min-h-[72px] items-center gap-3 border-b border-border/60 bg-muted/15 px-4 py-3">
           <span class="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-foreground text-xs font-semibold text-background">3</span>
           <div class="min-w-0 flex-1">
-            <h3 class="text-balance text-sm font-semibold">逐项确认</h3>
-            <p class="text-pretty text-[11px] leading-4 text-muted-foreground">展开任意 Key 可修改内容或设置单独配置</p>
+            <h3 class="text-balance text-sm font-semibold">
+              逐项确认
+            </h3>
+            <p class="text-pretty text-[11px] leading-4 text-muted-foreground">
+              展开任意 Key 可修改内容或设置单独配置
+            </p>
           </div>
           <div class="shrink-0 text-right text-[11px] text-muted-foreground">
             <div><span class="font-semibold tabular-nums text-foreground">{{ reviewItems.length }}</span> 个 Key</div>
-            <div v-if="customizedItemCount > 0"><span class="tabular-nums">{{ customizedItemCount }}</span> 个单独配置</div>
+            <div v-if="customizedItemCount > 0">
+              <span class="tabular-nums">{{ customizedItemCount }}</span> 个单独配置
+            </div>
           </div>
         </header>
 
@@ -156,9 +178,13 @@
                     v-if="reviewErrorsByIndex.has(entry.index)"
                     variant="destructive"
                     class="shrink-0 text-[10px]"
-                  >需修正</Badge>
+                  >
+                    需修正
+                  </Badge>
                 </div>
-                <div class="mt-0.5 truncate font-mono text-[10px] text-muted-foreground">{{ maskSecret(entry.item.apiKey) }}</div>
+                <div class="mt-0.5 truncate font-mono text-[10px] text-muted-foreground">
+                  {{ maskSecret(entry.item.apiKey) }}
+                </div>
               </div>
               <div class="hidden shrink-0 items-center gap-1.5 sm:flex">
                 <span class="rounded-md bg-muted px-2 py-0.5 text-[10px] text-muted-foreground">{{ effectiveAuthLabel(entry.item) }}</span>
@@ -186,18 +212,30 @@
               <div class="grid gap-3 sm:grid-cols-2">
                 <div class="space-y-1.5">
                   <Label class="text-xs">名称</Label>
-                  <Input v-model="entry.item.name" class="h-10" placeholder="必填" />
+                  <Input
+                    v-model="entry.item.name"
+                    class="h-10"
+                    placeholder="必填"
+                  />
                 </div>
                 <div class="space-y-1.5">
                   <Label class="text-xs">Key</Label>
-                  <Input v-model="entry.item.apiKey" class="h-10 font-mono text-xs" placeholder="必填" />
+                  <Input
+                    v-model="entry.item.apiKey"
+                    class="h-10 font-mono text-xs"
+                    placeholder="必填"
+                  />
                 </div>
               </div>
 
               <div class="flex min-h-12 items-center justify-between gap-3 rounded-lg bg-background px-3 shadow-[0_0_0_1px_rgb(0_0_0/0.06)] dark:shadow-[0_0_0_1px_rgb(255_255_255/0.08)]">
                 <div>
-                  <div class="text-xs font-medium">单独配置此 Key</div>
-                  <div class="text-[11px] text-muted-foreground">开启后覆盖第二步中的统一配置</div>
+                  <div class="text-xs font-medium">
+                    单独配置此 Key
+                  </div>
+                  <div class="text-[11px] text-muted-foreground">
+                    开启后覆盖第二步中的统一配置
+                  </div>
                 </div>
                 <Switch
                   :model-value="entry.item.customized"
@@ -220,7 +258,12 @@
                 v-if="reviewErrorsByIndex.has(entry.index)"
                 class="space-y-1 rounded-lg bg-destructive/5 px-3 py-2 text-[11px] text-destructive"
               >
-                <div v-for="message in reviewErrorsByIndex.get(entry.index)" :key="message">{{ message }}</div>
+                <div
+                  v-for="message in reviewErrorsByIndex.get(entry.index)"
+                  :key="message"
+                >
+                  {{ message }}
+                </div>
               </div>
             </div>
           </article>
@@ -230,12 +273,24 @@
           v-if="reviewPageCount > 1"
           class="flex min-h-12 items-center justify-between gap-3 border-t border-border/60 bg-muted/10 px-3 sm:px-4"
         >
-          <Button variant="ghost" size="sm" class="h-9" :disabled="reviewPage === 1" @click="changeReviewPage(reviewPage - 1)">
+          <Button
+            variant="ghost"
+            size="sm"
+            class="h-9"
+            :disabled="reviewPage === 1"
+            @click="changeReviewPage(reviewPage - 1)"
+          >
             <ChevronLeft class="mr-1 h-4 w-4" />
             上一页
           </Button>
           <span class="text-[11px] tabular-nums text-muted-foreground">{{ reviewPage }} / {{ reviewPageCount }}</span>
-          <Button variant="ghost" size="sm" class="h-9" :disabled="reviewPage === reviewPageCount" @click="changeReviewPage(reviewPage + 1)">
+          <Button
+            variant="ghost"
+            size="sm"
+            class="h-9"
+            :disabled="reviewPage === reviewPageCount"
+            @click="changeReviewPage(reviewPage + 1)"
+          >
             下一页
             <ChevronRight class="ml-1 h-4 w-4" />
           </Button>
@@ -245,14 +300,35 @@
 
     <template #footer>
       <div class="flex w-full flex-col-reverse gap-2 sm:flex-row sm:justify-end">
-        <Button class="w-full sm:w-auto" variant="outline" :disabled="importing" @click="handleBack">
-          <ArrowLeft v-if="currentStep > 1" class="mr-2 h-4 w-4" />
+        <Button
+          class="w-full sm:w-auto"
+          variant="outline"
+          :disabled="importing"
+          @click="handleBack"
+        >
+          <ArrowLeft
+            v-if="currentStep > 1"
+            class="mr-2 h-4 w-4"
+          />
           {{ currentStep === 1 ? '取消' : '上一步' }}
         </Button>
-        <Button class="w-full sm:w-auto" :disabled="primaryActionDisabled" @click="handlePrimaryAction">
-          <Loader2 v-if="importing" class="mr-2 h-4 w-4 animate-spin" />
-          <ListPlus v-else-if="currentStep === 3" class="mr-2 h-4 w-4" />
-          <ArrowRight v-else class="mr-2 h-4 w-4" />
+        <Button
+          class="w-full sm:w-auto"
+          :disabled="primaryActionDisabled"
+          @click="handlePrimaryAction"
+        >
+          <Loader2
+            v-if="importing"
+            class="mr-2 h-4 w-4 animate-spin"
+          />
+          <ListPlus
+            v-else-if="currentStep === 3"
+            class="mr-2 h-4 w-4"
+          />
+          <ArrowRight
+            v-else
+            class="mr-2 h-4 w-4"
+          />
           {{ primaryActionLabel }}
         </Button>
       </div>
@@ -459,7 +535,7 @@ function buildSettingsPayload(
     cache_ttl_minutes: source.cache_ttl_minutes,
     max_probe_interval_minutes: source.max_probe_interval_minutes,
     is_active: source.is_active,
-    note: source.note.trim() || null,
+    note: source.note?.trim() || null,
     ...((source.proxy_node_id || includeEmptyProxy)
       ? { proxy_node_id: source.proxy_node_id || null }
       : {}),

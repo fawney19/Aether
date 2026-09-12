@@ -9,6 +9,7 @@ use super::super::shared::{
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::handlers::admin::shared::{attach_admin_audit_response, unix_secs_to_rfc3339};
 use crate::GatewayError;
+use aether_data::repository::wallet::stored_timestamp_unix_secs;
 use axum::{
     body::Body,
     response::{IntoResponse, Response},
@@ -71,7 +72,7 @@ pub(in super::super) async fn build_admin_wallet_process_refund_response(
                     transaction.link_id.as_deref(),
                     transaction.operator_id.as_deref(),
                     transaction.description.as_deref(),
-                    unix_secs_to_rfc3339(transaction.created_at_unix_ms),
+                    unix_secs_to_rfc3339(stored_timestamp_unix_secs(transaction.created_at_unix_ms)),
                 ),
             }))
             .into_response();

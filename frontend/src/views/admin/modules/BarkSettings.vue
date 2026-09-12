@@ -52,9 +52,7 @@
                 class="mt-1"
               />
               <p class="mt-1 text-xs text-muted-foreground">
-                Bark App 中推送地址
-                <span class="font-mono">https://api.day.app/xxxx</span>
-                的 <span class="font-mono">xxxx</span> 部分
+                {{ $t('modules.bark.deviceKeyHint') }}
               </p>
             </div>
 

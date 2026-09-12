@@ -17,6 +17,9 @@ use uuid::Uuid;
 use crate::handlers::shared::{
     payment_gateway_allow_user_refund, payment_gateway_provider_for_payment_method,
 };
+use aether_data::repository::wallet::{
+    canonicalize_wallet_refund_fields, stored_timestamp_unix_secs,
+};
 
 const WALLET_REFUND_CONFIGURED_PROVIDERS: &[&str] = &["epay", "alipay", "wxpay", "stripe"];
 
@@ -150,12 +153,19 @@ fn wallet_refund_payload_from_record(
         "gateway_refund_id": record.gateway_refund_id,
         "payout_method": record.payout_method,
         "payout_reference": record.payout_reference,
-        "payout_proof": record.payout_proof,
-        "created_at": unix_secs_to_rfc3339(record.created_at_unix_ms),
+        "created_at": unix_secs_to_rfc3339(stored_timestamp_unix_secs(record.created_at_unix_ms)),
         "updated_at": unix_secs_to_rfc3339(record.updated_at_unix_secs),
         "processed_at": record.processed_at_unix_secs.and_then(unix_secs_to_rfc3339),
         "completed_at": record.completed_at_unix_secs.and_then(unix_secs_to_rfc3339),
     })
+}
+
+#[cfg(test)]
+fn wallet_public_refund_payload(mut payload: serde_json::Value) -> serde_json::Value {
+    if let Some(object) = payload.as_object_mut() {
+        object.remove("payout_proof");
+    }
+    payload
 }
 
 pub(super) async fn handle_wallet_refunds_list(
@@ -240,8 +250,7 @@ pub(super) async fn handle_wallet_refunds_list(
                 "gateway_refund_id": record.gateway_refund_id,
                 "payout_method": record.payout_method,
                 "payout_reference": record.payout_reference,
-                "payout_proof": record.payout_proof,
-                "created_at": unix_secs_to_rfc3339(record.created_at_unix_ms),
+                "created_at": unix_secs_to_rfc3339(stored_timestamp_unix_secs(record.created_at_unix_ms)),
                 "updated_at": unix_secs_to_rfc3339(record.updated_at_unix_secs),
                 "processed_at": record.processed_at_unix_secs.and_then(unix_secs_to_rfc3339),
                 "completed_at": record.completed_at_unix_secs.and_then(unix_secs_to_rfc3339),
@@ -257,6 +266,7 @@ pub(super) async fn handle_wallet_refunds_list(
                 .into_iter()
                 .skip(offset)
                 .take(limit)
+                .map(wallet_public_refund_payload)
                 .collect::<Vec<_>>();
             (items, total)
         } else {
@@ -324,7 +334,11 @@ pub(super) async fn handle_wallet_refund_detail(
         Ok(None) => {
             #[cfg(test)]
             if let Some(payload) = wallet_test_refund_by_id(&wallet.id, &refund_id) {
-                return build_auth_json_response(http::StatusCode::OK, payload, None);
+                return build_auth_json_response(
+                    http::StatusCode::OK,
+                    wallet_public_refund_payload(payload),
+                    None,
+                );
             }
             build_auth_error_response(
                 http::StatusCode::NOT_FOUND,
@@ -359,7 +373,7 @@ pub(super) async fn handle_wallet_create_refund(
             return build_auth_error_response(http::StatusCode::BAD_REQUEST, "输入验证失败", false)
         }
     };
-    let payload = match normalize_wallet_create_refund_request(payload) {
+    let mut payload = match normalize_wallet_create_refund_request(payload) {
         Ok(value) => value,
         Err(detail) => {
             return build_auth_error_response(http::StatusCode::BAD_REQUEST, detail, false);
@@ -389,6 +403,7 @@ pub(super) async fn handle_wallet_create_refund(
         );
     };
 
+    let mut resolved_payment_method = None;
     if let Some(payment_order_id) = payload.payment_order_id.as_deref() {
         let order = match state
             .find_wallet_payment_order_by_user_id(&auth.user.id, payment_order_id)
@@ -437,7 +452,24 @@ pub(super) async fn handle_wallet_create_refund(
                 false,
             );
         }
+        resolved_payment_method = Some(order.payment_method.clone());
     }
+
+    let canonical = match canonicalize_wallet_refund_fields(
+        payload.payment_order_id.as_deref(),
+        payload.source_type.as_deref(),
+        payload.source_id.as_deref(),
+        payload.refund_mode.as_deref(),
+        resolved_payment_method.as_deref(),
+    ) {
+        Ok(value) => value,
+        Err(detail) => {
+            return build_auth_error_response(http::StatusCode::BAD_REQUEST, detail, false);
+        }
+    };
+    payload.source_type = Some(canonical.source_type);
+    payload.source_id = canonical.source_id;
+    payload.refund_mode = Some(canonical.refund_mode);
 
     if !state.has_database_wallet_data_writer() {
         #[cfg(test)]
@@ -446,11 +478,19 @@ pub(super) async fn handle_wallet_create_refund(
                 if let Some(existing) =
                     wallet_test_refund_by_idempotency(&auth.user.id, idempotency_key)
                 {
-                    return build_auth_json_response(http::StatusCode::OK, existing, None);
+                    return build_auth_json_response(
+                        http::StatusCode::OK,
+                        wallet_public_refund_payload(existing),
+                        None,
+                    );
                 }
             }
             let reserved_amount = wallet_test_reserved_refund_amount(&wallet.id);
-            if payload.amount_usd > (wallet.balance - reserved_amount) {
+            let available_balance = wallet.balance - reserved_amount;
+            if !wallet.balance.is_finite()
+                || !available_balance.is_finite()
+                || payload.amount_usd > available_balance
+            {
                 return build_auth_error_response(
                     http::StatusCode::BAD_REQUEST,
                     "refund amount exceeds available refundable recharge balance",
@@ -472,7 +512,6 @@ pub(super) async fn handle_wallet_create_refund(
                 "gateway_refund_id": serde_json::Value::Null,
                 "payout_method": serde_json::Value::Null,
                 "payout_reference": serde_json::Value::Null,
-                "payout_proof": serde_json::Value::Null,
                 "created_at": now.to_rfc3339(),
                 "updated_at": now.to_rfc3339(),
                 "processed_at": serde_json::Value::Null,
@@ -527,6 +566,9 @@ pub(super) async fn handle_wallet_create_refund(
                 None,
             )
         }
+        aether_data::repository::wallet::CreateWalletRefundRequestOutcome::InvalidInput(detail) => {
+            build_auth_error_response(http::StatusCode::BAD_REQUEST, detail, false)
+        }
         aether_data::repository::wallet::CreateWalletRefundRequestOutcome::WalletMissing => {
             build_auth_error_response(
                 http::StatusCode::BAD_REQUEST,
@@ -569,5 +611,51 @@ pub(super) async fn handle_wallet_create_refund(
                 false,
             )
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::wallet_refund_payload_from_record;
+    use aether_data::repository::wallet::StoredAdminWalletRefund;
+    use serde_json::json;
+
+    #[test]
+    fn public_refund_projection_excludes_payout_proof_and_upstream_payload() {
+        let record = StoredAdminWalletRefund {
+            id: "refund-1".to_string(),
+            refund_no: "rf_1".to_string(),
+            wallet_id: "wallet-1".to_string(),
+            user_id: Some("user-1".to_string()),
+            payment_order_id: Some("order-1".to_string()),
+            source_type: "payment_order".to_string(),
+            source_id: Some("order-1".to_string()),
+            refund_mode: "original_channel".to_string(),
+            amount_usd: 10.0,
+            status: "processing".to_string(),
+            reason: Some("requested".to_string()),
+            failure_reason: None,
+            gateway_refund_id: Some("gateway-refund-1".to_string()),
+            payout_method: None,
+            payout_reference: None,
+            payout_proof: Some(json!({
+                "gateway_refund": {
+                    "id": "gateway-refund-1",
+                    "payload": {"payer": "sensitive", "credential": "secret"}
+                }
+            })),
+            requested_by: Some("user-1".to_string()),
+            approved_by: Some("admin-1".to_string()),
+            processed_by: Some("admin-1".to_string()),
+            created_at_unix_ms: 1,
+            updated_at_unix_secs: 1,
+            processed_at_unix_secs: Some(1),
+            completed_at_unix_secs: None,
+        };
+
+        let payload = wallet_refund_payload_from_record(&record);
+        assert!(payload.get("payout_proof").is_none());
+        assert_eq!(payload["status"], "processing");
+        assert_eq!(payload["gateway_refund_id"], "gateway-refund-1");
     }
 }

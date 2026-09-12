@@ -67,6 +67,14 @@ pub(super) async fn perform_usage_cleanup_once(
     perform_usage_cleanup_once_with_override(data, None, true).await
 }
 
+pub(super) async fn perform_automatic_usage_cleanup_once(
+    data: &GatewayDataState,
+) -> Result<UsageCleanupSummary, DataLayerError> {
+    let mut summary = perform_usage_cleanup_once(data).await?;
+    cleanup_usage_policy_ledgers(data, &mut summary).await?;
+    Ok(summary)
+}
+
 pub(super) async fn perform_usage_cleanup_once_with_override(
     data: &GatewayDataState,
     override_older_than: Option<chrono::Duration>,
@@ -126,6 +134,41 @@ async fn perform_usage_cleanup_once_with_options(
         cleanup_execution_mode(options.mode),
     )
     .await
+}
+
+async fn cleanup_usage_policy_ledgers(
+    data: &GatewayDataState,
+    summary: &mut UsageCleanupSummary,
+) -> Result<(), DataLayerError> {
+    if !data.has_settlement_writer() {
+        return Ok(());
+    }
+
+    let settings = usage_cleanup_settings(data).await?;
+    let now_unix_secs = u64::try_from(Utc::now().timestamp()).unwrap_or(0);
+    let cleanup_batch_size = settings.batch_size.max(1);
+    // Bound each maintenance run while still draining faster than one day's normal growth.
+    for _ in 0..32 {
+        let deleted = data
+            .cleanup_usage_policy_cost_reservations(now_unix_secs, cleanup_batch_size)
+            .await?;
+        summary.cost_reservations_deleted =
+            summary.cost_reservations_deleted.saturating_add(deleted);
+        if deleted < cleanup_batch_size {
+            break;
+        }
+    }
+    for _ in 0..32 {
+        let deleted = data
+            .cleanup_usage_policy_request_admissions(now_unix_secs, cleanup_batch_size)
+            .await?;
+        summary.request_admissions_deleted =
+            summary.request_admissions_deleted.saturating_add(deleted);
+        if deleted < cleanup_batch_size {
+            break;
+        }
+    }
+    Ok(())
 }
 
 pub(crate) async fn preview_manual_usage_cleanup(

@@ -1,5 +1,12 @@
 import type { ProviderModelMapping } from './provider'
 
+export interface ModelProviderReference {
+  id: string
+  model_id?: string | null
+  name: string
+  is_active: boolean
+}
+
 // ========== 阶梯计费类型 ==========
 
 /** 缓存时长定价配置 */
@@ -67,13 +74,26 @@ export interface ProviderTieredPricingConfig {
   [key: string]: unknown
 }
 
+export interface ModelConfig extends Record<string, unknown> {
+  description?: string
+  model_mappings?: string[]
+  api_formats?: string[]
+  billing?: {
+    video?: {
+      price_per_second_by_resolution?: Record<string, number>
+      [key: string]: unknown
+    }
+    [key: string]: unknown
+  }
+}
+
 export interface Model {
   id: string
   provider_id: string
   global_model_id: string  // 关联的 GlobalModel ID
   provider_model_name: string  // Provider 侧的主模型名称
   provider_model_mappings?: ProviderModelMapping[] | null  // 模型名称映射列表（带优先级）
-  config?: Record<string, unknown> | null  // 额外配置（如 billing/video 等）
+  config?: ModelConfig | null  // 额外配置（如 billing/video 等）
   // 原始配置值（可能为空，为空时使用 GlobalModel 默认值）
   price_per_request?: number | null  // 按次计费价格
   tiered_pricing?: ProviderTieredPricingConfig | null  // Provider 原始覆盖，可仅包含 processing_tiers
@@ -102,7 +122,7 @@ export interface Model {
   global_model_name?: string
   global_model_display_name?: string
   // 有效配置（合并 Model 和 GlobalModel 的 config）
-  effective_config?: Record<string, unknown> | null
+  effective_config?: ModelConfig | null
   model_test_capabilities?: ModelTestCapabilities | null
 }
 
@@ -120,7 +140,7 @@ export interface ModelCreate {
   supports_extended_thinking?: boolean
   supports_image_generation?: boolean
   is_active?: boolean
-  config?: Record<string, unknown>
+  config?: ModelConfig
 }
 
 export interface ModelUpdate {
@@ -136,7 +156,7 @@ export interface ModelUpdate {
   supports_image_generation?: boolean
   is_active?: boolean
   is_available?: boolean
-  config?: Record<string, unknown> | null
+  config?: ModelConfig | null
 }
 
 export interface ModelCapabilities {
@@ -243,7 +263,7 @@ export interface GlobalModelCreate {
   // Key 能力配置 - 模型支持的能力列表
   supported_capabilities?: string[]
   // 模型配置（JSON格式）- 包含能力、规格、元信息等
-  config?: Record<string, unknown>
+  config?: ModelConfig
   is_active?: boolean
 }
 
@@ -257,7 +277,7 @@ export interface GlobalModelUpdate {
   // Key 能力配置 - 模型支持的能力列表
   supported_capabilities?: string[] | null
   // 模型配置（JSON格式）- 包含能力、规格、元信息等
-  config?: Record<string, unknown> | null
+  config?: ModelConfig | null
 }
 
 export interface GlobalModelResponse {
@@ -273,7 +293,7 @@ export interface GlobalModelResponse {
   supported_capabilities?: string[] | null
   supports_embedding?: boolean | null
   // 模型配置（JSON格式）
-  config?: Record<string, unknown> | null
+  config?: ModelConfig | null
   // 统计数据
   provider_count?: number
   active_provider_count?: number

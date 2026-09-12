@@ -4,9 +4,9 @@ use super::{
     build_internal_gateway_header_map, build_internal_gateway_passthrough_payload,
     build_internal_gateway_proxy_public_response, build_internal_gateway_request_parts,
     build_internal_gateway_resolve_payload, build_internal_gateway_uri,
-    build_internal_tunnel_heartbeat_ack, build_management_token_payload, gateway_error_message,
-    maybe_build_internal_finalize_video_response, parse_internal_tunnel_heartbeat_request,
-    parse_internal_tunnel_node_status_request,
+    build_internal_tunnel_heartbeat_ack, build_management_token_payload,
+    internal_finalize_report_kind_is_supported, maybe_build_internal_finalize_video_response,
+    parse_internal_tunnel_heartbeat_request, parse_internal_tunnel_node_status_request,
 };
 use crate::ai_serving::api;
 use crate::constants::{
@@ -19,6 +19,7 @@ use crate::execution_runtime::{execute_execution_runtime_stream, execute_executi
 use crate::handlers::shared::{
     InternalGatewayAuthContextRequest, InternalGatewayExecuteRequest, InternalGatewayResolveRequest,
 };
+use crate::tunnel::{claim_tunnel_heartbeat, finish_tunnel_heartbeat_claim};
 use crate::tunnel::{is_tunnel_heartbeat_path, is_tunnel_node_status_path, TUNNEL_ROUTE_FAMILY};
 use crate::{AppState, GatewayError};
 use aether_data::repository::proxy_nodes::{
@@ -28,31 +29,70 @@ use axum::body::{Body, Bytes};
 use axum::http::{self, HeaderName, HeaderValue, Response};
 use axum::response::IntoResponse;
 use axum::Json;
-use serde_json::json;
+use serde_json::{json, Value};
 
-async fn apply_supplied_auth_context(
-    state: &AppState,
-    decision: &mut GatewayControlDecision,
-    auth_context: Option<crate::control::GatewayControlAuthContext>,
-) -> Result<bool, GatewayError> {
-    let Some(auth_context) = auth_context else {
-        return Ok(false);
-    };
-    let refreshed = crate::control::refresh_execution_runtime_auth_context(
-        state,
-        auth_context,
-        decision.auth_endpoint_signature.as_deref(),
+fn reject_supplied_auth_context(
+    auth_context: Option<&crate::control::GatewayControlAuthContext>,
+) -> Result<(), Response<Body>> {
+    if auth_context.is_some() {
+        return Err(build_internal_control_error_response(
+            http::StatusCode::BAD_REQUEST,
+            "supplied auth_context is not accepted; authenticate through request headers",
+        ));
+    }
+    Ok(())
+}
+
+fn internal_gateway_data_error_response(operation: &'static str) -> Response<Body> {
+    tracing::error!(
+        event_name = "internal_gateway_data_error",
+        operation,
+        error_category = "repository_unavailable",
+        "internal gateway data operation failed"
+    );
+    build_internal_control_error_response(
+        http::StatusCode::INTERNAL_SERVER_ERROR,
+        "internal gateway data unavailable",
     )
-    .await?;
-    decision.local_auth_rejection = refreshed.local_rejection.clone();
-    decision.auth_context = Some(refreshed);
-    Ok(true)
+}
+
+async fn resolve_bound_internal_report_context(
+    state: &AppState,
+    trace_id: &str,
+    report_kind: &str,
+    report_context: Option<&Value>,
+    operation: &'static str,
+) -> Result<Value, Response<Body>> {
+    match crate::usage::resolve_bound_internal_gateway_report_context(
+        state,
+        trace_id,
+        report_kind,
+        report_context,
+    )
+    .await
+    {
+        Ok(Some(report_context)) => Ok(report_context),
+        Ok(None) => {
+            tracing::warn!(
+                event_name = "internal_gateway_report_context_rejected",
+                operation,
+                error_category = "unbound_report_context",
+                "internal gateway report context did not carry a valid planner capability"
+            );
+            Err(build_internal_control_error_response(
+                http::StatusCode::CONFLICT,
+                "internal gateway report context does not carry a valid planner capability",
+            ))
+        }
+        Err(_) => Err(internal_gateway_data_error_response(operation)),
+    }
 }
 
 pub(crate) async fn maybe_build_local_internal_proxy_response_impl(
     state: &AppState,
     request_context: &GatewayPublicRequestContext,
     remote_addr: &std::net::SocketAddr,
+    request_headers: &http::HeaderMap,
     request_body: Option<&Bytes>,
 ) -> Result<Option<Response<Body>>, GatewayError> {
     let Some(decision) = request_context.control_decision.as_ref() else {
@@ -62,11 +102,39 @@ pub(crate) async fn maybe_build_local_internal_proxy_response_impl(
         return Ok(None);
     }
     if decision.route_family.as_deref() == Some("internal_gateway") {
-        if !remote_addr.ip().is_loopback() {
+        if request_context.request_method != http::Method::POST
+            || decision.route_kind.as_deref() == Some("unhandled")
+        {
             return Ok(Some(build_internal_control_error_response(
-                http::StatusCode::FORBIDDEN,
-                "loopback access only",
+                http::StatusCode::NOT_FOUND,
+                "route not found",
             )));
+        }
+        let authenticated_body = request_body.map_or(&[][..], Bytes::as_ref);
+        if let Err(error) = crate::internal_gateway_auth::authenticate_internal_gateway_request(
+            state,
+            remote_addr,
+            &request_context.request_method,
+            &request_context.request_path_and_query(),
+            request_headers,
+            authenticated_body,
+        )
+        .await
+        {
+            let (status, message) = match error {
+                crate::internal_gateway_auth::InternalGatewayAuthError::Disabled => {
+                    (http::StatusCode::NOT_FOUND, "route not found")
+                }
+                crate::internal_gateway_auth::InternalGatewayAuthError::Invalid => (
+                    http::StatusCode::FORBIDDEN,
+                    "invalid internal gateway authentication",
+                ),
+                crate::internal_gateway_auth::InternalGatewayAuthError::Unavailable => (
+                    http::StatusCode::SERVICE_UNAVAILABLE,
+                    "internal gateway authentication unavailable",
+                ),
+            };
+            return Ok(Some(build_internal_control_error_response(status, message)));
         }
         match decision.route_kind.as_deref() {
             Some("resolve") if request_context.request_path == "/api/internal/gateway/resolve" => {
@@ -192,6 +260,9 @@ pub(crate) async fn maybe_build_local_internal_proxy_response_impl(
                             )));
                         }
                     };
+                if let Err(response) = reject_supplied_auth_context(payload.auth_context.as_ref()) {
+                    return Ok(Some(response));
+                }
                 let parts = match build_internal_gateway_request_parts(
                     &payload.method,
                     &payload.path,
@@ -225,23 +296,14 @@ pub(crate) async fn maybe_build_local_internal_proxy_response_impl(
                         Json(build_internal_gateway_fallback_plan_payload(None)).into_response(),
                     ));
                 };
-                let provided_auth_context =
-                    apply_supplied_auth_context(state, &mut resolved, payload.auth_context).await?;
                 let auth_context = resolved.auth_context.as_ref();
                 if auth_context
                     .map(|value| !value.access_allowed)
                     .unwrap_or(true)
                 {
-                    let fallback_auth_context = if !provided_auth_context {
-                        auth_context
-                    } else {
-                        None
-                    };
                     return Ok(Some(
-                        Json(build_internal_gateway_fallback_plan_payload(
-                            fallback_auth_context,
-                        ))
-                        .into_response(),
+                        Json(build_internal_gateway_fallback_plan_payload(auth_context))
+                            .into_response(),
                     ));
                 }
                 let Some(mut local_payload) = api::maybe_build_sync_decision_payload(
@@ -255,21 +317,20 @@ pub(crate) async fn maybe_build_local_internal_proxy_response_impl(
                 )
                 .await?
                 else {
-                    let fallback_auth_context = if !provided_auth_context {
-                        auth_context
-                    } else {
-                        None
-                    };
                     return Ok(Some(
-                        Json(build_internal_gateway_fallback_plan_payload(
-                            fallback_auth_context,
-                        ))
-                        .into_response(),
+                        Json(build_internal_gateway_fallback_plan_payload(auth_context))
+                            .into_response(),
                     ));
                 };
-                if provided_auth_context {
-                    local_payload.auth_context = None;
-                }
+                let report_kind = local_payload.report_kind.clone();
+                crate::usage::attach_internal_gateway_report_capability(
+                    state,
+                    trace_id.as_str(),
+                    report_kind.as_deref(),
+                    &local_payload.provider_request_headers,
+                    &mut local_payload.report_context,
+                )
+                .await?;
                 return Ok(Some(Json(local_payload).into_response()));
             }
             Some("decision_stream")
@@ -291,6 +352,9 @@ pub(crate) async fn maybe_build_local_internal_proxy_response_impl(
                             )));
                         }
                     };
+                if let Err(response) = reject_supplied_auth_context(payload.auth_context.as_ref()) {
+                    return Ok(Some(response));
+                }
                 let parts = match build_internal_gateway_request_parts(
                     &payload.method,
                     &payload.path,
@@ -324,23 +388,14 @@ pub(crate) async fn maybe_build_local_internal_proxy_response_impl(
                         Json(build_internal_gateway_fallback_plan_payload(None)).into_response(),
                     ));
                 };
-                let provided_auth_context =
-                    apply_supplied_auth_context(state, &mut resolved, payload.auth_context).await?;
                 let auth_context = resolved.auth_context.as_ref();
                 if auth_context
                     .map(|value| !value.access_allowed)
                     .unwrap_or(true)
                 {
-                    let fallback_auth_context = if !provided_auth_context {
-                        auth_context
-                    } else {
-                        None
-                    };
                     return Ok(Some(
-                        Json(build_internal_gateway_fallback_plan_payload(
-                            fallback_auth_context,
-                        ))
-                        .into_response(),
+                        Json(build_internal_gateway_fallback_plan_payload(auth_context))
+                            .into_response(),
                     ));
                 }
                 let Some(mut local_payload) = api::maybe_build_stream_decision_payload(
@@ -353,21 +408,20 @@ pub(crate) async fn maybe_build_local_internal_proxy_response_impl(
                 )
                 .await?
                 else {
-                    let fallback_auth_context = if !provided_auth_context {
-                        auth_context
-                    } else {
-                        None
-                    };
                     return Ok(Some(
-                        Json(build_internal_gateway_fallback_plan_payload(
-                            fallback_auth_context,
-                        ))
-                        .into_response(),
+                        Json(build_internal_gateway_fallback_plan_payload(auth_context))
+                            .into_response(),
                     ));
                 };
-                if provided_auth_context {
-                    local_payload.auth_context = None;
-                }
+                let report_kind = local_payload.report_kind.clone();
+                crate::usage::attach_internal_gateway_report_capability(
+                    state,
+                    trace_id.as_str(),
+                    report_kind.as_deref(),
+                    &local_payload.provider_request_headers,
+                    &mut local_payload.report_context,
+                )
+                .await?;
                 return Ok(Some(Json(local_payload).into_response()));
             }
             Some("plan_sync")
@@ -389,6 +443,9 @@ pub(crate) async fn maybe_build_local_internal_proxy_response_impl(
                             )));
                         }
                     };
+                if let Err(response) = reject_supplied_auth_context(payload.auth_context.as_ref()) {
+                    return Ok(Some(response));
+                }
                 let parts = match build_internal_gateway_request_parts(
                     &payload.method,
                     &payload.path,
@@ -420,8 +477,6 @@ pub(crate) async fn maybe_build_local_internal_proxy_response_impl(
                 else {
                     return Ok(Some(build_internal_gateway_proxy_public_response()));
                 };
-                let provided_auth_context =
-                    apply_supplied_auth_context(state, &mut resolved, payload.auth_context).await?;
                 if let Some(mut planned) = api::maybe_build_sync_plan_payload(
                     state,
                     &parts,
@@ -433,9 +488,24 @@ pub(crate) async fn maybe_build_local_internal_proxy_response_impl(
                 )
                 .await?
                 {
-                    if provided_auth_context {
-                        planned.auth_context = None;
-                    }
+                    let report_kind = planned.report_kind.clone();
+                    let provider_request_headers = planned
+                        .plan
+                        .as_ref()
+                        .map(|plan| &plan.headers)
+                        .ok_or_else(|| {
+                            crate::GatewayError::Internal(
+                                "internal gateway sync plan omitted its execution plan".to_string(),
+                            )
+                        })?;
+                    crate::usage::attach_internal_gateway_report_capability(
+                        state,
+                        trace_id.as_str(),
+                        report_kind.as_deref(),
+                        provider_request_headers,
+                        &mut planned.report_context,
+                    )
+                    .await?;
                     return Ok(Some(Json(planned).into_response()));
                 }
                 return Ok(Some(build_internal_gateway_proxy_public_response()));
@@ -459,6 +529,9 @@ pub(crate) async fn maybe_build_local_internal_proxy_response_impl(
                             )));
                         }
                     };
+                if let Err(response) = reject_supplied_auth_context(payload.auth_context.as_ref()) {
+                    return Ok(Some(response));
+                }
                 let parts = match build_internal_gateway_request_parts(
                     &payload.method,
                     &payload.path,
@@ -484,8 +557,6 @@ pub(crate) async fn maybe_build_local_internal_proxy_response_impl(
                 else {
                     return Ok(Some(build_internal_gateway_proxy_public_response()));
                 };
-                let provided_auth_context =
-                    apply_supplied_auth_context(state, &mut resolved, payload.auth_context).await?;
                 if let Some(mut planned) = api::maybe_build_stream_plan_payload(
                     state,
                     &parts,
@@ -496,9 +567,25 @@ pub(crate) async fn maybe_build_local_internal_proxy_response_impl(
                 )
                 .await?
                 {
-                    if provided_auth_context {
-                        planned.auth_context = None;
-                    }
+                    let report_kind = planned.report_kind.clone();
+                    let provider_request_headers = planned
+                        .plan
+                        .as_ref()
+                        .map(|plan| &plan.headers)
+                        .ok_or_else(|| {
+                            crate::GatewayError::Internal(
+                                "internal gateway stream plan omitted its execution plan"
+                                    .to_string(),
+                            )
+                        })?;
+                    crate::usage::attach_internal_gateway_report_capability(
+                        state,
+                        trace_id.as_str(),
+                        report_kind.as_deref(),
+                        provider_request_headers,
+                        &mut planned.report_context,
+                    )
+                    .await?;
                     return Ok(Some(Json(planned).into_response()));
                 }
                 return Ok(Some(build_internal_gateway_proxy_public_response()));
@@ -522,6 +609,9 @@ pub(crate) async fn maybe_build_local_internal_proxy_response_impl(
                             )));
                         }
                     };
+                if let Err(response) = reject_supplied_auth_context(payload.auth_context.as_ref()) {
+                    return Ok(Some(response));
+                }
                 let parts = match build_internal_gateway_request_parts(
                     &payload.method,
                     &payload.path,
@@ -553,7 +643,6 @@ pub(crate) async fn maybe_build_local_internal_proxy_response_impl(
                 else {
                     return Ok(None);
                 };
-                apply_supplied_auth_context(state, &mut resolved, payload.auth_context).await?;
                 if let Some(plan_payload) = api::maybe_build_sync_plan_payload(
                     state,
                     &parts,
@@ -609,6 +698,9 @@ pub(crate) async fn maybe_build_local_internal_proxy_response_impl(
                             )));
                         }
                     };
+                if let Err(response) = reject_supplied_auth_context(payload.auth_context.as_ref()) {
+                    return Ok(Some(response));
+                }
                 let parts = match build_internal_gateway_request_parts(
                     &payload.method,
                     &payload.path,
@@ -634,7 +726,6 @@ pub(crate) async fn maybe_build_local_internal_proxy_response_impl(
                 else {
                     return Ok(None);
                 };
-                apply_supplied_auth_context(state, &mut resolved, payload.auth_context).await?;
                 if let Some(plan_payload) = api::maybe_build_stream_plan_payload(
                     state,
                     &parts,
@@ -678,9 +769,10 @@ pub(crate) async fn maybe_build_local_internal_proxy_response_impl(
                         "invalid internal gateway report-sync payload",
                     )));
                 };
-                let payload = match serde_json::from_slice::<crate::usage::GatewaySyncReportRequest>(
-                    request_body,
-                ) {
+                let mut payload = match serde_json::from_slice::<
+                    crate::usage::GatewaySyncReportRequest,
+                >(request_body)
+                {
                     Ok(payload) => payload,
                     Err(_) => {
                         return Ok(Some(build_internal_control_error_response(
@@ -689,6 +781,20 @@ pub(crate) async fn maybe_build_local_internal_proxy_response_impl(
                         )));
                     }
                 };
+                payload.report_context = Some(
+                    match resolve_bound_internal_report_context(
+                        state,
+                        payload.trace_id.as_str(),
+                        payload.report_kind.as_str(),
+                        payload.report_context.as_ref(),
+                        "report_sync",
+                    )
+                    .await
+                    {
+                        Ok(report_context) => report_context,
+                        Err(response) => return Ok(Some(response)),
+                    },
+                );
                 crate::usage::submit_sync_report(state, payload).await?;
                 return Ok(Some(Json(json!({ "ok": true })).into_response()));
             }
@@ -701,9 +807,10 @@ pub(crate) async fn maybe_build_local_internal_proxy_response_impl(
                         "invalid internal gateway report-stream payload",
                     )));
                 };
-                let payload = match serde_json::from_slice::<crate::usage::GatewayStreamReportRequest>(
-                    request_body,
-                ) {
+                let mut payload = match serde_json::from_slice::<
+                    crate::usage::GatewayStreamReportRequest,
+                >(request_body)
+                {
                     Ok(payload) => payload,
                     Err(_) => {
                         return Ok(Some(build_internal_control_error_response(
@@ -712,6 +819,20 @@ pub(crate) async fn maybe_build_local_internal_proxy_response_impl(
                         )));
                     }
                 };
+                payload.report_context = Some(
+                    match resolve_bound_internal_report_context(
+                        state,
+                        payload.trace_id.as_str(),
+                        payload.report_kind.as_str(),
+                        payload.report_context.as_ref(),
+                        "report_stream",
+                    )
+                    .await
+                    {
+                        Ok(report_context) => report_context,
+                        Err(response) => return Ok(Some(response)),
+                    },
+                );
                 crate::usage::submit_stream_report(state, payload).await?;
                 return Ok(Some(Json(json!({ "ok": true })).into_response()));
             }
@@ -724,9 +845,10 @@ pub(crate) async fn maybe_build_local_internal_proxy_response_impl(
                         "invalid internal gateway finalize-sync payload",
                     )));
                 };
-                let payload = match serde_json::from_slice::<crate::usage::GatewaySyncReportRequest>(
-                    request_body,
-                ) {
+                let mut payload = match serde_json::from_slice::<
+                    crate::usage::GatewaySyncReportRequest,
+                >(request_body)
+                {
                     Ok(payload) => payload,
                     Err(_) => {
                         return Ok(Some(build_internal_control_error_response(
@@ -735,6 +857,26 @@ pub(crate) async fn maybe_build_local_internal_proxy_response_impl(
                         )));
                     }
                 };
+                if !internal_finalize_report_kind_is_supported(payload.report_kind.as_str()) {
+                    return Ok(Some(build_internal_control_error_response(
+                        http::StatusCode::BAD_REQUEST,
+                        "Unsupported gateway sync finalize kind",
+                    )));
+                }
+                payload.report_context = Some(
+                    match resolve_bound_internal_report_context(
+                        state,
+                        payload.trace_id.as_str(),
+                        payload.report_kind.as_str(),
+                        payload.report_context.as_ref(),
+                        "finalize_sync",
+                    )
+                    .await
+                    {
+                        Ok(report_context) => report_context,
+                        Err(response) => return Ok(Some(response)),
+                    },
+                );
                 let Some(synthetic_decision) = build_internal_finalize_decision(&payload) else {
                     return Ok(Some(build_internal_control_error_response(
                         http::StatusCode::BAD_REQUEST,
@@ -806,8 +948,66 @@ pub(crate) async fn maybe_build_local_internal_proxy_response_impl(
                 Err(response) => return Ok(Some(response)),
             };
             let node_id = payload.node_id.trim().to_string();
+            let authenticated_generation = match state
+                .tunnel
+                .authenticate_control_plane_request(
+                    request_headers,
+                    request_context.request_method.as_str(),
+                    request_context.request_path.as_str(),
+                    &node_id,
+                    request_body,
+                )
+                .await
+            {
+                Ok(generation) => generation,
+                Err(error) => {
+                    let (status, message) = match error {
+                        crate::tunnel::ControlPlaneAuthError::Unavailable => (
+                            http::StatusCode::SERVICE_UNAVAILABLE,
+                            "tunnel control-plane authentication unavailable",
+                        ),
+                        crate::tunnel::ControlPlaneAuthError::Invalid => (
+                            http::StatusCode::FORBIDDEN,
+                            "invalid tunnel control-plane authentication",
+                        ),
+                    };
+                    return Ok(Some(build_internal_control_error_response(status, message)));
+                }
+            };
+            let claim = match claim_tunnel_heartbeat(
+                state.runtime_state.as_ref(),
+                &node_id,
+                &payload.heartbeat_session_id,
+                payload.heartbeat_id,
+            )
+            .await
+            {
+                Ok(claim) => claim,
+                Err(error) => {
+                    return Ok(Some(build_internal_control_error_response(
+                        http::StatusCode::SERVICE_UNAVAILABLE,
+                        error,
+                    )));
+                }
+            };
+            if claim.is_none() {
+                let response = match state.find_proxy_node(&node_id).await {
+                    Ok(Some(node)) if node.tunnel_generation == authenticated_generation => Json(
+                        build_internal_tunnel_heartbeat_ack(&node, payload.heartbeat_id),
+                    )
+                    .into_response(),
+                    Ok(Some(_)) | Ok(None) => build_internal_control_error_response(
+                        http::StatusCode::FORBIDDEN,
+                        "proxy tunnel credential was revoked",
+                    ),
+                    Err(_) => internal_gateway_data_error_response("heartbeat_duplicate_lookup"),
+                };
+                return Ok(Some(response));
+            }
+            let claim = claim.expect("fresh heartbeat claim should be present");
             let mutation = ProxyNodeHeartbeatMutation {
                 node_id: node_id.clone(),
+                expected_tunnel_generation: Some(authenticated_generation.clone()),
                 heartbeat_interval: payload.heartbeat_interval,
                 active_connections: payload.active_connections,
                 total_requests_delta: payload.window_total_requests.or(payload.total_requests),
@@ -820,19 +1020,25 @@ pub(crate) async fn maybe_build_local_internal_proxy_response_impl(
             };
 
             let response = match state.apply_proxy_node_heartbeat(&mutation).await {
-                Ok(Some(node)) => Json(build_internal_tunnel_heartbeat_ack(
-                    &node,
-                    payload.heartbeat_id,
-                ))
-                .into_response(),
-                Ok(None) => build_internal_control_error_response(
-                    http::StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("heartbeat sync failed: ProxyNode {node_id} 不存在"),
-                ),
-                Err(err) => build_internal_control_error_response(
-                    http::StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("heartbeat sync failed: {}", gateway_error_message(err)),
-                ),
+                Ok(Some(node)) => {
+                    finish_tunnel_heartbeat_claim(state.runtime_state.as_ref(), claim).await;
+                    Json(build_internal_tunnel_heartbeat_ack(
+                        &node,
+                        payload.heartbeat_id,
+                    ))
+                    .into_response()
+                }
+                Ok(None) => {
+                    finish_tunnel_heartbeat_claim(state.runtime_state.as_ref(), claim).await;
+                    build_internal_control_error_response(
+                        http::StatusCode::FORBIDDEN,
+                        "proxy tunnel credential was revoked",
+                    )
+                }
+                Err(_) => {
+                    finish_tunnel_heartbeat_claim(state.runtime_state.as_ref(), claim).await;
+                    internal_gateway_data_error_response("heartbeat_sync")
+                }
             };
             return Ok(Some(response));
         }
@@ -849,8 +1055,36 @@ pub(crate) async fn maybe_build_local_internal_proxy_response_impl(
                 Ok(payload) => payload,
                 Err(response) => return Ok(Some(response)),
             };
+            let node_id = payload.node_id.trim().to_string();
+            let authenticated_generation = match state
+                .tunnel
+                .authenticate_control_plane_request(
+                    request_headers,
+                    request_context.request_method.as_str(),
+                    request_context.request_path.as_str(),
+                    &node_id,
+                    request_body,
+                )
+                .await
+            {
+                Ok(generation) => generation,
+                Err(error) => {
+                    let (status, message) = match error {
+                        crate::tunnel::ControlPlaneAuthError::Unavailable => (
+                            http::StatusCode::SERVICE_UNAVAILABLE,
+                            "tunnel control-plane authentication unavailable",
+                        ),
+                        crate::tunnel::ControlPlaneAuthError::Invalid => (
+                            http::StatusCode::FORBIDDEN,
+                            "invalid tunnel control-plane authentication",
+                        ),
+                    };
+                    return Ok(Some(build_internal_control_error_response(status, message)));
+                }
+            };
             let mutation = ProxyNodeTunnelStatusMutation {
-                node_id: payload.node_id.trim().to_string(),
+                node_id,
+                expected_tunnel_generation: Some(authenticated_generation),
                 connected: payload.connected,
                 conn_count: payload.conn_count,
                 detail: None,
@@ -858,11 +1092,12 @@ pub(crate) async fn maybe_build_local_internal_proxy_response_impl(
             };
 
             let response = match state.update_proxy_node_tunnel_status(&mutation).await {
-                Ok(node) => Json(json!({ "updated": node.is_some() })).into_response(),
-                Err(err) => build_internal_control_error_response(
-                    http::StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("node status sync failed: {}", gateway_error_message(err)),
+                Ok(Some(_)) => Json(json!({ "updated": true })).into_response(),
+                Ok(None) => build_internal_control_error_response(
+                    http::StatusCode::FORBIDDEN,
+                    "proxy tunnel credential was revoked",
                 ),
+                Err(_) => internal_gateway_data_error_response("node_status_sync"),
             };
             return Ok(Some(response));
         }

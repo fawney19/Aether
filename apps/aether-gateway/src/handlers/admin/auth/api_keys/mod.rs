@@ -6,8 +6,7 @@ use super::super::users::{
 };
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::handlers::admin::shared::{
-    decrypt_catalog_secret_with_fallbacks, encrypt_catalog_secret_with_fallbacks, query_param_bool,
-    query_param_optional_bool, query_param_value,
+    query_param_bool, query_param_optional_bool, query_param_value,
 };
 use crate::GatewayError;
 use axum::{
@@ -42,12 +41,14 @@ pub(crate) async fn maybe_build_local_admin_api_keys_response(
     state: &AdminAppState<'_>,
     request_context: &AdminRequestContext<'_>,
     request_headers: &http::HeaderMap,
+    remote_addr: &std::net::SocketAddr,
     request_body: Option<&axum::body::Bytes>,
 ) -> Result<Option<Response<Body>>, GatewayError> {
     routes::maybe_build_local_admin_api_keys_routes_response(
         state,
         request_context,
         request_headers,
+        remote_addr,
         request_body,
     )
     .await

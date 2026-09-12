@@ -28,7 +28,10 @@ use std::sync::{Arc, Mutex};
 
 use crate::constants::TRACE_ID_HEADER;
 
-use super::{build_router_with_state, build_state_with_execution_runtime_override, start_server};
+use super::{
+    build_router_with_state, build_state_with_execution_runtime_override, start_server,
+    video_provider_catalog_repository, video_proxy_node_repository,
+};
 
 #[tokio::test]
 async fn gateway_executes_openai_video_create_via_local_decision_gate_with_local_planning_only() {
@@ -418,7 +421,10 @@ async fn gateway_executes_openai_video_create_via_local_decision_gate_with_local
             provider_catalog_repository,
             Arc::clone(&request_candidate_repository),
             DEVELOPMENT_ENCRYPTION_KEY,
-        ),
+        )
+        .attach_proxy_node_repository_for_tests(video_proxy_node_repository([
+            "proxy-node-openai-video-local",
+        ])),
     );
     let gateway = build_router_with_state(gateway_state);
     let (gateway_url, gateway_handle) = start_server(gateway).await;
@@ -515,6 +521,39 @@ async fn gateway_executes_openai_video_remix_via_data_backed_local_follow_up_wit
         url: String,
         authorization: String,
         prompt: String,
+    }
+
+    fn hash_api_key(value: &str) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(value.as_bytes());
+        format!("{:x}", hasher.finalize())
+    }
+
+    fn sample_auth_snapshot(api_key_id: &str, user_id: &str) -> StoredAuthApiKeySnapshot {
+        StoredAuthApiKeySnapshot::new(
+            user_id.to_string(),
+            "video-user".to_string(),
+            Some("video@example.com".to_string()),
+            "user".to_string(),
+            "local".to_string(),
+            true,
+            false,
+            Some(json!(["openai"])),
+            Some(json!(["openai:video"])),
+            Some(json!(["sora-2"])),
+            api_key_id.to_string(),
+            Some("default".to_string()),
+            true,
+            false,
+            false,
+            Some(60),
+            Some(5),
+            Some(4_102_444_800),
+            Some(json!(["openai"])),
+            Some(json!(["openai:video"])),
+            Some(json!(["sora-2"])),
+        )
+        .expect("auth snapshot should build")
     }
 
     let decision_hits = Arc::new(Mutex::new(0usize));
@@ -739,21 +778,42 @@ async fn gateway_executes_openai_video_remix_via_data_backed_local_follow_up_wit
         .await
         .expect("upsert should succeed");
 
+    let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+        Some(hash_api_key("client-openai-video-remix-local-key")),
+        sample_auth_snapshot(
+            "key-openai-video-remix-rotated-local-123",
+            "user-openai-video-remix-local-123",
+        ),
+    )]));
+    let provider_catalog_repository = video_provider_catalog_repository(
+        "provider-openai-video-local-1",
+        "openai",
+        "endpoint-openai-video-local-1",
+        "openai:video",
+        "https://api.openai.example/v1",
+        "key-openai-video-local-1",
+        "sk-upstream-openai-video",
+    );
+
     let (upstream_url, upstream_handle) = start_server(upstream).await;
     let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
     let gateway_state = build_state_with_execution_runtime_override(execution_runtime_url)
         .with_data_state_for_tests(
-        crate::data::GatewayDataState::with_video_task_and_request_candidate_repository_for_tests(
-            repository,
-            Arc::clone(&request_candidate_repository),
-        ),
-    );
+            crate::data::GatewayDataState::with_video_task_provider_transport_and_request_candidate_repository_for_tests(
+                repository,
+                provider_catalog_repository,
+                Arc::clone(&request_candidate_repository),
+                DEVELOPMENT_ENCRYPTION_KEY,
+            )
+            .with_auth_api_key_reader(auth_repository),
+        );
     let gateway = build_router_with_state(gateway_state);
     let (gateway_url, gateway_handle) = start_server(gateway).await;
 
     let response = reqwest::Client::new()
         .post(format!("{gateway_url}/v1/videos/task-local-123/remix"))
         .header(http::header::CONTENT_TYPE, "application/json")
+        .bearer_auth("client-openai-video-remix-local-key")
         .header(TRACE_ID_HEADER, "trace-openai-video-remix-local-123")
         .body("{\"prompt\":\"remix this\",\"model\":\"sora-2\"}")
         .send()

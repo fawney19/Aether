@@ -1,5 +1,6 @@
 import type { RouteLocationNormalized } from 'vue-router'
 import type { useAuthStore } from '@/stores/auth'
+import { safeInternalNavigationPath } from '@/utils/navigationSecurity'
 
 /**
  * 处理已认证用户访问首页时的重定向。
@@ -27,9 +28,10 @@ export function resolveHomeRedirect(
 
   // 已登录用户首次访问首页(非返回/刷新场景),根据角色跳转到对应仪表盘
   const redirectPath = sessionStorage.getItem('redirectPath')
-  if (redirectPath && redirectPath !== '/') {
+  if (redirectPath) {
     sessionStorage.removeItem('redirectPath')
-    return redirectPath
+    const safePath = safeInternalNavigationPath(redirectPath)
+    if (safePath && safePath !== '/') return safePath
   }
 
   return authStore.canAccessAdmin ? '/admin/dashboard' : '/dashboard'

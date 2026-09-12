@@ -1,4 +1,5 @@
 use std::fmt;
+use std::future::Future;
 use std::time::Duration;
 
 use aether_admin::system::admin_system_config_default_value;
@@ -12,14 +13,15 @@ use chrono::Utc;
 use futures_util::FutureExt;
 use serde::Serialize;
 use serde_json::{json, Map, Value};
+use tokio::task::{JoinError, JoinHandle};
 use tracing::warn;
 
 use super::config::S3BackupConfig;
 use super::executor::{run_backup_with_store, BackupRunResult};
 use super::scopes::BackupScope;
 use super::store::ObjectStoreS3BackupStore;
-use crate::admin_api::AdminAppState;
-use crate::handlers::shared::decrypt_catalog_secret_with_fallbacks;
+use crate::admin_api::{AdminAppState, SystemExportMode};
+use crate::handlers::shared::decrypt_or_migrate_system_config_secret;
 use crate::task_runtime::{
     append_event_with_logging, build_task_run_id, now_unix_secs, spawn_fire_and_forget,
     task_definition, update_run_status, upsert_run_with_logging, TASK_KEY_SYSTEM_S3_BACKUP,
@@ -48,6 +50,9 @@ const S3_BACKUP_CONFIG_KEYS: &[&str] = &[
 ];
 
 const S3_BACKUP_QUEUED_MESSAGE: &str = "S3 备份任务已提交";
+const S3_BACKUP_INTERNAL_ERROR_DETAIL: &str = "S3 备份服务暂时不可用";
+const S3_BACKUP_TASK_FAILURE_CODE: &str = "s3_backup_failed";
+const S3_BACKUP_SLOT_RECORD_FAILURE_CODE: &str = "s3_backup_slot_record_failed";
 const S3_BACKUP_TASK_LOCK_KEY: &str = "task_runtime:lock:system.s3.backup";
 const S3_BACKUP_TASK_LOCK_TTL: Duration = Duration::from_secs(60 * 60 * 6);
 const S3_BACKUP_TASK_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60 * 5);
@@ -65,6 +70,16 @@ pub(crate) struct S3BackupTaskStart {
 pub(crate) struct S3BackupTaskError {
     status: StatusCode,
     detail: String,
+}
+
+enum BackupLockRenewalFailure<E> {
+    Lost,
+    Backend(E),
+}
+
+enum BackupLockRaceOutcome<T> {
+    BackupCompleted(T),
+    LeaseLost(Result<(), JoinError>),
 }
 
 impl S3BackupTaskError {
@@ -114,8 +129,12 @@ impl fmt::Display for S3BackupTaskError {
 impl std::error::Error for S3BackupTaskError {}
 
 impl From<GatewayError> for S3BackupTaskError {
-    fn from(error: GatewayError) -> Self {
-        Self::internal(format!("{error:?}"))
+    fn from(_error: GatewayError) -> Self {
+        warn!(
+            error_category = "dependency_failed",
+            "S3 backup dependency failed"
+        );
+        Self::internal(S3_BACKUP_INTERNAL_ERROR_DETAIL)
     }
 }
 
@@ -220,8 +239,6 @@ fn s3_backup_task_payload_json(
 ) -> Value {
     let mut payload = json!({
         "scope": config.scope.as_config_value(),
-        "bucket": config.bucket.clone(),
-        "prefix": config.prefix.clone(),
         "compression": config.compression.clone(),
         "trigger": trigger,
     });
@@ -259,7 +276,7 @@ fn spawn_s3_backup_worker(
                 Some(100),
                 Some("S3 备份任务异常退出".to_string()),
                 None,
-                Some("S3 backup task panicked".to_string()),
+                Some("background_task_panicked".to_string()),
                 None,
                 Some(now_unix_secs()),
             )
@@ -294,16 +311,67 @@ async fn run_s3_backup_worker_inner(
     .await;
     append_event_with_logging(&app, &run_id, "running", "S3 backup task started", None).await;
 
-    let heartbeat = spawn_s3_backup_task_heartbeat(app.clone(), run_id.clone(), lock);
-    let result = run_s3_backup_once(&app, &config).await;
-    heartbeat.abort();
-    let _ = heartbeat.await;
+    let heartbeat = spawn_s3_backup_task_heartbeat(app.clone(), run_id.clone(), lock.clone());
+    let result = match race_backup_with_lock_heartbeat(run_s3_backup_once(&app, &config), heartbeat)
+        .await
+    {
+        BackupLockRaceOutcome::BackupCompleted(result) => {
+            match require_successful_backup_lock_renewal(
+                app.runtime_state
+                    .lock_renew(&lock, S3_BACKUP_TASK_LOCK_TTL)
+                    .await,
+            ) {
+                Ok(()) => result,
+                Err(BackupLockRenewalFailure::Lost) => {
+                    warn!(
+                        run_id = %run_id,
+                        lock_key = %lock.key,
+                        "S3 backup task lost its distributed lock before publishing completion"
+                    );
+                    Err(S3BackupTaskError::service_unavailable(
+                        "S3 备份任务锁已失效，任务完成状态未发布",
+                    ))
+                }
+                Err(BackupLockRenewalFailure::Backend(error)) => {
+                    warn!(
+                        run_id = %run_id,
+                        lock_key = %lock.key,
+                        error = %error,
+                        "S3 backup task could not verify its distributed lock before publishing completion"
+                    );
+                    Err(S3BackupTaskError::service_unavailable(
+                        "无法确认 S3 备份任务锁所有权，任务完成状态未发布",
+                    ))
+                }
+            }
+        }
+        BackupLockRaceOutcome::LeaseLost(heartbeat_result) => {
+            match heartbeat_result {
+                Ok(()) => warn!(
+                    run_id = %run_id,
+                    "S3 backup task stopped after losing its distributed lock"
+                ),
+                Err(error) => warn!(
+                    run_id = %run_id,
+                    error = %error,
+                    "S3 backup lock heartbeat task failed"
+                ),
+            }
+            Err(S3BackupTaskError::service_unavailable(
+                "S3 备份任务锁已失效，任务已停止",
+            ))
+        }
+    };
 
     match result {
         Ok(result) => {
             if let Some(slot) = scheduled_backup_slot_to_record(scheduled_slot.as_deref(), true) {
-                if let Err(error) = record_scheduled_backup_slot(&app, &slot).await {
-                    warn!(error = ?error, run_id = %run_id, "S3 backup slot record failed");
+                if record_scheduled_backup_slot(&app, &slot).await.is_err() {
+                    warn!(
+                        error_category = "slot_record_failed",
+                        run_id = %run_id,
+                        "S3 backup slot record failed"
+                    );
                     let _ = update_run_status(
                         &app,
                         &run_id,
@@ -311,7 +379,7 @@ async fn run_s3_backup_worker_inner(
                         Some(100),
                         Some("S3 备份任务完成，但记录调度时间失败".to_string()),
                         None,
-                        Some(format!("S3 backup slot record failed: {error:?}")),
+                        Some(S3_BACKUP_SLOT_RECORD_FAILURE_CODE.to_string()),
                         None,
                         Some(now_unix_secs()),
                     )
@@ -321,7 +389,7 @@ async fn run_s3_backup_worker_inner(
                         &run_id,
                         "failed",
                         "S3 backup slot record failed",
-                        Some(json!({ "error": format!("{error:?}") })),
+                        Some(json!({ "error_code": S3_BACKUP_SLOT_RECORD_FAILURE_CODE })),
                     )
                     .await;
                     return;
@@ -349,8 +417,12 @@ async fn run_s3_backup_worker_inner(
             )
             .await;
         }
-        Err(error) => {
-            warn!(error = %error, run_id = %run_id, "S3 backup task failed");
+        Err(_) => {
+            warn!(
+                error_category = "backup_execution_failed",
+                run_id = %run_id,
+                "S3 backup task failed"
+            );
             let _ = update_run_status(
                 &app,
                 &run_id,
@@ -358,7 +430,7 @@ async fn run_s3_backup_worker_inner(
                 Some(100),
                 Some("S3 备份任务失败".to_string()),
                 None,
-                Some(error.to_string()),
+                Some(S3_BACKUP_TASK_FAILURE_CODE.to_string()),
                 None,
                 Some(now_unix_secs()),
             )
@@ -368,10 +440,41 @@ async fn run_s3_backup_worker_inner(
                 &run_id,
                 "failed",
                 "S3 backup task failed",
-                Some(json!({ "error": error.to_string() })),
+                Some(json!({ "error_code": S3_BACKUP_TASK_FAILURE_CODE })),
             )
             .await;
         }
+    }
+}
+
+async fn race_backup_with_lock_heartbeat<F, T>(
+    backup: F,
+    mut heartbeat: JoinHandle<()>,
+) -> BackupLockRaceOutcome<T>
+where
+    F: Future<Output = T>,
+{
+    tokio::pin!(backup);
+    tokio::select! {
+        biased;
+        heartbeat_result = &mut heartbeat => {
+            BackupLockRaceOutcome::LeaseLost(heartbeat_result)
+        }
+        result = &mut backup => {
+            heartbeat.abort();
+            let _ = heartbeat.await;
+            BackupLockRaceOutcome::BackupCompleted(result)
+        }
+    }
+}
+
+fn require_successful_backup_lock_renewal<E>(
+    result: Result<bool, E>,
+) -> Result<(), BackupLockRenewalFailure<E>> {
+    match result {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(BackupLockRenewalFailure::Lost),
+        Err(error) => Err(BackupLockRenewalFailure::Backend(error)),
     }
 }
 
@@ -386,10 +489,30 @@ fn spawn_s3_backup_task_heartbeat(
         interval.tick().await;
         loop {
             interval.tick().await;
-            let _ = app
-                .runtime_state
-                .lock_renew(&lock, S3_BACKUP_TASK_LOCK_TTL)
-                .await;
+            match require_successful_backup_lock_renewal(
+                app.runtime_state
+                    .lock_renew(&lock, S3_BACKUP_TASK_LOCK_TTL)
+                    .await,
+            ) {
+                Ok(()) => {}
+                Err(BackupLockRenewalFailure::Lost) => {
+                    warn!(
+                        run_id = %run_id,
+                        lock_key = %lock.key,
+                        "S3 backup task distributed lock is no longer owned"
+                    );
+                    return;
+                }
+                Err(BackupLockRenewalFailure::Backend(error)) => {
+                    warn!(
+                        run_id = %run_id,
+                        lock_key = %lock.key,
+                        error = %error,
+                        "S3 backup task distributed lock renewal failed"
+                    );
+                    return;
+                }
+            }
             let _ = update_run_status(
                 &app,
                 &run_id,
@@ -458,9 +581,15 @@ async fn acquire_s3_backup_task_lock(
         Ok(None) => Err(S3BackupTaskError::conflict(
             "已有 S3 备份任务正在执行，请等待当前任务完成后再试",
         )),
-        Err(error) => Err(S3BackupTaskError::service_unavailable(format!(
-            "无法获取 S3 备份任务锁：{error}"
-        ))),
+        Err(_) => {
+            warn!(
+                error_category = "lock_acquisition_failed",
+                "S3 backup task lock acquisition failed"
+            );
+            Err(S3BackupTaskError::service_unavailable(
+                "无法获取 S3 备份任务锁，请稍后重试",
+            ))
+        }
     }
 }
 
@@ -509,25 +638,77 @@ async fn run_s3_backup_once(
     app: &AppState,
     config: &S3BackupConfig,
 ) -> Result<BackupRunResult, S3BackupTaskError> {
-    let admin_state = AdminAppState::new(app);
-    let payload = match config.scope {
-        BackupScope::Config => {
-            admin_state
-                .build_admin_system_config_export_payload()
-                .await?
-        }
-        BackupScope::Users => {
-            admin_state
-                .build_admin_system_users_export_payload()
-                .await?
-        }
-        BackupScope::Data => admin_state.build_admin_system_data_export_payload().await?,
+    let Some(encryption_secret) = effective_backup_encryption_secret(app) else {
+        return Err(S3BackupTaskError::service_unavailable(
+            "S3 备份需要 AETHER_BACKUP_ENCRYPTION_KEY 或可用的数据加密密钥",
+        ));
     };
-    let store = ObjectStoreS3BackupStore::from_config(config)
-        .map_err(|error| S3BackupTaskError::internal(error.to_string()))?;
-    run_backup_with_store(config, &store, payload, Utc::now())
+    let payload = build_s3_backup_payload_exclusively(app, config.scope).await?;
+    let store = ObjectStoreS3BackupStore::from_config(config).map_err(|_| {
+        warn!(
+            error_category = "object_store_initialization_failed",
+            "S3 backup object store initialization failed"
+        );
+        S3BackupTaskError::internal(S3_BACKUP_INTERNAL_ERROR_DETAIL)
+    })?;
+    run_backup_with_store(config, &store, payload, Utc::now(), &encryption_secret)
         .await
-        .map_err(|error| S3BackupTaskError::internal(error.to_string()))
+        .map_err(|_| {
+            warn!(
+                error_category = "backup_execution_failed",
+                "S3 backup execution failed"
+            );
+            S3BackupTaskError::internal(S3_BACKUP_INTERNAL_ERROR_DETAIL)
+        })
+}
+
+async fn build_s3_backup_payload_exclusively(
+    app: &AppState,
+    scope: BackupScope,
+) -> Result<Value, S3BackupTaskError> {
+    let admin_state = AdminAppState::new(app);
+    crate::admin_api::execute_admin_system_import_exclusively(app, async {
+        match scope {
+            BackupScope::Config => {
+                admin_state
+                    .build_admin_system_config_export_payload(SystemExportMode::RecoveryBackup)
+                    .await
+            }
+            BackupScope::Users => {
+                admin_state
+                    .build_admin_system_users_export_payload(SystemExportMode::RecoveryBackup)
+                    .await
+            }
+            BackupScope::Data => {
+                admin_state
+                    .build_admin_system_data_export_payload(SystemExportMode::RecoveryBackup)
+                    .await
+            }
+        }
+    })
+    .await
+    .map_err(|error| {
+        warn!(
+            error_category = "system_import_coordination_failed",
+            lock_error = ?error,
+            "S3 backup snapshot could not acquire or retain the system import lock"
+        );
+        S3BackupTaskError::service_unavailable(S3_BACKUP_INTERNAL_ERROR_DETAIL)
+    })?
+    .map_err(S3BackupTaskError::from)
+}
+
+fn effective_backup_encryption_secret(app: &AppState) -> Option<String> {
+    std::env::var("AETHER_BACKUP_ENCRYPTION_KEY")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            app.encryption_key()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+        })
 }
 
 async fn load_s3_backup_config_for_run(
@@ -551,7 +732,7 @@ pub(crate) async fn load_s3_backup_config_values(
             .or_else(|| admin_system_config_default_value(key));
         if let Some(value) = value {
             let value = if *key == "backup_s3_secret_access_key" {
-                decrypt_s3_secret_access_key(app, value)?
+                decrypt_s3_secret_access_key(app, value).await?
             } else {
                 value
             };
@@ -561,39 +742,56 @@ pub(crate) async fn load_s3_backup_config_values(
     Ok(values)
 }
 
-fn decrypt_s3_secret_access_key(app: &AppState, value: Value) -> Result<Value, S3BackupTaskError> {
-    let Some(ciphertext) = value
+async fn decrypt_s3_secret_access_key(
+    app: &AppState,
+    value: Value,
+) -> Result<Value, S3BackupTaskError> {
+    let Some(stored_value) = value
         .as_str()
         .map(str::trim)
         .filter(|value| !value.is_empty())
     else {
         return Ok(value);
     };
-    let Some(plaintext) = decrypt_catalog_secret_with_fallbacks(app.encryption_key(), ciphertext)
-    else {
-        return Err(S3BackupTaskError::bad_request(
+    let plaintext = decrypt_or_migrate_system_config_secret(
+        app,
+        "backup_s3_secret_access_key",
+        stored_value.to_string(),
+    )
+    .await
+    .map_err(|_| {
+        S3BackupTaskError::bad_request(
             "S3 备份配置无效：Secret Access Key（访问密钥）无法解密，请重新填写",
-        ));
-    };
+        )
+    })?;
     Ok(Value::String(plaintext))
 }
 
 fn backup_run_result_json(result: &BackupRunResult) -> Value {
     json!({
         "scope": result.scope.as_config_value(),
-        "bucket": result.bucket,
-        "object_key": result.object_key,
         "bytes": result.bytes,
         "sha256": result.sha256,
         "export_version": result.export_version,
         "exported_at": result.exported_at,
         "compression": result.compression,
-        "deleted_old_objects": result.deleted_old_objects,
+        "encryption": result.encryption,
+        "legacy_encrypted_copies_created": result.legacy_encrypted_copies_created,
+        "legacy_encrypted_copies_verified": result.legacy_encrypted_copies_verified,
+        "legacy_plaintext_objects_deleted": result.legacy_plaintext_objects_deleted,
+        "legacy_plaintext_objects_retained": result.legacy_plaintext_objects_retained,
+        "retention_cleanup_candidates": result.retention_cleanup_candidates,
+        "automatic_deletions": result.legacy_plaintext_objects_deleted,
+        "object_cleanup_mode": "legacy_plaintext_deleted_after_verified_encryption",
+        "versioned_storage_cleanup_required": result.versioned_storage_cleanup_required,
+        "versioned_storage_cleanup_notice": "legacy_plaintext_versions_require_external_cleanup",
     })
 }
 
 #[cfg(test)]
 mod tests {
+    use std::convert::Infallible;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
     use aether_crypto::{encrypt_python_fernet_plaintext, DEVELOPMENT_ENCRYPTION_KEY};
@@ -603,8 +801,77 @@ mod tests {
     };
 
     use crate::data::GatewayDataState;
+    use crate::handlers::shared::decrypt_system_config_secret;
     use crate::state::AppState;
     use crate::task_runtime::{now_unix_secs, TASK_KEY_SYSTEM_S3_BACKUP};
+
+    #[test]
+    fn backup_lock_renewal_requires_ownership_and_preserves_backend_errors() {
+        assert!(matches!(
+            super::require_successful_backup_lock_renewal::<Infallible>(Ok(true)),
+            Ok(())
+        ));
+        assert!(matches!(
+            super::require_successful_backup_lock_renewal::<Infallible>(Ok(false)),
+            Err(super::BackupLockRenewalFailure::Lost)
+        ));
+        assert!(matches!(
+            super::require_successful_backup_lock_renewal(Err("redis unavailable")),
+            Err(super::BackupLockRenewalFailure::Backend(
+                "redis unavailable"
+            ))
+        ));
+    }
+
+    #[tokio::test]
+    async fn lost_backup_lock_stops_race_without_publishing_backup_result() {
+        let destructive_stage_reached = Arc::new(AtomicBool::new(false));
+        let destructive_stage_for_backup = Arc::clone(&destructive_stage_reached);
+        let backup = async move {
+            std::future::pending::<()>().await;
+            destructive_stage_for_backup.store(true, Ordering::Release);
+            Ok::<(), super::S3BackupTaskError>(())
+        };
+        let heartbeat = tokio::spawn(async {});
+        let outcome = super::race_backup_with_lock_heartbeat(backup, heartbeat).await;
+        assert!(matches!(
+            outcome,
+            super::BackupLockRaceOutcome::LeaseLost(Ok(()))
+        ));
+        assert!(!destructive_stage_reached.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn completed_heartbeat_wins_when_backup_completion_is_also_ready() {
+        let heartbeat = tokio::spawn(async {});
+        tokio::task::yield_now().await;
+
+        let outcome = super::race_backup_with_lock_heartbeat(async { 42_u8 }, heartbeat).await;
+
+        assert!(matches!(
+            outcome,
+            super::BackupLockRaceOutcome::LeaseLost(Ok(()))
+        ));
+    }
+
+    #[tokio::test]
+    async fn s3_backup_snapshot_refuses_to_overlap_system_import() {
+        let app = AppState::new().expect("app state should build");
+        let lease = crate::admin_api::try_acquire_admin_system_import_lease(&app)
+            .await
+            .expect("test should acquire the system import lease");
+
+        let error = super::build_s3_backup_payload_exclusively(
+            &app,
+            crate::backup::scopes::BackupScope::Config,
+        )
+        .await
+        .expect_err("backup snapshot must not overlap a system import");
+
+        crate::admin_api::release_admin_system_import_lease(&app, &lease).await;
+        assert_eq!(error.status(), axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error.detail(), super::S3_BACKUP_INTERNAL_ERROR_DETAIL);
+    }
 
     fn valid_s3_backup_config_values() -> Vec<(String, serde_json::Value)> {
         vec![
@@ -630,6 +897,92 @@ mod tests {
                 .expect("test secret should encrypt")),
             ),
         ]
+    }
+
+    #[tokio::test]
+    async fn legacy_plaintext_s3_secret_is_migrated_when_config_loads() {
+        let plaintext = "legacy-s3-secret-access-key";
+        let mut entries = valid_s3_backup_config_values();
+        entries
+            .iter_mut()
+            .find(|(key, _)| key == "backup_s3_secret_access_key")
+            .expect("secret config fixture should exist")
+            .1 = serde_json::json!(plaintext);
+        let app = AppState::new()
+            .expect("app state should build")
+            .with_data_state_for_tests(
+                GatewayDataState::disabled()
+                    .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY)
+                    .with_system_config_values_for_tests(entries),
+            );
+
+        let values = super::load_s3_backup_config_values(&app)
+            .await
+            .expect("legacy S3 config should load");
+        assert_eq!(
+            values.get("backup_s3_secret_access_key"),
+            Some(&serde_json::json!(plaintext))
+        );
+
+        let stored = app
+            .read_system_config_json_value_strong("backup_s3_secret_access_key")
+            .await
+            .expect("stored S3 secret should read")
+            .and_then(|value| value.as_str().map(ToOwned::to_owned))
+            .expect("stored S3 secret should remain a string");
+        assert_ne!(stored, plaintext);
+        assert_eq!(
+            decrypt_system_config_secret(&app, "backup_s3_secret_access_key", &stored)
+                .expect("migrated S3 secret should decrypt"),
+            plaintext
+        );
+    }
+
+    #[tokio::test]
+    async fn undecryptable_s3_fernet_secret_fails_closed() {
+        let plaintext = "s3-secret-from-unavailable-key";
+        let ciphertext = encrypt_python_fernet_plaintext("unavailable-s3-key", plaintext)
+            .expect("unknown-key fixture should encrypt");
+        let mut entries = valid_s3_backup_config_values();
+        entries
+            .iter_mut()
+            .find(|(key, _)| key == "backup_s3_secret_access_key")
+            .expect("secret config fixture should exist")
+            .1 = serde_json::json!(ciphertext.clone());
+        let app = AppState::new()
+            .expect("app state should build")
+            .with_data_state_for_tests(
+                GatewayDataState::disabled()
+                    .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY)
+                    .with_system_config_values_for_tests(entries),
+            );
+
+        let error = super::load_s3_backup_config_values(&app)
+            .await
+            .expect_err("unknown-key S3 ciphertext must fail closed");
+        let error_text = error.to_string();
+        assert!(!error_text.contains(plaintext));
+        assert!(!error_text.contains(&ciphertext));
+        assert_eq!(
+            app.read_system_config_json_value_strong("backup_s3_secret_access_key")
+                .await
+                .expect("stored S3 secret should read"),
+            Some(serde_json::json!(ciphertext))
+        );
+    }
+
+    #[test]
+    fn gateway_dependency_errors_are_not_exposed_to_backup_clients() {
+        let error = super::S3BackupTaskError::from(crate::GatewayError::Internal(
+            "postgresql://admin:database-secret@db.internal/aether".to_string(),
+        ));
+
+        assert_eq!(
+            error.status(),
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(error.detail(), super::S3_BACKUP_INTERNAL_ERROR_DETAIL);
+        assert!(!error.detail().contains("database-secret"));
     }
 
     fn stored_s3_backup_run(status: BackgroundTaskStatus) -> StoredBackgroundTaskRun {
@@ -774,7 +1127,9 @@ mod tests {
 
         let payload = super::s3_backup_task_payload_json(&config, "manual", None);
 
-        assert!(payload["bucket"].is_string());
+        assert!(payload.get("bucket").is_none());
+        assert!(payload.get("prefix").is_none());
+        assert_eq!(payload["scope"], serde_json::json!("data"));
         assert_eq!(payload["trigger"], serde_json::json!("manual"));
         assert!(!payload.to_string().contains("secret"));
     }

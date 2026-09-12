@@ -17,7 +17,9 @@ pub fn decode_stream_frame_ndjson(line: &[u8]) -> Result<StreamFrame, IoError> {
 mod tests {
     use std::collections::BTreeMap;
 
-    use aether_contracts::{StreamFramePayload, StreamFrameType};
+    use aether_contracts::{
+        ExecutionStreamTerminalSummary, StandardizedUsage, StreamFramePayload, StreamFrameType,
+    };
 
     use super::{decode_stream_frame_ndjson, encode_stream_frame_ndjson};
 
@@ -39,6 +41,24 @@ mod tests {
         let raw = encode_stream_frame_ndjson(&frame).expect("frame should encode");
         let decoded =
             decode_stream_frame_ndjson(raw.trim_ascii_end()).expect("frame should decode");
+        assert_eq!(decoded, frame);
+    }
+
+    #[test]
+    fn ndjson_round_trip_preserves_terminal_usage_with_fractional_fields() {
+        let mut usage = StandardizedUsage::new();
+        usage.cache_storage_token_hours = 0.125;
+        let frame =
+            aether_contracts::StreamFrame::eof_with_summary(Some(ExecutionStreamTerminalSummary {
+                standardized_usage: Some(usage),
+                observed_finish: true,
+                ..ExecutionStreamTerminalSummary::default()
+            }));
+
+        let raw = encode_stream_frame_ndjson(&frame).expect("frame should encode");
+        let decoded = decode_stream_frame_ndjson(raw.trim_ascii_end())
+            .expect("terminal usage frame should decode");
+
         assert_eq!(decoded, frame);
     }
 }

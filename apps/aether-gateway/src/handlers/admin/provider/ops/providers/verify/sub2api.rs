@@ -4,6 +4,9 @@ use super::request::{
 };
 use crate::handlers::admin::provider::ops::providers::config::persist_admin_provider_ops_runtime_credentials;
 use crate::handlers::admin::request::AdminAppState;
+use crate::handlers::shared::{
+    canonicalize_provider_ops_base_url, resolve_provider_ops_same_origin_url,
+};
 use aether_admin::provider::ops::{
     admin_provider_ops_frontend_updated_credentials, admin_provider_ops_verify_failure,
     parse_verify_payload, ADMIN_PROVIDER_OPS_USER_AGENT,
@@ -46,7 +49,10 @@ pub(super) async fn admin_provider_ops_local_sub2api_verify_response(
         }
     }
 
-    let verify_url = admin_provider_ops_sub2api_request_url(base_url, verify_endpoint);
+    let verify_url = match admin_provider_ops_sub2api_request_url(base_url, verify_endpoint) {
+        Ok(url) => url,
+        Err(message) => return admin_provider_ops_verify_failure(message),
+    };
     let auth_value = match reqwest::header::HeaderValue::from_str(&format!("Bearer {access_token}"))
     {
         Ok(value) => value,
@@ -98,20 +104,9 @@ pub(super) async fn admin_provider_ops_local_sub2api_verify_response(
 pub(in super::super) fn admin_provider_ops_sub2api_request_url(
     base_url: &str,
     endpoint: &str,
-) -> String {
-    let trimmed_base_url = base_url.trim().trim_end_matches('/');
-    let trimmed_endpoint = endpoint.trim();
-    if trimmed_endpoint.is_empty() {
-        return trimmed_base_url.to_string();
-    }
-    if trimmed_endpoint.starts_with("http://") || trimmed_endpoint.starts_with("https://") {
-        return trimmed_endpoint.to_string();
-    }
-
-    reqwest::Url::parse(trimmed_base_url)
-        .and_then(|base| base.join(trimmed_endpoint))
-        .map(|url| url.to_string())
-        .unwrap_or_else(|_| format!("{trimmed_base_url}{trimmed_endpoint}"))
+) -> Result<String, String> {
+    let destination = canonicalize_provider_ops_base_url(base_url).map_err(ToString::to_string)?;
+    resolve_provider_ops_same_origin_url(&destination, endpoint).map_err(ToString::to_string)
 }
 
 fn admin_provider_ops_sub2api_updated_credentials(
@@ -212,7 +207,7 @@ async fn admin_provider_ops_sub2api_token_request(
     default_error: &str,
     proxy_snapshot: Option<&ProxySnapshot>,
 ) -> Result<Map<String, Value>, String> {
-    let url = admin_provider_ops_sub2api_request_url(base_url, path);
+    let url = admin_provider_ops_sub2api_request_url(base_url, path)?;
     let default_headers = reqwest::header::HeaderMap::from_iter([
         (
             reqwest::header::USER_AGENT,
@@ -246,11 +241,10 @@ async fn admin_provider_ops_sub2api_token_request(
     if status != http::StatusCode::OK
         || payload.get("code").and_then(Value::as_i64).unwrap_or(-1) != 0
     {
-        let message = payload
-            .get("message")
-            .and_then(Value::as_str)
-            .unwrap_or(default_error);
-        return Err(message.to_string());
+        // Upstream messages are untrusted response data and may echo credentials or
+        // request headers.  Callers only need a stable local classification here;
+        // never reflect the upstream text into verify responses, logs, or caches.
+        return Err(default_error.to_string());
     }
     payload
         .get("data")

@@ -117,7 +117,7 @@
         <div
           class="space-y-4 transition-opacity duration-150"
           :class="mode === 'oauth' ? 'opacity-100' : 'opacity-0 pointer-events-none'"
-          :inert="mode !== 'oauth' ? '' : undefined"
+          :inert="mode !== 'oauth' ? true : undefined"
           :aria-hidden="mode !== 'oauth'"
         >
           <!-- Windsurf: 浏览器 session/poll 授权 -->
@@ -612,7 +612,7 @@
           v-if="isClaudeCodeProvider"
           class="flex flex-col gap-3 justify-center transition-opacity duration-150"
           :class="mode === 'cookie' ? 'opacity-100' : 'opacity-0 pointer-events-none'"
-          :inert="mode !== 'cookie' ? '' : undefined"
+          :inert="mode !== 'cookie' ? true : undefined"
           :aria-hidden="mode !== 'cookie'"
         >
           <label
@@ -648,7 +648,7 @@
         <div
           class="flex flex-col gap-3 justify-center transition-opacity duration-150"
           :class="mode === 'import' ? 'opacity-100' : 'opacity-0 pointer-events-none'"
-          :inert="mode !== 'import' ? '' : undefined"
+          :inert="mode !== 'import' ? true : undefined"
           :aria-hidden="mode !== 'import'"
         >
           <div
@@ -780,7 +780,7 @@
           v-if="isCodexProvider"
           class="flex flex-col gap-3 justify-center transition-opacity duration-150"
           :class="mode === 'agent_identity' ? 'opacity-100' : 'opacity-0 pointer-events-none'"
-          :inert="mode !== 'agent_identity' ? '' : undefined"
+          :inert="mode !== 'agent_identity' ? true : undefined"
           :aria-hidden="mode !== 'agent_identity'"
         >
           <Textarea
@@ -868,6 +868,7 @@ import { useToast } from '@/composables/useToast'
 import { useClipboard } from '@/composables/useClipboard'
 import { useTotp } from '@/composables/useTotp'
 import { parseApiError } from '@/utils/errorParser'
+import { safeExternalHttpsUrl } from '@/utils/navigationSecurity'
 import { useI18n } from '@/i18n'
 import {
   startProviderLevelOAuth,
@@ -1550,7 +1551,12 @@ function handleClose() {
 function openAuthorizationUrl() {
   const url = oauth.value.authorization_url
   if (!url) return
-  window.open(url, '_blank', 'noopener,noreferrer')
+  const safeUrl = safeExternalHttpsUrl(url)
+  if (!safeUrl) {
+    showError(legacyT('OAuth 服务返回了不安全的授权地址'))
+    return
+  }
+  window.open(safeUrl, '_blank', 'noopener,noreferrer')
 }
 
 async function initOAuth() {
@@ -2324,7 +2330,13 @@ async function handleCreateAgentIdentity() {
 
 function openDeviceVerificationUrl() {
   const url = device.value.verification_uri_complete || device.value.verification_uri
-  if (url) window.open(url, '_blank', 'noopener,noreferrer')
+  if (!url) return
+  const safeUrl = safeExternalHttpsUrl(url)
+  if (!safeUrl) {
+    showError(legacyT('OAuth 服务返回了不安全的设备验证地址'))
+    return
+  }
+  window.open(safeUrl, '_blank', 'noopener,noreferrer')
 }
 
 function startCountdown() {

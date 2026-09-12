@@ -6,22 +6,47 @@ use super::{
 use crate::email_delivery::{
     read_smtp_delivery_config, send_smtp_email, ComposedEmail, SmtpDeliveryConfig,
 };
+use aether_admin::system::{
+    admin_email_template_subject_is_valid, ADMIN_EMAIL_TEMPLATE_MAX_PREVIEW_VALUE_BYTES,
+    ADMIN_EMAIL_TEMPLATE_MAX_SUBJECT_BYTES,
+};
+use hmac::Mac;
+use sha2::{Digest, Sha256};
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(super) struct StoredAuthEmailVerificationCode {
-    pub(super) code: String,
+    pub(super) code_hash: String,
     pub(super) created_at: String,
+    pub(super) verification_token_hash: String,
 }
 
 pub(super) type AuthSmtpConfig = SmtpDeliveryConfig;
 pub(super) type AuthComposedEmail = ComposedEmail;
 
-pub(super) fn auth_email_verification_key(email: &str) -> String {
-    format!("{AUTH_EMAIL_VERIFICATION_PREFIX}{email}")
+fn auth_email_storage_key_digest(domain: &str, parts: &[&str]) -> Result<String, GatewayError> {
+    let secret = super::auth_jwt_secret().map_err(GatewayError::Internal)?;
+    let mut mac = hmac::Hmac::<Sha256>::new_from_slice(secret.as_bytes())
+        .map_err(|_| GatewayError::Internal("auth email HMAC key invalid".to_string()))?;
+    mac.update(b"aether-auth-email-storage-v1\0");
+    mac.update(domain.as_bytes());
+    for part in parts {
+        mac.update(b"\0");
+        mac.update(part.as_bytes());
+    }
+    Ok(mac
+        .finalize()
+        .into_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
 }
 
-pub(super) fn auth_email_verified_key(email: &str) -> String {
-    format!("{AUTH_EMAIL_VERIFIED_PREFIX}{email}")
+pub(super) fn auth_email_verification_key(email: &str) -> Result<String, GatewayError> {
+    let email = email.trim().to_ascii_lowercase();
+    Ok(format!(
+        "{AUTH_EMAIL_VERIFICATION_PREFIX}{}",
+        auth_email_storage_key_digest("pending", &[email.as_str()])?
+    ))
 }
 
 pub(super) fn record_auth_email_delivery_for_tests(
@@ -46,13 +71,98 @@ pub(super) fn generate_auth_verification_code() -> String {
     format!("{:06}", uuid::Uuid::new_v4().as_u128() % 1_000_000)
 }
 
+pub(super) fn generate_auth_verification_token() -> String {
+    format!(
+        "{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    )
+}
+
+pub(super) fn auth_verification_token_hash(token: &str) -> String {
+    format!("{:x}", Sha256::digest(token.trim().as_bytes()))
+}
+
+pub(super) fn auth_verification_code_hash(verification_token: &str, code: &str) -> String {
+    format!(
+        "{:x}",
+        Sha256::digest(
+            format!(
+                "aether-email-verification\0{}\0{}",
+                verification_token.trim(),
+                code.trim()
+            )
+            .as_bytes()
+        )
+    )
+}
+
+fn constant_time_eq(left: &str, right: &str) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    left.as_bytes()
+        .iter()
+        .zip(right.as_bytes())
+        .fold(0u8, |difference, (left, right)| difference | (left ^ right))
+        == 0
+}
+
+pub(super) fn auth_email_registration_proof_key(
+    email: &str,
+    verification_token: &str,
+) -> Result<String, GatewayError> {
+    let email = email.trim().to_ascii_lowercase();
+    Ok(format!(
+        "{AUTH_EMAIL_VERIFIED_PREFIX}{}",
+        auth_email_storage_key_digest(
+            "registration-proof",
+            &[email.as_str(), verification_token.trim()]
+        )?
+    ))
+}
+
+pub(super) fn auth_verification_token_matches(
+    stored: &StoredAuthEmailVerificationCode,
+    verification_token: &str,
+) -> bool {
+    !verification_token.trim().is_empty()
+        && constant_time_eq(
+            &stored.verification_token_hash,
+            &auth_verification_token_hash(verification_token),
+        )
+}
+
+pub(super) fn auth_verification_code_matches(
+    stored: &StoredAuthEmailVerificationCode,
+    verification_token: &str,
+    code: &str,
+) -> bool {
+    constant_time_eq(
+        &stored.code_hash,
+        &auth_verification_code_hash(verification_token, code),
+    )
+}
+
 fn render_auth_template_string(
     template: &str,
     variables: &std::collections::BTreeMap<String, String>,
     escape_html: bool,
 ) -> Result<String, GatewayError> {
+    if template.len() > ADMIN_EMAIL_TEMPLATE_MAX_SUBJECT_BYTES
+        || template.bytes().any(|byte| byte < 0x20 || byte == 0x7f)
+    {
+        return Err(GatewayError::Internal(
+            "email template subject is invalid or oversized".to_string(),
+        ));
+    }
     let mut rendered = template.to_string();
     for (key, value) in variables {
+        if value.len() > ADMIN_EMAIL_TEMPLATE_MAX_PREVIEW_VALUE_BYTES {
+            return Err(GatewayError::Internal(
+                "email template variable is oversized".to_string(),
+            ));
+        }
         let pattern = regex::Regex::new(&format!(r"\{{\{{\s*{}\s*\}}\}}", regex::escape(key)))
             .map_err(|err| GatewayError::Internal(err.to_string()))?;
         let replacement = if escape_html {
@@ -60,9 +170,37 @@ fn render_auth_template_string(
         } else {
             value.clone()
         };
+        let (matched_bytes, occurrences) = pattern
+            .find_iter(&rendered)
+            .fold((0usize, 0usize), |(matched, count), found| {
+                (matched.saturating_add(found.as_str().len()), count + 1)
+            });
+        let prospective_len = occurrences
+            .checked_mul(replacement.len())
+            .and_then(|bytes| {
+                rendered
+                    .len()
+                    .checked_sub(matched_bytes)?
+                    .checked_add(bytes)
+            });
+        if prospective_len.is_none_or(|length| length > ADMIN_EMAIL_TEMPLATE_MAX_SUBJECT_BYTES) {
+            return Err(GatewayError::Internal(
+                "rendered email template subject is oversized".to_string(),
+            ));
+        }
         rendered = pattern
-            .replace_all(&rendered, replacement.as_str())
+            .replace_all(&rendered, regex::NoExpand(replacement.as_str()))
             .into_owned();
+        if rendered.len() > ADMIN_EMAIL_TEMPLATE_MAX_SUBJECT_BYTES {
+            return Err(GatewayError::Internal(
+                "rendered email template subject is oversized".to_string(),
+            ));
+        }
+    }
+    if !admin_email_template_subject_is_valid(&rendered) {
+        return Err(GatewayError::Internal(
+            "rendered email template subject is invalid or oversized".to_string(),
+        ));
     }
     Ok(rendered)
 }
@@ -82,7 +220,7 @@ pub(super) async fn read_auth_email_verification_code(
     state: &AppState,
     email: &str,
 ) -> Result<Option<StoredAuthEmailVerificationCode>, GatewayError> {
-    let key = auth_email_verification_key(email);
+    let key = auth_email_verification_key(email)?;
     let raw = state.runtime_kv_get(&key).await?;
     raw.map(|value| {
         serde_json::from_str::<StoredAuthEmailVerificationCode>(&value)
@@ -91,55 +229,72 @@ pub(super) async fn read_auth_email_verification_code(
     .transpose()
 }
 
-pub(super) async fn auth_email_is_verified(
+pub(in crate::handlers::public::support) async fn auth_email_is_verified(
     state: &AppState,
     email: &str,
+    verification_token: &str,
 ) -> Result<bool, GatewayError> {
-    let key = auth_email_verified_key(email);
+    let key = auth_email_registration_proof_key(email, verification_token)?;
     state.runtime_kv_exists(&key).await
 }
 
 pub(super) async fn mark_auth_email_verified(
     state: &AppState,
     email: &str,
+    verification_token: &str,
 ) -> Result<bool, GatewayError> {
-    let key = auth_email_verified_key(email);
+    let key = auth_email_registration_proof_key(email, verification_token)?;
     state
         .runtime_kv_setex(&key, "verified", AUTH_EMAIL_VERIFIED_TTL_SECS)
         .await?;
     Ok(true)
 }
 
+pub(super) async fn consume_auth_email_verification_code(
+    state: &AppState,
+    email: &str,
+) -> Result<Option<StoredAuthEmailVerificationCode>, GatewayError> {
+    let key = auth_email_verification_key(email)?;
+    state
+        .runtime_kv_getdel(&key)
+        .await?
+        .map(|value| {
+            serde_json::from_str::<StoredAuthEmailVerificationCode>(&value)
+                .map_err(|err| GatewayError::Internal(err.to_string()))
+        })
+        .transpose()
+}
+
+pub(in crate::handlers::public::support) async fn consume_auth_email_registration_proof(
+    state: &AppState,
+    email: &str,
+    verification_token: &str,
+) -> Result<bool, GatewayError> {
+    let key = auth_email_registration_proof_key(email, verification_token)?;
+    Ok(state.runtime_kv_getdel(&key).await?.as_deref() == Some("verified"))
+}
+
 pub(super) async fn clear_auth_email_pending_code(
     state: &AppState,
     email: &str,
 ) -> Result<bool, GatewayError> {
-    let verification_key = auth_email_verification_key(email);
+    let verification_key = auth_email_verification_key(email)?;
     state.runtime_kv_del(&verification_key).await
-}
-
-pub(super) async fn clear_auth_email_verification(
-    state: &AppState,
-    email: &str,
-) -> Result<bool, GatewayError> {
-    let verification_key = auth_email_verification_key(email);
-    let verified_key = auth_email_verified_key(email);
-    let deleted_pending = state.runtime_kv_del(&verification_key).await?;
-    let deleted_verified = state.runtime_kv_del(&verified_key).await?;
-    Ok(deleted_pending || deleted_verified)
 }
 
 pub(super) async fn store_auth_email_verification_code(
     state: &AppState,
     email: &str,
     code: &str,
+    verification_token: &str,
     created_at: chrono::DateTime<chrono::Utc>,
     ttl_seconds: u64,
 ) -> Result<bool, GatewayError> {
-    let key = auth_email_verification_key(email);
+    let key = auth_email_verification_key(email)?;
     let value = json!({
-        "code": code,
+        "code_hash": auth_verification_code_hash(verification_token, code),
         "created_at": created_at.to_rfc3339(),
+        "verification_token_hash": auth_verification_token_hash(verification_token),
     })
     .to_string();
     state.runtime_kv_setex(&key, &value, ttl_seconds).await?;
@@ -225,4 +380,64 @@ pub(super) async fn auth_registration_email_configured(
     state: &AppState,
 ) -> Result<bool, GatewayError> {
     Ok(read_smtp_delivery_config(state).await?.is_some())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auth_email_runtime_keys_are_keyed_and_contain_no_plaintext_identifiers() {
+        let email = "Alice+security@example.com";
+        let token = "verification-token-security-test";
+        let pending = auth_email_verification_key(email).expect("pending key should build");
+        let proof =
+            auth_email_registration_proof_key(email, token).expect("proof key should build");
+
+        for key in [&pending, &proof] {
+            assert!(!key.to_ascii_lowercase().contains("alice"));
+            assert!(!key.contains("example.com"));
+            assert!(!key.contains(token));
+        }
+        let plain_email_hash = format!("{:x}", Sha256::digest(email.to_ascii_lowercase()));
+        assert!(!pending.contains(&plain_email_hash));
+        assert_ne!(pending, proof);
+    }
+
+    #[tokio::test]
+    async fn auth_email_challenges_and_registration_proofs_are_consumed_once_concurrently() {
+        let state = AppState::new().expect("app state should build");
+        let email = "atomic@example.com";
+        let token = "atomic-verification-token";
+        store_auth_email_verification_code(&state, email, "123456", token, chrono::Utc::now(), 300)
+            .await
+            .expect("challenge should store");
+
+        let (first_challenge, second_challenge) = tokio::join!(
+            consume_auth_email_verification_code(&state, email),
+            consume_auth_email_verification_code(&state, email)
+        );
+        assert_eq!(
+            [first_challenge, second_challenge]
+                .into_iter()
+                .filter(|result| result.as_ref().is_ok_and(Option::is_some))
+                .count(),
+            1
+        );
+
+        mark_auth_email_verified(&state, email, token)
+            .await
+            .expect("proof should store");
+        let (first_proof, second_proof) = tokio::join!(
+            consume_auth_email_registration_proof(&state, email, token),
+            consume_auth_email_registration_proof(&state, email, token)
+        );
+        assert_eq!(
+            [first_proof, second_proof]
+                .into_iter()
+                .filter(|result| result.as_ref().is_ok_and(|consumed| *consumed))
+                .count(),
+            1
+        );
+    }
 }

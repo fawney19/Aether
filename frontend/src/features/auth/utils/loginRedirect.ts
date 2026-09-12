@@ -1,4 +1,5 @@
 import { isNavigationFailure, NavigationFailureType, type Router } from 'vue-router'
+import { safeInternalNavigationPath } from '@/utils/navigationSecurity'
 
 export type LoginNavigationResult = 'router' | 'already-there' | 'document'
 
@@ -13,21 +14,22 @@ export async function navigateAfterLogin(
   targetPath: string,
   documentNavigate: DocumentNavigate = defaultDocumentNavigate,
 ): Promise<LoginNavigationResult> {
+  const safeTargetPath = safeInternalNavigationPath(targetPath) ?? '/'
   try {
-    const navigationFailure = await router.push(targetPath)
+    const navigationFailure = await router.push(safeTargetPath)
 
     if (isNavigationFailure(navigationFailure, NavigationFailureType.duplicated)) {
       return 'already-there'
     }
 
     if (navigationFailure) {
-      documentNavigate(targetPath)
+      documentNavigate(safeTargetPath)
       return 'document'
     }
 
     return 'router'
   } catch {
-    documentNavigate(targetPath)
+    documentNavigate(safeTargetPath)
     return 'document'
   }
 }

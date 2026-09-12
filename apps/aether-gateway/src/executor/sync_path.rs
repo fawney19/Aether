@@ -16,6 +16,7 @@ use crate::ai_serving::api::{
 use crate::api::response::build_client_response_from_parts;
 use crate::control::resolve_execution_runtime_auth_context;
 use crate::control::GatewayControlDecision;
+use crate::state::VideoTaskRouteAccess;
 use crate::{AppState, GatewayError, GatewayFallbackReason};
 
 use super::{
@@ -90,7 +91,7 @@ pub(crate) async fn maybe_execute_via_sync_decision_path(
         plan_kind,
         bypass_cache_key,
         scheduler_supported: supports_sync_execution_decision_kind(plan_kind),
-        transfer_tracker: ProviderTransferTracker::default(),
+        transfer_tracker: ProviderTransferTracker::for_request(parts),
     };
 
     Ok(from_ai_serving_outcome(
@@ -321,13 +322,41 @@ async fn maybe_build_local_video_task_read_response(
         return Ok(LocalExecutionRequestOutcome::NoPath);
     }
 
-    let _ = state
-        .hydrate_video_task_for_route(decision.route_family.as_deref(), parts.uri.path())
-        .await?;
-
-    let refresh_plan = state.video_tasks.prepare_read_refresh_sync_plan(
+    if crate::video_tasks::resolve_video_task_read_lookup_key(
         decision.route_family.as_deref(),
         parts.uri.path(),
+    )
+    .is_none()
+    {
+        return Ok(LocalExecutionRequestOutcome::NoPath);
+    }
+
+    let Some(user_id) = decision
+        .auth_context
+        .as_ref()
+        .filter(|auth_context| auth_context.access_allowed)
+        .map(|auth_context| auth_context.user_id.trim())
+        .filter(|value| !value.is_empty())
+    else {
+        return build_video_task_not_found_outcome(trace_id, decision);
+    };
+
+    if state
+        .hydrate_video_task_for_route_for_user(
+            decision.route_family.as_deref(),
+            parts.uri.path(),
+            user_id,
+        )
+        .await?
+        == VideoTaskRouteAccess::Denied
+    {
+        return build_video_task_not_found_outcome(trace_id, decision);
+    }
+
+    let refresh_plan = state.video_tasks.prepare_read_refresh_sync_plan_for_user(
+        decision.route_family.as_deref(),
+        parts.uri.path(),
+        user_id,
         trace_id,
     );
 
@@ -335,22 +364,25 @@ async fn maybe_build_local_video_task_read_response(
         state.execute_video_task_refresh_plan(&refresh_plan).await?;
     }
 
-    let read_response = state
-        .video_tasks
-        .read_response(decision.route_family.as_deref(), parts.uri.path());
+    let read_response = state.video_tasks.read_response_for_user(
+        decision.route_family.as_deref(),
+        parts.uri.path(),
+        user_id,
+    );
     let read_response = match read_response {
         Some(read_response) => Some(read_response),
         None => {
             state
-                .read_data_backed_video_task_response(
+                .read_data_backed_video_task_response_for_user(
                     decision.route_family.as_deref(),
                     parts.uri.path(),
+                    user_id,
                 )
                 .await?
         }
     };
     let Some(read_response) = read_response else {
-        return Ok(LocalExecutionRequestOutcome::NoPath);
+        return build_video_task_not_found_outcome(trace_id, decision);
     };
 
     let body_bytes = serde_json::to_vec(&read_response.body_json)
@@ -389,10 +421,6 @@ async fn maybe_execute_local_video_task_follow_up_sync(
         return Ok(LocalExecutionRequestOutcome::NoPath);
     }
 
-    let _ = state
-        .hydrate_video_task_for_route(decision.route_family.as_deref(), parts.uri.path())
-        .await?;
-
     let auth_context = resolve_execution_runtime_auth_context(
         state,
         decision,
@@ -401,14 +429,30 @@ async fn maybe_execute_local_video_task_follow_up_sync(
         trace_id,
     )
     .await?;
-    let Some(follow_up) = state.video_tasks.prepare_follow_up_sync_plan(
+    let Some(auth_context) = auth_context.filter(|auth_context| {
+        auth_context.access_allowed && !auth_context.user_id.trim().is_empty()
+    }) else {
+        return build_video_task_not_found_outcome(trace_id, decision);
+    };
+    if state
+        .hydrate_video_task_for_route_for_user(
+            decision.route_family.as_deref(),
+            parts.uri.path(),
+            &auth_context.user_id,
+        )
+        .await?
+        != VideoTaskRouteAccess::Allowed
+    {
+        return build_video_task_not_found_outcome(trace_id, decision);
+    }
+    let Some(follow_up) = state.video_tasks.prepare_follow_up_sync_plan_for_user(
         plan_kind,
         parts.uri.path(),
         Some(body_json),
-        auth_context.as_ref(),
+        Some(&auth_context),
         trace_id,
     ) else {
-        return Ok(LocalExecutionRequestOutcome::NoPath);
+        return build_video_task_not_found_outcome(trace_id, decision);
     };
 
     execute_sync_plan_and_reports_with_transfer_tracker(
@@ -425,4 +469,24 @@ async fn maybe_execute_local_video_task_follow_up_sync(
         transfer_tracker,
     )
     .await
+}
+
+fn build_video_task_not_found_outcome(
+    trace_id: &str,
+    decision: &GatewayControlDecision,
+) -> Result<LocalExecutionRequestOutcome, GatewayError> {
+    let body_bytes = serde_json::to_vec(&crate::video_tasks::not_found_body())
+        .map_err(|err| GatewayError::Internal(err.to_string()))?;
+    let mut headers = BTreeMap::new();
+    headers.insert("content-type".to_string(), "application/json".to_string());
+    headers.insert("content-length".to_string(), body_bytes.len().to_string());
+    Ok(LocalExecutionRequestOutcome::Responded(
+        build_client_response_from_parts(
+            404,
+            &headers,
+            Body::from(body_bytes),
+            trace_id,
+            Some(decision),
+        )?,
+    ))
 }

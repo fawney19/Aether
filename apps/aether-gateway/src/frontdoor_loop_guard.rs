@@ -77,9 +77,9 @@ pub(crate) fn gateway_frontdoor_self_loop_guard_error_with_port(
     url: &str,
 ) -> Option<String> {
     gateway_frontdoor_self_loop_guard_matches_with_port(app_port, url).then(|| {
-        format!(
-            "upstream execution target resolves back to the local aether-gateway frontdoor: {url}"
-        )
+        // Do not echo the configured target: provider URLs can carry API keys,
+        // signed query parameters, or proxy credentials.
+        "upstream execution target resolves back to the local aether-gateway frontdoor".to_string()
     })
 }
 
@@ -143,7 +143,28 @@ fn normalize_host_for_frontdoor_loop_guard(host: &str) -> String {
 }
 
 fn is_loopbackish_host(host: &str) -> bool {
-    matches!(host, "localhost" | "127.0.0.1" | "::1" | "0.0.0.0" | "::")
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+
+    // The execution URL validator deliberately permits literal loopback HTTP
+    // targets for local providers.  The frontdoor loop guard must therefore
+    // use IP semantics instead of a short allowlist: every address in
+    // 127.0.0.0/8 can reach a listener bound to 0.0.0.0, and IPv4-mapped
+    // IPv6 forms can represent the same destinations.
+    let Ok(address) = host.parse::<std::net::IpAddr>() else {
+        return false;
+    };
+    match address {
+        std::net::IpAddr::V4(address) => address.is_loopback() || address.is_unspecified(),
+        std::net::IpAddr::V6(address) => {
+            address.is_loopback()
+                || address.is_unspecified()
+                || address
+                    .to_ipv4()
+                    .is_some_and(|mapped| mapped.is_loopback() || mapped.is_unspecified())
+        }
+    }
 }
 
 #[cfg(test)]

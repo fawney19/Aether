@@ -11,6 +11,7 @@ use crate::ai_serving::planner::route::{
     is_matching_stream_request, resolve_execution_runtime_stream_plan_kind,
 };
 use crate::ai_serving::{resolve_decision_execution_runtime_auth_context, GatewayControlDecision};
+use crate::state::VideoTaskRouteAccess;
 use crate::{AiExecutionDecision, AppState, GatewayError};
 
 pub(crate) async fn maybe_build_stream_decision_payload(
@@ -155,16 +156,37 @@ async fn maybe_build_local_video_task_content_stream_decision_payload(
         return Ok(None);
     }
 
-    let _ = state
-        .hydrate_video_task_for_route(decision.route_family.as_deref(), parts.uri.path())
-        .await?;
+    let Some(user_id) = decision
+        .auth_context
+        .as_ref()
+        .filter(|auth_context| auth_context.access_allowed)
+        .map(|auth_context| auth_context.user_id.trim())
+        .filter(|value| !value.is_empty())
+    else {
+        return Err(crate::video_tasks::not_found_error());
+    };
+    if state
+        .hydrate_video_task_for_route_for_user(
+            decision.route_family.as_deref(),
+            parts.uri.path(),
+            user_id,
+        )
+        .await?
+        != VideoTaskRouteAccess::Allowed
+    {
+        return Err(crate::video_tasks::not_found_error());
+    }
 
-    let Some(action) = state.video_tasks.prepare_openai_content_stream_action(
-        parts.uri.path(),
-        parts.uri.query(),
-        trace_id,
-    ) else {
-        return Ok(None);
+    let Some(action) = state
+        .video_tasks
+        .prepare_openai_content_stream_action_for_user(
+            parts.uri.path(),
+            parts.uri.query(),
+            trace_id,
+            user_id,
+        )
+    else {
+        return Err(crate::video_tasks::not_found_error());
     };
 
     let crate::video_tasks::LocalVideoTaskContentAction::StreamPlan(plan) = action else {

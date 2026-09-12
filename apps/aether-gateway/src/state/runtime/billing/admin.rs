@@ -2,9 +2,11 @@ use super::{
     AdminBillingCollectorRecord, AdminBillingCollectorWriteInput, AdminBillingMutationOutcome,
     AdminBillingPresetApplyResult, AdminBillingRuleRecord, AdminBillingRuleWriteInput, AppState,
     BillingPlanRecord, BillingPlanWriteInput, GatewayError, LocalMutationOutcome,
-    PaymentGatewayConfigRecord, PaymentGatewayConfigWriteInput, UserDailyQuotaAvailabilityRecord,
-    UserPlanEntitlementRecord,
+    PaymentGatewayConfigCasWriteInput, PaymentGatewayConfigRecord, PaymentGatewayConfigWriteInput,
+    PaymentGatewaySecretCasUpdate, UserDailyQuotaAvailabilityRecord, UserPlanEntitlementRecord,
 };
+
+const PAYMENT_GATEWAY_SECRET_MIGRATION_MAX_ATTEMPTS: usize = 8;
 
 fn data_error(err: impl ToString) -> GatewayError {
     GatewayError::Internal(err.to_string())
@@ -446,9 +448,73 @@ impl AppState {
         &self,
         provider: &str,
     ) -> Result<Option<PaymentGatewayConfigRecord>, GatewayError> {
-        self.data
-            .find_payment_gateway_config(provider)
+        let provider = provider.trim().to_ascii_lowercase();
+        let mut record = self
+            .data
+            .find_payment_gateway_config(&provider)
             .await
+            .map_err(data_error)?;
+        for _ in 0..PAYMENT_GATEWAY_SECRET_MIGRATION_MAX_ATTEMPTS {
+            let Some(mut current) = record else {
+                return Ok(None);
+            };
+            let Some(observed) = current.merchant_key_encrypted.as_deref() else {
+                return Ok(Some(current));
+            };
+            let projection = crate::handlers::shared::open_payment_gateway_secret(
+                self,
+                &crate::handlers::shared::PaymentGatewaySecretBinding::from_record(&current)
+                    .map_err(|detail| {
+                        GatewayError::Internal(format!(
+                            "payment gateway secret binding is invalid for {}: {detail}",
+                            current.provider
+                        ))
+                    })?,
+                observed,
+            )
+            .map_err(|detail| {
+                GatewayError::Internal(format!(
+                    "payment gateway secret integrity check failed for {}: {detail}",
+                    current.provider
+                ))
+            })?;
+            if !projection.migration_required {
+                return Ok(Some(current));
+            }
+
+            let update = PaymentGatewaySecretCasUpdate {
+                provider: current.provider.clone(),
+                expected_merchant_key_encrypted: observed.to_string(),
+                merchant_key_encrypted: projection.protected.clone(),
+            };
+            if self
+                .data
+                .compare_and_swap_payment_gateway_secret(&update)
+                .await
+                .map_err(data_error)?
+            {
+                current.merchant_key_encrypted = Some(projection.protected);
+                return Ok(Some(current));
+            }
+            record = self
+                .data
+                .find_payment_gateway_config_strong(&provider)
+                .await
+                .map_err(data_error)?;
+        }
+        Err(GatewayError::Internal(format!(
+            "payment gateway secret migration did not converge for {provider}"
+        )))
+    }
+
+    pub(crate) async fn compare_and_swap_payment_gateway_config(
+        &self,
+        input: &PaymentGatewayConfigCasWriteInput,
+    ) -> Result<LocalMutationOutcome<PaymentGatewayConfigRecord>, GatewayError> {
+        self.data
+            .compare_and_swap_payment_gateway_config(input)
+            .await
+            .map(local_mutation_outcome)
             .map_err(data_error)
     }
 
@@ -499,11 +565,16 @@ impl AppState {
         plan_id: &str,
         input: &BillingPlanWriteInput,
     ) -> Result<LocalMutationOutcome<BillingPlanRecord>, GatewayError> {
-        self.data
+        let outcome = self
+            .data
             .update_billing_plan(plan_id, input)
             .await
             .map(local_mutation_outcome)
-            .map_err(data_error)
+            .map_err(data_error)?;
+        if matches!(&outcome, LocalMutationOutcome::Applied(_)) {
+            self.invalidate_auth_context_cache();
+        }
+        Ok(outcome)
     }
 
     pub(crate) async fn set_billing_plan_enabled(
@@ -537,6 +608,23 @@ impl AppState {
             .list_user_plan_entitlements(user_id)
             .await
             .map_err(data_error)
+    }
+
+    pub(crate) async fn revoke_user_plan_entitlement(
+        &self,
+        user_id: &str,
+        entitlement_id: &str,
+    ) -> Result<LocalMutationOutcome<()>, GatewayError> {
+        let outcome = self
+            .data
+            .revoke_user_plan_entitlement(user_id, entitlement_id)
+            .await
+            .map(local_mutation_outcome)
+            .map_err(data_error)?;
+        if matches!(&outcome, LocalMutationOutcome::Applied(_)) {
+            self.invalidate_auth_context_cache();
+        }
+        Ok(outcome)
     }
 
     pub(crate) async fn find_user_daily_quota_availability(
@@ -586,13 +674,20 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
     use std::time::Duration;
 
+    use aether_crypto::{encrypt_python_fernet_plaintext, DEVELOPMENT_ENCRYPTION_KEY};
+    use aether_data::repository::billing::InMemoryBillingReadRepository;
+    use aether_data_contracts::repository::billing::{
+        BillingReadRepository, PaymentGatewayConfigWriteInput,
+    };
     use serde_json::json;
 
     use super::{
         AdminBillingCollectorWriteInput, AdminBillingRuleWriteInput, AppState, LocalMutationOutcome,
     };
+    use crate::data::GatewayDataState;
 
     const CACHE_KEY: &str = "billing-mutation-test";
 
@@ -713,5 +808,60 @@ mod tests {
             .auth_request_cost_upper_bound_cache
             .get(&CACHE_KEY.to_string(), Duration::from_secs(60),)
             .is_some());
+    }
+
+    #[tokio::test]
+    async fn gateway_lookup_lazily_migrates_legacy_secret_without_touching_other_fields() {
+        let repository = Arc::new(InMemoryBillingReadRepository::default());
+        let legacy = encrypt_python_fernet_plaintext(
+            DEVELOPMENT_ENCRYPTION_KEY,
+            r#"{"secret_key":"legacy-value"}"#,
+        )
+        .expect("legacy secret should encrypt");
+        repository
+            .upsert_payment_gateway_config(&PaymentGatewayConfigWriteInput {
+                provider: "stripe".to_string(),
+                enabled: true,
+                endpoint_url: "https://api.stripe.com".to_string(),
+                callback_base_url: Some("https://example.com".to_string()),
+                merchant_id: "merchant".to_string(),
+                merchant_key_encrypted: Some(legacy),
+                preserve_existing_secret: false,
+                pay_currency: "USD".to_string(),
+                usd_exchange_rate: 1.0,
+                min_recharge_usd: 1.0,
+                channels_json: json!({"channels": []}),
+            })
+            .await
+            .expect("gateway seed should succeed");
+        let before = repository
+            .find_payment_gateway_config("stripe")
+            .await
+            .expect("gateway lookup should succeed")
+            .expect("gateway should exist");
+        let data = GatewayDataState::with_billing_reader_for_tests(repository.clone())
+            .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY);
+        let state = AppState::new()
+            .expect("app state should build")
+            .with_data_state_for_tests(data);
+
+        let migrated = state
+            .find_payment_gateway_config("stripe")
+            .await
+            .expect("gateway migration should succeed")
+            .expect("gateway should exist");
+        assert!(migrated
+            .merchant_key_encrypted
+            .as_deref()
+            .is_some_and(|value| value.starts_with("aether-payment-gateway-secret-v3:")));
+        let stored = repository
+            .find_payment_gateway_config("stripe")
+            .await
+            .expect("gateway lookup should succeed")
+            .expect("gateway should exist");
+        assert_eq!(stored, migrated);
+        assert_eq!(stored.updated_at_unix_secs, before.updated_at_unix_secs);
+        assert_eq!(stored.endpoint_url, before.endpoint_url);
+        assert_eq!(stored.channels_json, before.channels_json);
     }
 }

@@ -1,8 +1,22 @@
-#[derive(Debug, Clone, PartialEq, Eq)]
+use std::fmt;
+
+#[derive(Clone, PartialEq, Eq)]
 pub struct AiPreparedHeaderAuthenticatedCandidate {
     pub auth_header: String,
     pub auth_value: String,
     pub mapped_model: String,
+}
+
+impl fmt::Debug for AiPreparedHeaderAuthenticatedCandidate {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AiPreparedHeaderAuthenticatedCandidate")
+            .field("auth_header", &self.auth_header)
+            .field("has_auth_value", &(!self.auth_value.is_empty()))
+            .field("auth_value_len", &self.auth_value.len())
+            .field("mapped_model", &self.mapped_model)
+            .finish()
+    }
 }
 
 pub fn prepare_ai_header_authenticated_candidate(

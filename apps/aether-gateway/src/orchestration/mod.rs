@@ -20,11 +20,10 @@ pub(crate) use self::adaptive::{
     LocalAdaptiveRateLimitProjection, LocalAdaptiveSuccessProjection,
 };
 pub(crate) use self::attempt::{
-    attempt_identity_from_report_context, build_local_attempt_identities,
-    insert_pool_key_lease_report_context_fields, local_attempt_slot_count,
-    local_execution_candidate_metadata_from_report_context, ExecutionAttemptIdentity,
-    LocalExecutionCandidateMetadata, ROUTING_POOL_POLICY_OVERRIDE_REPORT_FIELD,
-    SCHEDULER_AFFINITY_EPOCH_REPORT_FIELD,
+    attempt_identity_from_report_context, insert_pool_key_lease_report_context_fields,
+    local_execution_candidate_metadata_from_report_context, next_same_key_retry_attempt,
+    ExecutionAttemptIdentity, LocalExecutionCandidateMetadata, POOL_KEY_RETRY_INDEX_STRIDE,
+    ROUTING_POOL_POLICY_OVERRIDE_REPORT_FIELD, SCHEDULER_AFFINITY_EPOCH_REPORT_FIELD,
 };
 pub(crate) use self::classifier::{
     classify_anthropic_failure_disposition, classify_failure_disposition, classify_local_failover,
@@ -57,10 +56,11 @@ pub(crate) use self::oauth_error::{
 };
 pub(crate) use self::policy::{
     append_local_failover_policy_to_value, codex_cyber_flag_passthrough_enabled,
-    cyber_continue_failover_enabled, local_failover_policy_from_report_context,
-    local_failover_policy_from_transport, resolve_local_failover_policy,
-    responses_websocket_adapter, LocalFailoverPolicy, LocalFailoverRegexRule,
-    ResponsesWebSocketAdapter, CYBER_CONTINUE_FAILOVER_CONFIG_KEY, RESPONSES_WEBSOCKET_CONFIG_KEY,
+    local_failover_policy_from_report_context, local_failover_policy_from_transport,
+    resolve_local_failover_policy, responses_websocket_adapter,
+    routing_execution_policy_from_report_context, LocalFailoverPolicy, LocalFailoverRegexRule,
+    ResponsesWebSocketAdapter, RESPONSES_WEBSOCKET_CONFIG_KEY,
+    ROUTING_EXECUTION_POLICY_REPORT_FIELD,
 };
 pub(crate) use self::recovery::{
     analyze_local_failover, analyze_local_transport_error, apply_provider_failure_disposition,
@@ -264,7 +264,16 @@ fn mask_trace_header_value(name: &str, value: &str) -> String {
     if value.len() <= 8 {
         return "****".to_string();
     }
-    format!("{}****{}", &value[..4], &value[value.len() - 4..])
+    let prefix = value.chars().take(4).collect::<String>();
+    let suffix = value
+        .chars()
+        .rev()
+        .take(4)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect::<String>();
+    format!("{prefix}****{suffix}")
 }
 
 fn trace_header_is_sensitive(name: &str) -> bool {
@@ -279,4 +288,25 @@ fn trace_header_is_sensitive(name: &str) -> bool {
     ]
     .iter()
     .any(|candidate| name.trim().eq_ignore_ascii_case(candidate))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::mask_trace_header_value;
+
+    #[test]
+    fn sensitive_header_masking_is_safe_for_unicode_values() {
+        let masked = mask_trace_header_value("authorization", "令牌值-абвгдеж");
+        assert!(masked.starts_with("令牌值-"));
+        assert!(masked.contains("****"));
+        assert!(masked.ends_with("гдеж"));
+    }
+
+    #[test]
+    fn sensitive_header_masking_preserves_ascii_shape() {
+        assert_eq!(
+            mask_trace_header_value("x-api-key", "abcdefghijk"),
+            "abcd****hijk"
+        );
+    }
 }

@@ -26,15 +26,18 @@ use crate::ai_serving::api::{
     CanonicalContentPart, CanonicalStreamEvent, CanonicalStreamFrame, ClaudeClientEmitter,
     OpenAIChatClientEmitter, OpenAIResponsesClientEmitter, StreamingCanonicalUsage,
 };
-use crate::ai_serving::openai_responses_synthetic_reasoning_item_id;
+use crate::ai_serving::{
+    openai_responses_message_item_id, openai_responses_synthetic_reasoning_item_id,
+};
 use crate::clock::current_unix_secs;
 use crate::execution_runtime::ndjson::encode_stream_frame_ndjson;
 use crate::execution_runtime::transport::{
     build_browser_wreq_client, build_request_body, build_request_headers,
-    decode_response_body_bytes, format_hyper_error_chain, format_upstream_request_error,
-    format_wreq_upstream_request_error, resolve_stream_first_byte_timeout, send_request,
-    stream_first_byte_timeout_message, with_non_stream_total_timeout, DirectHttpResponse,
-    ExecutionRuntimeTransportError, ExecutionTransportControls,
+    execution_plan_response_body_limit_bytes, format_hyper_error_chain,
+    format_upstream_request_error, format_wreq_upstream_request_error,
+    resolve_stream_first_byte_timeout, send_request, stream_first_byte_timeout_message,
+    with_non_stream_total_timeout, DirectHttpResponse, ExecutionRuntimeTransportError,
+    ExecutionTransportControls, UpstreamResponseBodyPhase,
 };
 
 const GROK_INTERNAL_HEADER: &str = "x-aether-grok-runtime";
@@ -44,6 +47,33 @@ const GROK_MEDIA_POST_PATH: &str = "/rest/media/post/create";
 const GROK_IMAGINE_WS_URL: &str = "wss://grok.com/ws/imagine/listen";
 const GROK_STANDARD_PROVIDER_API_FORMAT: &str = "openai:responses";
 const GROK_PROMPT_OVERHEAD_TOKENS: u64 = 4;
+const GROK_MAX_ATTACHMENT_BYTES: usize = 64 * 1024 * 1024;
+// Attachment uploads each require a fetch/decode plus a provider upload.  Cap
+// the number independently of the request-body byte limit so a compact JSON
+// array cannot turn into an unbounded sequence of outbound requests.
+const GROK_MAX_ATTACHMENT_COUNT: usize = 16;
+const GROK_MAX_ATTACHMENT_URL_BYTES: usize = 64 * 1024;
+const GROK_MAX_ATTACHMENT_FILENAME_BYTES: usize = 1024;
+const GROK_MAX_ATTACHMENT_MIME_TYPE_BYTES: usize = 256;
+const GROK_MAX_ATTACHMENT_DATA_URI_METADATA_BYTES: usize = 4 * 1024;
+// A websocket image response may contain several slots.  Bound the aggregate
+// encoded blob storage before retaining provider text in the slot map; the
+// per-message 64 MiB websocket limit alone would otherwise permit roughly
+// 1 GiB across the 16 transient slots.
+const GROK_MAX_IMAGINE_BLOB_TOTAL_DECODED_BYTES: usize = 128 * 1024 * 1024;
+// Collected image responses are rendered into one client-facing SSE payload
+// before being wrapped in a StreamFrame.  Keep this compatibility envelope
+// bounded independently of the normal streaming path; regular token streams
+// remain incremental and are not subject to this aggregate cap.
+const GROK_SYNTHETIC_STREAM_ENVELOPE_MAX_BYTES: usize = 256 * 1024 * 1024;
+const GROK_SYNTHETIC_STREAM_ENVELOPE_OVERHEAD_BYTES: usize = 64 * 1024;
+const GROK_SYNTHETIC_STREAM_BODY_MAX_BYTES: usize =
+    (GROK_SYNTHETIC_STREAM_ENVELOPE_MAX_BYTES - GROK_SYNTHETIC_STREAM_ENVELOPE_OVERHEAD_BYTES) / 4
+        * 3;
+const GROK_MAX_IMAGE_COUNT: usize = 4;
+// A provider can emit progress frames for more IDs than the client requested.
+// Keep transient IDs bounded so a malformed stream cannot grow the map forever.
+const GROK_MAX_IMAGINE_SLOTS: usize = 16;
 const GROK_MAX_ATTACHMENT_REDIRECTS: usize = 5;
 const GROK_IMAGINE_STREAM_TIMEOUT_MS: u64 = 10_000;
 const GROK_IMAGINE_ROUND_TIMEOUT_MS: u64 = 120_000;
@@ -209,12 +239,14 @@ async fn execute_grok_app_chat(
     let mut upstream_bytes = 0u64;
     let mut raw_body = Vec::new();
     let mut adapter = GrokStreamAdapter::default();
+    let response_body_limit_bytes = execution_plan_response_body_limit_bytes(plan);
     collect_grok_response_stream(
         response,
         status_code,
         &mut upstream_bytes,
         &mut raw_body,
         &mut adapter,
+        response_body_limit_bytes,
     )
     .await?;
     if (200..300).contains(&status_code) {
@@ -223,12 +255,10 @@ async fn execute_grok_app_chat(
 
     let elapsed_ms = started_at.elapsed().as_millis() as u64;
     if !(200..300).contains(&status_code) {
-        let decoded = decode_response_body_bytes(&headers, &raw_body)?;
-        let text = String::from_utf8_lossy(decoded.as_ref()).to_string();
         return Ok(GrokCollected {
             status_code,
             headers,
-            text,
+            text: grok_upstream_http_error_message(status_code),
             telemetry: ExecutionTelemetry {
                 ttfb_ms: Some(ttfb_ms),
                 elapsed_ms: Some(elapsed_ms),
@@ -266,21 +296,21 @@ async fn execute_grok_app_chat_stream(
         let mut upstream_bytes = 0u64;
         let mut raw_body = Vec::new();
         let mut adapter = GrokStreamAdapter::default();
+        let response_body_limit_bytes = execution_plan_response_body_limit_bytes(plan);
         collect_grok_response_stream(
             response,
             status_code,
             &mut upstream_bytes,
             &mut raw_body,
             &mut adapter,
+            response_body_limit_bytes,
         )
         .await?;
-        let decoded = decode_response_body_bytes(&headers, &raw_body)?;
-        let text = String::from_utf8_lossy(decoded.as_ref()).to_string();
         let elapsed_ms = started_at.elapsed().as_millis() as u64;
         let collected = GrokCollected {
             status_code,
             headers,
-            text,
+            text: grok_upstream_http_error_message(status_code),
             telemetry: ExecutionTelemetry {
                 ttfb_ms: Some(elapsed_ms),
                 elapsed_ms: Some(elapsed_ms),
@@ -349,7 +379,7 @@ async fn execute_grok_imagine_websocket(
             "Grok Imagine requires a non-empty prompt".to_string(),
         )
     })?;
-    let requested = grok_image_count_from_provider_body(body).clamp(1, 4);
+    let requested = grok_image_count_from_provider_body(body);
     let enable_pro = grok_upstream_model_name(report_context)?
         .to_ascii_lowercase()
         .contains("pro");
@@ -366,7 +396,7 @@ async fn execute_grok_imagine_websocket(
             .filter_map(|image| {
                 image
                     .url
-                    .or_else(|| image.blob_b64.map(grok_data_image_url))
+                    .or_else(|| image.blob_b64.and_then(grok_data_image_url))
             })
             .collect(),
         telemetry: ExecutionTelemetry {
@@ -491,6 +521,7 @@ async fn collect_grok_response_stream(
     upstream_bytes: &mut u64,
     raw_body: &mut Vec<u8>,
     adapter: &mut GrokStreamAdapter,
+    response_body_limit_bytes: usize,
 ) -> Result<(), ExecutionRuntimeTransportError> {
     match response {
         DirectHttpResponse::Reqwest(response) => {
@@ -501,7 +532,14 @@ async fn collect_grok_response_stream(
                         &err,
                     ))
                 })?;
-                collect_grok_response_chunk(status_code, upstream_bytes, raw_body, adapter, &chunk);
+                collect_grok_response_chunk_with_limit(
+                    status_code,
+                    upstream_bytes,
+                    raw_body,
+                    adapter,
+                    &chunk,
+                    response_body_limit_bytes,
+                )?;
             }
         }
         DirectHttpResponse::HyperH2c(response) => {
@@ -510,7 +548,14 @@ async fn collect_grok_response_stream(
                 let chunk = chunk.map_err(|err| {
                     ExecutionRuntimeTransportError::UpstreamRequest(format_hyper_error_chain(&err))
                 })?;
-                collect_grok_response_chunk(status_code, upstream_bytes, raw_body, adapter, &chunk);
+                collect_grok_response_chunk_with_limit(
+                    status_code,
+                    upstream_bytes,
+                    raw_body,
+                    adapter,
+                    &chunk,
+                    response_body_limit_bytes,
+                )?;
             }
         }
         DirectHttpResponse::BrowserWreq(response) => {
@@ -521,25 +566,44 @@ async fn collect_grok_response_stream(
                         format_wreq_upstream_request_error(&err),
                     )
                 })?;
-                collect_grok_response_chunk(status_code, upstream_bytes, raw_body, adapter, &chunk);
+                collect_grok_response_chunk_with_limit(
+                    status_code,
+                    upstream_bytes,
+                    raw_body,
+                    adapter,
+                    &chunk,
+                    response_body_limit_bytes,
+                )?;
             }
         }
     }
     Ok(())
 }
 
-fn collect_grok_response_chunk(
+fn collect_grok_response_chunk_with_limit(
     status_code: u16,
     upstream_bytes: &mut u64,
     raw_body: &mut Vec<u8>,
     adapter: &mut GrokStreamAdapter,
     chunk: &[u8],
-) {
+    response_body_limit_bytes: usize,
+) -> Result<(), ExecutionRuntimeTransportError> {
+    if chunk.len()
+        > response_body_limit_bytes
+            .saturating_sub(usize::try_from(*upstream_bytes).unwrap_or(usize::MAX))
+    {
+        return Err(ExecutionRuntimeTransportError::UpstreamResponseTooLarge {
+            phase: UpstreamResponseBodyPhase::Wire,
+            limit_bytes: response_body_limit_bytes,
+        });
+    }
     *upstream_bytes += chunk.len() as u64;
-    raw_body.extend_from_slice(chunk);
     if (200..300).contains(&status_code) {
         adapter.push_chunk(chunk);
+    } else {
+        raw_body.extend_from_slice(chunk);
     }
+    Ok(())
 }
 
 type GrokUpstreamBodyStream = BoxStream<'static, Result<Bytes, String>>;
@@ -589,6 +653,7 @@ fn grok_success_frame_stream(
     mut body_stream: GrokUpstreamBodyStream,
 ) -> BoxStream<'static, Result<Bytes, IoError>> {
     let stream_first_byte_timeout = resolve_stream_first_byte_timeout(&plan);
+    let response_body_limit_bytes = execution_plan_response_body_limit_bytes(&plan);
     async_stream::stream! {
         match encode_grok_headers_frame(
             status_code,
@@ -653,6 +718,27 @@ fn grok_success_frame_stream(
                     break;
                 }
             };
+            if chunk.len()
+                > response_body_limit_bytes.saturating_sub(
+                    usize::try_from(upstream_bytes).unwrap_or(usize::MAX),
+                )
+            {
+                match encode_grok_error_frame(
+                    ExecutionRuntimeTransportError::UpstreamResponseTooLarge {
+                        phase: UpstreamResponseBodyPhase::Wire,
+                        limit_bytes: response_body_limit_bytes,
+                    }
+                    .to_string(),
+                ) {
+                    Ok(frame) => yield Ok(frame),
+                    Err(err) => {
+                        yield Err(err);
+                        return;
+                    }
+                }
+                terminal_error_emitted = true;
+                break;
+            }
             if ttfb_ms.is_none() {
                 ttfb_ms = Some(started_at.elapsed().as_millis() as u64);
             }
@@ -1106,7 +1192,7 @@ async fn attach_grok_uploaded_files(
     original_body: &Value,
     upstream_body: &mut Value,
 ) -> Result<(), ExecutionRuntimeTransportError> {
-    let inputs = extract_grok_attachment_inputs(plan.client_api_format.as_str(), original_body);
+    let inputs = extract_grok_attachment_inputs(plan.client_api_format.as_str(), original_body)?;
     if inputs.is_empty() {
         return Ok(());
     }
@@ -1136,7 +1222,7 @@ async fn attach_grok_image_edit_references(
     original_body: &Value,
     upstream_body: &mut Value,
 ) -> Result<(), ExecutionRuntimeTransportError> {
-    let inputs = extract_grok_attachment_inputs(plan.client_api_format.as_str(), original_body);
+    let inputs = extract_grok_attachment_inputs(plan.client_api_format.as_str(), original_body)?;
     if inputs.is_empty() {
         return Err(ExecutionRuntimeTransportError::UpstreamRequest(
             "Grok image edit requires at least one reference image".to_string(),
@@ -1158,7 +1244,7 @@ async fn attach_grok_image_edit_references(
 fn extract_grok_attachment_inputs(
     client_api_format: &str,
     body: &Value,
-) -> Vec<GrokAttachmentInput> {
+) -> Result<Vec<GrokAttachmentInput>, ExecutionRuntimeTransportError> {
     match client_api_format.trim().to_ascii_lowercase().as_str() {
         "openai:responses" | "openai:responses:compact" => {
             extract_responses_attachment_inputs(body)
@@ -1168,103 +1254,173 @@ fn extract_grok_attachment_inputs(
     }
 }
 
-fn extract_openai_chat_attachment_inputs(body: &Value) -> Vec<GrokAttachmentInput> {
+fn extract_openai_chat_attachment_inputs(
+    body: &Value,
+) -> Result<Vec<GrokAttachmentInput>, ExecutionRuntimeTransportError> {
     let mut out = Vec::new();
     if let Some(messages) = body.get("messages").and_then(Value::as_array) {
         for message in messages {
-            collect_content_attachment_inputs(message.get("content"), &mut out);
+            collect_content_attachment_inputs(message.get("content"), &mut out)?;
         }
     }
-    out
+    Ok(out)
 }
 
-fn extract_responses_attachment_inputs(body: &Value) -> Vec<GrokAttachmentInput> {
+fn extract_responses_attachment_inputs(
+    body: &Value,
+) -> Result<Vec<GrokAttachmentInput>, ExecutionRuntimeTransportError> {
     let mut out = Vec::new();
-    collect_responses_input_attachment_inputs(body.get("input"), &mut out);
-    out
+    collect_responses_input_attachment_inputs(body.get("input"), &mut out)?;
+    Ok(out)
 }
 
 fn collect_responses_input_attachment_inputs(
     value: Option<&Value>,
     out: &mut Vec<GrokAttachmentInput>,
-) {
+) -> Result<(), ExecutionRuntimeTransportError> {
     let Some(value) = value else {
-        return;
+        return Ok(());
     };
     match value {
         Value::Array(items) => {
             for item in items {
                 if item.get("type").and_then(Value::as_str) == Some("message") {
-                    collect_content_attachment_inputs(item.get("content"), out);
+                    collect_content_attachment_inputs(item.get("content"), out)?;
                 } else {
-                    collect_attachment_input_from_object(item, out);
+                    collect_attachment_input_from_object(item, out)?;
                 }
             }
         }
-        Value::Object(_) => collect_attachment_input_from_object(value, out),
+        Value::Object(_) => collect_attachment_input_from_object(value, out)?,
         _ => {}
     }
+    Ok(())
 }
 
-fn extract_claude_attachment_inputs(body: &Value) -> Vec<GrokAttachmentInput> {
+fn extract_claude_attachment_inputs(
+    body: &Value,
+) -> Result<Vec<GrokAttachmentInput>, ExecutionRuntimeTransportError> {
     let mut out = Vec::new();
     if let Some(messages) = body.get("messages").and_then(Value::as_array) {
         for message in messages {
-            collect_content_attachment_inputs(message.get("content"), &mut out);
+            collect_content_attachment_inputs(message.get("content"), &mut out)?;
         }
     }
-    out
+    Ok(out)
 }
 
-fn collect_content_attachment_inputs(value: Option<&Value>, out: &mut Vec<GrokAttachmentInput>) {
+fn collect_content_attachment_inputs(
+    value: Option<&Value>,
+    out: &mut Vec<GrokAttachmentInput>,
+) -> Result<(), ExecutionRuntimeTransportError> {
     let Some(value) = value else {
-        return;
+        return Ok(());
     };
     match value {
         Value::Array(items) => {
             for item in items {
-                collect_attachment_input_from_object(item, out);
+                collect_attachment_input_from_object(item, out)?;
             }
         }
-        Value::Object(_) => collect_attachment_input_from_object(value, out),
+        Value::Object(_) => collect_attachment_input_from_object(value, out)?,
         _ => {}
     }
+    Ok(())
 }
 
-fn collect_attachment_input_from_object(value: &Value, out: &mut Vec<GrokAttachmentInput>) {
+fn collect_attachment_input_from_object(
+    value: &Value,
+    out: &mut Vec<GrokAttachmentInput>,
+) -> Result<(), ExecutionRuntimeTransportError> {
     let Some(object) = value.as_object() else {
-        return;
+        return Ok(());
     };
-    if let Some(input) = claude_source_attachment(object) {
-        out.push(input);
-        return;
+    // Do this cheap shape check before parsing/copying any source field.  In
+    // particular, a seventeenth Claude base64 block must not be materialized
+    // into another multi-megabyte data URI merely to reject it below.
+    if out.len() >= GROK_MAX_ATTACHMENT_COUNT && object_may_contain_grok_attachment(object) {
+        return Err(grok_attachment_count_error());
     }
-    if let Some(source) = image_url_source(object) {
-        out.push(GrokAttachmentInput {
-            source,
-            filename: None,
-            mime_type: None,
-        });
-        return;
+    if let Some(input) = claude_source_attachment(object)? {
+        return push_grok_attachment_input(out, input);
     }
-    if let Some(input) = file_source(object) {
-        out.push(input);
+    if let Some(source) = image_url_source(object)? {
+        return push_grok_attachment_input(
+            out,
+            GrokAttachmentInput {
+                source,
+                filename: None,
+                mime_type: None,
+            },
+        );
     }
+    if let Some(input) = file_source(object)? {
+        push_grok_attachment_input(out, input)?;
+    }
+    Ok(())
 }
 
-fn image_url_source(object: &Map<String, Value>) -> Option<String> {
-    if let Some(source) = object.get("image_url").and_then(string_or_url_value) {
-        return Some(source);
+fn push_grok_attachment_input(
+    out: &mut Vec<GrokAttachmentInput>,
+    input: GrokAttachmentInput,
+) -> Result<(), ExecutionRuntimeTransportError> {
+    if out.len() >= GROK_MAX_ATTACHMENT_COUNT {
+        return Err(grok_attachment_count_error());
+    }
+    out.push(input);
+    Ok(())
+}
+
+fn grok_attachment_count_error() -> ExecutionRuntimeTransportError {
+    ExecutionRuntimeTransportError::UpstreamRequest(format!(
+        "Grok requests support at most {GROK_MAX_ATTACHMENT_COUNT} attachments"
+    ))
+}
+
+fn object_may_contain_grok_attachment(object: &Map<String, Value>) -> bool {
+    if object.contains_key("image_url")
+        || object.contains_key("file_data")
+        || object.contains_key("file_url")
+        || object.contains_key("file")
+    {
+        return true;
+    }
+    object
+        .get("type")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .is_some_and(|value| {
+            [
+                "image_url",
+                "input_image",
+                "input_file",
+                "file",
+                "image",
+                "document",
+            ]
+            .iter()
+            .any(|candidate| value.eq_ignore_ascii_case(candidate))
+        })
+}
+
+fn image_url_source(
+    object: &Map<String, Value>,
+) -> Result<Option<String>, ExecutionRuntimeTransportError> {
+    if let Some(source) = object
+        .get("image_url")
+        .map(string_or_url_value)
+        .transpose()?
+        .flatten()
+    {
+        return Ok(Some(source));
     }
     if object
         .get("type")
         .and_then(Value::as_str)
         .is_some_and(|value| value.eq_ignore_ascii_case("image_url"))
     {
-        return object
-            .get("url")
-            .and_then(Value::as_str)
-            .map(trimmed_string);
+        return bounded_grok_attachment_source(object.get("url").and_then(Value::as_str))
+            .map(|value| value.map(ToOwned::to_owned));
     }
     if object
         .get("type")
@@ -1274,14 +1430,18 @@ fn image_url_source(object: &Map<String, Value>) -> Option<String> {
         return object
             .get("image_url")
             .or_else(|| object.get("source"))
-            .and_then(string_or_url_value);
+            .map(string_or_url_value)
+            .transpose()
+            .map(Option::flatten);
     }
-    None
+    Ok(None)
 }
 
-fn file_source(object: &Map<String, Value>) -> Option<GrokAttachmentInput> {
+fn file_source(
+    object: &Map<String, Value>,
+) -> Result<Option<GrokAttachmentInput>, ExecutionRuntimeTransportError> {
     let file_object = object.get("file").and_then(Value::as_object);
-    let source = file_object
+    let raw_source = file_object
         .and_then(|file| {
             file.get("file_data")
                 .or_else(|| file.get("data"))
@@ -1291,96 +1451,171 @@ fn file_source(object: &Map<String, Value>) -> Option<GrokAttachmentInput> {
         })
         .or_else(|| object.get("file_data").and_then(Value::as_str))
         .or_else(|| object.get("file_url").and_then(Value::as_str))
-        .or_else(|| object.get("data").and_then(Value::as_str))
-        .map(trimmed_string)
-        .filter(|value| !value.is_empty())?;
-    let filename = file_object
+        .or_else(|| object.get("data").and_then(Value::as_str));
+    let Some(source) = bounded_grok_attachment_source(raw_source)? else {
+        return Ok(None);
+    };
+    let raw_filename = file_object
         .and_then(|file| file.get("filename").or_else(|| file.get("name")))
         .or_else(|| object.get("filename"))
         .or_else(|| object.get("name"))
-        .and_then(Value::as_str)
-        .map(trimmed_string)
-        .filter(|value| !value.is_empty());
-    let mime_type = file_object
+        .and_then(Value::as_str);
+    let raw_mime_type = file_object
         .and_then(|file| file.get("mime_type").or_else(|| file.get("mimeType")))
         .or_else(|| object.get("mime_type"))
         .or_else(|| object.get("mimeType"))
-        .and_then(Value::as_str)
-        .map(trimmed_string)
-        .filter(|value| !value.is_empty());
-    Some(GrokAttachmentInput {
-        source,
+        .and_then(Value::as_str);
+    let filename = bounded_grok_attachment_field(
+        raw_filename,
+        "filename",
+        GROK_MAX_ATTACHMENT_FILENAME_BYTES,
+    )?
+    .map(ToOwned::to_owned);
+    let mime_type = bounded_grok_attachment_field(
+        raw_mime_type,
+        "MIME type",
+        GROK_MAX_ATTACHMENT_MIME_TYPE_BYTES,
+    )?
+    .map(ToOwned::to_owned);
+    Ok(Some(GrokAttachmentInput {
+        source: source.to_owned(),
         filename,
         mime_type,
-    })
+    }))
 }
 
-fn claude_source_attachment(object: &Map<String, Value>) -> Option<GrokAttachmentInput> {
+fn claude_source_attachment(
+    object: &Map<String, Value>,
+) -> Result<Option<GrokAttachmentInput>, ExecutionRuntimeTransportError> {
     let block_type = object
         .get("type")
         .and_then(Value::as_str)
         .map(str::trim)
         .unwrap_or_default();
     if !matches!(block_type, "image" | "document") {
-        return None;
+        return Ok(None);
     }
-    let source = object.get("source").and_then(Value::as_object)?;
+    let Some(source) = object.get("source").and_then(Value::as_object) else {
+        return Ok(None);
+    };
     let source_type = source
         .get("type")
         .and_then(Value::as_str)
         .map(str::trim)
         .unwrap_or_default();
-    let mime_type = source
+    let raw_mime_type = source
         .get("media_type")
         .or_else(|| source.get("mediaType"))
-        .and_then(Value::as_str)
-        .map(trimmed_string)
-        .filter(|value| !value.is_empty());
-    let filename = object
+        .and_then(Value::as_str);
+    let raw_filename = object
         .get("filename")
         .or_else(|| object.get("name"))
-        .and_then(Value::as_str)
-        .map(trimmed_string)
-        .filter(|value| !value.is_empty());
+        .and_then(Value::as_str);
+    let mime_type = bounded_grok_attachment_field(
+        raw_mime_type,
+        "MIME type",
+        GROK_MAX_ATTACHMENT_MIME_TYPE_BYTES,
+    )?
+    .map(ToOwned::to_owned);
+    let filename = bounded_grok_attachment_field(
+        raw_filename,
+        "filename",
+        GROK_MAX_ATTACHMENT_FILENAME_BYTES,
+    )?
+    .map(ToOwned::to_owned);
 
     match source_type {
         "base64" => {
-            let data = source
-                .get("data")
-                .and_then(Value::as_str)
-                .map(trimmed_string)
-                .filter(|value| !value.is_empty())?;
-            let mime = mime_type
-                .clone()
-                .unwrap_or_else(|| "application/octet-stream".to_string());
-            Some(GrokAttachmentInput {
-                source: format!("data:{mime};base64,{data}"),
+            let Some(data) = bounded_grok_attachment_field(
+                source.get("data").and_then(Value::as_str),
+                "base64 data",
+                maximum_base64_len_for_decoded_limit(GROK_MAX_ATTACHMENT_BYTES),
+            )?
+            else {
+                return Ok(None);
+            };
+            let mime = mime_type.as_deref().unwrap_or("application/octet-stream");
+            let mut data_uri = String::with_capacity(
+                mime.len()
+                    .saturating_add(data.len())
+                    .saturating_add("data:;base64,".len()),
+            );
+            data_uri.push_str("data:");
+            data_uri.push_str(mime);
+            data_uri.push_str(";base64,");
+            data_uri.push_str(data);
+            Ok(Some(GrokAttachmentInput {
+                source: data_uri,
                 filename,
                 mime_type,
-            })
+            }))
         }
         "url" => {
-            let url = source
-                .get("url")
-                .and_then(Value::as_str)
-                .map(trimmed_string)
-                .filter(|value| !value.is_empty())?;
-            Some(GrokAttachmentInput {
-                source: url,
+            let Some(url) =
+                bounded_grok_attachment_source(source.get("url").and_then(Value::as_str))?
+            else {
+                return Ok(None);
+            };
+            Ok(Some(GrokAttachmentInput {
+                source: url.to_owned(),
                 filename,
                 mime_type,
-            })
+            }))
         }
-        _ => None,
+        _ => Ok(None),
     }
 }
 
-fn string_or_url_value(value: &Value) -> Option<String> {
-    value
+fn string_or_url_value(value: &Value) -> Result<Option<String>, ExecutionRuntimeTransportError> {
+    let raw = value
         .as_str()
-        .map(trimmed_string)
-        .or_else(|| value.get("url").and_then(Value::as_str).map(trimmed_string))
-        .filter(|value| !value.is_empty())
+        .or_else(|| value.get("url").and_then(Value::as_str));
+    bounded_grok_attachment_source(raw).map(|value| value.map(ToOwned::to_owned))
+}
+
+fn bounded_grok_attachment_source(
+    raw: Option<&str>,
+) -> Result<Option<&str>, ExecutionRuntimeTransportError> {
+    let Some(value) = raw.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    let max_bytes = if grok_is_data_uri(value) {
+        let metadata_bytes = value.find(',').unwrap_or(value.len());
+        if metadata_bytes > GROK_MAX_ATTACHMENT_DATA_URI_METADATA_BYTES {
+            return Err(grok_attachment_field_too_large(
+                "data URI metadata",
+                GROK_MAX_ATTACHMENT_DATA_URI_METADATA_BYTES,
+            ));
+        }
+        maximum_base64_len_for_decoded_limit(GROK_MAX_ATTACHMENT_BYTES)
+            .saturating_add(GROK_MAX_ATTACHMENT_DATA_URI_METADATA_BYTES)
+    } else {
+        GROK_MAX_ATTACHMENT_URL_BYTES
+    };
+    bounded_grok_attachment_field(Some(value), "source", max_bytes)
+}
+
+fn bounded_grok_attachment_field<'a>(
+    raw: Option<&'a str>,
+    field: &str,
+    max_bytes: usize,
+) -> Result<Option<&'a str>, ExecutionRuntimeTransportError> {
+    let Some(value) = raw.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    if value.len() > max_bytes {
+        return Err(grok_attachment_field_too_large(field, max_bytes));
+    }
+    Ok(Some(value))
+}
+
+fn grok_attachment_field_too_large(
+    field: &str,
+    max_bytes: usize,
+) -> ExecutionRuntimeTransportError {
+    ExecutionRuntimeTransportError::UpstreamRequest(format!(
+        "Grok attachment {field} exceeds {max_bytes} byte limit"
+    ))
 }
 
 fn trimmed_string(value: &str) -> String {
@@ -1391,47 +1626,123 @@ async fn resolve_grok_attachment_payload(
     input: &GrokAttachmentInput,
     index: usize,
 ) -> Result<GrokAttachmentPayload, ExecutionRuntimeTransportError> {
-    if input.source.starts_with("data:") {
+    validate_grok_attachment_input_fields(input)?;
+    if grok_is_data_uri(input.source.as_str()) {
         return grok_attachment_payload_from_data_uri(input, index);
     }
     grok_attachment_payload_from_url(input, index).await
+}
+
+fn validate_grok_attachment_input_fields(
+    input: &GrokAttachmentInput,
+) -> Result<(), ExecutionRuntimeTransportError> {
+    let source = input.source.trim();
+    if source.is_empty() {
+        return Err(ExecutionRuntimeTransportError::UpstreamRequest(
+            "Grok attachment source is empty".to_string(),
+        ));
+    }
+    let max_source_bytes = if grok_is_data_uri(source) {
+        let metadata_bytes = source.find(',').unwrap_or(source.len());
+        if metadata_bytes > GROK_MAX_ATTACHMENT_DATA_URI_METADATA_BYTES {
+            return Err(grok_attachment_field_too_large(
+                "data URI metadata",
+                GROK_MAX_ATTACHMENT_DATA_URI_METADATA_BYTES,
+            ));
+        }
+        maximum_base64_len_for_decoded_limit(GROK_MAX_ATTACHMENT_BYTES)
+            .saturating_add(GROK_MAX_ATTACHMENT_DATA_URI_METADATA_BYTES)
+    } else {
+        GROK_MAX_ATTACHMENT_URL_BYTES
+    };
+    if source.len() > max_source_bytes {
+        return Err(grok_attachment_field_too_large("source", max_source_bytes));
+    }
+    if input
+        .filename
+        .as_deref()
+        .is_some_and(|filename| filename.trim().len() > GROK_MAX_ATTACHMENT_FILENAME_BYTES)
+    {
+        return Err(grok_attachment_field_too_large(
+            "filename",
+            GROK_MAX_ATTACHMENT_FILENAME_BYTES,
+        ));
+    }
+    if input
+        .mime_type
+        .as_deref()
+        .is_some_and(|mime_type| mime_type.trim().len() > GROK_MAX_ATTACHMENT_MIME_TYPE_BYTES)
+    {
+        return Err(grok_attachment_field_too_large(
+            "MIME type",
+            GROK_MAX_ATTACHMENT_MIME_TYPE_BYTES,
+        ));
+    }
+    Ok(())
 }
 
 fn grok_attachment_payload_from_data_uri(
     input: &GrokAttachmentInput,
     index: usize,
 ) -> Result<GrokAttachmentPayload, ExecutionRuntimeTransportError> {
-    let (header, content_b64) = input.source.split_once(',').ok_or_else(|| {
+    grok_attachment_payload_from_data_uri_with_limit(input, index, GROK_MAX_ATTACHMENT_BYTES)
+}
+
+fn grok_attachment_payload_from_data_uri_with_limit(
+    input: &GrokAttachmentInput,
+    index: usize,
+    limit_bytes: usize,
+) -> Result<GrokAttachmentPayload, ExecutionRuntimeTransportError> {
+    let source = input.source.trim();
+    let (header, content_b64) = source.split_once(',').ok_or_else(|| {
         ExecutionRuntimeTransportError::UpstreamRequest(
             "Grok attachment data URI is missing comma separator".to_string(),
         )
     })?;
-    if !header.contains(";base64") {
+    if !header
+        .split(';')
+        .skip(1)
+        .any(|parameter| parameter.trim().eq_ignore_ascii_case("base64"))
+    {
         return Err(ExecutionRuntimeTransportError::UpstreamRequest(
             "Grok attachment data URI must be base64 encoded".to_string(),
         ));
     }
+    let header_mime = header
+        .get(..5)
+        .filter(|prefix| prefix.eq_ignore_ascii_case("data:"))
+        .and_then(|_| header.get(5..))
+        .and_then(|value| value.split(';').next())
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if header_mime.is_some_and(|value| value.len() > GROK_MAX_ATTACHMENT_MIME_TYPE_BYTES) {
+        return Err(grok_attachment_field_too_large(
+            "MIME type",
+            GROK_MAX_ATTACHMENT_MIME_TYPE_BYTES,
+        ));
+    }
     let mime_type = input
         .mime_type
-        .clone()
-        .or_else(|| {
-            header
-                .strip_prefix("data:")
-                .and_then(|value| value.split(';').next())
-                .map(trimmed_string)
-                .filter(|value| !value.is_empty())
-        })
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| header_mime.map(ToOwned::to_owned))
         .unwrap_or_else(|| "application/octet-stream".to_string());
-    let normalized_b64 = content_b64.split_whitespace().collect::<String>();
-    drop(
-        base64::engine::general_purpose::STANDARD
-            .decode(&normalized_b64)
-            .map_err(|err| {
-                ExecutionRuntimeTransportError::UpstreamRequest(format!(
-                    "Grok attachment data URI base64 is invalid: {err}"
-                ))
-            })?,
-    );
+    let max_base64_len = maximum_base64_len_for_decoded_limit(limit_bytes);
+    let normalized_b64 = normalize_base64_with_limit(content_b64, max_base64_len)
+        .map_err(|_| grok_attachment_too_large(limit_bytes))?;
+    let decoded_len = base64::engine::general_purpose::STANDARD
+        .decode(&normalized_b64)
+        .map_err(|err| {
+            ExecutionRuntimeTransportError::UpstreamRequest(format!(
+                "Grok attachment data URI base64 is invalid: {err}"
+            ))
+        })?
+        .len();
+    if decoded_len > limit_bytes {
+        return Err(grok_attachment_too_large(limit_bytes));
+    }
     Ok(GrokAttachmentPayload {
         filename: input
             .filename
@@ -1440,6 +1751,30 @@ fn grok_attachment_payload_from_data_uri(
         mime_type,
         content_b64: normalized_b64,
     })
+}
+
+fn normalize_base64_with_limit(input: &str, limit_bytes: usize) -> Result<String, ()> {
+    // Do not reserve based on the untrusted URI length.  Whitespace is ignored,
+    // so an attacker could otherwise force a large allocation before validation.
+    let mut normalized = String::with_capacity(limit_bytes.min(4096));
+    for character in input.chars() {
+        if character.is_whitespace() {
+            continue;
+        }
+        if normalized.len().saturating_add(character.len_utf8()) > limit_bytes {
+            return Err(());
+        }
+        normalized.push(character);
+    }
+    Ok(normalized)
+}
+
+fn maximum_base64_len_for_decoded_limit(limit_bytes: usize) -> usize {
+    limit_bytes
+        .saturating_add(2)
+        .checked_div(3)
+        .unwrap_or(usize::MAX)
+        .saturating_mul(4)
 }
 
 async fn grok_attachment_payload_from_url(
@@ -1451,25 +1786,24 @@ async fn grok_attachment_payload_from_url(
             "Grok attachment URL is invalid: {err}"
         ))
     })?;
-    if !matches!(url.scheme(), "http" | "https") {
-        return Err(ExecutionRuntimeTransportError::UpstreamRequest(
-            "Grok attachment URL must use http or https".to_string(),
-        ));
-    }
+    validate_grok_attachment_url(&url)?;
     let response = fetch_grok_attachment_url(url.clone(), 0).await?;
     let final_url = response.url().clone();
+    let response_mime_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next());
+    let response_mime_type = bounded_grok_attachment_field(
+        response_mime_type,
+        "MIME type",
+        GROK_MAX_ATTACHMENT_MIME_TYPE_BYTES,
+    )?
+    .map(ToOwned::to_owned);
     let mime_type = input
         .mime_type
         .clone()
-        .or_else(|| {
-            response
-                .headers()
-                .get(reqwest::header::CONTENT_TYPE)
-                .and_then(|value| value.to_str().ok())
-                .and_then(|value| value.split(';').next())
-                .map(trimmed_string)
-                .filter(|value| !value.is_empty())
-        })
+        .or(response_mime_type)
         .unwrap_or_else(|| "application/octet-stream".to_string());
     let bytes = collect_grok_attachment_url_bytes(response).await?;
     Ok(GrokAttachmentPayload {
@@ -1488,14 +1822,16 @@ async fn fetch_grok_attachment_url(
     mut redirects: usize,
 ) -> Result<reqwest::Response, ExecutionRuntimeTransportError> {
     loop {
-        validate_grok_attachment_public_url(&url).await?;
+        // Validate every hop. A relative Location may inherit credentials or
+        // a fragment from the previous URL, while an absolute Location can
+        // introduce either explicitly.
+        validate_grok_attachment_url(&url)?;
+        let public_addrs = public_socket_addrs_for_url(&url).await?;
         let response = reqwest::Client::builder()
+            .no_proxy()
             .timeout(Duration::from_secs(30))
             .redirect(reqwest::redirect::Policy::none())
-            .resolve_to_addrs(
-                url.host_str().unwrap_or_default(),
-                &[public_socket_addr_for_url(&url).await?],
-            )
+            .resolve_to_addrs(url.host_str().unwrap_or_default(), &public_addrs)
             .build()
             .map_err(ExecutionRuntimeTransportError::ClientBuild)?
             .get(url.clone())
@@ -1537,21 +1873,33 @@ async fn fetch_grok_attachment_url(
     }
 }
 
-async fn validate_grok_attachment_public_url(
-    url: &reqwest::Url,
-) -> Result<(), ExecutionRuntimeTransportError> {
+fn validate_grok_attachment_url(url: &reqwest::Url) -> Result<(), ExecutionRuntimeTransportError> {
     if !matches!(url.scheme(), "http" | "https") {
-        return Err(ExecutionRuntimeTransportError::UpstreamRequest(format!(
-            "Grok attachment URL scheme is unsupported: {}",
-            url.scheme()
-        )));
+        return Err(ExecutionRuntimeTransportError::UpstreamRequest(
+            "Grok attachment URL must use http or https".to_string(),
+        ));
     }
-    public_socket_addr_for_url(url).await.map(|_| ())
+    if url.host_str().is_none() {
+        return Err(ExecutionRuntimeTransportError::UpstreamRequest(
+            "Grok attachment URL is missing a host".to_string(),
+        ));
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(ExecutionRuntimeTransportError::UpstreamRequest(
+            "Grok attachment URL must not contain credentials".to_string(),
+        ));
+    }
+    if url.fragment().is_some() {
+        return Err(ExecutionRuntimeTransportError::UpstreamRequest(
+            "Grok attachment URL must not contain a fragment".to_string(),
+        ));
+    }
+    Ok(())
 }
 
-async fn public_socket_addr_for_url(
+async fn public_socket_addrs_for_url(
     url: &reqwest::Url,
-) -> Result<std::net::SocketAddr, ExecutionRuntimeTransportError> {
+) -> Result<Vec<std::net::SocketAddr>, ExecutionRuntimeTransportError> {
     let host = url.host_str().ok_or_else(|| {
         ExecutionRuntimeTransportError::UpstreamRequest(
             "Grok attachment URL is missing a host".to_string(),
@@ -1562,78 +1910,67 @@ async fn public_socket_addr_for_url(
             "Grok attachment URL is missing a port".to_string(),
         )
     })?;
-    if let Ok(ip) = host.parse::<IpAddr>() {
-        if !grok_attachment_ip_is_public(ip) {
-            return Err(ExecutionRuntimeTransportError::UpstreamRequest(
-                "Grok attachment URL resolves to a non-public address".to_string(),
-            ));
-        }
-        return Ok(std::net::SocketAddr::new(ip, port));
-    }
-    let mut public_addr = None;
-    let mut resolved_any = false;
-    for addr in tokio::net::lookup_host((host, port)).await.map_err(|err| {
-        ExecutionRuntimeTransportError::UpstreamRequest(format!(
-            "Grok attachment URL DNS resolution failed: {err}"
-        ))
-    })? {
-        resolved_any = true;
-        if !grok_attachment_ip_is_public(addr.ip()) {
-            return Err(ExecutionRuntimeTransportError::UpstreamRequest(
-                "Grok attachment URL resolves to a non-public address".to_string(),
-            ));
-        }
-        public_addr.get_or_insert(addr);
-    }
-    if !resolved_any {
+    let addresses =
+        aether_http::lookup_host_with_limits(host, port, aether_http::DEFAULT_DNS_LOOKUP_TIMEOUT)
+            .await
+            .map_err(|err| {
+                ExecutionRuntimeTransportError::UpstreamRequest(format!(
+                    "Grok attachment URL DNS resolution failed: {err}"
+                ))
+            })?;
+    validate_grok_attachment_addresses(addresses)
+}
+
+fn validate_grok_attachment_addresses(
+    addresses: Vec<std::net::SocketAddr>,
+) -> Result<Vec<std::net::SocketAddr>, ExecutionRuntimeTransportError> {
+    if addresses.is_empty() {
         return Err(ExecutionRuntimeTransportError::UpstreamRequest(
             "Grok attachment URL DNS resolution returned no addresses".to_string(),
         ));
     }
-    public_addr.ok_or_else(|| {
-        ExecutionRuntimeTransportError::UpstreamRequest(
-            "Grok attachment URL has no public address".to_string(),
-        )
-    })
+    if addresses
+        .iter()
+        .any(|address| !grok_attachment_ip_is_public(address.ip()))
+    {
+        return Err(ExecutionRuntimeTransportError::UpstreamRequest(
+            "Grok attachment URL resolves to a non-public address".to_string(),
+        ));
+    }
+    Ok(addresses)
 }
 
 fn grok_attachment_ip_is_public(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(ip) => {
-            !(ip.is_private()
-                || ip.is_loopback()
-                || ip.is_link_local()
-                || ip.is_broadcast()
-                || ip.is_documentation()
-                || ip.is_unspecified())
-        }
-        IpAddr::V6(ip) => {
-            !(ip.is_loopback()
-                || ip.is_unspecified()
-                || ip.is_unique_local()
-                || ip.is_unicast_link_local()
-                || is_ipv6_documentation_addr(ip))
-        }
-    }
-}
-
-fn is_ipv6_documentation_addr(ip: std::net::Ipv6Addr) -> bool {
-    let segments = ip.segments();
-    segments[0] == 0x2001 && segments[1] == 0x0db8
+    !aether_http::is_private_or_reserved_ip(ip)
 }
 
 async fn collect_grok_attachment_url_bytes(
     response: reqwest::Response,
 ) -> Result<Vec<u8>, ExecutionRuntimeTransportError> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > GROK_MAX_ATTACHMENT_BYTES as u64)
+    {
+        return Err(grok_attachment_too_large(GROK_MAX_ATTACHMENT_BYTES));
+    }
     let mut bytes = Vec::new();
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|err| {
             ExecutionRuntimeTransportError::UpstreamRequest(format_upstream_request_error(&err))
         })?;
+        if chunk.len() > GROK_MAX_ATTACHMENT_BYTES.saturating_sub(bytes.len()) {
+            return Err(grok_attachment_too_large(GROK_MAX_ATTACHMENT_BYTES));
+        }
         bytes.extend_from_slice(&chunk);
     }
     Ok(bytes)
+}
+
+fn grok_attachment_too_large(limit_bytes: usize) -> ExecutionRuntimeTransportError {
+    ExecutionRuntimeTransportError::UpstreamRequest(format!(
+        "Grok attachment exceeds {limit_bytes} byte limit"
+    ))
 }
 
 async fn upload_grok_attachment(
@@ -1655,12 +1992,11 @@ async fn upload_grok_attachment(
     let request_body = build_request_body(&upload_plan)?;
     let response = send_request(&upload_plan, request_body).await?;
     let status_code = response.status_code();
-    let bytes = response.bytes().await?;
+    let bytes = response
+        .bytes_with_limit(execution_plan_response_body_limit_bytes(&upload_plan))
+        .await?;
     if !(200..300).contains(&status_code) {
-        let text = String::from_utf8_lossy(&bytes).to_string();
-        return Err(ExecutionRuntimeTransportError::UpstreamRequest(format!(
-            "Grok attachment upload returned {status_code}: {text}"
-        )));
+        return Err(grok_auxiliary_http_error("attachment upload", status_code));
     }
     let value = serde_json::from_slice::<Value>(&bytes)
         .map_err(ExecutionRuntimeTransportError::InvalidJson)?;
@@ -1705,12 +2041,11 @@ async fn create_grok_media_post(
     let request_body = build_request_body(&media_plan)?;
     let response = send_request(&media_plan, request_body).await?;
     let status_code = response.status_code();
-    let bytes = response.bytes().await?;
+    let bytes = response
+        .bytes_with_limit(execution_plan_response_body_limit_bytes(&media_plan))
+        .await?;
     if !(200..300).contains(&status_code) {
-        let text = String::from_utf8_lossy(&bytes).to_string();
-        return Err(ExecutionRuntimeTransportError::UpstreamRequest(format!(
-            "Grok media post create returned {status_code}: {text}"
-        )));
+        return Err(grok_auxiliary_http_error("media post create", status_code));
     }
     let value = serde_json::from_slice::<Value>(&bytes)
         .map_err(ExecutionRuntimeTransportError::InvalidJson)?;
@@ -1858,6 +2193,7 @@ fn grok_image_count_from_provider_body(body: &Value) -> usize {
         })
         .and_then(|value| usize::try_from(value).ok())
         .unwrap_or(1)
+        .clamp(1, GROK_MAX_IMAGE_COUNT)
 }
 
 fn grok_aspect_ratio_from_provider_body(body: &Value) -> String {
@@ -1979,27 +2315,41 @@ fn grok_handle_imagine_ws_message(
     value: &Value,
     slots: &mut BTreeMap<String, GrokImagineImage>,
 ) -> Result<(), ExecutionRuntimeTransportError> {
+    grok_handle_imagine_ws_message_with_slot_limit(value, slots, GROK_MAX_IMAGINE_SLOTS)
+}
+
+fn grok_handle_imagine_ws_message_with_slot_limit(
+    value: &Value,
+    slots: &mut BTreeMap<String, GrokImagineImage>,
+    max_slots: usize,
+) -> Result<(), ExecutionRuntimeTransportError> {
     match value.get("type").and_then(Value::as_str) {
-        Some("json") => grok_handle_imagine_json_frame(value, slots),
+        Some("json") => grok_handle_imagine_json_frame(value, slots, max_slots),
         Some("image") => {
-            grok_handle_imagine_image_frame(value, slots);
+            grok_handle_imagine_image_frame(value, slots, max_slots);
             Ok(())
         }
-        Some("error") => Err(ExecutionRuntimeTransportError::UpstreamRequest(format!(
-            "Grok Imagine websocket error: {}",
-            value
-                .get("err_msg")
-                .or_else(|| value.get("error"))
-                .and_then(Value::as_str)
-                .unwrap_or("unknown")
-        ))),
+        Some("error") => Err(ExecutionRuntimeTransportError::UpstreamRequest(
+            "Grok Imagine websocket returned an error".to_string(),
+        )),
         _ => Ok(()),
     }
+}
+
+fn grok_auxiliary_http_error(stage: &str, status_code: u16) -> ExecutionRuntimeTransportError {
+    ExecutionRuntimeTransportError::UpstreamRequest(format!(
+        "Grok {stage} returned HTTP {status_code}"
+    ))
+}
+
+fn grok_upstream_http_error_message(status_code: u16) -> String {
+    format!("Grok upstream request returned HTTP {status_code}")
 }
 
 fn grok_handle_imagine_json_frame(
     value: &Value,
     slots: &mut BTreeMap<String, GrokImagineImage>,
+    max_slots: usize,
 ) -> Result<(), ExecutionRuntimeTransportError> {
     let status = value.get("current_status").and_then(Value::as_str);
     let Some(image_id) = value
@@ -2016,6 +2366,9 @@ fn grok_handle_imagine_json_frame(
         .and_then(Value::as_u64)
         .and_then(|value| usize::try_from(value).ok())
         .unwrap_or_default();
+    if !slots.contains_key(&image_id) && slots.len() >= max_slots {
+        return Ok(());
+    }
     match status {
         Some("start_stage") => {
             slots.entry(image_id.clone()).or_insert(GrokImagineImage {
@@ -2048,12 +2401,57 @@ fn grok_handle_imagine_json_frame(
     Ok(())
 }
 
-fn grok_handle_imagine_image_frame(value: &Value, slots: &mut BTreeMap<String, GrokImagineImage>) {
-    let Some(url) = value.get("url").and_then(Value::as_str).map(grok_asset_url) else {
+fn grok_handle_imagine_image_frame(
+    value: &Value,
+    slots: &mut BTreeMap<String, GrokImagineImage>,
+    max_slots: usize,
+) {
+    let Some(raw_url) = value
+        .get("url")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
         return;
     };
+    if raw_url.len() > GROK_MAX_ATTACHMENT_URL_BYTES {
+        return;
+    }
+    let url = grok_asset_url(raw_url);
+    if url.len() > GROK_MAX_ATTACHMENT_URL_BYTES {
+        return;
+    }
     let image_id =
         grok_imagine_image_id_from_url(&url).unwrap_or_else(|| Uuid::new_v4().to_string());
+    if !slots.contains_key(&image_id) && slots.len() >= max_slots {
+        return;
+    }
+    let blob = value
+        .get("blob")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let Some(blob) = blob else {
+        let fallback_order = slots.len();
+        let slot = slots.entry(image_id.clone()).or_insert(GrokImagineImage {
+            image_id,
+            order: fallback_order,
+            url: None,
+            blob_b64: None,
+            done: false,
+            moderated: false,
+        });
+        slot.url = Some(url);
+        return;
+    };
+    let existing_blob_len = slots
+        .get(&image_id)
+        .and_then(|slot| slot.blob_b64.as_ref())
+        .map(String::len)
+        .unwrap_or(0);
+    if !grok_imagine_blob_can_be_retained(slots, existing_blob_len, blob.len()) {
+        return;
+    }
     let fallback_order = slots.len();
     let slot = slots.entry(image_id.clone()).or_insert(GrokImagineImage {
         image_id,
@@ -2064,11 +2462,39 @@ fn grok_handle_imagine_image_frame(value: &Value, slots: &mut BTreeMap<String, G
         moderated: false,
     });
     slot.url = Some(url);
-    slot.blob_b64 = value
-        .get("blob")
-        .and_then(Value::as_str)
-        .map(trimmed_string)
-        .filter(|value| !value.is_empty());
+    slot.blob_b64 = Some(blob.to_owned());
+}
+
+fn grok_imagine_blob_can_be_retained(
+    slots: &BTreeMap<String, GrokImagineImage>,
+    existing_blob_len: usize,
+    incoming_blob_len: usize,
+) -> bool {
+    let retained_blob_bytes = slots.values().fold(0usize, |total, slot| {
+        total.saturating_add(slot.blob_b64.as_ref().map(String::len).unwrap_or(0))
+    });
+    grok_imagine_blob_lengths_can_be_retained(
+        retained_blob_bytes,
+        existing_blob_len,
+        incoming_blob_len,
+    )
+}
+
+fn grok_imagine_blob_lengths_can_be_retained(
+    retained_blob_bytes: usize,
+    existing_blob_len: usize,
+    incoming_blob_len: usize,
+) -> bool {
+    let per_blob_limit = maximum_base64_len_for_decoded_limit(GROK_MAX_ATTACHMENT_BYTES);
+    if incoming_blob_len > per_blob_limit {
+        return false;
+    }
+    let total_blob_limit =
+        maximum_base64_len_for_decoded_limit(GROK_MAX_IMAGINE_BLOB_TOTAL_DECODED_BYTES);
+    retained_blob_bytes
+        .saturating_sub(existing_blob_len)
+        .saturating_add(incoming_blob_len)
+        <= total_blob_limit
 }
 
 fn grok_imagine_image_id_from_url(url: &str) -> Option<String> {
@@ -2090,8 +2516,22 @@ fn grok_imagine_completed_count(slots: &BTreeMap<String, GrokImagineImage>) -> u
         .count()
 }
 
-fn grok_data_image_url(blob_b64: String) -> String {
-    format!("data:image/png;base64,{blob_b64}")
+fn grok_data_image_url(blob_b64: String) -> Option<String> {
+    // A websocket `blob` is untrusted provider data.  Do not pass it through
+    // as an arbitrary data URL: malformed base64 and active formats such as
+    // SVG/HTML could otherwise cross the public image boundary.  Validate the
+    // encoded and decoded sizes plus the raster magic before retaining it.
+    // Bound the interpolation itself before constructing the candidate URL;
+    // otherwise formatting would allocate from an attacker-controlled blob
+    // before the parser has a chance to reject it.
+    if blob_b64.len() > maximum_base64_len_for_decoded_limit(GROK_MAX_ATTACHMENT_BYTES) {
+        return None;
+    }
+    let mut candidate = String::with_capacity(22usize.saturating_add(blob_b64.len()));
+    candidate.push_str("data:image/png;base64,");
+    candidate.push_str(&blob_b64);
+    grok_data_image_parts(&candidate)?;
+    Some(candidate)
 }
 
 fn set_grok_image_edit_config(
@@ -2119,10 +2559,11 @@ fn set_grok_image_edit_config(
 }
 
 fn filename_from_url_path(path: &str) -> Option<String> {
-    path.rsplit('/')
-        .next()
-        .map(trimmed_string)
-        .filter(|value| !value.is_empty())
+    let filename = path.rsplit('/').next()?.trim();
+    if filename.is_empty() || filename.len() > GROK_MAX_ATTACHMENT_FILENAME_BYTES {
+        return None;
+    }
+    Some(filename.to_owned())
 }
 
 fn default_attachment_filename(index: usize, mime_type: &str) -> String {
@@ -2130,9 +2571,10 @@ fn default_attachment_filename(index: usize, mime_type: &str) -> String {
         .rsplit('/')
         .next()
         .map(|value| value.split('+').next().unwrap_or(value))
-        .map(trimmed_string)
+        .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "bin".to_string());
+        .filter(|value| value.len() <= GROK_MAX_ATTACHMENT_FILENAME_BYTES)
+        .unwrap_or("bin");
     format!("file-{}.{}", index + 1, ext)
 }
 
@@ -2147,7 +2589,7 @@ fn grok_execution_result(
     } else {
         json!({
             "error": {
-                "message": collected.text,
+                "message": grok_upstream_http_error_message(status_code),
                 "type": "grok_upstream_error",
                 "code": status_code,
             }
@@ -2206,54 +2648,95 @@ fn grok_collected_frame_stream(
     collected: GrokCollected,
     report_context: Option<&Value>,
 ) -> BoxStream<'static, Result<Bytes, IoError>> {
-    let body = grok_client_stream_body(&plan, &collected, report_context);
     let telemetry = collected.telemetry.clone();
     let status_code = collected.status_code;
-    let frames = vec![
-        StreamFrame {
-            frame_type: StreamFrameType::Headers,
-            payload: StreamFramePayload::Headers {
-                status_code,
-                headers: BTreeMap::from([(
-                    "content-type".to_string(),
-                    if (200..300).contains(&status_code) {
-                        "text/event-stream".to_string()
-                    } else {
-                        "application/json".to_string()
-                    },
-                )]),
-                response_observation: None,
+    let headers_frame = || StreamFrame {
+        frame_type: StreamFrameType::Headers,
+        payload: StreamFramePayload::Headers {
+            status_code,
+            headers: BTreeMap::from([(
+                "content-type".to_string(),
+                if (200..300).contains(&status_code) {
+                    "text/event-stream".to_string()
+                } else {
+                    "application/json".to_string()
+                },
+            )]),
+            response_observation: None,
+        },
+    };
+    let initial_telemetry_frame = || StreamFrame {
+        frame_type: StreamFrameType::Telemetry,
+        payload: StreamFramePayload::Telemetry {
+            telemetry: ExecutionTelemetry {
+                ttfb_ms: telemetry.ttfb_ms,
+                elapsed_ms: telemetry.ttfb_ms,
+                upstream_bytes: Some(0),
             },
         },
-        StreamFrame {
-            frame_type: StreamFrameType::Telemetry,
-            payload: StreamFramePayload::Telemetry {
-                telemetry: ExecutionTelemetry {
-                    ttfb_ms: telemetry.ttfb_ms,
-                    elapsed_ms: telemetry.ttfb_ms,
-                    upstream_bytes: Some(0),
+    };
+    let frames = match bounded_grok_client_stream_body(&plan, &collected, report_context) {
+        Ok(body) => vec![
+            headers_frame(),
+            initial_telemetry_frame(),
+            StreamFrame {
+                frame_type: StreamFrameType::Data,
+                payload: StreamFramePayload::Data {
+                    chunk_b64: Some(
+                        base64::engine::general_purpose::STANDARD.encode(body.as_bytes()),
+                    ),
+                    text: None,
                 },
             },
-        },
-        StreamFrame {
-            frame_type: StreamFrameType::Data,
-            payload: StreamFramePayload::Data {
-                chunk_b64: Some(base64::engine::general_purpose::STANDARD.encode(body.as_bytes())),
-                text: None,
+            StreamFrame {
+                frame_type: StreamFrameType::Telemetry,
+                payload: StreamFramePayload::Telemetry { telemetry },
             },
-        },
-        StreamFrame {
-            frame_type: StreamFrameType::Telemetry,
-            payload: StreamFramePayload::Telemetry { telemetry },
-        },
-        StreamFrame::eof(),
-    ];
+            StreamFrame::eof(),
+        ],
+        Err(error) => vec![
+            headers_frame(),
+            StreamFrame {
+                frame_type: StreamFrameType::Error,
+                payload: StreamFramePayload::Error {
+                    error: aether_contracts::ExecutionError {
+                        kind: aether_contracts::ExecutionErrorKind::ProtocolError,
+                        phase: aether_contracts::ExecutionPhase::Finalize,
+                        message: error.to_string(),
+                        upstream_status: None,
+                        retryable: true,
+                        failover_recommended: true,
+                    },
+                },
+            },
+            StreamFrame {
+                frame_type: StreamFrameType::Telemetry,
+                payload: StreamFramePayload::Telemetry { telemetry },
+            },
+            StreamFrame::eof_with_summary(None),
+        ],
+    };
     stream::iter(
         frames
             .into_iter()
             .map(|frame| encode_stream_frame_ndjson(&frame)),
     )
     .boxed()
+}
+
+fn bounded_grok_client_stream_body(
+    plan: &ExecutionPlan,
+    collected: &GrokCollected,
+    report_context: Option<&Value>,
+) -> Result<String, ExecutionRuntimeTransportError> {
+    let body = grok_client_stream_body(plan, collected, report_context);
+    if body.len() > GROK_SYNTHETIC_STREAM_BODY_MAX_BYTES {
+        return Err(ExecutionRuntimeTransportError::UpstreamResponseTooLarge {
+            phase: UpstreamResponseBodyPhase::Decoded,
+            limit_bytes: GROK_SYNTHETIC_STREAM_ENVELOPE_MAX_BYTES,
+        });
+    }
+    Ok(body)
 }
 
 fn grok_client_stream_body(
@@ -2264,7 +2747,7 @@ fn grok_client_stream_body(
     if !(200..300).contains(&collected.status_code) {
         return serde_json::to_string(&json!({
             "error": {
-                "message": collected.text,
+                "message": grok_upstream_http_error_message(collected.status_code),
                 "type": "grok_upstream_error",
                 "code": collected.status_code,
             }
@@ -2563,8 +3046,15 @@ impl GrokStreamAdapter {
     }
 
     fn push_image_url(&mut self, url: String) {
-        if !url.trim().is_empty() && !self.images.iter().any(|item| item == &url) {
-            self.images.push(url);
+        let url = url.trim();
+        if url.is_empty()
+            || url.len() > GROK_MAX_ATTACHMENT_URL_BYTES
+            || self.images.len() >= GROK_MAX_IMAGE_COUNT
+        {
+            return;
+        }
+        if !self.images.iter().any(|item| item == url) {
+            self.images.push(url.to_owned());
         }
     }
 
@@ -2725,7 +3215,7 @@ fn openai_responses_body(
     };
     if !message_text.trim().is_empty() {
         output.push(json!({
-            "id": format!("{response_id}_msg"),
+            "id": openai_responses_message_item_id(response_id.as_str(), output.len()),
             "type": "message",
             "role": "assistant",
             "content": [{"type": "output_text", "text": message_text, "annotations": []}],
@@ -2734,11 +3224,13 @@ fn openai_responses_body(
     }
     if images_as_generation_calls {
         for (index, image) in collected.images.iter().enumerate() {
-            output.push(grok_openai_responses_image_generation_item(
+            if let Some(item) = grok_openai_responses_image_generation_item(
                 response_id.as_str(),
                 index,
                 image.as_str(),
-            ));
+            ) {
+                output.push(item);
+            }
         }
     }
     json!({
@@ -2756,7 +3248,11 @@ fn grok_openai_responses_image_generation_item(
     response_id: &str,
     index: usize,
     image: &str,
-) -> Value {
+) -> Option<Value> {
+    let image = image.trim();
+    if image.is_empty() {
+        return None;
+    }
     let mut item = Map::new();
     item.insert(
         "id".to_string(),
@@ -2768,7 +3264,8 @@ fn grok_openai_responses_image_generation_item(
     );
     item.insert("status".to_string(), Value::String("completed".to_string()));
     item.insert("action".to_string(), Value::String("generate".to_string()));
-    if let Some((mime_type, b64_json)) = grok_data_image_parts(image) {
+    if grok_is_data_uri(image) {
+        let (mime_type, b64_json) = grok_data_image_parts(image)?;
         item.insert("result".to_string(), Value::String(b64_json));
         item.insert(
             "output_format".to_string(),
@@ -2782,7 +3279,7 @@ fn grok_openai_responses_image_generation_item(
             Value::String("png".to_string()),
         );
     }
-    Value::Object(item)
+    Some(Value::Object(item))
 }
 
 fn grok_output_format_from_mime_type(mime_type: &str) -> String {
@@ -2985,19 +3482,24 @@ fn openai_image_body(collected: &GrokCollected) -> Value {
         "data": collected
             .images
             .iter()
-            .map(|url| grok_openai_image_item(url.as_str()))
+            .filter_map(|url| grok_openai_image_item(url.as_str()))
             .collect::<Vec<_>>(),
     })
 }
 
-fn grok_openai_image_item(url: &str) -> Value {
-    if let Some((mime_type, b64_json)) = grok_data_image_parts(url) {
-        return json!({
+fn grok_openai_image_item(url: &str) -> Option<Value> {
+    let url = url.trim();
+    if url.is_empty() {
+        return None;
+    }
+    if grok_is_data_uri(url) {
+        let (mime_type, b64_json) = grok_data_image_parts(url)?;
+        return Some(json!({
             "b64_json": b64_json,
             "mime_type": mime_type,
-        });
+        }));
     }
-    json!({ "url": url })
+    Some(json!({ "url": url }))
 }
 
 async fn materialize_grok_image_assets(plan: &ExecutionPlan, collected: &mut GrokCollected) {
@@ -3050,25 +3552,69 @@ async fn grok_download_image_asset(
         return Ok(None);
     }
     let headers = response.headers();
-    let content_type = headers
+    let declared_content_type = headers
         .get("content-type")
-        .map(String::as_str)
+        .and_then(|value| value.split(';').next())
         .map(str::trim)
-        .filter(|value| value.starts_with("image/"))
-        .unwrap_or("image/png")
-        .to_string();
-    let bytes = response.bytes().await.map_err(|err| {
-        ExecutionRuntimeTransportError::UpstreamRequest(format!(
-            "Grok image asset download failed: {err}"
-        ))
-    })?;
+        .filter(|value| !value.is_empty());
+    let bytes = response
+        .bytes_with_limit(GROK_MAX_ATTACHMENT_BYTES)
+        .await
+        .map_err(|err| {
+            ExecutionRuntimeTransportError::UpstreamRequest(format!(
+                "Grok image asset download failed: {err}"
+            ))
+        })?;
     if bytes.is_empty() {
         return Ok(None);
     }
+    let content_type =
+        grok_image_mime_for_payload(&bytes, declared_content_type).ok_or_else(|| {
+            ExecutionRuntimeTransportError::UpstreamRequest(
+                "Grok image asset response is not a supported image".to_string(),
+            )
+        })?;
     Ok(Some(format!(
         "data:{content_type};base64,{}",
         base64::engine::general_purpose::STANDARD.encode(bytes)
     )))
+}
+
+fn grok_image_mime_for_payload(
+    bytes: &[u8],
+    declared_content_type: Option<&str>,
+) -> Option<&'static str> {
+    let detected = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        "image/png"
+    } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        "image/jpeg"
+    } else if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        "image/webp"
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        "image/gif"
+    } else if bytes.len() >= 12
+        && &bytes[4..8] == b"ftyp"
+        && matches!(&bytes[8..12], b"avif" | b"avis")
+    {
+        "image/avif"
+    } else {
+        return None;
+    };
+
+    let declared = declared_content_type
+        .and_then(|value| value.split(';').next())
+        .map(|value| value.trim().to_ascii_lowercase());
+    let declared = declared.as_deref().map(|value| {
+        if value == "image/jpg" {
+            "image/jpeg"
+        } else {
+            value
+        }
+    });
+    if declared.is_some_and(|value| value != detected) {
+        return None;
+    }
+    Some(detected)
 }
 
 fn grok_image_asset_url_is_supported(raw_url: &str) -> bool {
@@ -3091,28 +3637,98 @@ fn grok_image_asset_url_is_supported(raw_url: &str) -> bool {
 }
 
 fn grok_data_image_parts(raw_url: &str) -> Option<(String, String)> {
+    grok_data_image_parts_with_limit(raw_url, GROK_MAX_ATTACHMENT_BYTES)
+}
+
+fn grok_data_image_parts_with_limit(
+    raw_url: &str,
+    decoded_limit: usize,
+) -> Option<(String, String)> {
     let Some((header, data)) = raw_url.trim().split_once(',') else {
         return None;
     };
-    if !header.starts_with("data:image/") || !header.contains(";base64") {
+    let metadata = header
+        .get(..5)
+        .filter(|prefix| prefix.eq_ignore_ascii_case("data:"))
+        .and_then(|_| header.get(5..))?;
+    let mut parameters = metadata.split(';');
+    let declared_mime = parameters.next()?.trim();
+    let declared_mime = grok_inline_image_mime(declared_mime)?;
+    if !parameters.any(|parameter| parameter.trim().eq_ignore_ascii_case("base64")) {
         return None;
     }
-    let mime = header
-        .strip_prefix("data:")
-        .and_then(|value| value.split(';').next())
-        .map(str::trim)
-        .filter(|value| value.starts_with("image/"))?
-        .to_string();
-    let normalized = data.split_whitespace().collect::<String>();
+
+    // Check the encoded length before decoding.  The base64 engine allocates
+    // based on that length, so a post-decode check alone would still permit an
+    // allocation denial of service.
+    let max_base64_len = maximum_base64_len_for_decoded_limit(decoded_limit);
+    let normalized = normalize_base64_with_limit(data, max_base64_len).ok()?;
     if normalized.is_empty() {
         return None;
     }
-    Some((mime, normalized))
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(&normalized)
+        .ok()?;
+    if decoded.len() > decoded_limit {
+        return None;
+    }
+    let detected = grok_image_mime_for_payload(&decoded, Some(declared_mime))?;
+    Some((detected.to_string(), normalized))
+}
+
+fn grok_inline_image_mime(value: &str) -> Option<&'static str> {
+    // Keep the declaration bounded and restricted to passive raster formats.
+    // In particular, never permit image/svg+xml or a generic image/* token to
+    // cross a client-facing data URL boundary.
+    if value.is_empty()
+        || value.len() > 64
+        || value
+            .bytes()
+            .any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control() || byte == b',')
+    {
+        return None;
+    }
+    if value.eq_ignore_ascii_case("image/png") {
+        Some("image/png")
+    } else if value.eq_ignore_ascii_case("image/jpeg") || value.eq_ignore_ascii_case("image/jpg") {
+        Some("image/jpeg")
+    } else if value.eq_ignore_ascii_case("image/webp") {
+        Some("image/webp")
+    } else if value.eq_ignore_ascii_case("image/gif") {
+        Some("image/gif")
+    } else if value.eq_ignore_ascii_case("image/avif") {
+        Some("image/avif")
+    } else {
+        None
+    }
+}
+
+fn grok_is_data_uri(value: &str) -> bool {
+    value
+        .trim()
+        .get(..5)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("data:"))
+}
+
+fn grok_public_image_reference(value: &str) -> Option<&str> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    if grok_is_data_uri(value) {
+        // Validate before exposing any data URL.  Keep the original borrowed
+        // text to avoid an additional large allocation for stream responses.
+        grok_data_image_parts(value)?;
+    }
+    Some(value)
 }
 
 fn openai_image_sse(collected: &GrokCollected) -> String {
     let mut body = String::new();
     for (index, url) in collected.images.iter().enumerate() {
+        let Some(url) = grok_public_image_reference(url) else {
+            continue;
+        };
         push_sse_event(
             &mut body,
             "image_generation.completed",
@@ -3130,6 +3746,9 @@ fn openai_image_sse(collected: &GrokCollected) -> String {
 fn chat_text_with_images(collected: &GrokCollected) -> String {
     let mut text = collected.text.clone();
     for image in &collected.images {
+        let Some(image) = grok_public_image_reference(image) else {
+            continue;
+        };
         if !text.is_empty() {
             text.push_str("\n\n");
         }
@@ -3235,18 +3854,23 @@ mod tests {
     use http::{Method, StatusCode};
 
     use super::{
-        encode_grok_error_frame, encode_grok_first_byte_timeout_frame,
+        chat_text_with_images, encode_grok_error_frame, encode_grok_first_byte_timeout_frame,
         extract_grok_attachment_inputs, grok_aspect_ratio_from_provider_body, grok_asset_url,
-        grok_attachment_ip_is_public, grok_attachment_payload_from_data_uri, grok_client_json_body,
-        grok_client_stream_body, grok_handle_imagine_ws_message,
-        grok_image_count_from_provider_body, grok_image_prompt_from_provider_body,
-        grok_imagine_request_message, grok_imagine_reset_message, grok_media_post_url,
+        grok_attachment_ip_is_public, grok_attachment_payload_from_data_uri,
+        grok_attachment_payload_from_data_uri_with_limit, grok_auxiliary_http_error,
+        grok_client_json_body, grok_client_stream_body, grok_data_image_parts_with_limit,
+        grok_execution_result, grok_handle_imagine_ws_message,
+        grok_handle_imagine_ws_message_with_slot_limit, grok_image_count_from_provider_body,
+        grok_image_mime_for_payload, grok_image_prompt_from_provider_body,
+        grok_imagine_blob_lengths_can_be_retained, grok_imagine_request_message,
+        grok_imagine_reset_message, grok_media_post_url,
         grok_plan_uses_structured_image_generation, grok_should_collect_image_stream,
         grok_should_use_imagine_websocket, grok_success_frame_stream, grok_upload_url,
         grok_upstream_model_name, grok_usage_estimate, grok_user_id_from_cookie_header,
-        materialize_grok_image_assets, openai_chat_body, openai_image_body, openai_responses_body,
-        set_grok_image_edit_config, GrokAttachmentInput, GrokCollected, GrokImagineImage,
-        GrokStreamAdapter,
+        materialize_grok_image_assets, maximum_base64_len_for_decoded_limit, openai_chat_body,
+        openai_image_body, openai_image_sse, openai_responses_body, public_socket_addrs_for_url,
+        set_grok_image_edit_config, validate_grok_attachment_url, GrokAttachmentInput,
+        GrokCollected, GrokImagineImage, GrokStreamAdapter,
     };
 
     fn sample_plan(body: serde_json::Value, client_api_format: &str) -> ExecutionPlan {
@@ -3455,6 +4079,56 @@ mod tests {
     }
 
     #[test]
+    fn grok_response_chunk_limit_rejects_wire_overflow_without_growing_buffers() {
+        let mut upstream_bytes = 4;
+        let mut raw_body = b"1234".to_vec();
+        let mut adapter = GrokStreamAdapter::default();
+
+        let error = super::collect_grok_response_chunk_with_limit(
+            502,
+            &mut upstream_bytes,
+            &mut raw_body,
+            &mut adapter,
+            b"56",
+            5,
+        )
+        .expect_err("wire body above the plan limit must fail");
+
+        assert_eq!(upstream_bytes, 4);
+        assert_eq!(raw_body, b"1234");
+        assert!(matches!(
+            error,
+            super::ExecutionRuntimeTransportError::UpstreamResponseTooLarge {
+                phase: super::UpstreamResponseBodyPhase::Wire,
+                limit_bytes: 5,
+            }
+        ));
+    }
+
+    #[test]
+    fn grok_success_response_does_not_duplicate_raw_body_storage() {
+        let mut upstream_bytes = 0;
+        let mut raw_body = Vec::new();
+        let mut adapter = GrokStreamAdapter::default();
+        let line =
+            b"data: {\"result\":{\"response\":{\"token\":\"ok\",\"messageTag\":\"final\"}}}\n";
+
+        super::collect_grok_response_chunk_with_limit(
+            200,
+            &mut upstream_bytes,
+            &mut raw_body,
+            &mut adapter,
+            line,
+            line.len(),
+        )
+        .expect("body exactly at the limit should pass");
+
+        assert_eq!(upstream_bytes, line.len() as u64);
+        assert!(raw_body.is_empty());
+        assert_eq!(adapter.text, "ok");
+    }
+
+    #[test]
     fn adapter_extracts_grok_image_edit_streaming_response() {
         let line = format!(
             "data: {}\n",
@@ -3503,6 +4177,16 @@ mod tests {
                 "https://assets.grok.com/asset-123/content"
             ]
         );
+    }
+
+    #[test]
+    fn adapter_bounds_collected_image_urls() {
+        let mut adapter = GrokStreamAdapter::default();
+        for index in 0..(super::GROK_MAX_IMAGE_COUNT + 3) {
+            adapter.push_image_url(format!("https://assets.grok.com/image-{index}.png"));
+        }
+
+        assert_eq!(adapter.images.len(), super::GROK_MAX_IMAGE_COUNT);
     }
 
     #[test]
@@ -3595,6 +4279,53 @@ mod tests {
     }
 
     #[test]
+    fn grok_auxiliary_errors_omit_response_and_websocket_error_bodies() {
+        let upstream_body = "Bearer secret-grok-error-body";
+        let upload_message = grok_auxiliary_http_error("attachment upload", 502).to_string();
+
+        assert!(upload_message.contains("Grok attachment upload returned HTTP 502"));
+        assert!(!upload_message.contains(upstream_body));
+
+        let mut slots = BTreeMap::new();
+        let error = grok_handle_imagine_ws_message(
+            &serde_json::json!({
+                "type": "error",
+                "err_msg": upstream_body,
+            }),
+            &mut slots,
+        )
+        .expect_err("websocket error frame should fail");
+        let message = error.to_string();
+
+        assert!(message.contains("Grok Imagine websocket returned an error"));
+        assert!(!message.contains(upstream_body));
+    }
+
+    #[test]
+    fn grok_http_errors_do_not_copy_upstream_response_bodies() {
+        let secret = "authorization=Bearer secret-grok-error-body";
+        let plan = sample_plan(serde_json::json!({"message": "test"}), "openai:chat");
+        let collected = GrokCollected {
+            status_code: 502,
+            text: secret.to_string(),
+            ..GrokCollected::default()
+        };
+
+        let stream_body = grok_client_stream_body(&plan, &collected, None);
+        let result = grok_execution_result(&plan, collected, None);
+        let sync_body = result
+            .body
+            .and_then(|body| body.json_body)
+            .expect("sync error body should exist")
+            .to_string();
+
+        assert!(stream_body.contains("Grok upstream request returned HTTP 502"));
+        assert!(sync_body.contains("Grok upstream request returned HTTP 502"));
+        assert!(!stream_body.contains("secret-grok-error-body"));
+        assert!(!sync_body.contains("secret-grok-error-body"));
+    }
+
+    #[test]
     fn grok_imagine_ws_parser_collects_completed_image() {
         let mut slots = BTreeMap::<String, GrokImagineImage>::new();
         grok_handle_imagine_ws_message(
@@ -3653,6 +4384,14 @@ mod tests {
             Some("a chair".to_string())
         );
         assert_eq!(grok_image_count_from_provider_body(&body), 3);
+        assert_eq!(
+            grok_image_count_from_provider_body(&serde_json::json!({"n": 0})),
+            1
+        );
+        assert_eq!(
+            grok_image_count_from_provider_body(&serde_json::json!({"n": u64::MAX})),
+            4
+        );
         assert_eq!(grok_aspect_ratio_from_provider_body(&body), "16:9");
 
         let plan = sample_plan(body, "openai:image");
@@ -3669,6 +4408,49 @@ mod tests {
     }
 
     #[test]
+    fn grok_imagine_ws_parser_bounds_transient_image_slots() {
+        let mut slots = BTreeMap::<String, GrokImagineImage>::new();
+        for index in 0..8 {
+            grok_handle_imagine_ws_message_with_slot_limit(
+                &serde_json::json!({
+                    "type": "json",
+                    "current_status": "start_stage",
+                    "image_id": format!("image-{index}"),
+                    "order": index,
+                }),
+                &mut slots,
+                4,
+            )
+            .expect("progress frame should parse");
+        }
+
+        assert_eq!(slots.len(), 4);
+    }
+
+    #[test]
+    fn grok_imagine_ws_parser_bounds_aggregate_blob_storage() {
+        let total_limit =
+            maximum_base64_len_for_decoded_limit(super::GROK_MAX_IMAGINE_BLOB_TOTAL_DECODED_BYTES);
+        let existing_len = total_limit.saturating_sub(8);
+        assert!(!grok_imagine_blob_lengths_can_be_retained(
+            existing_len,
+            0,
+            16,
+        ));
+        assert!(grok_imagine_blob_lengths_can_be_retained(
+            existing_len,
+            existing_len,
+            maximum_base64_len_for_decoded_limit(super::GROK_MAX_ATTACHMENT_BYTES),
+        ));
+        assert!(!grok_imagine_blob_lengths_can_be_retained(
+            0,
+            0,
+            maximum_base64_len_for_decoded_limit(super::GROK_MAX_ATTACHMENT_BYTES)
+                .saturating_add(1),
+        ));
+    }
+
+    #[test]
     fn grok_attachment_public_ip_guard_rejects_private_ranges() {
         for ip in [
             "127.0.0.1",
@@ -3679,6 +4461,12 @@ mod tests {
             "::1",
             "fc00::1",
             "fe80::1",
+            "100.64.0.1",
+            "198.18.0.1",
+            "224.0.0.1",
+            "64:ff9b::10.0.0.1",
+            "2002:0a00:0001::1",
+            "2001:0000:4136:e378:8000:63bf:3fff:fdd2",
         ] {
             assert!(
                 !grok_attachment_ip_is_public(ip.parse().expect("ip should parse")),
@@ -3691,6 +4479,72 @@ mod tests {
         assert!(grok_attachment_ip_is_public(
             "2606:4700:4700::1111".parse().expect("ip should parse")
         ));
+    }
+
+    #[tokio::test]
+    async fn grok_attachment_public_target_rejects_bracketed_private_ipv6_literals() {
+        for raw_url in [
+            "http://[::1]/attachment",
+            "http://[fc00::1]/attachment",
+            "http://[fe80::1]/attachment",
+        ] {
+            let url = reqwest::Url::parse(raw_url).expect("URL should parse");
+            assert!(
+                public_socket_addrs_for_url(&url).await.is_err(),
+                "private IPv6 literal should be rejected: {raw_url}"
+            );
+        }
+
+        let url = reqwest::Url::parse("https://[2606:4700:4700::1111]/attachment")
+            .expect("URL should parse");
+        assert_eq!(
+            public_socket_addrs_for_url(&url)
+                .await
+                .expect("public IPv6 literal should pass"),
+            vec!["[2606:4700:4700::1111]:443".parse().unwrap()]
+        );
+    }
+
+    #[test]
+    fn grok_attachment_dns_keeps_all_safe_addresses_for_connection_fallback() {
+        let addresses = vec![
+            "[2606:4700:4700::1111]:443".parse().unwrap(),
+            "8.8.8.8:443".parse().unwrap(),
+        ];
+        assert_eq!(
+            super::validate_grok_attachment_addresses(addresses.clone()).unwrap(),
+            addresses
+        );
+        assert!(super::validate_grok_attachment_addresses(Vec::new()).is_err());
+        for blocked in ["198.18.0.1:443", "127.0.0.1:443", "[fd00::1]:443"] {
+            let mut mixed = addresses.clone();
+            mixed.push(blocked.parse().unwrap());
+            assert!(super::validate_grok_attachment_addresses(mixed).is_err());
+        }
+    }
+
+    #[test]
+    fn grok_attachment_url_rejects_credentials_and_fragments_on_every_hop() {
+        for raw_url in [
+            "https://user@example.com/attachment.png",
+            "https://:password@example.com/attachment.png",
+            "https://user:password@example.com/attachment.png",
+            "https://example.com/attachment.png#private-fragment",
+        ] {
+            let url = reqwest::Url::parse(raw_url).expect("URL should parse");
+            assert!(
+                validate_grok_attachment_url(&url).is_err(),
+                "unsafe attachment URL should be rejected: {raw_url}"
+            );
+        }
+
+        let initial = reqwest::Url::parse("https://example.com/attachment.png?signature=abc")
+            .expect("URL should parse");
+        validate_grok_attachment_url(&initial).expect("signed query URL should remain supported");
+        let redirected = initial
+            .join("https://redirect-user:redirect-pass@example.net/next.png")
+            .expect("redirect URL should parse");
+        assert!(validate_grok_attachment_url(&redirected).is_err());
     }
 
     #[test]
@@ -3774,6 +4628,9 @@ mod tests {
         );
         assert_eq!(body["output"][0]["type"], serde_json::json!("reasoning"));
         assert_eq!(body["output"][1]["type"], serde_json::json!("message"));
+        assert!(body["output"][1]["id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("msg_")));
     }
 
     #[test]
@@ -3781,7 +4638,7 @@ mod tests {
         let plan = sample_plan(serde_json::json!({"input": "draw"}), "openai:responses");
         let collected = GrokCollected {
             text: "done".to_string(),
-            images: vec!["data:image/png;base64,aW1hZ2U=".to_string()],
+            images: vec!["data:image/png;base64,iVBORw0KGgo=".to_string()],
             ..GrokCollected::default()
         };
         let usage = grok_usage_estimate(&plan, &collected);
@@ -3792,7 +4649,10 @@ mod tests {
             body["output"][1]["type"],
             serde_json::json!("image_generation_call")
         );
-        assert_eq!(body["output"][1]["result"], serde_json::json!("aW1hZ2U="));
+        assert_eq!(
+            body["output"][1]["result"],
+            serde_json::json!("iVBORw0KGgo=")
+        );
         assert_eq!(body["output"][1]["output_format"], serde_json::json!("png"));
     }
 
@@ -3894,7 +4754,7 @@ mod tests {
         plan.model_name = Some("grok-imagine-image-lite".to_string());
         let collected = GrokCollected {
             status_code: 200,
-            images: vec!["data:image/png;base64,aW1hZ2U=".to_string()],
+            images: vec!["data:image/png;base64,iVBORw0KGgo=".to_string()],
             ..GrokCollected::default()
         };
         let body = grok_client_json_body(&plan, &collected, None);
@@ -3906,7 +4766,7 @@ mod tests {
         );
         assert_eq!(
             body["choices"][0]["message"]["content"][0]["image_url"]["url"],
-            serde_json::json!("data:image/png;base64,aW1hZ2U=")
+            serde_json::json!("data:image/png;base64,iVBORw0KGgo=")
         );
     }
 
@@ -3922,7 +4782,7 @@ mod tests {
         let report_context = report_context_with_mapped_model("grok-imagine-image-lite");
         let collected = GrokCollected {
             status_code: 200,
-            images: vec!["data:image/png;base64,aW1hZ2U=".to_string()],
+            images: vec!["data:image/png;base64,iVBORw0KGgo=".to_string()],
             ..GrokCollected::default()
         };
         let body = grok_client_json_body(&plan, &collected, Some(&report_context));
@@ -3970,14 +4830,14 @@ mod tests {
         );
         let collected = GrokCollected {
             status_code: 200,
-            images: vec!["data:image/png;base64,aGVsbG8=".to_string()],
+            images: vec!["data:image/png;base64,iVBORw0KGgo=".to_string()],
             ..GrokCollected::default()
         };
         let body = grok_client_stream_body(&plan, &collected, None);
 
         assert!(body.contains("event: response.output_item.done"));
         assert!(body.contains("\"type\":\"image_generation_call\""));
-        assert!(body.contains("\"result\":\"aGVsbG8=\""));
+        assert!(body.contains("\"result\":\"iVBORw0KGgo=\""));
         assert!(body.contains("event: response.completed"));
     }
 
@@ -3994,7 +4854,7 @@ mod tests {
         let report_context = report_context_with_mapped_model("grok-imagine-image-lite");
         let collected = GrokCollected {
             status_code: 200,
-            images: vec!["data:image/png;base64,aGVsbG8=".to_string()],
+            images: vec!["data:image/png;base64,iVBORw0KGgo=".to_string()],
             ..GrokCollected::default()
         };
         let body = grok_client_stream_body(&plan, &collected, Some(&report_context));
@@ -4005,7 +4865,7 @@ mod tests {
         ));
         assert!(body.contains("event: response.output_item.done"));
         assert!(body.contains("\"type\":\"image_generation_call\""));
-        assert!(body.contains("\"result\":\"aGVsbG8=\""));
+        assert!(body.contains("\"result\":\"iVBORw0KGgo=\""));
     }
 
     #[test]
@@ -4084,7 +4944,8 @@ mod tests {
                     ]
                 }]
             }),
-        );
+        )
+        .expect("attachment inputs should be within limits");
 
         assert_eq!(inputs.len(), 2);
         assert_eq!(inputs[0].source.as_str(), "data:image/png;base64,aGVsbG8=");
@@ -4093,9 +4954,88 @@ mod tests {
     }
 
     #[test]
-    fn grok_data_uri_attachment_accepts_content_above_previous_size_cap() {
-        const PREVIOUS_CAP_BYTES: usize = 25 * 1024 * 1024;
-        let base64_blocks = PREVIOUS_CAP_BYTES / 3 + 1;
+    fn grok_attachment_inputs_reject_excess_count_before_uploads() {
+        let content = (0..=super::GROK_MAX_ATTACHMENT_COUNT)
+            .map(|index| {
+                serde_json::json!({
+                    "type": "image_url",
+                    "image_url": format!("https://example.com/image-{index}.png")
+                })
+            })
+            .collect::<Vec<_>>();
+        let error = extract_grok_attachment_inputs(
+            "openai:chat",
+            &serde_json::json!({
+                "messages": [{"role": "user", "content": content}]
+            }),
+        )
+        .expect_err("more than the bounded attachment count must be rejected");
+
+        assert!(error.to_string().contains("at most 16 attachments"));
+    }
+
+    #[test]
+    fn grok_attachment_inputs_bound_source_and_metadata_fields() {
+        let long_url = format!(
+            "https://example.com/{}",
+            "u".repeat(super::GROK_MAX_ATTACHMENT_URL_BYTES)
+        );
+        let source_error = extract_grok_attachment_inputs(
+            "openai:chat",
+            &serde_json::json!({
+                "messages": [{
+                    "role": "user",
+                    "content": [{"type": "image_url", "image_url": long_url}]
+                }]
+            }),
+        )
+        .expect_err("an oversized URL field must be rejected before DNS/fetch");
+        assert!(source_error.to_string().contains("source exceeds"));
+
+        let long_filename = "f".repeat(super::GROK_MAX_ATTACHMENT_FILENAME_BYTES + 1);
+        let filename_error = extract_grok_attachment_inputs(
+            "openai:chat",
+            &serde_json::json!({
+                "messages": [{
+                    "role": "user",
+                    "content": [{
+                        "type": "file",
+                        "file": {
+                            "filename": long_filename,
+                            "file_data": "data:text/plain;base64,Zm9v"
+                        }
+                    }]
+                }]
+            }),
+        )
+        .expect_err("an oversized filename field must be rejected");
+        assert!(filename_error.to_string().contains("filename exceeds"));
+
+        let long_mime = "a".repeat(super::GROK_MAX_ATTACHMENT_MIME_TYPE_BYTES + 1);
+        let mime_error = extract_grok_attachment_inputs(
+            "claude:messages",
+            &serde_json::json!({
+                "messages": [{
+                    "role": "user",
+                    "content": [{
+                        "type": "document",
+                        "source": {
+                            "type": "base64",
+                            "media_type": long_mime,
+                            "data": "Zm9v"
+                        }
+                    }]
+                }]
+            }),
+        )
+        .expect_err("an oversized MIME field must be rejected");
+        assert!(mime_error.to_string().contains("MIME type exceeds"));
+    }
+
+    #[test]
+    fn grok_data_uri_attachment_accepts_content_within_hard_size_cap() {
+        const PAYLOAD_BYTES: usize = 25 * 1024 * 1024 + 1;
+        let base64_blocks = PAYLOAD_BYTES / 3 + 1;
         let mut source = String::from("data:application/octet-stream;base64,");
         source.extend(std::iter::repeat_n('A', base64_blocks * 4));
         let input = GrokAttachmentInput {
@@ -4105,11 +5045,86 @@ mod tests {
         };
 
         let payload = grok_attachment_payload_from_data_uri(&input, 0)
-            .expect("attachment above the previous size cap should be accepted");
+            .expect("attachment within the hard cap should be accepted");
 
         assert_eq!(payload.filename, "large.bin");
         assert_eq!(payload.mime_type, "application/octet-stream");
         assert_eq!(payload.content_b64.len(), base64_blocks * 4);
+    }
+
+    #[test]
+    fn grok_data_uri_attachment_rejects_content_above_hard_size_cap() {
+        let source = "data:application/octet-stream;base64,MTIzNDU2Nzg5".to_string();
+        let input = GrokAttachmentInput {
+            source,
+            filename: Some("oversized.bin".to_string()),
+            mime_type: None,
+        };
+
+        let error = grok_attachment_payload_from_data_uri_with_limit(&input, 0, 8)
+            .expect_err("attachment above the hard cap must be rejected");
+
+        assert!(error.to_string().contains("exceeds"));
+    }
+
+    #[test]
+    fn grok_public_data_image_requires_bounded_base64_and_matching_raster_magic() {
+        let png = [
+            0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, b'I', b'H', b'D', b'R',
+        ];
+        let encoded_png = base64::engine::general_purpose::STANDARD.encode(png);
+        let valid = format!("data:image/png;base64,{encoded_png}");
+        let (mime, normalized) = grok_data_image_parts_with_limit(&valid, png.len())
+            .expect("valid PNG data URL should pass");
+        assert_eq!(mime, "image/png");
+        assert_eq!(normalized, encoded_png);
+
+        let html = base64::engine::general_purpose::STANDARD.encode(b"<html>not an image</html>");
+        assert!(grok_data_image_parts_with_limit(
+            format!("data:image/png;base64,{html}").as_str(),
+            64,
+        )
+        .is_none());
+        assert!(grok_data_image_parts_with_limit(
+            format!("data:image/svg+xml;base64,{html}").as_str(),
+            64,
+        )
+        .is_none());
+        assert!(grok_data_image_parts_with_limit(
+            format!("data:image/jpeg;base64,{encoded_png}").as_str(),
+            png.len(),
+        )
+        .is_none());
+        assert!(
+            grok_data_image_parts_with_limit("data:image/png;base64,not-valid-***", 64,).is_none()
+        );
+        assert!(grok_data_image_parts_with_limit(&valid, png.len() - 1).is_none());
+    }
+
+    #[test]
+    fn grok_public_image_outputs_drop_invalid_data_urls_but_keep_http_urls() {
+        let svg =
+            base64::engine::general_purpose::STANDARD.encode(b"<svg><script>x</script></svg>");
+        let invalid = format!("data:image/svg+xml;base64,{svg}");
+        let ordinary_url = "https://assets.grok.com/generated/example.png";
+        let collected = GrokCollected {
+            status_code: 200,
+            text: "done".to_string(),
+            images: vec![invalid.clone(), ordinary_url.to_string()],
+            ..GrokCollected::default()
+        };
+
+        let body = openai_image_body(&collected);
+        assert_eq!(body["data"].as_array().map(Vec::len), Some(1));
+        assert_eq!(body["data"][0]["url"], serde_json::json!(ordinary_url));
+
+        let text = chat_text_with_images(&collected);
+        assert!(text.contains(ordinary_url));
+        assert!(!text.contains(&invalid));
+
+        let sse = openai_image_sse(&collected);
+        assert!(sse.contains(ordinary_url));
+        assert!(!sse.contains(&invalid));
     }
 
     #[test]
@@ -4127,7 +5142,8 @@ mod tests {
                     ]
                 }]
             }),
-        );
+        )
+        .expect("responses attachments should be within limits");
         let claude = extract_grok_attachment_inputs(
             "claude:messages",
             &serde_json::json!({
@@ -4140,7 +5156,8 @@ mod tests {
                     ]
                 }]
             }),
-        );
+        )
+        .expect("Claude attachments should be within limits");
 
         assert_eq!(responses.len(), 2);
         assert_eq!(responses[0].source.as_str(), "https://example.com/a.png");
@@ -4179,7 +5196,7 @@ mod tests {
                 (Method::GET, "/generated.png") => response(
                     StatusCode::OK,
                     "image/png",
-                    Body::from(vec![0x89, b'P', b'N', b'G']),
+                    Body::from(vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]),
                 ),
                 _ => response(StatusCode::NOT_FOUND, "text/plain", "not found"),
             }
@@ -4208,6 +5225,21 @@ mod tests {
         let body = openai_image_body(&collected);
         assert_eq!(body["data"][0]["b64_json"].as_str().is_some(), true);
         assert!(body["data"][0].get("url").is_none());
+    }
+
+    #[test]
+    fn grok_downloaded_image_requires_matching_magic_and_mime() {
+        let png = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+        assert_eq!(
+            grok_image_mime_for_payload(&png, Some("image/png; charset=binary")),
+            Some("image/png")
+        );
+        assert_eq!(grok_image_mime_for_payload(&png, Some("text/html")), None);
+        assert_eq!(
+            grok_image_mime_for_payload(b"<html>not an image</html>", Some("image/png")),
+            None
+        );
+        assert_eq!(grok_image_mime_for_payload(&png, None), Some("image/png"));
     }
 
     #[test]

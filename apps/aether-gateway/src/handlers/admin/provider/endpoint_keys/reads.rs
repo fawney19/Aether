@@ -2,7 +2,9 @@ use crate::handlers::admin::provider::shared::paths::{
     admin_export_key_id, admin_provider_id_for_keys, admin_reveal_key_id,
 };
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
-use crate::handlers::admin::shared::{attach_admin_audit_response, query_param_value};
+use crate::handlers::admin::shared::{
+    attach_admin_audit_response, mark_sensitive_admin_response_no_store, query_param_value,
+};
 use crate::GatewayError;
 use axum::{
     body::{Body, Bytes},
@@ -94,13 +96,13 @@ pub(super) async fn maybe_handle(
             ));
         };
         return Ok(Some(match state.build_admin_reveal_key_payload(&key) {
-            Ok(payload) => attach_admin_audit_response(
+            Ok(payload) => mark_sensitive_admin_response_no_store(attach_admin_audit_response(
                 Json(payload).into_response(),
                 "admin_provider_key_revealed",
                 "reveal_provider_key",
                 "provider_key",
                 &key_id,
-            ),
+            )),
             Err(detail) => (
                 http::StatusCode::BAD_REQUEST,
                 Json(json!({ "detail": detail })),
@@ -141,13 +143,13 @@ pub(super) async fn maybe_handle(
         };
         return Ok(Some(
             match state.build_admin_export_key_payload(&key).await {
-                Ok(payload) => attach_admin_audit_response(
+                Ok(payload) => mark_sensitive_admin_response_no_store(attach_admin_audit_response(
                     Json(payload).into_response(),
                     "admin_provider_key_exported",
                     "export_provider_key",
                     "provider_key_export",
                     &key_id,
-                ),
+                )),
                 Err(detail) => (
                     http::StatusCode::BAD_REQUEST,
                     Json(json!({ "detail": detail })),

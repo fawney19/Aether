@@ -171,8 +171,8 @@ const props = withDefaults(defineProps<{
   headerStats: { added: number; modified: number; removed: number; unchanged: number }
   isDark: boolean
   // 泛化 props：允许传入任意 header 对和标签，用于复用为响应头对比
-  clientHeaders?: Record<string, unknown>
-  providerHeaders?: Record<string, unknown>
+  clientHeaders?: Record<string, unknown> | null
+  providerHeaders?: Record<string, unknown> | null
   clientLabel?: string
   providerLabel?: string
   emptyMessage?: string

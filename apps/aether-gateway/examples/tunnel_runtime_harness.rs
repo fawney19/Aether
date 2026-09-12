@@ -88,8 +88,13 @@ struct Args {
     distributed_request_command_timeout_ms: u64,
 }
 
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let _log_shutdown = aether_runtime::LogShutdownGuard::new();
+    run()
+}
+
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn run() -> Result<(), Box<dyn std::error::Error>> {
     init_service_runtime(ServiceRuntimeConfig::new(
         "aether-tunnel-standalone",
         "aether_gateway=info",

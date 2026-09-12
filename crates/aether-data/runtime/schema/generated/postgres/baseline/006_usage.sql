@@ -177,6 +177,7 @@ CREATE TABLE IF NOT EXISTS public.usage_counter_deltas (
     request_id character varying(128) NOT NULL,
     kind character varying(64) NOT NULL,
     target_id text NOT NULL,
+    target_tunnel_generation character varying(64),
     request_count_delta bigint DEFAULT 0 NOT NULL,
     total_requests_delta bigint DEFAULT 0 NOT NULL,
     success_count_delta bigint DEFAULT 0 NOT NULL,
@@ -248,4 +249,42 @@ CREATE INDEX IF NOT EXISTS usage_settlement_snapshots_billing_status_idx ON publ
 CREATE INDEX IF NOT EXISTS usage_settlement_snapshots_wallet_id_idx ON public.usage_settlement_snapshots USING btree (wallet_id);
 CREATE INDEX IF NOT EXISTS ix_usage_settlement_snapshots_schema_version ON public.usage_settlement_snapshots USING btree (settlement_snapshot_schema_version);
 CREATE INDEX IF NOT EXISTS ix_usage_settlement_snapshots_pricing_source ON public.usage_settlement_snapshots USING btree (billing_pricing_source);
+
+CREATE TABLE IF NOT EXISTS public.usage_cost_reservations (
+    request_id character varying(128) NOT NULL,
+    subject_id character varying(128) NOT NULL,
+    reservation_token character varying(128) NOT NULL,
+    admitted_at timestamp with time zone NOT NULL,
+    reserved_cost_units bigint NOT NULL,
+    actual_cost_units bigint,
+    state character varying(20) NOT NULL,
+    reservation_expires_at timestamp with time zone NOT NULL,
+    retain_until timestamp with time zone NOT NULL,
+    finalized_at timestamp with time zone,
+    created_at timestamp with time zone NOT NULL,
+    updated_at timestamp with time zone NOT NULL
+);
+
+ALTER TABLE ONLY public.usage_cost_reservations ADD CONSTRAINT usage_cost_reservations_pkey PRIMARY KEY (reservation_token);
+CREATE INDEX IF NOT EXISTS usage_cost_reservations_request_id_idx ON public.usage_cost_reservations USING btree (request_id);
+CREATE INDEX IF NOT EXISTS usage_cost_reservations_subject_admitted_at_idx ON public.usage_cost_reservations USING btree (subject_id, admitted_at);
+CREATE INDEX IF NOT EXISTS usage_cost_reservations_reservation_expires_at_idx ON public.usage_cost_reservations USING btree (reservation_expires_at);
+CREATE INDEX IF NOT EXISTS usage_cost_reservations_retain_until_token_idx ON public.usage_cost_reservations USING btree (retain_until, reservation_token);
+ALTER TABLE ONLY public.usage_cost_reservations ADD CONSTRAINT usage_cost_reservations_subject_id_fkey FOREIGN KEY (subject_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+CREATE TABLE IF NOT EXISTS public.usage_request_admissions (
+    request_id character varying(128) NOT NULL,
+    subject_id character varying(128) NOT NULL,
+    event_token character varying(128) NOT NULL,
+    admitted_at timestamp with time zone NOT NULL,
+    retain_until timestamp with time zone NOT NULL,
+    state character varying(20) NOT NULL,
+    released_at timestamp with time zone,
+    created_at timestamp with time zone NOT NULL
+);
+
+ALTER TABLE ONLY public.usage_request_admissions ADD CONSTRAINT usage_request_admissions_pkey PRIMARY KEY (event_token);
+CREATE INDEX IF NOT EXISTS usage_request_admissions_subject_admitted_at_idx ON public.usage_request_admissions USING btree (subject_id, admitted_at);
+CREATE INDEX IF NOT EXISTS usage_request_admissions_retain_until_token_idx ON public.usage_request_admissions USING btree (retain_until, event_token);
+ALTER TABLE ONLY public.usage_request_admissions ADD CONSTRAINT usage_request_admissions_subject_id_fkey FOREIGN KEY (subject_id) REFERENCES public.users(id) ON DELETE CASCADE;
 

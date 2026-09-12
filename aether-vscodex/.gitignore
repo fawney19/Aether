@@ -1,0 +1,8 @@
+node_modules/
+vscode-extension/node_modules/
+vscode-extension/dist/
+data/
+coverage/
+*.vsix
+.DS_Store
+*.log

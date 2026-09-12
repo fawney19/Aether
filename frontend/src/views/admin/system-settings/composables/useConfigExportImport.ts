@@ -106,7 +106,7 @@ function downloadJson(data: unknown, filename: string) {
   URL.revokeObjectURL(url)
 }
 
-export function useConfigExportImport(systemConfig: { value: SystemConfig }) {
+export function useConfigExportImport(systemConfig: { value: Pick<SystemConfig, 'site_name'> }) {
   const { success, error } = useToast()
 
   // 配置导出/导入相关

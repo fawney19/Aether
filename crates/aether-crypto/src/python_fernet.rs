@@ -19,8 +19,17 @@ const SIGNING_KEY_SIZE: usize = 16;
 const ENCRYPTION_KEY_SIZE: usize = 16;
 const MIN_CIPHERTEXT_SIZE: usize = 16;
 const MIN_TOKEN_SIZE: usize = 1 + 8 + IV_SIZE + MIN_CIPHERTEXT_SIZE + HMAC_SIZE;
+const STANDARD_FERNET_TOKEN_PREFIX: &str = "gAAAA";
+const WRAPPED_FERNET_TOKEN_PREFIX: &str = "Z0FBQUFB";
 const PBKDF2_ITERATIONS: u32 = 100_000;
 const MAX_CACHED_DERIVED_KEYS: usize = 16;
+const MAX_FERNET_PLAINTEXT_BYTES: usize = 16 * 1024 * 1024;
+
+// A Fernet token contains fixed metadata, PKCS#7 padded ciphertext and an HMAC.
+// Aether's compatibility format then base64-encodes that token twice.
+const MAX_FERNET_TOKEN_BYTES: usize =
+    1 + 8 + IV_SIZE + MAX_FERNET_PLAINTEXT_BYTES + AES_BLOCK_SIZE + HMAC_SIZE;
+const AES_BLOCK_SIZE: usize = 16;
 
 pub const APP_SALT_SEED: &[u8] = b"aether-v1";
 pub const APP_SALT_HEX: &str = "8797080a7a4b45b4810e934d1af36261";
@@ -55,7 +64,7 @@ fn minimum_wrapped_token_len() -> usize {
     base64_unpadded_len(base64_unpadded_len(MIN_TOKEN_SIZE))
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 struct RawFernetKeyCache {
     entries: HashMap<Arc<str>, [u8; 32]>,
     insertion_order: VecDeque<Arc<str>>,
@@ -99,12 +108,26 @@ pub enum PythonFernetError {
     InvalidPadding,
     #[error("invalid Python Fernet plaintext utf-8")]
     InvalidUtf8(#[from] std::string::FromUtf8Error),
+    #[error("Python Fernet plaintext exceeds {limit_bytes} bytes")]
+    PlaintextTooLarge { limit_bytes: usize },
+    #[error("Python Fernet ciphertext exceeds the supported size")]
+    CiphertextTooLarge,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PythonFernetCompat {
     signing_key: [u8; SIGNING_KEY_SIZE],
     encryption_key: [u8; ENCRYPTION_KEY_SIZE],
+}
+
+impl std::fmt::Debug for PythonFernetCompat {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PythonFernetCompat")
+            .field("signing_key", &"[REDACTED]")
+            .field("encryption_key", &"[REDACTED]")
+            .finish()
+    }
 }
 
 impl PythonFernetCompat {
@@ -115,13 +138,10 @@ impl PythonFernetCompat {
 
     pub fn decrypt_ciphertext(&self, ciphertext: &str) -> Result<String, PythonFernetError> {
         if ciphertext.is_empty() {
-            return Ok(String::new());
+            return Err(PythonFernetError::InvalidTokenStructure);
         }
 
-        let outer =
-            decode_urlsafe(ciphertext).map_err(|_| PythonFernetError::InvalidOuterBase64)?;
-        let token =
-            decode_urlsafe_bytes(&outer).map_err(|_| PythonFernetError::InvalidInnerBase64)?;
+        let token = decode_wrapped_fernet_token_with_limit(ciphertext, MAX_FERNET_TOKEN_BYTES)?;
         let plaintext = self.decrypt_token_bytes(token)?;
         String::from_utf8(plaintext).map_err(PythonFernetError::InvalidUtf8)
     }
@@ -146,6 +166,9 @@ impl PythonFernetCompat {
     }
 
     fn decrypt_token_bytes(&self, mut token: Vec<u8>) -> Result<Vec<u8>, PythonFernetError> {
+        if token.len() > MAX_FERNET_TOKEN_BYTES {
+            return Err(PythonFernetError::CiphertextTooLarge);
+        }
         if token.len() < MIN_TOKEN_SIZE {
             return Err(PythonFernetError::InvalidTokenStructure);
         }
@@ -174,6 +197,11 @@ impl PythonFernetCompat {
                 .map_err(|_| PythonFernetError::InvalidPadding)?
                 .len()
         };
+        if plaintext_len > MAX_FERNET_PLAINTEXT_BYTES {
+            return Err(PythonFernetError::PlaintextTooLarge {
+                limit_bytes: MAX_FERNET_PLAINTEXT_BYTES,
+            });
+        }
 
         token.copy_within(ciphertext_offset..ciphertext_offset + plaintext_len, 0);
         token.truncate(plaintext_len);
@@ -187,6 +215,11 @@ impl PythonFernetCompat {
         iv: [u8; IV_SIZE],
     ) -> Result<String, PythonFernetError> {
         let plaintext = plaintext.as_bytes();
+        if plaintext.len() > MAX_FERNET_PLAINTEXT_BYTES {
+            return Err(PythonFernetError::PlaintextTooLarge {
+                limit_bytes: MAX_FERNET_PLAINTEXT_BYTES,
+            });
+        }
         let mut padded = vec![0u8; plaintext.len() + IV_SIZE];
         padded[..plaintext.len()].copy_from_slice(plaintext);
         let ciphertext = Aes128CbcEnc::new((&self.encryption_key).into(), (&iv).into())
@@ -227,14 +260,28 @@ pub fn decrypt_python_fernet_ciphertext(
 
 pub fn looks_like_python_fernet_ciphertext(ciphertext: &str) -> bool {
     let ciphertext = ciphertext.trim();
-    if ciphertext.is_empty() || ciphertext.len() < minimum_wrapped_token_len() {
+    if ciphertext.is_empty() {
+        return false;
+    }
+    let max_inner_encoded_bytes = maximum_base64_len_for_decoded_limit(MAX_FERNET_TOKEN_BYTES);
+    if ciphertext.len() > maximum_base64_len_for_decoded_limit(max_inner_encoded_bytes) {
+        return false;
+    }
+    if (ciphertext.len() >= minimum_wrapped_token_len()
+        && ciphertext.starts_with(WRAPPED_FERNET_TOKEN_PREFIX))
+        || (ciphertext.len() >= base64_unpadded_len(MIN_TOKEN_SIZE)
+            && ciphertext.starts_with(STANDARD_FERNET_TOKEN_PREFIX))
+    {
+        return true;
+    }
+    if ciphertext.len() < minimum_wrapped_token_len() {
         return false;
     }
 
-    let Ok(outer) = decode_urlsafe(ciphertext) else {
+    let Ok(outer) = decode_urlsafe_with_limit(ciphertext, max_inner_encoded_bytes) else {
         return false;
     };
-    let Ok(inner) = decode_urlsafe_bytes(&outer) else {
+    let Ok(inner) = decode_urlsafe_bytes_with_limit(&outer, MAX_FERNET_TOKEN_BYTES) else {
         return false;
     };
 
@@ -287,6 +334,9 @@ fn raw_fernet_key(secret: &str) -> [u8; 32] {
 }
 
 fn decode_direct_fernet_key(secret: &str) -> Result<[u8; 32], PythonFernetError> {
+    if secret.len() > base64_encoded_len(32) {
+        return Err(PythonFernetError::InvalidTokenStructure);
+    }
     let decoded = URL_SAFE
         .decode(secret)
         .or_else(|_| STANDARD.decode(secret))
@@ -298,32 +348,75 @@ fn decode_direct_fernet_key(secret: &str) -> Result<[u8; 32], PythonFernetError>
     Ok(raw_key)
 }
 
-fn decode_urlsafe(value: &str) -> Result<Vec<u8>, base64::DecodeError> {
-    decode_with_engine_fallback(value.as_bytes())
+#[derive(Debug)]
+enum BoundedBase64Error {
+    TooLarge,
+    Invalid,
 }
 
-fn decode_urlsafe_bytes(value: &[u8]) -> Result<Vec<u8>, base64::DecodeError> {
-    decode_with_engine_fallback(value)
+fn maximum_base64_len_for_decoded_limit(decoded_limit: usize) -> usize {
+    decoded_limit
+        .checked_add(2)
+        .and_then(|value| value.checked_div(3))
+        .and_then(|value| value.checked_mul(4))
+        .unwrap_or(usize::MAX)
 }
 
-fn decode_with_engine_fallback(value: &[u8]) -> Result<Vec<u8>, base64::DecodeError> {
+fn decode_urlsafe_with_limit(
+    value: &str,
+    decoded_limit: usize,
+) -> Result<Vec<u8>, BoundedBase64Error> {
+    decode_urlsafe_bytes_with_limit(value.as_bytes(), decoded_limit)
+}
+
+fn decode_urlsafe_bytes_with_limit(
+    value: &[u8],
+    decoded_limit: usize,
+) -> Result<Vec<u8>, BoundedBase64Error> {
+    if value.len() > maximum_base64_len_for_decoded_limit(decoded_limit) {
+        return Err(BoundedBase64Error::TooLarge);
+    }
     let mut decoded = Vec::with_capacity(decoded_len_estimate(value.len()));
     match URL_SAFE.decode_vec(value, &mut decoded) {
-        Ok(()) => Ok(decoded),
+        Ok(()) if decoded.len() <= decoded_limit => Ok(decoded),
+        Ok(()) => Err(BoundedBase64Error::TooLarge),
         Err(_) => {
             decoded.clear();
-            URL_SAFE_NO_PAD.decode_vec(value, &mut decoded)?;
+            URL_SAFE_NO_PAD
+                .decode_vec(value, &mut decoded)
+                .map_err(|_| BoundedBase64Error::Invalid)?;
+            if decoded.len() > decoded_limit {
+                return Err(BoundedBase64Error::TooLarge);
+            }
             Ok(decoded)
         }
     }
 }
 
+fn decode_wrapped_fernet_token_with_limit(
+    ciphertext: &str,
+    max_token_bytes: usize,
+) -> Result<Vec<u8>, PythonFernetError> {
+    let max_inner_encoded_bytes = maximum_base64_len_for_decoded_limit(max_token_bytes);
+    let outer = decode_urlsafe_with_limit(ciphertext, max_inner_encoded_bytes).map_err(
+        |error| match error {
+            BoundedBase64Error::TooLarge => PythonFernetError::CiphertextTooLarge,
+            BoundedBase64Error::Invalid => PythonFernetError::InvalidOuterBase64,
+        },
+    )?;
+    decode_urlsafe_bytes_with_limit(&outer, max_token_bytes).map_err(|error| match error {
+        BoundedBase64Error::TooLarge => PythonFernetError::CiphertextTooLarge,
+        BoundedBase64Error::Invalid => PythonFernetError::InvalidInnerBase64,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        decrypt_python_fernet_ciphertext, derive_python_fernet_key,
-        encrypt_python_fernet_plaintext, looks_like_python_fernet_ciphertext, PythonFernetCompat,
-        PythonFernetError, APP_SALT_HEX, DEVELOPMENT_ENCRYPTION_KEY,
+        decode_wrapped_fernet_token_with_limit, decrypt_python_fernet_ciphertext,
+        derive_python_fernet_key, encrypt_python_fernet_plaintext,
+        looks_like_python_fernet_ciphertext, maximum_base64_len_for_decoded_limit,
+        PythonFernetCompat, PythonFernetError, APP_SALT_HEX, DEVELOPMENT_ENCRYPTION_KEY,
     };
 
     #[test]
@@ -339,6 +432,16 @@ mod tests {
     fn passes_through_existing_fernet_key_secret() {
         let direct_key = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=";
         assert_eq!(derive_python_fernet_key(direct_key), direct_key);
+    }
+
+    #[test]
+    fn debug_output_never_exposes_fernet_key_material() {
+        let crypto = PythonFernetCompat::from_secret(DEVELOPMENT_ENCRYPTION_KEY);
+
+        assert_eq!(
+            format!("{crypto:?}"),
+            "PythonFernetCompat { signing_key: \"[REDACTED]\", encryption_key: \"[REDACTED]\" }"
+        );
     }
 
     #[test]
@@ -400,6 +503,8 @@ mod tests {
             .expect("ciphertext should build");
         ciphertext.replace_range(ciphertext.len() - 2.., "AA");
 
+        assert!(looks_like_python_fernet_ciphertext(&ciphertext));
+
         let err = decrypt_python_fernet_ciphertext(DEVELOPMENT_ENCRYPTION_KEY, &ciphertext)
             .expect_err("tampered ciphertext should fail");
         assert!(matches!(
@@ -407,6 +512,35 @@ mod tests {
             PythonFernetError::InvalidInnerBase64
                 | PythonFernetError::InvalidTokenSignature
                 | PythonFernetError::InvalidPadding
+        ));
+    }
+
+    #[test]
+    fn rejects_unauthenticated_empty_ciphertext() {
+        assert!(matches!(
+            decrypt_python_fernet_ciphertext(DEVELOPMENT_ENCRYPTION_KEY, ""),
+            Err(PythonFernetError::InvalidTokenStructure)
+        ));
+
+        let ciphertext = encrypt_python_fernet_plaintext(DEVELOPMENT_ENCRYPTION_KEY, "")
+            .expect("empty plaintext should still have an authenticated token");
+        assert_eq!(
+            decrypt_python_fernet_ciphertext(DEVELOPMENT_ENCRYPTION_KEY, &ciphertext)
+                .expect("authenticated empty plaintext should decrypt"),
+            ""
+        );
+    }
+
+    #[test]
+    fn wrapped_fernet_decode_rejects_oversized_outer_base64_before_allocation() {
+        let token_limit = 3;
+        let inner_encoded_limit = maximum_base64_len_for_decoded_limit(token_limit);
+        let outer_encoded_limit = maximum_base64_len_for_decoded_limit(inner_encoded_limit);
+        let oversized = "A".repeat(outer_encoded_limit + 1);
+
+        assert!(matches!(
+            decode_wrapped_fernet_token_with_limit(&oversized, token_limit),
+            Err(PythonFernetError::CiphertextTooLarge)
         ));
     }
 

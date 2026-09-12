@@ -4,6 +4,7 @@ mod lock;
 mod namespace;
 mod runtime;
 mod stream;
+mod usage_cleanup;
 
 pub use client::{RedisClientConfig, RedisLaneDiagnostics};
 pub use kv::{RedisKvRunner, RedisKvRunnerConfig};

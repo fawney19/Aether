@@ -209,6 +209,7 @@ mod tests {
                 pool_key_index: None,
                 pool_key_lease: None,
                 scheduler_affinity_epoch: None,
+                sticky_key_attempts: None,
             },
             ranking: None,
         }

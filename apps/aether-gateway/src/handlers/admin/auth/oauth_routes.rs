@@ -1,8 +1,9 @@
 use super::oauth_config::{
+    admin_oauth_builtin_allowed_domains, admin_oauth_custom_allowed_domains,
     admin_oauth_is_supported_provider, admin_oauth_provider_type_from_path,
     admin_oauth_test_provider_type_from_path, build_admin_oauth_provider_payload,
     build_admin_oauth_supported_types_payload, build_admin_oauth_upsert_record,
-    AdminOAuthProviderUpsertRequest,
+    validate_admin_oauth_url_override, AdminOAuthProviderUpsertRequest,
 };
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::handlers::admin::shared::{attach_admin_audit_response, build_proxy_error_response};
@@ -14,9 +15,11 @@ use axum::{
     Json,
 };
 use serde_json::json;
+use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
 const ADMIN_OAUTH_TEST_TIMEOUT_SECS: u64 = 10;
+const ADMIN_OAUTH_TEST_MAX_REDIRECTS: usize = 3;
 const LINUXDO_AUTHORIZATION_URL: &str = "https://connect.linux.do/oauth2/authorize";
 const LINUXDO_TOKEN_URL: &str = "https://connect.linux.do/oauth2/token";
 
@@ -36,27 +39,204 @@ fn admin_oauth_secret_status(has_secret: bool) -> &'static str {
     }
 }
 
-async fn admin_oauth_endpoint_reachable(client: &reqwest::Client, url: &str) -> bool {
-    let Ok(parsed) = reqwest::Url::parse(url) else {
+async fn admin_oauth_endpoint_reachable(
+    url: &str,
+    allowed_domains: &[&str],
+    allow_benchmarking_ip: bool,
+) -> bool {
+    let Ok(mut current) = reqwest::Url::parse(url) else {
         return false;
     };
-    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+    for redirects in 0..=ADMIN_OAUTH_TEST_MAX_REDIRECTS {
+        if validate_admin_oauth_url_override(current.as_str(), allowed_domains).is_err() {
+            return false;
+        }
+        let Ok((host, addrs)) =
+            resolve_public_admin_oauth_endpoint_with_policy(&current, allow_benchmarking_ip).await
+        else {
+            return false;
+        };
+        let mut builder = reqwest::Client::builder()
+            .timeout(Duration::from_secs(ADMIN_OAUTH_TEST_TIMEOUT_SECS))
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy();
+        if host.parse::<IpAddr>().is_err() {
+            builder = builder.resolve_to_addrs(host.as_str(), &addrs);
+        }
+        let Ok(client) = builder.build() else {
+            return false;
+        };
+        let Ok(response) = client
+            .get(current.clone())
+            .header(reqwest::header::ACCEPT, "*/*")
+            .header(
+                reqwest::header::USER_AGENT,
+                "Aether OAuth configuration tester",
+            )
+            .send()
+            .await
+        else {
+            return false;
+        };
+        if !response.status().is_redirection() {
+            return response.status().as_u16() < 500;
+        }
+        if redirects == ADMIN_OAUTH_TEST_MAX_REDIRECTS {
+            return false;
+        }
+        let Some(location) = response
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+        else {
+            return false;
+        };
+        let Ok(next) = current.join(location) else {
+            return false;
+        };
+        current = next;
+    }
+    false
+}
+
+async fn resolve_public_admin_oauth_endpoint(
+    url: &reqwest::Url,
+) -> Result<(String, Vec<SocketAddr>), ()> {
+    resolve_public_admin_oauth_endpoint_with_policy(url, false).await
+}
+
+async fn resolve_public_admin_oauth_endpoint_with_policy(
+    url: &reqwest::Url,
+    allow_benchmarking_ip: bool,
+) -> Result<(String, Vec<SocketAddr>), ()> {
+    if url.scheme() != "https"
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.host_str().is_none()
+    {
+        return Err(());
+    }
+    let host = url.host_str().ok_or(())?;
+    let port = url.port_or_known_default().ok_or(())?;
+    let addrs = if let Ok(ip) = host.parse::<IpAddr>() {
+        vec![SocketAddr::new(ip, port)]
+    } else {
+        aether_http::lookup_host_with_limits(host, port, aether_http::DEFAULT_DNS_LOOKUP_TIMEOUT)
+            .await
+            .map_err(|_| ())?
+    };
+    if validate_public_admin_oauth_resolved_addrs(url, &addrs, allow_benchmarking_ip).is_err() {
+        return Err(());
+    }
+    Ok((host.to_string(), addrs))
+}
+
+fn validate_public_admin_oauth_resolved_addrs(
+    url: &reqwest::Url,
+    addrs: &[SocketAddr],
+    allow_benchmarking_ip: bool,
+) -> Result<(), ()> {
+    if addrs.is_empty()
+        || addrs.iter().any(|addr| {
+            aether_http::is_private_or_reserved_ip(addr.ip())
+                && !(allow_benchmarking_ip
+                    && is_fixed_linuxdo_oauth_origin(url)
+                    && aether_http::is_ipv4_benchmarking_fake_ip(addr.ip()))
+        })
+    {
+        return Err(());
+    }
+    Ok(())
+}
+
+fn is_fixed_linuxdo_oauth_origin(url: &reqwest::Url) -> bool {
+    url.scheme() == "https"
+        && url.host_str().is_some_and(|host| {
+            host.trim_end_matches('.')
+                .eq_ignore_ascii_case("connect.linux.do")
+        })
+        && url.port_or_known_default() == Some(443)
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.query().is_none()
+        && url.fragment().is_none()
+}
+
+fn admin_oauth_test_allowed_domains(
+    provider_type: &str,
+    payload: &serde_json::Value,
+    persisted_config: Option<&aether_data::repository::oauth_providers::StoredOAuthProviderConfig>,
+) -> Vec<String> {
+    if let Some(domains) = admin_oauth_builtin_allowed_domains(provider_type) {
+        return domains.iter().map(|domain| (*domain).to_string()).collect();
+    }
+    let payload_extra = payload.get("extra_config");
+    let domains = admin_oauth_custom_allowed_domains(payload_extra);
+    if domains.is_empty() {
+        admin_oauth_custom_allowed_domains(
+            persisted_config.and_then(|provider| provider.extra_config.as_ref()),
+        )
+    } else {
+        domains
+    }
+}
+
+fn management_token_may_configure_frontend_callback(
+    request_context: &AdminRequestContext<'_>,
+    existing: Option<&aether_data::repository::oauth_providers::StoredOAuthProviderConfig>,
+    requested_callback: &str,
+) -> bool {
+    let Some(principal) = request_context
+        .decision()
+        .and_then(|decision| decision.admin_principal.as_ref())
+    else {
         return false;
+    };
+    if principal.management_token_id.is_none() {
+        return true;
+    }
+    let callback_changed =
+        existing.is_none_or(|provider| provider.frontend_callback_url != requested_callback.trim());
+    if !callback_changed {
+        return true;
     }
 
-    match client
-        .get(parsed)
-        .header(reqwest::header::ACCEPT, "*/*")
-        .header(
-            reqwest::header::USER_AGENT,
-            "Aether OAuth configuration tester",
+    // A missing permission list is the legacy full-access token representation.
+    principal
+        .management_token_permissions
+        .as_ref()
+        .is_none_or(|permissions| {
+            permissions
+                .iter()
+                .any(|permission| permission == "admin:oauth:admin")
+        })
+}
+
+fn oauth_frontend_callback_permission_denied_response(
+    request_context: &AdminRequestContext<'_>,
+) -> Response<Body> {
+    let actor_id = request_context
+        .decision()
+        .and_then(|decision| decision.admin_principal.as_ref())
+        .and_then(|principal| principal.management_token_id.as_deref())
+        .unwrap_or("unknown");
+    attach_admin_audit_response(
+        (
+            http::StatusCode::FORBIDDEN,
+            Json(json!({
+                "detail": "management token permission denied",
+                "required_permission": "admin:oauth:admin",
+                "route_family": "oauth_manage",
+                "route_kind": "upsert_provider",
+                "request_path": request_context.path(),
+            })),
         )
-        .send()
-        .await
-    {
-        Ok(response) => response.status().as_u16() < 500,
-        Err(_) => false,
-    }
+            .into_response(),
+        "admin_oauth_frontend_callback_permission_denied",
+        "permission_denied",
+        "oauth_frontend_callback",
+        actor_id,
+    )
 }
 
 async fn build_admin_oauth_test_payload(
@@ -117,34 +297,38 @@ async fn build_admin_oauth_test_payload(
         }));
     };
 
-    let proxy_snapshot = state.app().resolve_system_proxy_snapshot().await;
-    let mut client_builder = reqwest::Client::builder()
-        .timeout(Duration::from_secs(ADMIN_OAUTH_TEST_TIMEOUT_SECS))
-        .redirect(reqwest::redirect::Policy::limited(3));
-    if let Some(proxy_url) = proxy_snapshot.as_ref().and_then(|p| p.url.as_deref()) {
-        if let Ok(proxy) = reqwest::Proxy::all(proxy_url) {
-            client_builder = client_builder.proxy(proxy);
-        }
-    }
-    let client = client_builder.build();
-    let Ok(client) = client else {
+    let allowed_domains =
+        admin_oauth_test_allowed_domains(provider_type, payload, persisted_config.as_ref());
+    let allowed_domain_refs = allowed_domains
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    if allowed_domain_refs.is_empty()
+        || validate_admin_oauth_url_override(&authorization_url, &allowed_domain_refs).is_err()
+        || validate_admin_oauth_url_override(&token_url, &allowed_domain_refs).is_err()
+    {
         return Ok(json!({
             "authorization_url_reachable": false,
             "token_url_reachable": false,
             "secret_status": admin_oauth_secret_status(has_secret),
-            "details": "OAuth 配置测试 HTTP client 初始化失败",
+            "details": "OAuth 端点必须使用 https 且位于 provider 域名白名单中",
         }));
-    };
+    }
 
+    let allow_benchmarking_ip = provider_type.eq_ignore_ascii_case("linuxdo");
     let (authorization_url_reachable, token_url_reachable) = tokio::join!(
-        admin_oauth_endpoint_reachable(&client, &authorization_url),
-        admin_oauth_endpoint_reachable(&client, &token_url),
+        admin_oauth_endpoint_reachable(
+            &authorization_url,
+            &allowed_domain_refs,
+            allow_benchmarking_ip,
+        ),
+        admin_oauth_endpoint_reachable(&token_url, &allowed_domain_refs, allow_benchmarking_ip),
     );
 
     let details = if authorization_url_reachable && token_url_reachable {
         "OAuth 端点可达；client_secret 仅在授权回调兑换 code 时校验"
     } else {
-        "OAuth 端点不可达或返回不可用状态；请检查端点 URL、网络和代理配置"
+        "OAuth 端点不可达或返回不可用状态；请检查端点 URL 和网络配置"
     };
 
     Ok(json!({
@@ -263,34 +447,16 @@ pub(crate) async fn maybe_build_local_admin_oauth_response(
             }
         };
         let existing = state.get_oauth_provider_config(&provider_type).await?;
-        let ldap_exclusive = state.get_ldap_module_config().await?.is_some_and(|config| {
-            config.is_enabled
-                && config.is_exclusive
-                && config
-                    .bind_password_encrypted
-                    .as_deref()
-                    .map(str::trim)
-                    .is_some_and(|value| !value.is_empty())
-        });
-        if existing
-            .as_ref()
-            .is_some_and(|provider| provider.is_enabled && !payload.is_enabled)
-        {
-            let affected_count = state
-                .count_locked_users_if_oauth_provider_disabled(&provider_type, ldap_exclusive)
-                .await?;
-            if affected_count > 0 && !payload.force {
-                return Ok(Some(build_proxy_error_response(
-                    http::StatusCode::CONFLICT,
-                    "confirmation_required",
-                    format!("禁用该 Provider 会导致 {affected_count} 个用户无法登录"),
-                    Some(json!({
-                        "affected_count": affected_count,
-                        "action": "disable_oauth_provider",
-                    })),
-                )));
-            }
+        if !management_token_may_configure_frontend_callback(
+            request_context,
+            existing.as_ref(),
+            &payload.frontend_callback_url,
+        ) {
+            return Ok(Some(oauth_frontend_callback_permission_denied_response(
+                request_context,
+            )));
         }
+        let force_disable = payload.force;
         let record = match build_admin_oauth_upsert_record(state, &provider_type, payload) {
             Ok(record) => record,
             Err(message) => {
@@ -302,8 +468,62 @@ pub(crate) async fn maybe_build_local_admin_oauth_response(
                 )));
             }
         };
-        let Some(provider) = state.upsert_oauth_provider_config(&record).await? else {
+        if let Some(existing) = existing.as_ref() {
+            if existing
+                .client_secret_encrypted
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
+                && matches!(
+                    record.client_secret_encrypted,
+                    aether_data::repository::oauth_providers::EncryptedSecretUpdate::Preserve
+                )
+            {
+                match crate::handlers::shared::identity_oauth_provider_secret_binding_matches(
+                    existing, &record,
+                ) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        return Ok(Some(build_proxy_error_response(
+                            http::StatusCode::BAD_REQUEST,
+                            "invalid_request",
+                            "修改 OAuth Provider 的 Client ID、端点或 redirect_uri 时必须重新提供 client_secret",
+                            None,
+                        )));
+                    }
+                    Err(_) => {
+                        return Ok(Some(build_proxy_error_response(
+                            http::StatusCode::BAD_REQUEST,
+                            "invalid_request",
+                            "OAuth Provider 密钥绑定校验失败，请重新提供 client_secret",
+                            None,
+                        )));
+                    }
+                }
+            }
+        }
+        let Some(outcome) = state
+            .upsert_oauth_provider_config_with_force_disable(&record, force_disable)
+            .await?
+        else {
             return Ok(None);
+        };
+        let provider = match outcome {
+            aether_data::repository::oauth_providers::UpsertOAuthProviderConfigOutcome::Upserted(
+                provider,
+            ) => provider,
+            aether_data::repository::oauth_providers::UpsertOAuthProviderConfigOutcome::DisableRequiresConfirmation {
+                affected_count,
+            } => {
+                return Ok(Some(build_proxy_error_response(
+                    http::StatusCode::CONFLICT,
+                    "confirmation_required",
+                    format!("禁用该 Provider 会导致 {affected_count} 个用户无法登录"),
+                    Some(json!({
+                        "affected_count": affected_count,
+                        "action": "disable_oauth_provider",
+                    })),
+                )));
+            }
         };
         return Ok(Some(
             Json(build_admin_oauth_provider_payload(&provider)).into_response(),
@@ -322,7 +542,7 @@ pub(crate) async fn maybe_build_local_admin_oauth_response(
                 None,
             )));
         };
-        let Some(existing) = state.get_oauth_provider_config(&provider_type).await? else {
+        let Some(_existing) = state.get_oauth_provider_config(&provider_type).await? else {
             return Ok(Some(build_proxy_error_response(
                 http::StatusCode::BAD_REQUEST,
                 "invalid_request",
@@ -330,32 +550,27 @@ pub(crate) async fn maybe_build_local_admin_oauth_response(
                 None,
             )));
         };
-        if existing.is_enabled {
-            let ldap_exclusive = state.get_ldap_module_config().await?.is_some_and(|config| {
-                config.is_enabled
-                    && config.is_exclusive
-                    && config
-                        .bind_password_encrypted
-                        .as_deref()
-                        .map(str::trim)
-                        .is_some_and(|value| !value.is_empty())
-            });
-            let affected_count = state
-                .count_locked_users_if_oauth_provider_disabled(&provider_type, ldap_exclusive)
-                .await?;
-            if affected_count > 0 {
+        let _mutation_guard = crate::oauth::lock_identity_oauth_mutation().await;
+        if state.has_oauth_links_for_provider(&provider_type).await? {
+            return Ok(Some(build_proxy_error_response(
+                http::StatusCode::CONFLICT,
+                "provider_has_bindings",
+                "Provider 仍有用户绑定，必须先解除全部绑定",
+                None,
+            )));
+        }
+        let deleted = state
+            .delete_oauth_provider_config_if_unlinked(&provider_type)
+            .await?;
+        if !deleted {
+            if state.has_oauth_links_for_provider(&provider_type).await? {
                 return Ok(Some(build_proxy_error_response(
-                    http::StatusCode::BAD_REQUEST,
-                    "invalid_request",
-                    format!(
-                        "删除该 Provider 会导致部分用户无法登录（数量: {affected_count}），已阻止操作"
-                    ),
+                    http::StatusCode::CONFLICT,
+                    "provider_has_bindings",
+                    "Provider 仍有用户绑定，必须先解除全部绑定",
                     None,
                 )));
             }
-        }
-        let deleted = state.delete_oauth_provider_config(&provider_type).await?;
-        if !deleted {
             return Ok(Some(build_proxy_error_response(
                 http::StatusCode::BAD_REQUEST,
                 "invalid_request",
@@ -422,4 +637,55 @@ pub(crate) async fn maybe_build_local_admin_oauth_response(
     }
 
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        is_fixed_linuxdo_oauth_origin, resolve_public_admin_oauth_endpoint,
+        validate_public_admin_oauth_resolved_addrs,
+    };
+    use std::net::SocketAddr;
+
+    #[tokio::test]
+    async fn oauth_test_endpoint_rejects_loopback_https_targets_before_connecting() {
+        let url = reqwest::Url::parse("https://127.0.0.1/oauth/token").expect("URL");
+
+        assert!(resolve_public_admin_oauth_endpoint(&url).await.is_err());
+    }
+
+    #[test]
+    fn linuxdo_builtin_origin_allows_only_benchmarking_addresses() {
+        let fixed = reqwest::Url::parse("https://connect.linux.do/oauth2/token")
+            .expect("LinuxDo URL should parse");
+        let fake = SocketAddr::from(([198, 18, 75, 234], 443));
+        assert!(is_fixed_linuxdo_oauth_origin(&fixed));
+        assert!(validate_public_admin_oauth_resolved_addrs(&fixed, &[fake], true).is_ok());
+        assert!(validate_public_admin_oauth_resolved_addrs(&fixed, &[fake], false).is_err());
+        assert!(validate_public_admin_oauth_resolved_addrs(
+            &fixed,
+            &[fake, SocketAddr::from(([127, 0, 0, 1], 443))],
+            true,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn custom_or_non_default_oauth_origins_reject_benchmarking_addresses() {
+        let fake = SocketAddr::from(([198, 18, 75, 234], 443));
+        for raw_url in [
+            "https://oauth.example.test/token",
+            "https://connect.linux.do:8443/oauth2/token",
+            "https://connect.linuxdo.org/oauth2/token",
+            "https://connect.linux.do.evil.test/oauth2/token",
+            "https://connect.linux.do/oauth2/token?tenant=unexpected",
+        ] {
+            let url = reqwest::Url::parse(raw_url).expect("test URL should parse");
+            assert!(
+                !is_fixed_linuxdo_oauth_origin(&url),
+                "must not trust {raw_url}"
+            );
+            assert!(validate_public_admin_oauth_resolved_addrs(&url, &[fake], true).is_err());
+        }
+    }
 }

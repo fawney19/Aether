@@ -1,9 +1,10 @@
 use super::super::{
     build_admin_users_bad_request_response, build_admin_users_data_unavailable_response,
-    build_admin_users_read_only_response, disabled_user_policy_detail, disabled_user_policy_field,
-    normalize_admin_feature_settings, normalize_admin_optional_user_email,
-    normalize_admin_user_group_ids, normalize_admin_user_role, normalize_admin_username,
-    validate_admin_user_password, AdminUpdateUserPatch,
+    build_admin_users_permission_denied_response, build_admin_users_read_only_response,
+    disabled_user_policy_detail, disabled_user_policy_field,
+    management_token_may_administer_user_accounts, normalize_admin_feature_settings,
+    normalize_admin_optional_user_email, normalize_admin_user_group_ids, normalize_admin_user_role,
+    normalize_admin_username, validate_admin_user_password, AdminUpdateUserPatch,
 };
 use super::support::{
     admin_user_id_from_detail_path, admin_user_password_policy,
@@ -70,6 +71,7 @@ pub(in super::super) async fn build_admin_update_user_response(
         }
     };
     let (field_presence, payload) = patch.into_parts();
+    let email_present = field_presence.contains("email");
     let feature_settings = if field_presence.contains("feature_settings") {
         match normalize_admin_feature_settings(payload.feature_settings.flatten()) {
             Ok(value) => Some(value),
@@ -150,16 +152,47 @@ pub(in super::super) async fn build_admin_update_user_response(
         },
         None => None,
     };
+    let changes_admin_role = role.as_deref().is_some_and(|role| {
+        !role.eq_ignore_ascii_case(&existing_user.role)
+            && (crate::roles::can_access_admin_console(&existing_user.role)
+                || crate::roles::can_access_admin_console(role))
+    });
+    let resets_admin_password =
+        payload.password.is_some() && crate::roles::can_access_admin_console(&existing_user.role);
+    let changes_admin_active_state = payload
+        .is_active
+        .is_some_and(|is_active| is_active != existing_user.is_active)
+        && crate::roles::can_access_admin_console(&existing_user.role);
+    let mutates_existing_admin = crate::roles::can_access_admin_console(&existing_user.role)
+        && (email.is_some()
+            || username.is_some()
+            || payload.password.is_some()
+            || role.is_some()
+            || payload.is_active.is_some()
+            || field_presence.contains("group_ids")
+            || field_presence.contains("feature_settings")
+            || payload.unlimited.is_some());
+    if (changes_admin_role
+        || resets_admin_password
+        || changes_admin_active_state
+        || mutates_existing_admin)
+        && !management_token_may_administer_user_accounts(request_context)
+    {
+        return Ok(build_admin_users_permission_denied_response(
+            request_context,
+        ));
+    }
     if existing_user.is_active
         && crate::roles::is_full_admin_role(&existing_user.role)
-        && role
+        && (role
             .as_deref()
             .is_some_and(|role| !crate::roles::is_full_admin_role(role))
+            || payload.is_active == Some(false))
         && state.count_active_admin_users().await? <= 1
     {
         return Ok((
             http::StatusCode::BAD_REQUEST,
-            Json(json!({ "detail": "不能降级最后一个管理员账户" })),
+            Json(json!({ "detail": "不能降级或停用最后一个管理员账户" })),
         )
             .into_response());
     }
@@ -193,7 +226,7 @@ pub(in super::super) async fn build_admin_update_user_response(
             }
         }
     }
-    let needs_auth_user_write = email.is_some()
+    let needs_auth_user_write = email_present
         || username.is_some()
         || payload.password.is_some()
         || role.is_some()
@@ -211,9 +244,21 @@ pub(in super::super) async fn build_admin_update_user_response(
         ));
     }
 
-    if email.is_some() || username.is_some() {
+    if email_present || username.is_some() {
+        let resets_email_verification = email.as_deref().is_some_and(|email| {
+            existing_user
+                .email
+                .as_deref()
+                .is_none_or(|existing| !existing.trim().eq_ignore_ascii_case(email.trim()))
+        });
         if state
-            .update_local_auth_user_profile(&user_id, email.clone(), username.clone())
+            .update_local_auth_user_profile(
+                &user_id,
+                email_present,
+                email.clone(),
+                resets_email_verification.then_some(false),
+                username.clone(),
+            )
             .await?
             .is_none()
         {
@@ -249,10 +294,13 @@ pub(in super::super) async fn build_admin_update_user_response(
                     .into_response())
             }
         };
-        if state
-            .update_local_auth_user_password_hash(&user_id, password_hash, chrono::Utc::now())
+        if !state
+            .reset_local_auth_user_password_and_revoke_sessions(
+                &user_id,
+                password_hash,
+                chrono::Utc::now(),
+            )
             .await?
-            .is_none()
         {
             return Ok((
                 http::StatusCode::NOT_FOUND,

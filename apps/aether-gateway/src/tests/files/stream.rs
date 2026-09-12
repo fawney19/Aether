@@ -5,8 +5,8 @@ use super::{
     any, build_router, build_router_with_state, build_state_with_execution_runtime_override,
     hash_api_key, json, sample_auth_snapshot, sample_files_candidate_row,
     sample_files_provider_catalog_endpoint, sample_files_provider_catalog_key,
-    sample_files_provider_catalog_provider, start_server, to_bytes, Arc, Body, Bytes, HeaderName,
-    HeaderValue, InMemoryAuthApiKeySnapshotRepository,
+    sample_files_provider_catalog_provider, sample_files_proxy_node_repository, start_server,
+    to_bytes, Arc, Body, Bytes, HeaderName, HeaderValue, InMemoryAuthApiKeySnapshotRepository,
     InMemoryMinimalCandidateSelectionReadRepository, InMemoryProviderCatalogReadRepository,
     InMemoryRequestCandidateRepository, Infallible, Json, Mutex, Request,
     RequestCandidateReadRepository, RequestCandidateStatus, Response, Router, StatusCode,
@@ -193,6 +193,10 @@ async fn gateway_executes_gemini_files_download_via_local_decision_gate_with_loc
             sample_files_candidate_row(),
         ]));
     let request_candidate_repository = Arc::new(InMemoryRequestCandidateRepository::default());
+    let gemini_file_mapping_repository =
+        Arc::new(super::InMemoryGeminiFileMappingRepository::seed([
+            super::sample_owned_file_mapping("files/file-123", "user-files-download-local-123"),
+        ]));
     let mut provider = sample_files_provider_catalog_provider();
     provider.proxy = Some(serde_json::json!({"url":"http://provider-proxy.internal:8080"}));
     let mut endpoint = sample_files_provider_catalog_endpoint();
@@ -216,13 +220,17 @@ async fn gateway_executes_gemini_files_download_via_local_decision_gate_with_loc
     let gateway_state =
         build_state_with_execution_runtime_override(execution_runtime_url.clone())
         .with_data_state_for_tests(
-            crate::data::GatewayDataState::with_auth_candidate_selection_provider_catalog_and_request_candidate_repository_for_tests(
+            crate::data::GatewayDataState::with_auth_candidate_selection_provider_catalog_request_candidate_and_gemini_file_mapping_repositories_for_tests(
                 auth_repository,
                 candidate_selection_repository,
                 provider_catalog_repository,
                 Arc::clone(&request_candidate_repository),
+                gemini_file_mapping_repository,
                 DEVELOPMENT_ENCRYPTION_KEY,
-            ),
+            )
+            .attach_proxy_node_repository_for_tests(sample_files_proxy_node_repository([
+                "proxy-node-gemini-files-download-local",
+            ])),
         );
     let gateway = build_router_with_state(gateway_state);
     let (gateway_url, gateway_handle) = start_server(gateway).await;

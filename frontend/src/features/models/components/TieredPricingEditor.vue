@@ -728,8 +728,8 @@ const activeProcessingTierUsesMultiplier = computed(() => (
 const compactProcessingTierOptions = computed<CompactProcessingTierOption[]>(() => (
   COMPACT_PROCESSING_TIERS.map(option => ({
     ...option,
-    accessibleLabel: [option.group, option.label, 'detail' in option ? option.detail : null]
-      .filter((part): part is string => Boolean(part))
+    accessibleLabel: ['group' in option ? option.group : null, option.label, 'detail' in option ? option.detail : null]
+      .filter((part) => Boolean(part))
       .join(' · '),
     ...(processingTierMultiplierDrafts[option.key] ?? {
       enabled: false,
@@ -1335,7 +1335,7 @@ function processingTierDisplayLabel(key: string): string {
       'group' in compactTier ? compactTier.group : null,
       compactTier.label,
       'detail' in compactTier ? compactTier.detail : null,
-    ].filter((part): part is string => Boolean(part)).join(' · ')
+    ].filter((part) => Boolean(part)).join(' · ')
   }
   return KNOWN_PROCESSING_TIERS.find(tier => tier.key === key)?.label ?? key
 }

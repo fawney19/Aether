@@ -5,15 +5,15 @@ use aether_contracts::{
     EXECUTION_REQUEST_FOLLOW_REDIRECTS_HEADER,
 };
 use aether_data::repository::provider_oauth::{
-    build_provider_oauth_batch_task_status_payload, provider_oauth_batch_task_storage_key,
+    build_provider_oauth_batch_task_status_payload, provider_oauth_batch_task_secret_purpose,
+    provider_oauth_batch_task_storage_key, provider_oauth_device_session_secret_purpose,
     provider_oauth_device_session_storage_key, provider_oauth_state_storage_key,
     StoredAdminProviderOAuthDeviceSession, StoredAdminProviderOAuthState,
     PROVIDER_OAUTH_BATCH_TASK_TTL_SECS, PROVIDER_OAUTH_STATE_TTL_SECS,
 };
 use axum::http;
-use base64::{engine::general_purpose::STANDARD, Engine as _};
 use flate2::read::{DeflateDecoder, GzDecoder};
-use serde_json::json;
+use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::io::Read;
 use url::Url;
@@ -21,6 +21,9 @@ use url::Url;
 const KIRO_IDC_AMZ_USER_AGENT: &str = "aws-sdk-js/3.738.0 ua/2.1 os/other lang/js md/browser#unknown_unknown api/sso-oidc#3.738.0 m/E KiroIDE";
 const ADMIN_PROVIDER_OAUTH_TIMEOUT_MS: u64 = 30_000;
 const ADMIN_PROVIDER_OAUTH_PROXY_TIMEOUT_MS: u64 = 60_000;
+const ADMIN_PROVIDER_OAUTH_RESPONSE_BODY_LIMIT_BYTES: usize = 4 * 1024 * 1024;
+const ADMIN_PROVIDER_OAUTH_STATE_SECRET_PURPOSE: &str = "provider-oauth-state";
+const ADMIN_PROVIDER_OAUTH_STATE_MAX_CLOCK_SKEW_SECS: u64 = 60;
 
 pub(crate) struct AdminProviderOAuthHttpResponse {
     pub(crate) status: http::StatusCode,
@@ -28,30 +31,177 @@ pub(crate) struct AdminProviderOAuthHttpResponse {
     pub(crate) json_body: Option<serde_json::Value>,
 }
 
-impl<'a> AdminAppState<'a> {
-    pub(crate) async fn update_provider_catalog_key_oauth_credentials(
-        &self,
-        key_id: &str,
-        encrypted_api_key: &str,
-        encrypted_auth_config: Option<&str>,
-        expires_at_unix_secs: Option<u64>,
-    ) -> Result<bool, GatewayError> {
-        crate::oauth::ProviderOAuthRepository::update_provider_catalog_key_oauth_credentials(
-            self,
-            key_id,
-            encrypted_api_key,
-            encrypted_auth_config,
-            expires_at_unix_secs,
-        )
-        .await
-    }
+fn admin_provider_oauth_state_secret_purpose(nonce: &str) -> String {
+    format!(
+        "{ADMIN_PROVIDER_OAUTH_STATE_SECRET_PURPOSE}:{}",
+        provider_oauth_state_storage_key(nonce.trim())
+    )
+}
 
+fn is_generated_admin_provider_oauth_nonce(nonce: &str) -> bool {
+    let nonce = nonce.trim();
+    nonce.len() == 64
+        && nonce
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn decode_admin_provider_oauth_state(
+    state: &AdminAppState<'_>,
+    expected_nonce: &str,
+    stored: &str,
+) -> Result<StoredAdminProviderOAuthState, GatewayError> {
+    let expected_nonce = expected_nonce.trim();
+    let purpose = admin_provider_oauth_state_secret_purpose(expected_nonce);
+    let plaintext =
+        crate::handlers::shared::open_runtime_secret_payload(state.as_ref(), &purpose, stored)
+            .ok_or_else(invalid_admin_provider_oauth_state_error)?;
+    let record = serde_json::from_str::<StoredAdminProviderOAuthState>(&plaintext)
+        .map_err(|_| invalid_admin_provider_oauth_state_error())?;
+    validate_admin_provider_oauth_state(expected_nonce, &record)?;
+    Ok(record)
+}
+
+fn invalid_admin_provider_oauth_state_error() -> GatewayError {
+    GatewayError::Client {
+        status: http::StatusCode::BAD_REQUEST,
+        message: "provider OAuth state is invalid".to_string(),
+    }
+}
+
+fn invalid_admin_provider_oauth_device_session_error() -> GatewayError {
+    GatewayError::Client {
+        status: http::StatusCode::BAD_REQUEST,
+        message: "provider OAuth device session is invalid".to_string(),
+    }
+}
+
+fn is_valid_admin_provider_oauth_ephemeral_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
+}
+
+fn validate_admin_provider_oauth_device_session(
+    expected_session_id: &str,
+    record: &StoredAdminProviderOAuthDeviceSession,
+) -> Result<(), GatewayError> {
+    let raw_expected_session_id = expected_session_id;
+    let expected_session_id = expected_session_id.trim();
+    let optional_identity_is_invalid = |value: Option<&str>| {
+        value.is_some_and(|value| value.trim().is_empty() || value != value.trim())
+    };
+    if raw_expected_session_id != expected_session_id
+        || !is_valid_admin_provider_oauth_ephemeral_id(expected_session_id)
+        || record.session_id != expected_session_id
+        || !is_valid_admin_provider_oauth_ephemeral_id(&record.session_id)
+        || record.provider_id.trim().is_empty()
+        || record.provider_id != record.provider_id.trim()
+        || record.initiated_by_user_id.trim().is_empty()
+        || record.initiated_by_user_id != record.initiated_by_user_id.trim()
+        || optional_identity_is_invalid(record.initiated_by_session_id.as_deref())
+        || optional_identity_is_invalid(record.initiated_by_management_token_id.as_deref())
+        || (record.initiated_by_session_id.is_none()
+            && record.initiated_by_management_token_id.is_none())
+        || !matches!(
+            record.status.as_str(),
+            "pending" | "authorized" | "expired" | "error"
+        )
+        || record.created_at_unix_ms == 0
+        || record.expires_at_unix_secs < record.created_at_unix_ms
+        || (record.status == "authorized"
+            && record
+                .key_id
+                .as_deref()
+                .map(str::trim)
+                .is_none_or(str::is_empty))
+    {
+        return Err(invalid_admin_provider_oauth_device_session_error());
+    }
+    Ok(())
+}
+
+fn decode_admin_provider_oauth_device_session(
+    state: &AdminAppState<'_>,
+    expected_session_id: &str,
+    stored: &str,
+) -> Result<StoredAdminProviderOAuthDeviceSession, GatewayError> {
+    let purpose = provider_oauth_device_session_secret_purpose(expected_session_id);
+    let plaintext =
+        crate::handlers::shared::open_runtime_secret_payload(state.as_ref(), &purpose, stored)
+            .ok_or_else(invalid_admin_provider_oauth_device_session_error)?;
+    let record = serde_json::from_str::<StoredAdminProviderOAuthDeviceSession>(&plaintext)
+        .map_err(|_| invalid_admin_provider_oauth_device_session_error())?;
+    validate_admin_provider_oauth_device_session(expected_session_id, &record)?;
+    Ok(record)
+}
+
+fn decode_admin_provider_oauth_batch_task(
+    state: &AdminAppState<'_>,
+    expected_task_id: &str,
+    stored: &str,
+) -> Result<serde_json::Value, GatewayError> {
+    let invalid = || GatewayError::Internal("provider OAuth batch task is invalid".to_string());
+    let purpose = provider_oauth_batch_task_secret_purpose(expected_task_id);
+    let plaintext =
+        crate::handlers::shared::open_runtime_secret_payload(state.as_ref(), &purpose, stored)
+            .ok_or_else(invalid)?;
+    let parsed = serde_json::from_str::<serde_json::Value>(&plaintext).map_err(|_| invalid())?;
+    let state = parsed.as_object().ok_or_else(invalid)?;
+    if state.get("task_id").and_then(serde_json::Value::as_str) != Some(expected_task_id) {
+        return Err(invalid());
+    }
+    Ok(parsed)
+}
+
+fn validate_admin_provider_oauth_state(
+    expected_nonce: &str,
+    record: &StoredAdminProviderOAuthState,
+) -> Result<(), GatewayError> {
+    let invalid = invalid_admin_provider_oauth_state_error;
+    if !is_generated_admin_provider_oauth_nonce(expected_nonce)
+        || record.nonce != expected_nonce
+        || !is_generated_admin_provider_oauth_nonce(&record.nonce)
+        || record.provider_id.trim().is_empty()
+        || record.provider_id != record.provider_id.trim()
+        || record.provider_type.trim().is_empty()
+        || record.provider_type != record.provider_type.trim().to_ascii_lowercase()
+        || record.initiated_by_user_id.trim().is_empty()
+        || record.initiated_by_user_id != record.initiated_by_user_id.trim()
+        || record
+            .pkce_verifier
+            .as_deref()
+            .is_some_and(|value| value.trim().is_empty())
+        || record
+            .initiated_by_session_id
+            .as_deref()
+            .is_some_and(|value| value.trim().is_empty())
+        || record
+            .initiated_by_management_token_id
+            .as_deref()
+            .is_some_and(|value| value.trim().is_empty())
+        || (record.initiated_by_session_id.is_none()
+            && record.initiated_by_management_token_id.is_none())
+    {
+        return Err(invalid());
+    }
+    let now = aether_admin::provider::state::current_unix_secs();
+    if record.created_at > now.saturating_add(ADMIN_PROVIDER_OAUTH_STATE_MAX_CLOCK_SKEW_SECS)
+        || now.saturating_sub(record.created_at) > PROVIDER_OAUTH_STATE_TTL_SECS
+    {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
+impl<'a> AdminAppState<'a> {
     pub(crate) async fn update_provider_catalog_key_oauth_runtime_state(
         &self,
         key_id: &str,
         oauth_invalid_at_unix_secs: Option<u64>,
         oauth_invalid_reason: Option<&str>,
-        encrypted_auth_config_update: Option<&str>,
         updated_at_unix_secs: Option<u64>,
     ) -> Result<bool, GatewayError> {
         self.app
@@ -59,7 +209,6 @@ impl<'a> AdminAppState<'a> {
                 key_id,
                 oauth_invalid_at_unix_secs,
                 oauth_invalid_reason,
-                encrypted_auth_config_update,
                 updated_at_unix_secs,
             )
             .await
@@ -91,21 +240,36 @@ impl<'a> AdminAppState<'a> {
         provider_type: &str,
         pkce_verifier: Option<&str>,
         expected_encrypted_auth_config: Option<&str>,
+        initiated_by_user_id: &str,
+        initiated_by_session_id: Option<&str>,
+        initiated_by_management_token_id: Option<&str>,
     ) -> Result<String, GatewayError> {
         let nonce = aether_admin::provider::state::generate_provider_oauth_nonce();
-        let payload = json!({
-            "nonce": nonce,
-            "key_id": key_id,
-            "provider_id": provider_id,
-            "provider_type": provider_type,
-            "pkce_verifier": pkce_verifier,
-            "expected_encrypted_auth_config": expected_encrypted_auth_config,
-            "created_at": aether_admin::provider::state::current_unix_secs(),
-        });
+        let record = StoredAdminProviderOAuthState {
+            nonce: nonce.clone(),
+            key_id: key_id.to_string(),
+            provider_id: provider_id.to_string(),
+            provider_type: provider_type.to_string(),
+            pkce_verifier: pkce_verifier.map(ToOwned::to_owned),
+            expected_encrypted_auth_config: expected_encrypted_auth_config.map(ToOwned::to_owned),
+            initiated_by_user_id: initiated_by_user_id.to_string(),
+            initiated_by_session_id: initiated_by_session_id.map(ToOwned::to_owned),
+            initiated_by_management_token_id: initiated_by_management_token_id
+                .map(ToOwned::to_owned),
+            created_at: aether_admin::provider::state::current_unix_secs(),
+        };
+        validate_admin_provider_oauth_state(&nonce, &record)?;
         let key = provider_oauth_state_storage_key(&nonce);
-        let value = payload.to_string();
+        let value = serde_json::to_string(&record)
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        let purpose = admin_provider_oauth_state_secret_purpose(&nonce);
+        let sealed =
+            crate::handlers::shared::seal_runtime_secret_payload(self.as_ref(), &purpose, &value)
+                .ok_or_else(|| {
+                GatewayError::Internal("provider OAuth state encryption unavailable".to_string())
+            })?;
         self.as_ref()
-            .runtime_kv_setex(&key, &value, PROVIDER_OAUTH_STATE_TTL_SECS)
+            .runtime_kv_setex(&key, &sealed, PROVIDER_OAUTH_STATE_TTL_SECS)
             .await?;
         self.as_ref()
             .save_provider_oauth_state_for_tests(&key, &value);
@@ -118,11 +282,18 @@ impl<'a> AdminAppState<'a> {
     ) -> Result<Option<StoredAdminProviderOAuthState>, GatewayError> {
         let key = provider_oauth_state_storage_key(nonce);
         let raw = self.as_ref().runtime_kv_getdel(&key).await?;
-        raw.map(|value| {
-            serde_json::from_str::<StoredAdminProviderOAuthState>(&value)
-                .map_err(|err| GatewayError::Internal(err.to_string()))
-        })
-        .transpose()
+        raw.map(|value| decode_admin_provider_oauth_state(self, nonce, &value))
+            .transpose()
+    }
+
+    pub(crate) async fn load_provider_oauth_state(
+        &self,
+        nonce: &str,
+    ) -> Result<Option<StoredAdminProviderOAuthState>, GatewayError> {
+        let key = provider_oauth_state_storage_key(nonce);
+        let raw = self.as_ref().runtime_kv_get(&key).await?;
+        raw.map(|value| decode_admin_provider_oauth_state(self, nonce, &value))
+            .transpose()
     }
 
     pub(crate) async fn exchange_admin_provider_oauth_code(
@@ -164,12 +335,37 @@ impl<'a> AdminAppState<'a> {
         task_id: &str,
         task_state: &serde_json::Value,
     ) -> Result<(), GatewayError> {
+        let Some(state) = task_state.as_object() else {
+            return Err(GatewayError::Internal(
+                "provider OAuth batch task is invalid".to_string(),
+            ));
+        };
+        if !is_valid_admin_provider_oauth_ephemeral_id(task_id)
+            || state.get("task_id").and_then(serde_json::Value::as_str) != Some(task_id)
+            || state
+                .get("provider_id")
+                .and_then(serde_json::Value::as_str)
+                .is_none_or(|value| value.trim().is_empty() || value != value.trim())
+        {
+            return Err(GatewayError::Internal(
+                "provider OAuth batch task is invalid".to_string(),
+            ));
+        }
         let key = provider_oauth_batch_task_storage_key(task_id);
         let serialized = serde_json::to_string(task_state)
             .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        let purpose = provider_oauth_batch_task_secret_purpose(task_id);
+        let sealed = crate::handlers::shared::seal_runtime_secret_payload(
+            self.as_ref(),
+            &purpose,
+            &serialized,
+        )
+        .ok_or_else(|| {
+            GatewayError::Internal("provider OAuth batch task encryption unavailable".to_string())
+        })?;
 
         self.as_ref()
-            .runtime_kv_setex(&key, &serialized, PROVIDER_OAUTH_BATCH_TASK_TTL_SECS)
+            .runtime_kv_setex(&key, &sealed, PROVIDER_OAUTH_BATCH_TASK_TTL_SECS)
             .await?;
         self.as_ref()
             .save_provider_oauth_batch_task_for_tests(&key, &serialized);
@@ -181,17 +377,20 @@ impl<'a> AdminAppState<'a> {
         provider_id: &str,
         task_id: &str,
     ) -> Result<Option<serde_json::Value>, GatewayError> {
+        if provider_id.trim().is_empty()
+            || provider_id != provider_id.trim()
+            || !is_valid_admin_provider_oauth_ephemeral_id(task_id)
+        {
+            return Ok(None);
+        }
         let key = provider_oauth_batch_task_storage_key(task_id);
         let raw = self.as_ref().runtime_kv_get(&key).await?;
         let Some(raw) = raw else {
             return Ok(None);
         };
-        let parsed = match serde_json::from_str::<serde_json::Value>(&raw) {
-            Ok(value) => value,
-            Err(_) => return Ok(None),
-        };
+        let parsed = decode_admin_provider_oauth_batch_task(self, task_id, &raw)?;
         let Some(state) = parsed.as_object() else {
-            return Ok(None);
+            unreachable!("validated provider OAuth batch task must be an object");
         };
         if state
             .get("provider_id")
@@ -213,6 +412,12 @@ impl<'a> AdminAppState<'a> {
         session: &StoredAdminProviderOAuthDeviceSession,
         ttl_seconds: u64,
     ) -> Result<(), Response<Body>> {
+        if validate_admin_provider_oauth_device_session(session_id, session).is_err() {
+            return Err(build_internal_control_error_response(
+                http::StatusCode::BAD_REQUEST,
+                "provider oauth device session is invalid",
+            ));
+        }
         let key = provider_oauth_device_session_storage_key(session_id);
         let value = serde_json::to_string(session).map_err(|_| {
             build_internal_control_error_response(
@@ -220,8 +425,17 @@ impl<'a> AdminAppState<'a> {
                 "provider oauth redis unavailable",
             )
         })?;
+        let purpose = provider_oauth_device_session_secret_purpose(session_id);
+        let sealed =
+            crate::handlers::shared::seal_runtime_secret_payload(self.as_ref(), &purpose, &value)
+                .ok_or_else(|| {
+                build_internal_control_error_response(
+                    http::StatusCode::SERVICE_UNAVAILABLE,
+                    "provider oauth session encryption unavailable",
+                )
+            })?;
         self.as_ref()
-            .runtime_kv_setex(&key, &value, ttl_seconds)
+            .runtime_kv_setex(&key, &sealed, ttl_seconds)
             .await
             .map_err(|_| {
                 build_internal_control_error_response(
@@ -238,13 +452,15 @@ impl<'a> AdminAppState<'a> {
         &self,
         session_id: &str,
     ) -> Result<Option<StoredAdminProviderOAuthDeviceSession>, GatewayError> {
+        if session_id != session_id.trim()
+            || !is_valid_admin_provider_oauth_ephemeral_id(session_id)
+        {
+            return Err(invalid_admin_provider_oauth_device_session_error());
+        }
         let key = provider_oauth_device_session_storage_key(session_id);
         let raw = self.as_ref().runtime_kv_get(&key).await?;
-        raw.map(|value| {
-            serde_json::from_str::<StoredAdminProviderOAuthDeviceSession>(&value)
-                .map_err(|err| GatewayError::Internal(err.to_string()))
-        })
-        .transpose()
+        raw.map(|value| decode_admin_provider_oauth_device_session(self, session_id, &value))
+            .transpose()
     }
 
     pub(crate) async fn register_admin_kiro_device_oidc_client(
@@ -253,6 +469,7 @@ impl<'a> AdminAppState<'a> {
         start_url: &str,
         proxy: Option<ProxySnapshot>,
     ) -> Result<serde_json::Value, Response<Body>> {
+        let region = aether_provider_transport::kiro::normalize_kiro_region(region);
         let payload = post_kiro_device_oidc_json(
             self,
             "kiro_device_register",
@@ -281,14 +498,10 @@ impl<'a> AdminAppState<'a> {
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false)
         {
-            let error_desc = aether_admin::provider::state::json_non_empty_string(
-                payload.get("error_description"),
-            )
-            .or_else(|| aether_admin::provider::state::json_non_empty_string(payload.get("error")))
-            .unwrap_or_else(|| "unknown".to_string());
+            let error_code = kiro_device_oidc_error_code(&payload);
             return Err(build_internal_control_error_response(
                 http::StatusCode::BAD_REQUEST,
-                format!("注册 OIDC 客户端失败: {error_desc}"),
+                format!("注册 OIDC 客户端失败: {error_code}"),
             ));
         }
         Ok(payload)
@@ -302,6 +515,7 @@ impl<'a> AdminAppState<'a> {
         start_url: &str,
         proxy: Option<ProxySnapshot>,
     ) -> Result<serde_json::Value, Response<Body>> {
+        let region = aether_provider_transport::kiro::normalize_kiro_region(region);
         let payload = post_kiro_device_oidc_json(
             self,
             "kiro_device_authorize",
@@ -319,14 +533,10 @@ impl<'a> AdminAppState<'a> {
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false)
         {
-            let error_desc = aether_admin::provider::state::json_non_empty_string(
-                payload.get("error_description"),
-            )
-            .or_else(|| aether_admin::provider::state::json_non_empty_string(payload.get("error")))
-            .unwrap_or_else(|| "unknown".to_string());
+            let error_code = kiro_device_oidc_error_code(&payload);
             return Err(build_internal_control_error_response(
                 http::StatusCode::BAD_REQUEST,
-                format!("发起设备授权失败: {error_desc}"),
+                format!("发起设备授权失败: {error_code}"),
             ));
         }
         Ok(payload)
@@ -340,6 +550,7 @@ impl<'a> AdminAppState<'a> {
         device_code: &str,
         proxy: Option<ProxySnapshot>,
     ) -> Result<serde_json::Value, Response<Body>> {
+        let region = aether_provider_transport::kiro::normalize_kiro_region(region);
         post_kiro_device_oidc_json(
             self,
             "kiro_device_poll",
@@ -505,29 +716,48 @@ async fn post_kiro_device_oidc_json(
                 "发起设备授权失败: unknown",
             )
         })?;
-    let status = response.status;
-    let body_text = response.body_text;
-    Ok(
-        match serde_json::from_str::<serde_json::Value>(&body_text) {
-            Ok(mut payload) => {
-                if !status.is_success() {
-                    if let Some(object) = payload.as_object_mut() {
-                        object.insert("_error".to_string(), json!(true));
-                    } else {
-                        payload = json!({
-                            "_error": true,
-                            "data": payload,
-                        });
-                    }
-                }
-                payload
-            }
-            Err(_) => json!({
-                "_error": !status.is_success(),
-                "error": body_text.trim(),
-            }),
-        },
-    )
+    Ok(project_kiro_device_oidc_response(
+        response.status,
+        &response.body_text,
+    ))
+}
+
+fn project_kiro_device_oidc_response(status: http::StatusCode, body_text: &str) -> Value {
+    match serde_json::from_str::<Value>(body_text) {
+        Ok(payload) if status.is_success() => payload,
+        Ok(payload) => json!({
+            "_error": true,
+            "error": kiro_device_oidc_error_code(&payload),
+        }),
+        Err(_) => json!({
+            "_error": true,
+            "error": if status.is_success() {
+                "invalid_response"
+            } else {
+                "upstream_error"
+            },
+        }),
+    }
+}
+
+fn kiro_device_oidc_error_code(payload: &Value) -> &'static str {
+    let Some(error_code) = payload.get("error").and_then(Value::as_str).map(str::trim) else {
+        return "upstream_error";
+    };
+    match error_code {
+        "access_denied" => "access_denied",
+        "authorization_pending" => "authorization_pending",
+        "expired_token" => "expired_token",
+        "invalid_client" => "invalid_client",
+        "invalid_client_metadata" => "invalid_client_metadata",
+        "invalid_grant" => "invalid_grant",
+        "invalid_redirect_uri" => "invalid_redirect_uri",
+        "invalid_request" => "invalid_request",
+        "invalid_scope" => "invalid_scope",
+        "slow_down" => "slow_down",
+        "unauthorized_client" => "unauthorized_client",
+        _ => "upstream_error",
+    }
 }
 
 impl<'a> AdminAppState<'a> {
@@ -647,10 +877,13 @@ fn admin_provider_oauth_execution_body_bytes(
     headers: &BTreeMap<String, String>,
     body: &aether_contracts::ResponseBody,
 ) -> Option<Vec<u8>> {
-    let bytes = body
-        .body_bytes_b64
-        .as_deref()
-        .and_then(|value| STANDARD.decode(value).ok())?;
+    let bytes = body.body_bytes_b64.as_deref().and_then(|value| {
+        crate::execution_runtime::transport::decode_base64_body_with_limit(
+            value,
+            ADMIN_PROVIDER_OAUTH_RESPONSE_BODY_LIMIT_BYTES,
+        )
+        .ok()
+    })?;
     admin_provider_oauth_decode_response_bytes(
         &bytes,
         headers.get("content-encoding").map(String::as_str),
@@ -669,20 +902,287 @@ fn admin_provider_oauth_decode_response_bytes(
     match encoding.as_deref() {
         Some("gzip") => {
             let mut decoder = GzDecoder::new(bytes);
-            let mut out = Vec::new();
-            decoder.read_to_end(&mut out).ok()?;
-            Some(out)
+            read_admin_provider_oauth_decoder_with_limit(
+                &mut decoder,
+                ADMIN_PROVIDER_OAUTH_RESPONSE_BODY_LIMIT_BYTES,
+            )
         }
         Some("deflate") => {
             let mut decoder = DeflateDecoder::new(bytes);
-            let mut out = Vec::new();
-            decoder.read_to_end(&mut out).ok()?;
-            Some(out)
+            read_admin_provider_oauth_decoder_with_limit(
+                &mut decoder,
+                ADMIN_PROVIDER_OAUTH_RESPONSE_BODY_LIMIT_BYTES,
+            )
         }
         _ => None,
     }
 }
 
+fn read_admin_provider_oauth_decoder_with_limit(
+    decoder: &mut impl Read,
+    limit_bytes: usize,
+) -> Option<Vec<u8>> {
+    let read_limit = u64::try_from(limit_bytes)
+        .unwrap_or(u64::MAX)
+        .saturating_add(1);
+    let mut limited = decoder.take(read_limit);
+    let mut out = Vec::new();
+    limited.read_to_end(&mut out).ok()?;
+    (out.len() <= limit_bytes).then_some(out)
+}
+
 fn admin_provider_oauth_gateway_error_message(error: GatewayError) -> String {
     error.into_message()
+}
+
+#[cfg(test)]
+mod response_decode_tests {
+    use std::io::Cursor;
+
+    use super::{
+        admin_provider_oauth_state_secret_purpose, decode_admin_provider_oauth_batch_task,
+        decode_admin_provider_oauth_device_session, decode_admin_provider_oauth_state,
+        project_kiro_device_oidc_response, read_admin_provider_oauth_decoder_with_limit,
+    };
+    use crate::{data::GatewayDataState, AppState};
+    use aether_crypto::DEVELOPMENT_ENCRYPTION_KEY;
+    use aether_data::repository::provider_oauth::{
+        provider_oauth_batch_task_secret_purpose, provider_oauth_device_session_secret_purpose,
+        StoredAdminProviderOAuthDeviceSession, StoredAdminProviderOAuthState,
+    };
+    use axum::http::StatusCode;
+    use serde_json::json;
+
+    #[test]
+    fn admin_oauth_decoder_accepts_exact_limit_and_rejects_limit_plus_one() {
+        let mut exact = Cursor::new(vec![b'x'; 8]);
+        assert_eq!(
+            read_admin_provider_oauth_decoder_with_limit(&mut exact, 8),
+            Some(vec![b'x'; 8])
+        );
+
+        let mut oversized = Cursor::new(vec![b'x'; 9]);
+        assert!(read_admin_provider_oauth_decoder_with_limit(&mut oversized, 8).is_none());
+    }
+
+    #[test]
+    fn admin_provider_oauth_state_ciphertext_is_bound_to_its_nonce() {
+        let app = AppState::new()
+            .expect("test state should build")
+            .with_data_state_for_tests(
+                GatewayDataState::disabled()
+                    .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+            );
+        let admin = super::AdminAppState::new(&app);
+        let record = StoredAdminProviderOAuthState {
+            nonce: "a".repeat(64),
+            key_id: "key-1".to_string(),
+            provider_id: "provider-1".to_string(),
+            provider_type: "codex".to_string(),
+            pkce_verifier: Some("verifier".to_string()),
+            expected_encrypted_auth_config: None,
+            initiated_by_user_id: "admin-1".to_string(),
+            initiated_by_session_id: Some("session-1".to_string()),
+            initiated_by_management_token_id: None,
+            created_at: aether_admin::provider::state::current_unix_secs(),
+        };
+        let plaintext = serde_json::to_string(&record).expect("state should serialize");
+        let sealed = crate::handlers::shared::seal_runtime_secret_payload(
+            &app,
+            &admin_provider_oauth_state_secret_purpose(&record.nonce),
+            &plaintext,
+        )
+        .expect("state should seal");
+
+        assert_eq!(
+            decode_admin_provider_oauth_state(&admin, &record.nonce, &sealed)
+                .expect("matching state should open"),
+            record
+        );
+        assert!(matches!(
+            decode_admin_provider_oauth_state(&admin, &"b".repeat(64), &sealed),
+            Err(crate::GatewayError::Client {
+                status: StatusCode::BAD_REQUEST,
+                ..
+            })
+        ));
+        assert!(matches!(
+            decode_admin_provider_oauth_state(&admin, &record.nonce, "damaged-ciphertext"),
+            Err(crate::GatewayError::Client {
+                status: StatusCode::BAD_REQUEST,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn admin_provider_oauth_device_session_ciphertext_is_bound_to_session_and_principal() {
+        let app = AppState::new()
+            .expect("test state should build")
+            .with_data_state_for_tests(
+                GatewayDataState::disabled()
+                    .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+            );
+        let admin = super::AdminAppState::new(&app);
+        let now = aether_admin::provider::state::current_unix_secs();
+        let record = StoredAdminProviderOAuthDeviceSession {
+            session_id: "session-123".to_string(),
+            provider_id: "provider-1".to_string(),
+            initiated_by_user_id: "admin-1".to_string(),
+            initiated_by_session_id: Some("admin-session-1".to_string()),
+            initiated_by_management_token_id: None,
+            region: "us-east-1".to_string(),
+            client_id: "client-1".to_string(),
+            client_secret: "secret-1".to_string(),
+            device_code: "device-code-1".to_string(),
+            auth_type: Some("idc".to_string()),
+            social_provider: None,
+            code_verifier: None,
+            redirect_uri: None,
+            machine_id: None,
+            interval: 5,
+            expires_at_unix_secs: now.saturating_add(600),
+            status: "pending".to_string(),
+            proxy_node_id: None,
+            created_at_unix_ms: now,
+            key_id: None,
+            email: None,
+            replaced: false,
+            error_msg: None,
+        };
+        let plaintext = serde_json::to_string(&record).expect("device session should serialize");
+        let sealed = crate::handlers::shared::seal_runtime_secret_payload(
+            &app,
+            &provider_oauth_device_session_secret_purpose(&record.session_id),
+            &plaintext,
+        )
+        .expect("device session should seal");
+
+        let decoded =
+            decode_admin_provider_oauth_device_session(&admin, &record.session_id, &sealed)
+                .expect("matching device session should open");
+        assert_eq!(decoded.session_id, record.session_id);
+        assert_eq!(decoded.initiated_by_user_id, record.initiated_by_user_id);
+        assert_eq!(
+            decoded.initiated_by_session_id,
+            record.initiated_by_session_id
+        );
+        assert!(matches!(
+            decode_admin_provider_oauth_device_session(&admin, "session-456", &sealed),
+            Err(crate::GatewayError::Client {
+                status: StatusCode::BAD_REQUEST,
+                ..
+            })
+        ));
+        assert!(matches!(
+            decode_admin_provider_oauth_device_session(
+                &admin,
+                &record.session_id,
+                "damaged-ciphertext"
+            ),
+            Err(crate::GatewayError::Client {
+                status: StatusCode::BAD_REQUEST,
+                ..
+            })
+        ));
+
+        let mut mismatched = record.clone();
+        mismatched.session_id = "session-456".to_string();
+        let mismatched_plaintext =
+            serde_json::to_string(&mismatched).expect("mismatched session should serialize");
+        let mismatched_sealed = crate::handlers::shared::seal_runtime_secret_payload(
+            &app,
+            &provider_oauth_device_session_secret_purpose("session-123"),
+            &mismatched_plaintext,
+        )
+        .expect("mismatched session should seal");
+        assert!(matches!(
+            decode_admin_provider_oauth_device_session(&admin, "session-123", &mismatched_sealed),
+            Err(crate::GatewayError::Client {
+                status: StatusCode::BAD_REQUEST,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn admin_provider_oauth_batch_task_ciphertext_is_bound_to_task_id() {
+        let app = AppState::new()
+            .expect("test state should build")
+            .with_data_state_for_tests(
+                GatewayDataState::disabled()
+                    .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+            );
+        let admin = super::AdminAppState::new(&app);
+        let task = json!({
+            "task_id": "task-123",
+            "provider_id": "provider-1",
+            "provider_type": "codex",
+            "status": "processing",
+        });
+        let plaintext = task.to_string();
+        let sealed = crate::handlers::shared::seal_runtime_secret_payload(
+            &app,
+            &provider_oauth_batch_task_secret_purpose("task-123"),
+            &plaintext,
+        )
+        .expect("batch task should seal");
+
+        assert_eq!(
+            decode_admin_provider_oauth_batch_task(&admin, "task-123", &sealed)
+                .expect("matching batch task should open"),
+            task
+        );
+        assert!(decode_admin_provider_oauth_batch_task(&admin, "task-456", &sealed).is_err());
+
+        let mismatched = json!({
+            "task_id": "task-456",
+            "provider_id": "provider-1",
+            "status": "processing",
+        });
+        let mismatched_sealed = crate::handlers::shared::seal_runtime_secret_payload(
+            &app,
+            &provider_oauth_batch_task_secret_purpose("task-123"),
+            &mismatched.to_string(),
+        )
+        .expect("mismatched batch task should seal");
+        assert!(
+            decode_admin_provider_oauth_batch_task(&admin, "task-123", &mismatched_sealed).is_err()
+        );
+    }
+
+    #[test]
+    fn kiro_oidc_error_projection_discards_upstream_free_text() {
+        let known = project_kiro_device_oidc_response(
+            StatusCode::BAD_REQUEST,
+            r#"{
+                "error": "authorization_pending",
+                "error_description": "Bearer upstream-secret at https://internal.test"
+            }"#,
+        );
+        assert_eq!(
+            known,
+            json!({"_error": true, "error": "authorization_pending"})
+        );
+
+        let unknown = project_kiro_device_oidc_response(
+            StatusCode::BAD_REQUEST,
+            r#"{
+                "error": "Bearer-upstream-secret",
+                "error_description": "https://user:password@internal.test"
+            }"#,
+        );
+        assert_eq!(unknown, json!({"_error": true, "error": "upstream_error"}));
+
+        let non_json = project_kiro_device_oidc_response(
+            StatusCode::BAD_GATEWAY,
+            "Bearer upstream-secret at https://internal.test",
+        );
+        assert_eq!(non_json, json!({"_error": true, "error": "upstream_error"}));
+
+        let exposed = format!("{known}{unknown}{non_json}");
+        for secret in ["upstream-secret", "password", "internal.test", "Bearer"] {
+            assert!(!exposed.contains(secret));
+        }
+    }
 }

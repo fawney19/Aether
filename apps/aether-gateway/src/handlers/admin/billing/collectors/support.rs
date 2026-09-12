@@ -5,6 +5,7 @@ use super::super::{
 use crate::handlers::admin::request::AdminAppState;
 use crate::handlers::admin::shared::unix_secs_to_rfc3339;
 use crate::GatewayError;
+use aether_data::repository::wallet::stored_timestamp_unix_secs;
 use axum::{
     body::{Body, Bytes},
     http,
@@ -53,7 +54,7 @@ pub(super) fn build_admin_billing_collector_payload_from_record(
         "default_value": record.default_value,
         "priority": record.priority,
         "is_enabled": record.is_enabled,
-        "created_at": unix_secs_to_rfc3339(record.created_at_unix_ms),
+        "created_at": unix_secs_to_rfc3339(stored_timestamp_unix_secs(record.created_at_unix_ms)),
         "updated_at": unix_secs_to_rfc3339(record.updated_at_unix_secs),
     })
 }
@@ -174,17 +175,7 @@ pub(super) async fn parse_admin_billing_collector_request(
                 ));
             }
             Ok(false) => {}
-            Err(err) => {
-                let detail = match err {
-                    GatewayError::Internal(message) => message,
-                    other => format!("{other:?}"),
-                };
-                return Err((
-                    http::StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({ "detail": detail })),
-                )
-                    .into_response());
-            }
+            Err(_err) => return Err(build_admin_billing_internal_error_response()),
         }
     }
 
@@ -200,6 +191,16 @@ pub(super) async fn parse_admin_billing_collector_request(
         priority: request.priority,
         is_enabled: request.is_enabled,
     })
+}
+
+fn build_admin_billing_internal_error_response() -> Response<Body> {
+    (
+        http::StatusCode::INTERNAL_SERVER_ERROR,
+        Json(json!({
+            "detail": "计费采集器服务暂不可用，请稍后重试"
+        })),
+    )
+        .into_response()
 }
 
 pub(in super::super) fn admin_billing_parse_page(query: Option<&str>) -> Result<u32, String> {

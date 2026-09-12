@@ -11,6 +11,7 @@ async-stream.workspace = true
 axum = { version = "0.8" }
 chrono.workspace = true
 futures-util.workspace = true
+libc = "0.2"
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true

@@ -1,9 +1,15 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use aether_contracts::{ExecutionPlan, ExecutionResult, RequestBody};
+use aether_contracts::{
+    ExecutionError, ExecutionErrorKind, ExecutionPlan, ExecutionResult, RequestBody,
+};
+use aether_crypto::{rsa_pkcs1_sha256_sign, RsaPkcs1Sha256Error};
 use aether_provider_transport::antigravity::{
     resolve_local_antigravity_request_auth, AntigravityRequestAuthSupport,
+};
+use aether_provider_transport::vertex::{
+    looks_like_vertex_ai_host, parse_vertex_service_account_auth_config,
 };
 use aether_provider_transport::{
     is_vertex_api_key_transport_context, resolve_transport_execution_timeouts,
@@ -11,13 +17,7 @@ use aether_provider_transport::{
 };
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use base64::Engine as _;
-use rsa::pkcs1::DecodeRsaPrivateKey;
-use rsa::pkcs1v15::SigningKey;
-use rsa::pkcs8::DecodePrivateKey;
-use rsa::signature::{SignatureEncoding, Signer};
-use rsa::RsaPrivateKey;
 use serde_json::{json, Value};
-use sha2::Sha256;
 
 use crate::logic::{
     aggregate_models_for_cache, codex_model_identity, extract_error_message,
@@ -41,7 +41,6 @@ const VERTEX_API_BASE_URL: &str = "https://aiplatform.googleapis.com";
 const VERTEX_MODEL_GARDEN_API_VERSION: &str = "v1beta1";
 const VERTEX_PAGE_SIZE: &str = "100";
 const VERTEX_MAX_PAGES: usize = 20;
-const GOOGLE_OAUTH_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const GOOGLE_CLOUD_PLATFORM_SCOPE: &str = "https://www.googleapis.com/auth/cloud-platform";
 
 #[derive(Debug, Clone, PartialEq)]
@@ -53,6 +52,8 @@ pub struct ModelsFetchOutcome {
     pub legacy_models: Vec<Value>,
     pub errors: Vec<String>,
     pub has_success: bool,
+    /// Only native `models` responses may populate the opaque Codex client catalog.
+    pub native_codex_catalog: bool,
     pub upstream_metadata: Option<Value>,
     pub etag: Option<String>,
     pub upstream_status: Option<u16>,
@@ -142,8 +143,31 @@ pub async fn fetch_models_from_transports_for_client_version(
     transports: &[GatewayProviderTransportSnapshot],
     codex_client_version: Option<&str>,
 ) -> Result<ModelsFetchOutcome, String> {
-    let strategy = select_model_fetch_strategy(transports)?;
-    execute_model_fetch_strategy(runtime, transports, strategy, codex_client_version).await
+    let strategy = select_model_fetch_strategy(transports)
+        .map_err(|error| sanitize_model_fetch_error(&error))?;
+    execute_model_fetch_strategy(
+        runtime,
+        transports,
+        strategy,
+        codex_client_version,
+        codex_client_version.is_none(),
+    )
+    .await
+    .map_err(|error| sanitize_model_fetch_error(&error))
+}
+
+/// Management also supports Codex-compatible proxies returning OpenAI `data` arrays,
+/// independently of the fingerprint sent upstream. Public client catalogs stay strict.
+pub async fn fetch_models_from_transports_for_management(
+    runtime: &(impl ModelFetchTransportRuntime + ?Sized),
+    transports: &[GatewayProviderTransportSnapshot],
+    codex_client_version: Option<&str>,
+) -> Result<ModelsFetchOutcome, String> {
+    let strategy = select_model_fetch_strategy(transports)
+        .map_err(|error| sanitize_model_fetch_error(&error))?;
+    execute_model_fetch_strategy(runtime, transports, strategy, codex_client_version, true)
+        .await
+        .map_err(|error| sanitize_model_fetch_error(&error))
 }
 
 fn select_model_fetch_strategy(
@@ -213,6 +237,7 @@ async fn execute_model_fetch_strategy(
     transports: &[GatewayProviderTransportSnapshot],
     strategy: SelectedModelFetchStrategy,
     codex_client_version: Option<&str>,
+    allow_codex_legacy_response: bool,
 ) -> Result<ModelsFetchOutcome, String> {
     let Some(first_transport) = transports.first() else {
         return Err("No transport snapshots available for models fetch".to_string());
@@ -230,6 +255,7 @@ async fn execute_model_fetch_strategy(
                 transports,
                 strategy.provider_id(),
                 codex_client_version,
+                allow_codex_legacy_response,
             )
             .await
         }
@@ -255,6 +281,7 @@ async fn fetch_standard_models(
     transports: &[GatewayProviderTransportSnapshot],
     provider_type: &str,
     codex_client_version: Option<&str>,
+    allow_codex_legacy_response: bool,
 ) -> Result<ModelsFetchOutcome, String> {
     let mut all_models = Vec::new();
     let mut successful_codex_catalogs = Vec::<(String, Vec<Value>)>::new();
@@ -263,10 +290,19 @@ async fn fetch_standard_models(
     let mut etag = ConsistentValue::default();
     let mut upstream_status = ConsistentValue::default();
     let is_codex = provider_type.trim().eq_ignore_ascii_case("codex");
+    let mut native_codex_catalog = is_codex;
 
     for transport in transports {
-        match fetch_standard_models_for_transport(runtime, transport, codex_client_version).await {
+        match fetch_standard_models_for_transport(
+            runtime,
+            transport,
+            codex_client_version,
+            allow_codex_legacy_response,
+        )
+        .await
+        {
             Ok(outcome) => {
+                native_codex_catalog &= outcome.native_codex_catalog;
                 all_models.extend(outcome.cached_models.iter().cloned());
                 if is_codex && outcome.has_success {
                     successful_codex_catalogs
@@ -280,7 +316,11 @@ async fn fetch_standard_models(
             }
             Err((err, status)) => {
                 upstream_status.observe(status);
-                errors.push(format!("{}: {err}", transport.endpoint.api_format.trim()));
+                let format_label = model_fetch_format_label(&transport.endpoint.api_format);
+                errors.push(format!(
+                    "{format_label}: {}",
+                    sanitize_model_fetch_error(&err)
+                ));
             }
         }
     }
@@ -294,6 +334,7 @@ async fn fetch_standard_models(
     let upstream_metadata =
         crate::logic::model_catalog_upstream_metadata(provider_type, &merged_models);
     let mut outcome = build_success_outcome(merged_models, upstream_metadata, has_success);
+    outcome.native_codex_catalog = native_codex_catalog && has_success;
     if let Some(model_ids) = codex_model_ids {
         outcome.fetched_model_ids = model_ids;
         outcome.legacy_models = project_codex_models_for_legacy_cache(
@@ -312,6 +353,7 @@ async fn fetch_standard_models_for_transport(
     runtime: &(impl ModelFetchTransportRuntime + ?Sized),
     transport: &GatewayProviderTransportSnapshot,
     codex_client_version: Option<&str>,
+    allow_codex_legacy_response: bool,
 ) -> Result<ModelsFetchOutcome, (String, Option<u16>)> {
     let mut all_models = Vec::new();
     let mut seen_ids = BTreeSet::new();
@@ -324,6 +366,7 @@ async fn fetch_standard_models_for_transport(
         .provider_type
         .trim()
         .eq_ignore_ascii_case("codex");
+    let mut native_codex_catalog = is_codex;
 
     for _ in 0..20 {
         let plan = build_standard_models_fetch_execution_plan_for_client_version(
@@ -341,11 +384,16 @@ async fn fetch_standard_models_for_transport(
         upstream_status.observe(Some(result.status_code));
         let body_json =
             execution_result_json_body(&result).map_err(|err| (err, Some(result.status_code)))?;
+        native_codex_catalog &= body_json.get("models").and_then(Value::as_array).is_some();
         let parsed = if is_codex {
             parse_codex_models_response_for_request(
                 &transport.endpoint.api_format,
                 &body_json,
-                codex_client_version,
+                if allow_codex_legacy_response {
+                    None
+                } else {
+                    codex_client_version
+                },
             )
         } else {
             parse_models_response_page(&transport.endpoint.api_format, &body_json)
@@ -385,7 +433,9 @@ async fn fetch_standard_models_for_transport(
         next_after_id = Some(next_cursor);
     }
 
-    Ok(build_success_outcome(all_models, None, has_success)
+    let mut outcome = build_success_outcome(all_models, None, has_success);
+    outcome.native_codex_catalog = native_codex_catalog && has_success;
+    Ok(outcome
         .with_etag(etag.finish())
         .with_upstream_status(upstream_status.finish()))
 }
@@ -425,13 +475,16 @@ async fn fetch_antigravity_models(
         .await
         {
             Ok(plan) => plan,
-            Err(err) => return Err(err),
+            Err(err) => return Err(sanitize_model_fetch_error(&err)),
         };
 
         let result = match runtime.execute_model_fetch_execution_plan(&plan).await {
             Ok(result) => result,
             Err(err) => {
-                errors.push(format!("{base_url}: {err}"));
+                errors.push(format!(
+                    "antigravity models fetch failed: {}",
+                    sanitize_model_fetch_error(&err)
+                ));
                 continue;
             }
         };
@@ -447,10 +500,10 @@ async fn fetch_antigravity_models(
 
         let error = execution_result_error_message(&result);
         if should_fallback_antigravity_status(result.status_code) {
-            errors.push(format!("{base_url}: {error}"));
+            errors.push(format!("antigravity models fetch failed: {error}"));
             continue;
         }
-        return Err(error);
+        return Err(sanitize_model_fetch_error(&error));
     }
 
     Ok(ModelsFetchOutcome {
@@ -459,6 +512,7 @@ async fn fetch_antigravity_models(
         legacy_models: Vec::new(),
         errors,
         has_success: false,
+        native_codex_catalog: false,
         upstream_metadata: None,
         etag: None,
         upstream_status: None,
@@ -474,8 +528,13 @@ async fn resolve_or_hydrate_antigravity_project(
         return Ok((project_id, transport.clone(), metadata));
     }
 
-    let plan = build_antigravity_load_code_assist_plan(runtime, transport).await?;
-    let result = runtime.execute_model_fetch_execution_plan(&plan).await?;
+    let plan = build_antigravity_load_code_assist_plan(runtime, transport)
+        .await
+        .map_err(|error| sanitize_model_fetch_error(&error))?;
+    let result = runtime
+        .execute_model_fetch_execution_plan(&plan)
+        .await
+        .map_err(|error| sanitize_model_fetch_error(&error))?;
     if !(200..300).contains(&result.status_code) {
         return Err(format!(
             "antigravity: loadCodeAssist failed: {}",
@@ -581,8 +640,13 @@ async fn fetch_kiro_models(
     runtime: &(impl ModelFetchTransportRuntime + ?Sized),
     transport: &GatewayProviderTransportSnapshot,
 ) -> Result<ModelsFetchOutcome, String> {
-    let plan = build_kiro_list_available_models_plan(runtime, transport).await?;
-    let result = runtime.execute_model_fetch_execution_plan(&plan).await?;
+    let plan = build_kiro_list_available_models_plan(runtime, transport)
+        .await
+        .map_err(|error| sanitize_model_fetch_error(&error))?;
+    let result = runtime
+        .execute_model_fetch_execution_plan(&plan)
+        .await
+        .map_err(|error| sanitize_model_fetch_error(&error))?;
     if !(200..300).contains(&result.status_code) {
         return Err(execution_result_error_message(&result));
     }
@@ -596,8 +660,13 @@ async fn fetch_windsurf_models(
     runtime: &(impl ModelFetchTransportRuntime + ?Sized),
     transport: &GatewayProviderTransportSnapshot,
 ) -> Result<ModelsFetchOutcome, String> {
-    let plan = build_windsurf_model_configs_execution_plan(runtime, transport).await?;
-    let result = runtime.execute_model_fetch_execution_plan(&plan).await?;
+    let plan = build_windsurf_model_configs_execution_plan(runtime, transport)
+        .await
+        .map_err(|error| sanitize_model_fetch_error(&error))?;
+    let result = runtime
+        .execute_model_fetch_execution_plan(&plan)
+        .await
+        .map_err(|error| sanitize_model_fetch_error(&error))?;
     if !(200..300).contains(&result.status_code) {
         return Err(execution_result_error_message(&result));
     }
@@ -642,6 +711,7 @@ async fn fetch_vertex_api_key_models(
             legacy_models: Vec::new(),
             errors: vec!["vertex_ai(api_key): missing api key".to_string()],
             has_success: false,
+            native_codex_catalog: false,
             upstream_metadata: None,
             etag: None,
             upstream_status: None,
@@ -653,7 +723,11 @@ async fn fetch_vertex_api_key_models(
     let mut soft_errors = Vec::new();
     let mut has_success = false;
 
-    for base_url in iter_vertex_base_urls(transports) {
+    // The API key is a bearer-like cloud credential.  Endpoint records can be
+    // imported or edited by administrators, so never send it to an arbitrary
+    // custom host merely because it is listed alongside a Vertex transport.
+    // Keep only the canonical Vertex host and its official regional variants.
+    for base_url in iter_trusted_vertex_base_urls(transports) {
         let url = build_vertex_google_list_url(&base_url, api_key, None);
         let outcome = match fetch_vertex_models_from_url(
             runtime,
@@ -668,16 +742,20 @@ async fn fetch_vertex_api_key_models(
         {
             Ok(outcome) => outcome,
             Err(err) => {
-                hard_errors.push(format!("{base_url}: {err}"));
+                hard_errors.push(format!(
+                    "vertex google models fetch failed: {}",
+                    sanitize_model_fetch_error(&err)
+                ));
                 continue;
             }
         };
         has_success |= outcome.has_success;
         if let Some(error) = outcome.error {
+            let error = sanitize_model_fetch_error(&error);
             if is_soft_not_found(&error) {
-                soft_errors.push(format!("{base_url}: {error}"));
+                soft_errors.push(format!("vertex google models fetch failed: {error}"));
             } else {
-                hard_errors.push(format!("{base_url}: {error}"));
+                hard_errors.push(format!("vertex google models fetch failed: {error}"));
             }
             continue;
         }
@@ -702,6 +780,7 @@ async fn fetch_vertex_api_key_models(
         legacy_models: Vec::new(),
         errors,
         has_success,
+        native_codex_catalog: false,
         upstream_metadata: None,
         etag: None,
         upstream_status: None,
@@ -720,12 +799,15 @@ async fn fetch_vertex_service_account_models(
             legacy_models: Vec::new(),
             errors: vec!["vertex_ai(service_account): missing auth_config".to_string()],
             has_success: false,
+            native_codex_catalog: false,
             upstream_metadata: None,
             etag: None,
             upstream_status: None,
         });
     };
-    let token = exchange_vertex_service_account_token(runtime, &transports[0], auth_config).await?;
+    let token = exchange_vertex_service_account_token(runtime, &transports[0], auth_config)
+        .await
+        .map_err(|error| sanitize_model_fetch_error(&error))?;
     let gemini_transport =
         select_transport_for_api_format(transports, "gemini:").unwrap_or(&transports[0]);
     let claude_transport =
@@ -736,7 +818,10 @@ async fn fetch_vertex_service_account_models(
     let mut soft_errors = Vec::new();
     let mut has_success = false;
 
-    for base in iter_vertex_base_urls(transports) {
+    // A service-account access token is a cloud credential.  Restrict its
+    // model-garden requests to official Vertex hosts even when an endpoint
+    // override exists under the provider.
+    for base in iter_trusted_vertex_base_urls(transports) {
         for (publisher, transport, api_format) in [
             ("google", gemini_transport, "gemini:generate_content"),
             ("anthropic", claude_transport, "claude:messages"),
@@ -755,13 +840,17 @@ async fn fetch_vertex_service_account_models(
             {
                 Ok(outcome) => outcome,
                 Err(err) => {
-                    hard_errors.push(format!("{url}: {err}"));
+                    hard_errors.push(format!(
+                        "vertex {publisher} models fetch failed: {}",
+                        sanitize_model_fetch_error(&err)
+                    ));
                     continue;
                 }
             };
             has_success |= outcome.has_success;
             if let Some(error) = outcome.error {
-                let labeled = format!("{url}: {error}");
+                let error = sanitize_model_fetch_error(&error);
+                let labeled = format!("vertex {publisher} models fetch failed: {error}");
                 if is_soft_not_found(&error) {
                     soft_errors.push(labeled);
                 } else {
@@ -791,6 +880,7 @@ async fn fetch_vertex_service_account_models(
         legacy_models: Vec::new(),
         errors,
         has_success,
+        native_codex_catalog: false,
         upstream_metadata: None,
         etag: None,
         upstream_status: None,
@@ -829,8 +919,12 @@ async fn fetch_vertex_models_from_url(
             api_format,
             auth_header.clone(),
         )
-        .await?;
-        let result = runtime.execute_model_fetch_execution_plan(&plan).await?;
+        .await
+        .map_err(|error| sanitize_model_fetch_error(&error))?;
+        let result = runtime
+            .execute_model_fetch_execution_plan(&plan)
+            .await
+            .map_err(|error| sanitize_model_fetch_error(&error))?;
         if result.status_code != 200 {
             return Ok(VertexFetchPageOutcome {
                 models: Vec::new(),
@@ -840,7 +934,8 @@ async fn fetch_vertex_models_from_url(
         }
 
         has_success = true;
-        let body_json = execution_result_json_body_allow_empty(&result)?;
+        let body_json = execution_result_json_body_allow_empty(&result)
+            .map_err(|error| sanitize_model_fetch_error(&error))?;
         all_models.extend(parse_vertex_models_payload(
             &body_json,
             auth_config,
@@ -869,15 +964,21 @@ async fn exchange_vertex_service_account_token(
     transport: &GatewayProviderTransportSnapshot,
     auth_config: &Value,
 ) -> Result<String, String> {
-    let token_url = json_string(auth_config.get("token_uri"))
-        .unwrap_or_else(|| GOOGLE_OAUTH_TOKEN_URL.to_string());
-    let client_email = json_string(auth_config.get("client_email"))
-        .ok_or_else(|| "vertex_ai(service_account): missing client_email".to_string())?;
-    let private_key = json_string(auth_config.get("private_key"))
-        .ok_or_else(|| "vertex_ai(service_account): missing private_key".to_string())?;
+    // Reuse the provider transport parser here instead of trusting token_uri
+    // from the raw credential JSON.  The parser pins the token endpoint to
+    // Google's HTTPS OAuth endpoint and rejects credentials, ports, queries,
+    // fragments, and lookalike hosts before a signed assertion is produced.
+    let auth_config_json = serde_json::to_string(auth_config)
+        .map_err(|_| "vertex_ai(service_account): invalid auth_config".to_string())?;
+    let auth_config = parse_vertex_service_account_auth_config(Some(&auth_config_json))
+        .ok_or_else(|| "vertex_ai(service_account): invalid auth_config".to_string())?;
+    let token_url = auth_config.token_uri;
+    let client_email = auth_config.client_email;
+    let private_key = auth_config.private_key;
     let now = now_unix_secs();
     let assertion =
-        build_vertex_service_account_assertion(&client_email, &private_key, &token_url, now)?;
+        build_vertex_service_account_assertion(&client_email, &private_key, &token_url, now)
+            .map_err(|error| sanitize_model_fetch_error(&error))?;
     let body = format!(
         "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion={assertion}"
     );
@@ -911,7 +1012,10 @@ async fn exchange_vertex_service_account_token(
         transport_profile,
         timeouts: resolve_transport_execution_timeouts(transport),
     };
-    let result = runtime.execute_model_fetch_execution_plan(&plan).await?;
+    let result = runtime
+        .execute_model_fetch_execution_plan(&plan)
+        .await
+        .map_err(|error| sanitize_model_fetch_error(&error))?;
     let body_json = execution_result_json_body(&result)?;
     body_json
         .get("access_token")
@@ -940,26 +1044,16 @@ fn build_vertex_service_account_assertion(
         .map_err(|err| format!("vertex_ai(service_account): jwt payload encode failed: {err}"))?,
     );
     let message = format!("{header}.{payload}");
-    let private_key = decode_vertex_service_account_private_key(private_key_pem)?;
-    let signing_key = SigningKey::<Sha256>::new(private_key);
-    let signature = signing_key.sign(message.as_bytes());
-    Ok(format!(
-        "{message}.{}",
-        URL_SAFE_NO_PAD.encode(signature.to_bytes())
-    ))
-}
-
-fn decode_vertex_service_account_private_key(
-    private_key_pem: &str,
-) -> Result<RsaPrivateKey, String> {
-    match RsaPrivateKey::from_pkcs8_pem(private_key_pem) {
-        Ok(private_key) => Ok(private_key),
-        Err(pkcs8_err) => RsaPrivateKey::from_pkcs1_pem(private_key_pem).map_err(|pkcs1_err| {
-            format!(
-                "vertex_ai(service_account): private_key parse failed: pkcs8: {pkcs8_err}; pkcs1: {pkcs1_err}"
-            )
-        }),
-    }
+    let signature =
+        rsa_pkcs1_sha256_sign(private_key_pem.as_bytes(), message.as_bytes()).map_err(|error| {
+            match error {
+                RsaPkcs1Sha256Error::InvalidPrivateKey => {
+                    "vertex_ai(service_account): private_key parse failed".to_string()
+                }
+                _ => "vertex_ai(service_account): signing failed".to_string(),
+            }
+        })?;
+    Ok(format!("{message}.{}", URL_SAFE_NO_PAD.encode(signature)))
 }
 
 fn execution_result_json_body(result: &ExecutionResult) -> Result<Value, String> {
@@ -987,6 +1081,8 @@ fn execution_result_header(result: &ExecutionResult, name: &str) -> Option<Strin
         .map(ToOwned::to_owned)
 }
 
+const MODEL_FETCH_ERROR_DETAIL_MAX_BYTES: usize = 256;
+
 fn execution_result_error_message(result: &ExecutionResult) -> String {
     let detail = result
         .body
@@ -999,12 +1095,293 @@ fn execution_result_error_message(result: &ExecutionResult) -> String {
                 (!message.is_empty()).then_some(message.to_string())
             })
         });
-    match detail {
-        Some(detail) if !(200..300).contains(&result.status_code) => {
-            format!("HTTP {}: {detail}", result.status_code)
+    let status = if !(200..300).contains(&result.status_code) {
+        Some(result.status_code)
+    } else {
+        result
+            .error
+            .as_ref()
+            .and_then(|error| error.upstream_status)
+            .filter(|status| (400..600).contains(status))
+    };
+    let summary = model_fetch_error_summary(detail.as_deref(), result.error.as_ref(), status);
+    match status {
+        Some(status) => format!("HTTP {status}: {summary}"),
+        None if detail.is_some() => summary,
+        None => format!("HTTP {}: {summary}", result.status_code),
+    }
+}
+
+/// Projects transport/upstream diagnostics into a bounded message that can cross the
+/// model-fetch API boundary.  Upstream error bodies and HTTP client errors are untrusted: they
+/// commonly contain authorization headers, credential-bearing URLs, or local file paths.
+fn sanitize_model_fetch_error(error: &str) -> String {
+    let trimmed = error.trim();
+    if trimmed.is_empty() {
+        return "upstream request failed".to_string();
+    }
+    match trimmed {
+        "No transport snapshots available for models fetch"
+        | "No supported endpoint for Rust models fetch"
+        | "Provider transport snapshot unavailable" => return trimmed.to_string(),
+        _ => {}
+    }
+
+    let status = model_fetch_status_from_text(trimmed);
+    if let Some(detail) = sanitize_model_fetch_error_detail(trimmed) {
+        if let Some(status) = status {
+            let lower = trimmed.to_ascii_lowercase();
+            if lower.starts_with("http ")
+                || lower.starts_with("status ")
+                || lower.starts_with("status=")
+                || lower.starts_with("status:")
+                || lower.starts_with("status_code=")
+                || lower.starts_with("status_code:")
+            {
+                return format!("HTTP {status}: {detail}");
+            }
         }
-        Some(detail) => detail,
-        None => format!("HTTP {}: upstream request failed", result.status_code),
+        return detail;
+    }
+
+    let summary = model_fetch_error_summary(Some(trimmed), None, status);
+    status
+        .map(|status| format!("HTTP {status}: {summary}"))
+        .unwrap_or_else(|| summary.to_string())
+}
+
+fn model_fetch_error_summary(
+    detail: Option<&str>,
+    execution_error: Option<&ExecutionError>,
+    status: Option<u16>,
+) -> String {
+    // Authentication, authorization, not-found, timeout, and rate-limit statuses are stable
+    // public classifications.  Never let an upstream body replace them with free-form text.
+    if matches!(status, Some(401 | 403 | 404 | 408 | 429)) {
+        return model_fetch_error_category(detail, execution_error, status).to_string();
+    }
+    if let Some(detail) = detail.and_then(sanitize_model_fetch_error_detail) {
+        return detail;
+    }
+    model_fetch_error_category(detail, execution_error, status).to_string()
+}
+
+fn model_fetch_error_category(
+    detail: Option<&str>,
+    execution_error: Option<&ExecutionError>,
+    status: Option<u16>,
+) -> &'static str {
+    let lower = detail.unwrap_or_default().to_ascii_lowercase();
+
+    match status {
+        Some(401) => return "upstream authentication failed",
+        Some(403) => return "upstream authorization failed",
+        Some(404) => return "upstream endpoint not found",
+        Some(408) => return "upstream request timed out",
+        Some(429) => return "upstream rate limited",
+        _ => {}
+    }
+
+    if let Some(error) = execution_error {
+        match &error.kind {
+            ExecutionErrorKind::ConnectTimeout
+            | ExecutionErrorKind::FirstByteTimeout
+            | ExecutionErrorKind::ReadTimeout => return "upstream request timed out",
+            ExecutionErrorKind::TlsError => return "upstream TLS connection failed",
+            ExecutionErrorKind::ProxyError => return "upstream proxy request failed",
+            ExecutionErrorKind::ProtocolError => return "upstream response invalid",
+            ExecutionErrorKind::Cancelled => return "upstream request cancelled",
+            ExecutionErrorKind::Upstream4xx => return "upstream request rejected",
+            ExecutionErrorKind::Upstream5xx => return "upstream service failed",
+            ExecutionErrorKind::Internal => {}
+        }
+    }
+
+    if lower.contains("timeout") || lower.contains("timed out") {
+        return "upstream request timed out";
+    }
+    if lower.contains("unauthorized")
+        || lower.contains("authentication")
+        || lower.contains("invalid api key")
+        || lower.contains("invalid token")
+    {
+        return "upstream authentication failed";
+    }
+    if lower.contains("forbidden") || lower.contains("authorization") {
+        return "upstream authorization failed";
+    }
+    if lower.contains("rate limit") || lower.contains("too many requests") {
+        return "upstream rate limited";
+    }
+    if lower.contains("response body")
+        || lower.contains("invalid response")
+        || lower.contains("malformed")
+        || lower.contains("missing models")
+        || lower.contains("missing data")
+        || lower.contains("conflicting cards")
+        || lower.contains("json")
+        || lower.contains("parse")
+    {
+        return "upstream response invalid";
+    }
+    if lower.contains("connect")
+        || lower.contains("connection")
+        || lower.contains("network")
+        || lower.contains("dns")
+        || lower.contains("certificate")
+    {
+        return "upstream connection failed";
+    }
+
+    match status {
+        Some(status) if (400..500).contains(&status) => "upstream request rejected",
+        Some(status) if (500..600).contains(&status) => "upstream service failed",
+        _ => "upstream request failed",
+    }
+}
+
+fn sanitize_model_fetch_error_detail(detail: &str) -> Option<String> {
+    let normalized = detail.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.is_empty()
+        || normalized.len() > MODEL_FETCH_ERROR_DETAIL_MAX_BYTES
+        || model_fetch_error_contains_sensitive_data(&normalized)
+    {
+        return None;
+    }
+
+    let lower = normalized.to_ascii_lowercase();
+    if lower.contains("conflicting cards") {
+        // The identity is upstream-controlled and the accepted model-ID alphabet also accepts
+        // common bearer/API-key encodings. A malicious upstream can reflect the credential it
+        // just received as a conflicting model ID, so the API boundary must omit it entirely.
+        return Some("conflicting cards".to_string());
+    }
+
+    const SAFE_ERROR_PHRASES: &[&str] = &[
+        "connection reset",
+        "connect timeout",
+        "connection timeout",
+        "compact endpoint unavailable",
+        "temporarily unavailable",
+        "missing models array",
+        "missing data array",
+        "missing project_id",
+        "missing clientmodelconfigs",
+        "response body is missing json payload",
+        "invalid response",
+        "no models",
+        "endpoint unavailable",
+    ];
+    SAFE_ERROR_PHRASES
+        .iter()
+        .find(|phrase| lower.contains(**phrase))
+        .map(|phrase| (*phrase).to_string())
+}
+
+fn model_fetch_error_contains_sensitive_data(value: &str) -> bool {
+    if value.chars().any(|character| character.is_control()) {
+        return true;
+    }
+
+    let lower = value.to_ascii_lowercase();
+    const SENSITIVE_MARKERS: &[&str] = &[
+        "authorization",
+        "proxy-authorization",
+        "bearer",
+        "basic ",
+        "api_key",
+        "api-key",
+        "apikey",
+        "access_token",
+        "access-token",
+        "refresh_token",
+        "refresh-token",
+        "session_token",
+        "session-token",
+        "sessionkey",
+        "password",
+        "passwd",
+        "private_key",
+        "private-key",
+        "secret",
+        "credential",
+        "cookie",
+        "set-cookie",
+        "token=",
+        "token:",
+        "key=",
+        "key:",
+        "url",
+        "uri",
+        "path=",
+    ];
+    if SENSITIVE_MARKERS
+        .iter()
+        .any(|marker| lower.contains(marker))
+    {
+        return true;
+    }
+
+    if lower
+        .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+        .any(|word| {
+            matches!(
+                word,
+                "token" | "apikey" | "password" | "passwd" | "secret" | "credential"
+            )
+        })
+    {
+        return true;
+    }
+
+    if lower
+        .chars()
+        .any(|character| matches!(character, '/' | '\\' | '?' | '#' | '@' | '%'))
+    {
+        return true;
+    }
+
+    // A host, IP literal, or version-like opaque identifier should not cross the boundary as
+    // part of an error.  Model IDs do not need to be included in transport diagnostics.
+    lower.split_whitespace().any(|token| {
+        let token = token.trim_matches(|character: char| {
+            !character.is_ascii_alphanumeric() && character != '.' && character != '-'
+        });
+        if token.len() > 64 {
+            return true;
+        }
+        let parts = token.split('.').collect::<Vec<_>>();
+        parts.len() >= 2
+            && parts.last().is_some_and(|suffix| suffix.len() >= 2)
+            && parts.iter().all(|part| {
+                !part.is_empty()
+                    && part
+                        .chars()
+                        .all(|character| character.is_ascii_alphanumeric() || character == '-')
+            })
+    })
+}
+
+fn model_fetch_status_from_text(error: &str) -> Option<u16> {
+    error
+        .split(|character: char| !character.is_ascii_digit())
+        .filter(|token| token.len() == 3)
+        .find_map(|token| {
+            let status = token.parse::<u16>().ok()?;
+            (400..600).contains(&status).then_some(status)
+        })
+}
+
+fn model_fetch_format_label(api_format: &str) -> &'static str {
+    let normalized = api_format.trim().to_ascii_lowercase();
+    if normalized.starts_with("openai:") {
+        "openai"
+    } else if normalized.starts_with("claude:") {
+        "claude"
+    } else if normalized.starts_with("gemini:") {
+        "gemini"
+    } else {
+        "models"
     }
 }
 
@@ -1018,7 +1395,7 @@ fn parse_antigravity_models_response(body: &Value) -> Result<(Vec<Value>, Option
     let mut quota_by_model = serde_json::Map::new();
     for (model_id, model_data) in models_object {
         let model_id = model_id.trim();
-        if model_id.is_empty() || ANTIGRAVITY_BLOCKED_MODELS.contains(&model_id) {
+        if !antigravity_model_id_is_routable(model_id) {
             continue;
         }
         let model_object = model_data.as_object().cloned().unwrap_or_default();
@@ -1037,7 +1414,9 @@ fn parse_antigravity_models_response(body: &Value) -> Result<(Vec<Value>, Option
         }));
 
         let quota_payload = build_antigravity_quota_payload(model_object.get("quotaInfo"));
-        quota_by_model.insert(model_id.to_string(), Value::Object(quota_payload));
+        if !quota_payload.is_empty() {
+            quota_by_model.insert(model_id.to_string(), Value::Object(quota_payload));
+        }
     }
 
     let upstream_metadata = (!quota_by_model.is_empty()).then(|| {
@@ -1050,6 +1429,14 @@ fn parse_antigravity_models_response(body: &Value) -> Result<(Vec<Value>, Option
     });
 
     Ok((models, upstream_metadata))
+}
+
+pub fn antigravity_model_id_is_routable(model_id: &str) -> bool {
+    let model_id = model_id.trim();
+    !model_id.is_empty()
+        && !ANTIGRAVITY_BLOCKED_MODELS
+            .iter()
+            .any(|blocked| blocked.eq_ignore_ascii_case(model_id))
 }
 
 fn parse_kiro_available_models_response(
@@ -1141,31 +1528,37 @@ fn infer_kiro_model_owner(model_id: &str) -> &'static str {
 }
 
 fn build_antigravity_quota_payload(quota_info: Option<&Value>) -> serde_json::Map<String, Value> {
-    let quota_info = quota_info.and_then(Value::as_object);
+    let Some(quota_info) = quota_info.and_then(Value::as_object) else {
+        return serde_json::Map::new();
+    };
     let reset_time = quota_info
-        .and_then(|value| value.get("resetTime"))
+        .get("resetTime")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned);
     let remaining_fraction = quota_info
-        .and_then(|value| value.get("remainingFraction"))
-        .and_then(Value::as_f64);
+        .get("remainingFraction")
+        .and_then(|value| {
+            value.as_f64().or_else(|| {
+                value
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .and_then(|value| value.parse::<f64>().ok())
+            })
+        })
+        .filter(|value| value.is_finite())
+        .map(|value| value.clamp(0.0, 1.0));
 
     let mut payload = serde_json::Map::new();
-    match remaining_fraction {
-        Some(remaining_fraction) => {
-            let used_percent = ((1.0 - remaining_fraction) * 100.0).clamp(0.0, 100.0);
-            payload.insert(
-                "remaining_fraction".to_string(),
-                Value::from(remaining_fraction),
-            );
-            payload.insert("used_percent".to_string(), Value::from(used_percent));
-        }
-        None => {
-            payload.insert("remaining_fraction".to_string(), Value::from(0.0));
-            payload.insert("used_percent".to_string(), Value::from(100.0));
-        }
+    if let Some(remaining_fraction) = remaining_fraction {
+        let used_percent = (1.0 - remaining_fraction) * 100.0;
+        payload.insert(
+            "remaining_fraction".to_string(),
+            Value::from(remaining_fraction),
+        );
+        payload.insert("used_percent".to_string(), Value::from(used_percent));
     }
     if let Some(reset_time) = reset_time {
         payload.insert("reset_time".to_string(), Value::String(reset_time));
@@ -1206,6 +1599,13 @@ fn iter_vertex_base_urls(transports: &[GatewayProviderTransportSnapshot]) -> Vec
         urls.push(VERTEX_API_BASE_URL.to_string());
     }
     urls
+}
+
+fn iter_trusted_vertex_base_urls(transports: &[GatewayProviderTransportSnapshot]) -> Vec<String> {
+    iter_vertex_base_urls(transports)
+        .into_iter()
+        .filter(|base_url| looks_like_vertex_ai_host(base_url))
+        .collect()
 }
 
 fn build_vertex_google_list_url(base_url: &str, api_key: &str, page_token: Option<&str>) -> String {
@@ -1410,6 +1810,7 @@ fn build_success_outcome(
         legacy_models,
         errors: Vec::new(),
         has_success,
+        native_codex_catalog: false,
         upstream_metadata,
         etag: None,
         upstream_status: None,
@@ -1472,10 +1873,14 @@ fn append_query_param(mut url: String, key: &str, value: &str) -> String {
         return url;
     }
     let separator = if url.contains('?') { '&' } else { '?' };
+    let encoded_key =
+        url::form_urlencoded::byte_serialize(key.trim().as_bytes()).collect::<String>();
+    let encoded_value =
+        url::form_urlencoded::byte_serialize(value.trim().as_bytes()).collect::<String>();
     url.push(separator);
-    url.push_str(key.trim());
+    url.push_str(&encoded_key);
     url.push('=');
-    url.push_str(value.trim());
+    url.push_str(&encoded_value);
     url
 }
 
@@ -1608,16 +2013,25 @@ mod tests {
     use std::collections::BTreeMap;
     use std::sync::{Arc, Mutex};
 
-    use aether_contracts::{ExecutionResult, ResponseBody};
+    use aether_contracts::{
+        redact_url_for_debug, ExecutionError, ExecutionErrorKind, ExecutionPhase, ExecutionResult,
+        ResponseBody,
+    };
     use aether_provider_transport::snapshot::{
         GatewayProviderTransportEndpoint, GatewayProviderTransportKey,
         GatewayProviderTransportProvider, GatewayProviderTransportSnapshot,
     };
     use async_trait::async_trait;
+    use aws_lc_rs::encoding::{AsDer, Pkcs8V1Der};
+    use aws_lc_rs::rsa::{KeyPair as AwsRsaKeyPair, KeySize};
+    use aws_lc_rs::signature::{KeyPair as _, UnparsedPublicKey, RSA_PKCS1_2048_8192_SHA256};
+    use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
+    use base64::Engine as _;
     use serde_json::{json, Value};
 
     use super::{
-        build_vertex_google_list_url, build_vertex_service_account_list_url,
+        build_vertex_google_list_url, build_vertex_service_account_assertion,
+        build_vertex_service_account_list_url, parse_antigravity_models_response,
         parse_codex_models_response_for_request, select_model_fetch_strategy, ModelFetchStrategy,
         ModelFetchStrategyKind,
     };
@@ -1626,6 +2040,30 @@ mod tests {
 
     type RouteResult = Result<(u16, Value), String>;
     type ModelFetchRoute = (String, RouteResult);
+
+    #[test]
+    fn vertex_assertion_accepts_bare_base64_pkcs8_and_verifies() {
+        let key_pair = AwsRsaKeyPair::generate(KeySize::Rsa2048)
+            .expect("2048-bit test RSA private key should generate");
+        let pkcs8 = AsDer::<Pkcs8V1Der<'static>>::as_der(&key_pair)
+            .expect("test RSA private key should encode as PKCS#8");
+        let assertion = build_vertex_service_account_assertion(
+            "svc@example.iam.gserviceaccount.com",
+            &STANDARD.encode(pkcs8.as_ref()),
+            "https://oauth2.googleapis.com/token",
+            1_700_000_000,
+        )
+        .expect("bare-base64 PKCS#8 key should sign");
+        let parts = assertion.split('.').collect::<Vec<_>>();
+        assert_eq!(parts.len(), 3);
+        let message = format!("{}.{}", parts[0], parts[1]);
+        let signature = URL_SAFE_NO_PAD
+            .decode(parts[2])
+            .expect("JWT signature should decode");
+        UnparsedPublicKey::new(&RSA_PKCS1_2048_8192_SHA256, key_pair.public_key().as_ref())
+            .verify(message.as_bytes(), &signature)
+            .expect("AWS-LC signature should verify");
+    }
 
     struct TestRuntime {
         executed_urls: Arc<Mutex<Vec<String>>>,
@@ -1715,7 +2153,10 @@ mod tests {
                 .iter()
                 .find(|(url_part, _)| plan.url.contains(url_part))
             else {
-                return Err(format!("unexpected models fetch URL {}", plan.url));
+                return Err(format!(
+                    "unexpected models fetch URL {}",
+                    redact_url_for_debug(&plan.url)
+                ));
             };
             let (status_code, response_body) = match route_result {
                 Ok((status_code, response_body)) => (*status_code, response_body.clone()),
@@ -1772,7 +2213,10 @@ mod tests {
                 .iter()
                 .find(|(url_part, _)| plan.url.contains(url_part))
             else {
-                return Err(format!("unexpected models fetch URL {}", plan.url));
+                return Err(format!(
+                    "unexpected models fetch URL {}",
+                    redact_url_for_debug(&plan.url)
+                ));
             };
             let (status_code, response_body) = match route_result {
                 Ok((status_code, response_body)) => (*status_code, response_body.clone()),
@@ -2165,6 +2609,185 @@ mod tests {
     }
 
     #[test]
+    fn execution_result_error_projection_discards_body_credentials_and_urls() {
+        const BEARER_SECRET: &str = "super-secret-bearer";
+        const QUERY_SECRET: &str = "query-secret";
+        let result = ExecutionResult {
+            request_id: "req-model-fetch-security-body".to_string(),
+            candidate_id: None,
+            status_code: 401,
+            headers: BTreeMap::new(),
+            response_observation: None,
+            body: Some(ResponseBody {
+                json_body: Some(json!({
+                    "error": {
+                        "message": format!(
+                            "Authorization: Bearer {BEARER_SECRET}; https://user:pass@example.test/v1/models?key={QUERY_SECRET}"
+                        )
+                    }
+                })),
+                body_bytes_b64: None,
+            }),
+            telemetry: None,
+            error: None,
+        };
+
+        let projected = super::execution_result_error_message(&result);
+        assert_eq!(projected, "HTTP 401: upstream authentication failed");
+        for secret in [
+            BEARER_SECRET,
+            QUERY_SECRET,
+            "Authorization",
+            "Bearer",
+            "user",
+            "pass",
+            "example.test",
+            "/v1/models",
+        ] {
+            assert!(
+                !projected.contains(secret),
+                "error projection leaked {secret}"
+            );
+        }
+    }
+
+    #[test]
+    fn execution_result_error_projection_discards_execution_error_message() {
+        const SECRET: &str = "transport-secret";
+        let result = ExecutionResult {
+            request_id: "req-model-fetch-security-error".to_string(),
+            candidate_id: None,
+            status_code: 502,
+            headers: BTreeMap::new(),
+            response_observation: None,
+            body: None,
+            telemetry: None,
+            error: Some(ExecutionError {
+                kind: ExecutionErrorKind::Upstream5xx,
+                phase: ExecutionPhase::Connect,
+                message: format!(
+                    "connection failed for https://user:pass@example.test/v1/models?token={SECRET}"
+                ),
+                upstream_status: Some(502),
+                retryable: true,
+                failover_recommended: true,
+            }),
+        };
+
+        let projected = super::execution_result_error_message(&result);
+        assert_eq!(projected, "HTTP 502: upstream service failed");
+        for secret in [SECRET, "https://", "user", "pass", "example.test", "token"] {
+            assert!(
+                !projected.contains(secret),
+                "error projection leaked {secret}"
+            );
+        }
+    }
+
+    #[test]
+    fn model_fetch_transport_error_projection_discards_urls_and_credentials() {
+        let projected = super::sanitize_model_fetch_error(
+            "connection failed for https://user:password@example.test/v1/models?key=query-secret; Authorization: Bearer transport-secret",
+        );
+        assert_eq!(projected, "upstream authorization failed");
+        for secret in [
+            "user",
+            "password",
+            "query-secret",
+            "transport-secret",
+            "Bearer",
+            "example.test",
+        ] {
+            assert!(
+                !projected.contains(secret),
+                "error projection leaked {secret}"
+            );
+        }
+    }
+
+    #[test]
+    fn model_fetch_error_projection_drops_reflected_secret_like_model_identity() {
+        const REFLECTED_API_KEY: &str = "sk-proj-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789";
+        let projected = super::sanitize_model_fetch_error(&format!(
+            "Codex models response contains conflicting cards for identity '{REFLECTED_API_KEY}'"
+        ));
+
+        assert_eq!(projected, "conflicting cards");
+        assert!(!projected.contains(REFLECTED_API_KEY));
+    }
+
+    #[tokio::test]
+    async fn vertex_service_account_rejects_untrusted_token_uri_before_signing() {
+        let executed_urls = Arc::new(Mutex::new(Vec::new()));
+        let runtime = TestRuntime {
+            executed_urls: Arc::clone(&executed_urls),
+            response_body: json!({}),
+            status_code: 200,
+            response_headers: BTreeMap::new(),
+        };
+        let transport = sample_custom_aiplatform_transport();
+        let auth_config = json!({
+            "client_email": "svc@example.iam.gserviceaccount.com",
+            "private_key": "not-a-real-key",
+            "project_id": "project-1",
+            "token_uri": "https://attacker.example/token"
+        });
+
+        let error =
+            super::exchange_vertex_service_account_token(&runtime, &transport, &auth_config)
+                .await
+                .expect_err("untrusted token URI must be rejected");
+        assert_eq!(error, "vertex_ai(service_account): invalid auth_config");
+        assert!(executed_urls.lock().expect("executed_urls lock").is_empty());
+    }
+
+    #[test]
+    fn vertex_service_account_model_fetch_ignores_untrusted_endpoint_bases() {
+        let mut untrusted = sample_custom_aiplatform_transport();
+        untrusted.endpoint.base_url = "https://attacker.example".to_string();
+        assert_eq!(
+            super::iter_trusted_vertex_base_urls(&[untrusted]),
+            vec!["https://aiplatform.googleapis.com".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn vertex_api_key_model_fetch_uses_only_trusted_endpoint_bases() {
+        let executed_urls = Arc::new(Mutex::new(Vec::new()));
+        let runtime = TestRuntime {
+            executed_urls: Arc::clone(&executed_urls),
+            response_body: json!({"models": []}),
+            status_code: 200,
+            response_headers: BTreeMap::new(),
+        };
+        let mut untrusted = sample_custom_aiplatform_transport();
+        untrusted.provider.provider_type = "vertex_ai".to_string();
+        untrusted.endpoint.base_url = "https://attacker.example".to_string();
+
+        fetch_models_from_transports(&runtime, &[untrusted])
+            .await
+            .expect("Vertex API-key model fetch should use the canonical fallback");
+
+        let urls = executed_urls.lock().expect("executed_urls lock");
+        assert_eq!(urls.len(), 1);
+        assert!(urls[0].starts_with("https://aiplatform.googleapis.com/"));
+        assert!(urls[0].contains("key=vertex-secret"));
+        assert!(!urls[0].contains("attacker.example"));
+    }
+
+    #[test]
+    fn pagination_query_values_are_percent_encoded() {
+        assert_eq!(
+            super::append_query_param(
+                "https://aiplatform.googleapis.com/v1beta1/models?key=secret".to_string(),
+                "pageToken",
+                "cursor&next=1#fragment",
+            ),
+            "https://aiplatform.googleapis.com/v1beta1/models?key=secret&pageToken=cursor%26next%3D1%23fragment"
+        );
+    }
+
+    #[test]
     fn vertex_model_fetch_uses_model_garden_list_endpoint() {
         assert_eq!(
             build_vertex_google_list_url(
@@ -2412,6 +3035,20 @@ mod tests {
         assert!(outcome.has_success);
         assert_eq!(outcome.fetched_model_ids, vec!["gpt-legacy-compatible"]);
         assert_eq!(outcome.cached_models[0]["id"], "gpt-legacy-compatible");
+        assert!(!outcome.native_codex_catalog);
+        let versioned = crate::fetch_models_from_transports_for_management(
+            &runtime,
+            &[sample_codex_transport()],
+            Some("0.153.3"),
+        )
+        .await
+        .expect("management retains data-array compatibility with a new fingerprint");
+        assert!(versioned.has_success);
+        assert!(
+            !versioned.native_codex_catalog,
+            "generic responses cannot replace opaque catalogs"
+        );
+        assert_eq!(versioned.fetched_model_ids, outcome.fetched_model_ids);
         assert_eq!(
             outcome.legacy_models[0]["api_formats"],
             json!(["openai:responses"])
@@ -2537,8 +3174,8 @@ mod tests {
                 .await
                 .expect_err("conflicting endpoint catalogs must fail");
 
-        assert!(error.contains("conflicting cards"));
-        assert!(error.contains("gpt-cross-identity"));
+        assert_eq!(error, "conflicting cards");
+        assert!(!error.contains("gpt-cross-identity"));
     }
 
     #[tokio::test]
@@ -2697,6 +3334,50 @@ mod tests {
                 .and_then(|value| value
                     .pointer("/antigravity/quota_by_model/chat_12345/remaining_fraction")),
             Some(&json!(0.75))
+        );
+    }
+
+    #[test]
+    fn antigravity_models_without_explicit_quota_are_not_marked_exhausted() {
+        let (models, metadata) = parse_antigravity_models_response(&json!({
+            "models": {
+                "gemini-3.7-flash-tiered": {
+                    "displayName": "Gemini 3.7 Flash"
+                },
+                "gemini-3.7-flash-high": {
+                    "displayName": "Gemini 3.7 Flash High",
+                    "quotaInfo": {
+                        "remainingFraction": "0.75",
+                        "resetTime": "2030-01-01T00:00:00Z"
+                    }
+                },
+                "gemini-3.7-flash-low": {
+                    "displayName": "Gemini 3.7 Flash Low",
+                    "quotaInfo": {
+                        "remainingFraction": 0.0
+                    }
+                }
+            }
+        }))
+        .expect("Antigravity models should parse");
+
+        assert_eq!(models.len(), 3);
+        let metadata = metadata.expect("explicit quota should produce metadata");
+        let antigravity = &metadata["antigravity"];
+        assert!(antigravity["quota_by_model"]
+            .get("gemini-3.7-flash-tiered")
+            .is_none());
+        assert_eq!(
+            antigravity["quota_by_model"]["gemini-3.7-flash-high"]["remaining_fraction"],
+            json!(0.75)
+        );
+        assert_eq!(
+            antigravity["quota_by_model"]["gemini-3.7-flash-high"]["used_percent"],
+            json!(25.0)
+        );
+        assert_eq!(
+            antigravity["quota_by_model"]["gemini-3.7-flash-low"]["used_percent"],
+            json!(100.0)
         );
     }
 

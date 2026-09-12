@@ -27,6 +27,8 @@ struct ProxyUpgradeRolloutPlan {
     #[serde(default)]
     skipped_node_ids: Vec<String>,
     #[serde(default)]
+    skipped_node_generations: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
     tracked_nodes: Vec<ProxyUpgradeRolloutTrackedNode>,
 }
 
@@ -39,6 +41,8 @@ pub(crate) struct ProxyUpgradeRolloutProbeConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct ProxyUpgradeRolloutTrackedNode {
     node_id: String,
+    #[serde(default)]
+    tunnel_generation: String,
     dispatched_at_unix_secs: u64,
     version_confirmed_at_unix_secs: Option<u64>,
     #[serde(default)]
@@ -51,6 +55,7 @@ struct ProxyUpgradeRolloutTrackedNode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ProxyUpgradeRolloutPendingProbe {
     pub(crate) node_id: String,
+    pub(crate) tunnel_generation: String,
     pub(crate) url: String,
     pub(crate) timeout_secs: u64,
 }
@@ -167,6 +172,7 @@ struct RolloutSnapshot {
     completed: Vec<String>,
     pending: Vec<String>,
     pending_conflicts: Vec<String>,
+    pending_conflict_nodes: Vec<StoredProxyNode>,
     skipped: Vec<String>,
     available: Vec<StoredProxyNode>,
     ready_to_finalize: Vec<StoredProxyNode>,
@@ -245,6 +251,11 @@ pub(crate) async fn start_proxy_upgrade_rollout(
             .filter(|_| preserve_existing)
             .map(|plan| plan.skipped_node_ids.clone())
             .unwrap_or_default(),
+        skipped_node_generations: existing
+            .as_ref()
+            .filter(|_| preserve_existing)
+            .map(|plan| plan.skipped_node_generations.clone())
+            .unwrap_or_default(),
         tracked_nodes: existing
             .as_ref()
             .filter(|_| preserve_existing)
@@ -307,6 +318,7 @@ pub(crate) async fn collect_proxy_upgrade_rollout_probes(
             }
             Some(ProxyUpgradeRolloutPendingProbe {
                 node_id: tracked.node_id,
+                tunnel_generation: tracked.tunnel_generation,
                 url: probe.url.clone(),
                 timeout_secs: probe.timeout_secs,
             })
@@ -430,10 +442,11 @@ pub(crate) async fn clear_proxy_upgrade_rollout_conflicts(
     }
 
     let mut cleared_node_ids = Vec::new();
-    for node_id in snapshot.pending_conflicts {
+    for node in snapshot.pending_conflict_nodes {
         let Some(updated) = data
             .update_proxy_node_remote_config(&ProxyNodeRemoteConfigMutation {
-                node_id: node_id.clone(),
+                node_id: node.id,
+                expected_tunnel_generation: Some(node.tunnel_generation),
                 node_name: None,
                 allowed_ports: None,
                 log_level: None,
@@ -484,6 +497,8 @@ pub(crate) async fn skip_proxy_upgrade_rollout_node(
         plan.skipped_node_ids.sort();
         plan.skipped_node_ids.dedup();
     }
+    plan.skipped_node_generations
+        .insert(node_id.to_string(), node.tunnel_generation.clone());
     plan.tracked_nodes
         .retain(|tracked| tracked.node_id != node_id);
     plan.updated_at_unix_secs = now;
@@ -495,6 +510,7 @@ pub(crate) async fn skip_proxy_upgrade_rollout_node(
         let _ = data
             .update_proxy_node_remote_config(&ProxyNodeRemoteConfigMutation {
                 node_id: node_id.to_string(),
+                expected_tunnel_generation: Some(node.tunnel_generation),
                 node_name: None,
                 allowed_ports: None,
                 log_level: None,
@@ -554,6 +570,7 @@ pub(crate) async fn restore_proxy_upgrade_rollout_skipped_nodes(
     }
 
     plan.skipped_node_ids.clear();
+    plan.skipped_node_generations.clear();
     plan.updated_at_unix_secs = now;
     save_proxy_upgrade_rollout_plan(data, &plan).await?;
 
@@ -584,14 +601,15 @@ pub(crate) async fn retry_proxy_upgrade_rollout_node(
     let Some(mut plan) = load_proxy_upgrade_rollout_plan(data).await? else {
         return Ok(None);
     };
-    let Some(_node) = data.find_proxy_node(node_id).await? else {
+    let Some(node) = data.find_proxy_node(node_id).await? else {
         return Ok(None);
     };
     let now = now_unix_secs();
 
-    let _ = data
+    let Some(updated) = data
         .update_proxy_node_remote_config(&ProxyNodeRemoteConfigMutation {
             node_id: node_id.to_string(),
+            expected_tunnel_generation: Some(node.tunnel_generation),
             node_name: None,
             allowed_ports: None,
             log_level: None,
@@ -599,13 +617,18 @@ pub(crate) async fn retry_proxy_upgrade_rollout_node(
             scheduling_state: None,
             upgrade_to: Some(Some(plan.version.clone())),
         })
-        .await?;
+        .await?
+    else {
+        return Ok(None);
+    };
 
     plan.skipped_node_ids.retain(|id| id != node_id);
+    plan.skipped_node_generations.remove(node_id);
     plan.tracked_nodes
         .retain(|tracked| tracked.node_id != node_id);
     plan.tracked_nodes.push(ProxyUpgradeRolloutTrackedNode {
         node_id: node_id.to_string(),
+        tunnel_generation: updated.tunnel_generation,
         dispatched_at_unix_secs: now,
         version_confirmed_at_unix_secs: None,
         traffic_confirmed_at_unix_secs: None,
@@ -659,6 +682,7 @@ async fn advance_proxy_upgrade_rollout(
         let _ = data
             .update_proxy_node_remote_config(&ProxyNodeRemoteConfigMutation {
                 node_id: node.id.clone(),
+                expected_tunnel_generation: Some(node.tunnel_generation.clone()),
                 node_name: None,
                 allowed_ports: None,
                 log_level: None,
@@ -711,11 +735,12 @@ async fn advance_proxy_upgrade_rollout(
         return Ok(summary);
     }
 
-    let mut updated_node_ids = Vec::with_capacity(selected.len());
+    let mut updated_nodes = Vec::with_capacity(selected.len());
     for node in selected {
         let Some(updated) = data
             .update_proxy_node_remote_config(&ProxyNodeRemoteConfigMutation {
                 node_id: node.id.clone(),
+                expected_tunnel_generation: Some(node.tunnel_generation),
                 node_name: None,
                 allowed_ports: None,
                 log_level: None,
@@ -727,28 +752,30 @@ async fn advance_proxy_upgrade_rollout(
         else {
             continue;
         };
-        updated_node_ids.push(updated.id);
+        updated_nodes.push((updated.id, updated.tunnel_generation));
     }
 
     plan.last_dispatched_at_unix_secs = Some(now);
     plan.updated_at_unix_secs = now;
     plan.tracked_nodes
-        .extend(
-            updated_node_ids
-                .iter()
-                .cloned()
-                .map(|node_id| ProxyUpgradeRolloutTrackedNode {
-                    node_id,
-                    dispatched_at_unix_secs: now,
-                    version_confirmed_at_unix_secs: None,
-                    traffic_confirmed_at_unix_secs: None,
-                    confirm_failed_requests: None,
-                    confirm_dns_failures: None,
-                    confirm_stream_errors: None,
-                }),
-        );
+        .extend(updated_nodes.iter().map(|(node_id, tunnel_generation)| {
+            ProxyUpgradeRolloutTrackedNode {
+                node_id: node_id.clone(),
+                tunnel_generation: tunnel_generation.clone(),
+                dispatched_at_unix_secs: now,
+                version_confirmed_at_unix_secs: None,
+                traffic_confirmed_at_unix_secs: None,
+                confirm_failed_requests: None,
+                confirm_dns_failures: None,
+                confirm_stream_errors: None,
+            }
+        }));
     save_proxy_upgrade_rollout_plan(data, &plan).await?;
 
+    let updated_node_ids = updated_nodes
+        .into_iter()
+        .map(|(node_id, _)| node_id)
+        .collect::<Vec<_>>();
     summary.updated = updated_node_ids.len();
     summary.skipped = summary.skipped.saturating_sub(summary.updated);
     summary.node_ids = updated_node_ids.clone();
@@ -785,7 +812,12 @@ fn build_rollout_snapshot(
             snapshot.online_eligible_total = snapshot.online_eligible_total.saturating_add(1);
         }
 
-        if skipped_node_ids.contains(node.id.as_str()) {
+        if skipped_node_ids.contains(node.id.as_str())
+            && plan
+                .skipped_node_generations
+                .get(node.id.as_str())
+                .is_some_and(|generation| generation == &node.tunnel_generation)
+        {
             snapshot.skipped.push(node.id.clone());
             tracked_by_node_id.remove(node.id.as_str());
             continue;
@@ -794,7 +826,13 @@ fn build_rollout_snapshot(
         let reported_version = proxy_reported_version(node.proxy_metadata.as_ref());
         let pending_target = remote_config_upgrade_target(node.remote_config.as_ref());
 
-        if let Some(mut tracked) = tracked_by_node_id.remove(node.id.as_str()) {
+        if let Some(mut tracked) = tracked_by_node_id
+            .remove(node.id.as_str())
+            .filter(|tracked| {
+                !tracked.tunnel_generation.is_empty()
+                    && tracked.tunnel_generation == node.tunnel_generation
+            })
+        {
             snapshot.remaining_total = snapshot.remaining_total.saturating_add(1);
 
             if reported_version.as_deref() == Some(target_version.as_str()) {
@@ -845,6 +883,7 @@ fn build_rollout_snapshot(
                 snapshot.pending.push(node.id.clone());
             } else {
                 snapshot.pending_conflicts.push(node.id.clone());
+                snapshot.pending_conflict_nodes.push(node);
             }
             continue;
         }
@@ -905,9 +944,24 @@ async fn save_proxy_upgrade_rollout_plan(
     Ok(())
 }
 
+/// Records rollout traffic only when the callback is bound to the exact tunnel
+/// generation that was dispatched. Callers handling a live connection should
+/// use [`record_proxy_upgrade_traffic_success_for_generation`].
 pub(crate) async fn record_proxy_upgrade_traffic_success(
     data: &GatewayDataState,
     node_id: &str,
+) -> Result<bool, DataLayerError> {
+    let Some(node) = data.find_proxy_node(node_id).await? else {
+        return Ok(false);
+    };
+    record_proxy_upgrade_traffic_success_for_generation(data, node_id, &node.tunnel_generation)
+        .await
+}
+
+pub(crate) async fn record_proxy_upgrade_traffic_success_for_generation(
+    data: &GatewayDataState,
+    node_id: &str,
+    tunnel_generation: &str,
 ) -> Result<bool, DataLayerError> {
     if !data.has_system_config_store() {
         return Ok(false);
@@ -916,13 +970,17 @@ pub(crate) async fn record_proxy_upgrade_traffic_success(
     let Some(mut plan) = load_proxy_upgrade_rollout_plan(data).await? else {
         return Ok(false);
     };
+    let Some(node) = data.find_proxy_node(node_id).await? else {
+        return Ok(false);
+    };
+    if tunnel_generation.is_empty() || node.tunnel_generation != tunnel_generation {
+        return Ok(false);
+    }
     let now = now_unix_secs();
 
-    let Some(tracked) = plan
-        .tracked_nodes
-        .iter_mut()
-        .find(|tracked| tracked.node_id == node_id)
-    else {
+    let Some(tracked) = plan.tracked_nodes.iter_mut().find(|tracked| {
+        tracked.node_id == node_id && tracked.tunnel_generation == tunnel_generation
+    }) else {
         return Ok(false);
     };
     let Some(version_confirmed_at_unix_secs) = tracked.version_confirmed_at_unix_secs else {

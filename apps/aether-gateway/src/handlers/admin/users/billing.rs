@@ -1,4 +1,5 @@
 use super::{build_admin_users_bad_request_response, build_admin_users_data_unavailable_response};
+use crate::handlers::admin::billing::admin_payment_gateway_response_projection;
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::handlers::admin::shared::{attach_admin_audit_response, unix_secs_to_rfc3339};
 use crate::handlers::shared::unix_ms_to_rfc3339;
@@ -32,6 +33,22 @@ fn admin_user_id_from_billing_path(request_path: &str, suffix: &str) -> Option<S
     } else {
         Some(user_id.to_string())
     }
+}
+
+fn admin_user_entitlement_ids_from_path(request_path: &str) -> Option<(String, String)> {
+    let rest = request_path
+        .trim_end_matches('/')
+        .strip_prefix("/api/admin/users/")?;
+    let mut parts = rest.split('/');
+    let user_id = parts.next()?.trim();
+    if parts.next()? != "billing" || parts.next()? != "entitlements" {
+        return None;
+    }
+    let entitlement_id = parts.next()?.trim();
+    if user_id.is_empty() || entitlement_id.is_empty() || parts.next().is_some() {
+        return None;
+    }
+    Some((user_id.to_string(), entitlement_id.to_string()))
 }
 
 fn admin_user_billing_operator_id(request_context: &AdminRequestContext<'_>) -> Option<String> {
@@ -102,7 +119,7 @@ fn plan_has_package_rights(record: &BillingPlanRecord) -> bool {
         items.iter().any(|item| {
             matches!(
                 item.get("type").and_then(|value| value.as_str()),
-                Some("daily_quota" | "membership_group")
+                Some("daily_quota" | "membership_group" | "usage_policy")
             )
         })
     })
@@ -122,7 +139,8 @@ fn admin_payment_order_payload(record: &crate::AdminWalletPaymentOrderRecord) ->
         "refundable_amount_usd": record.refundable_amount_usd,
         "payment_method": record.payment_method,
         "gateway_order_id": record.gateway_order_id,
-        "gateway_response": record.gateway_response,
+        "gateway_response": admin_payment_gateway_response_projection(record.gateway_response.as_ref()),
+        "has_gateway_response": record.gateway_response.is_some(),
         "status": record.status,
         "order_kind": "plan_purchase",
         "created_at": unix_ms_to_rfc3339(record.created_at_unix_ms),
@@ -202,6 +220,60 @@ pub(in super::super) async fn build_admin_list_user_billing_entitlements_respons
     }
 }
 
+pub(in super::super) async fn build_admin_revoke_user_billing_entitlement_response(
+    state: &AdminAppState<'_>,
+    request_context: &AdminRequestContext<'_>,
+) -> Result<Response<Body>, GatewayError> {
+    let Some((user_id, entitlement_id)) =
+        admin_user_entitlement_ids_from_path(request_context.path())
+    else {
+        return Ok(build_admin_users_bad_request_response("缺少套餐权益 ID"));
+    };
+    if state.find_user_auth_by_id(&user_id).await?.is_none() {
+        return Ok((
+            http::StatusCode::NOT_FOUND,
+            Json(json!({ "detail": "用户不存在" })),
+        )
+            .into_response());
+    }
+    match state
+        .app()
+        .revoke_user_plan_entitlement(&user_id, &entitlement_id)
+        .await?
+    {
+        crate::LocalMutationOutcome::Applied(()) => {}
+        crate::LocalMutationOutcome::NotFound => {
+            return Ok((
+                http::StatusCode::NOT_FOUND,
+                Json(json!({ "detail": "套餐权益不存在或已失效" })),
+            )
+                .into_response());
+        }
+        crate::LocalMutationOutcome::Invalid(detail) => {
+            return Ok(build_admin_users_bad_request_response(detail));
+        }
+        crate::LocalMutationOutcome::Unavailable => {
+            return Ok(build_admin_users_data_unavailable_response());
+        }
+    }
+    let entitlements = match load_admin_user_entitlements_payload(state, &user_id).await? {
+        Some(value) => value,
+        None => return Ok(build_admin_users_data_unavailable_response()),
+    };
+    Ok(attach_admin_audit_response(
+        Json(json!({
+            "items": entitlements["items"].clone(),
+            "entitlements": entitlements["items"].clone(),
+            "total": entitlements["total"].clone(),
+        }))
+        .into_response(),
+        "admin_user_plan_revoked",
+        "revoke_user_billing_entitlement",
+        "user_plan_entitlement",
+        &entitlement_id,
+    ))
+}
+
 pub(in super::super) async fn build_admin_grant_user_billing_plan_response(
     state: &AdminAppState<'_>,
     request_context: &AdminRequestContext<'_>,
@@ -264,7 +336,10 @@ pub(in super::super) async fn build_admin_grant_user_billing_plan_response(
                 user_id: user_id.clone(),
                 amount_usd: 0.0,
                 pay_amount: 0.0,
-                pay_currency: plan.price_currency.clone(),
+                // Manual grants have no provider settlement. Keep the order
+                // currency stable and independent of the plan's display
+                // currency (the amount is always zero).
+                pay_currency: "USD".to_string(),
                 exchange_rate: 1.0,
                 payment_method: "admin_grant".to_string(),
                 payment_provider: Some("admin".to_string()),
@@ -304,7 +379,7 @@ pub(in super::super) async fn build_admin_grant_user_billing_plan_response(
             &order.id,
             Some(&order_no),
             Some(0.0),
-            Some(&plan.price_currency),
+            Some("USD"),
             Some(1.0),
             Some(json!({ "admin_grant": true })),
             operator_id.as_deref(),

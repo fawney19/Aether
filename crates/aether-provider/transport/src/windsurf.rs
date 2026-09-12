@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
+use super::headers::{declared_connection_header_names, remove_declared_connection_headers};
 use crate::rules::{
     apply_local_body_rules_with_request_headers, apply_local_header_rules_with_request_headers,
     body_rules_are_locally_supported, header_rules_are_locally_supported,
@@ -190,13 +191,16 @@ pub fn build_windsurf_cascade_headers(
     auth_value: &str,
     _upstream_is_stream: bool,
 ) -> Option<BTreeMap<String, String>> {
+    let declared_connection_headers = declared_connection_header_names(headers, &BTreeMap::new());
     let mut out = BTreeMap::new();
     for (name, value) in headers {
         let Ok(value) = value.to_str() else {
             continue;
         };
         let key = name.as_str().to_ascii_lowercase();
-        if should_skip_upstream_passthrough_header(&key) {
+        if should_skip_upstream_passthrough_header(&key)
+            || declared_connection_headers.contains(&key)
+        {
             continue;
         }
         let value = value.trim();
@@ -234,6 +238,7 @@ pub fn build_windsurf_cascade_headers(
     if !auth_header.is_empty() {
         out.insert(auth_header, auth_value.trim().to_string());
     }
+    remove_declared_connection_headers(&mut out, &declared_connection_headers);
     out.remove("content-length");
     Some(out)
 }

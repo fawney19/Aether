@@ -172,7 +172,7 @@ mod tests {
                 candidates: vec![DecisionTraceCandidate {
                     candidate: sample_candidate("req-1"),
                     provider_name: Some("OpenAI".to_string()),
-                    provider_website: Some("https://openai.com".to_string()),
+                    provider_website: Some("https://openai.com/".to_string()),
                     provider_type: Some("custom".to_string()),
                     provider_priority: Some(0),
                     provider_keep_priority_on_conversion: Some(false),

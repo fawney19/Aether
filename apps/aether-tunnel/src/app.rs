@@ -19,8 +19,8 @@ use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
 use crate::config::{
-    effective_tunnel_security, validate_tunnel_encryption_key, Config, ServerEntry,
-    TunnelPoolSizing,
+    aether_url_for_log, effective_tunnel_security, validate_tunnel_encryption_key, Config,
+    ServerEntry, TunnelPoolSizing,
 };
 use crate::net;
 use crate::registration::client::AetherClient;
@@ -96,6 +96,11 @@ struct DiagnosticsState {
 /// Run the full application lifecycle after config has been parsed.
 pub async fn run(mut config: Config, servers: Vec<ServerEntry>) -> anyhow::Result<()> {
     config.validate()?;
+    for (index, server) in servers.iter().enumerate() {
+        server
+            .validate()
+            .map_err(|error| anyhow::anyhow!("servers[{index}] invalid: {error}"))?;
+    }
     init_tracing(&config);
 
     info!(
@@ -121,9 +126,14 @@ pub async fn run(mut config: Config, servers: Vec<ServerEntry>) -> anyhow::Resul
         if let Ok(proxy) = crate::egress_proxy::UpstreamProxyConfig::parse(proxy_url) {
             info!(
                 upstream_proxy_url = %proxy.redacted_url(),
+                upstream_proxy_remote_dns = config.upstream_proxy_remote_dns,
                 "provider upstream egress proxy configured"
             );
         }
+    }
+
+    if config.upstream_proxy_remote_dns {
+        warn!("provider hostname DNS resolution and destination IP access controls are delegated to the trusted upstream proxy");
     }
 
     // Resolve public IP (best-effort for region info)
@@ -227,7 +237,7 @@ pub async fn run(mut config: Config, servers: Vec<ServerEntry>) -> anyhow::Resul
             if entry.aether_url.trim_start().starts_with("http://") {
                 warn!(
                     server = %label,
-                    url = %entry.aether_url,
+                    url = %aether_url_for_log(&entry.aether_url),
                     "secure tunnel frame encryption starts after registration; deliver install and registration credentials over HTTPS or another trusted bootstrap channel"
                 );
             }
@@ -245,16 +255,29 @@ pub async fn run(mut config: Config, servers: Vec<ServerEntry>) -> anyhow::Resul
             .register(&config, entry, &node_name, &public_ip, Some(&hw_info))
             .await
         {
-            Ok(node_id) => {
-                info!(server = %label, node_id = %node_id, url = %entry.aether_url, node_name = %node_name, "registered");
+            Ok(registration) => {
+                info!(
+                    server = %label,
+                    node_id = %registration.node_id,
+                    tunnel_generation = %registration.tunnel_generation,
+                    url = %aether_url_for_log(&entry.aether_url),
+                    node_name = %node_name,
+                    "registered"
+                );
                 server_contexts.lock().await.push(build_server_context(
-                    &config, &label, entry, client, &node_name, node_id,
+                    &config,
+                    &label,
+                    entry,
+                    client,
+                    &node_name,
+                    registration.node_id,
+                    registration.tunnel_generation,
                 ));
             }
             Err(e) => {
                 warn!(
                     server = %label,
-                    url = %entry.aether_url,
+                    url = %aether_url_for_log(&entry.aether_url),
                     error = %e,
                     "registration failed, will retry in background"
                 );
@@ -457,6 +480,7 @@ async fn diagnostics_metrics(
     AxumState(diagnostics): AxumState<DiagnosticsState>,
 ) -> impl axum::response::IntoResponse {
     let mut samples = diagnostics.state.metric_samples().await;
+    samples.extend(aether_runtime::logging_metric_samples());
     let servers = diagnostics.server_contexts.lock().await.clone();
     for server in servers {
         samples.extend(server.metric_samples());
@@ -644,15 +668,16 @@ async fn retry_failed_registration(
             )
             .await
         {
-            Ok(node_id) => {
-                info!(server = %label, node_id = %node_id, attempt, "registration retry succeeded");
+            Ok(registration) => {
+                info!(server = %label, node_id = %registration.node_id, tunnel_generation = %registration.tunnel_generation, attempt, "registration retry succeeded");
                 let server = build_server_context(
                     &state.config,
                     &label,
                     &entry,
                     client,
                     &node_name,
-                    node_id,
+                    registration.node_id,
+                    registration.tunnel_generation,
                 );
                 server_contexts.lock().await.push(Arc::clone(&server));
                 spawn_tunnel_pool_manager(
@@ -712,6 +737,7 @@ fn build_server_context(
     client: Arc<AetherClient>,
     node_name: &str,
     node_id: String,
+    tunnel_generation: String,
 ) -> Arc<ServerContext> {
     let mut dynamic = DynamicConfig::from_config(config);
     dynamic.node_name = node_name.to_string();
@@ -727,6 +753,7 @@ fn build_server_context(
         tunnel_encryption_key: entry.tunnel_encryption_key.clone(),
         node_name: node_name.to_string(),
         node_id: Arc::new(RwLock::new(node_id)),
+        tunnel_generation,
         aether_client: client,
         dynamic: Arc::new(ArcSwap::from_pointee(dynamic)),
         active_connections: Arc::new(AtomicU64::new(0)),
@@ -1290,7 +1317,10 @@ mod tests {
         register_hits.fetch_add(1, Ordering::SeqCst);
         (
             AxumStatusCode::OK,
-            axum::Json(json!({ "node_id": "node-recovery" })),
+            axum::Json(json!({
+                "node_id": "node-recovery",
+                "tunnel_generation": "test-generation-recovery"
+            })),
         )
     }
 
@@ -1351,6 +1381,7 @@ mod tests {
             client,
             &state.config.node_name,
             node_id.to_string(),
+            "test-generation-1".to_string(),
         )
     }
 
@@ -1395,6 +1426,7 @@ mod tests {
             upstream_tcp_keepalive_secs: 60,
             upstream_tcp_nodelay: true,
             upstream_proxy_url: None,
+            upstream_proxy_remote_dns: false,
             legacy_redirect_replay_budget_bytes_ignored: None,
             emit_proxy_timing_header: true,
             log_level: "info".to_string(),

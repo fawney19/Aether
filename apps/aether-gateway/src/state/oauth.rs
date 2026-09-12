@@ -4,9 +4,7 @@ use super::{
     ProviderTransportSnapshotFlightResult, PROVIDER_TRANSPORT_SNAPSHOT_CACHE_MAX_ENTRIES,
     PROVIDER_TRANSPORT_SNAPSHOT_CACHE_STALE_TTL, PROVIDER_TRANSPORT_SNAPSHOT_CACHE_TTL,
 };
-use crate::handlers::shared::{
-    decrypt_catalog_secret_with_fallbacks, default_provider_key_status_snapshot,
-};
+use crate::handlers::shared::default_provider_key_status_snapshot;
 use crate::provider_transport::LocalOAuthHttpExecutor;
 
 use super::super::provider_transport;
@@ -24,18 +22,19 @@ use aether_data_contracts::repository::provider_catalog::{
 use aether_runtime_state::RuntimeLockLease;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use dashmap::{mapref::entry::Entry as DashMapEntry, DashMap};
-use flate2::read::{DeflateDecoder, GzDecoder};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use std::io::Read;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use aether_crypto::encrypt_python_fernet_plaintext;
+use aether_crypto::{
+    decrypt_python_fernet_ciphertext, encrypt_python_fernet_plaintext, DEVELOPMENT_ENCRYPTION_KEY,
+};
 
 const LOCAL_OAUTH_HTTP_TIMEOUT_MS: u64 = 30_000;
+const LOCAL_OAUTH_RESPONSE_BODY_LIMIT_BYTES: usize = 4 * 1024 * 1024;
 const REMOTE_OAUTH_REFRESH_WAIT_TIMEOUT: Duration = Duration::from_secs(35);
 const REMOTE_OAUTH_REFRESH_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const OAUTH_ACCOUNT_BLOCK_PREFIX: &str = "[ACCOUNT_BLOCK] ";
@@ -44,10 +43,20 @@ const OAUTH_REFRESH_FAILED_PREFIX: &str = "[REFRESH_FAILED] ";
 const OAUTH_REQUEST_FAILED_PREFIX: &str = "[REQUEST_FAILED] ";
 const CODEX_OAUTH_INVALIDATION_CAS_MAX_ATTEMPTS: usize = 16;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub(crate) struct ProviderTransportCredentialFence {
     pub(crate) encrypted_auth_config: String,
     pub(crate) credential: ProviderCatalogKeyOAuthCredentialFence,
+}
+
+impl std::fmt::Debug for ProviderTransportCredentialFence {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProviderTransportCredentialFence")
+            .field("encrypted_auth_config", &"[REDACTED]")
+            .field("credential", &self.credential)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -260,11 +269,11 @@ fn local_oauth_request_refresh_token_fingerprint(
 }
 
 fn local_oauth_log_excerpt(body: &str) -> String {
-    let body = body.trim();
-    if body.is_empty() {
-        return "-".to_string();
+    if body.trim().is_empty() {
+        "-".to_string()
+    } else {
+        "[redacted]".to_string()
     }
-    body.chars().take(300).collect()
 }
 
 fn local_oauth_proxy_is_tunnel(proxy: Option<&ProxySnapshot>) -> bool {
@@ -329,7 +338,6 @@ fn normalize_local_oauth_refresh_error_message(
 ) -> String {
     let mut message = None::<String>;
     let mut error_code = None::<String>;
-    let mut error_type = None::<String>;
 
     if let Some(body_excerpt) = body_excerpt {
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(body_excerpt) {
@@ -346,12 +354,6 @@ fn normalize_local_oauth_refresh_error_message(
                         .map(ToOwned::to_owned);
                     error_code = error_object
                         .get("code")
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::trim)
-                        .filter(|value| !value.is_empty())
-                        .map(|value| value.to_ascii_lowercase());
-                    error_type = error_object
-                        .get("type")
                         .and_then(serde_json::Value::as_str)
                         .map(str::trim)
                         .filter(|value| !value.is_empty())
@@ -374,14 +376,6 @@ fn normalize_local_oauth_refresh_error_message(
                         .filter(|value| !value.is_empty())
                         .map(|value| value.to_ascii_lowercase());
                 }
-                if error_type.is_none() {
-                    error_type = object
-                        .get("type")
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::trim)
-                        .filter(|value| !value.is_empty())
-                        .map(|value| value.to_ascii_lowercase());
-                }
             }
         }
     }
@@ -396,7 +390,6 @@ fn normalize_local_oauth_refresh_error_message(
         .unwrap_or_default();
     let lowered = message.to_ascii_lowercase();
     let error_code = error_code.unwrap_or_default();
-    let error_type = error_type.unwrap_or_default();
 
     if error_code == "refresh_token_reused"
         || lowered.contains("already been used to generate a new access token")
@@ -414,15 +407,9 @@ fn normalize_local_oauth_refresh_error_message(
     {
         return "refresh_token 无效、已过期或已撤销，请重新登录授权".to_string();
     }
-    if error_type == "invalid_request_error" && !message.is_empty() {
-        return message;
-    }
-    if !message.is_empty() {
-        return message;
-    }
     status_code
         .map(|status_code| format!("HTTP {status_code}"))
-        .unwrap_or_else(|| "未知错误".to_string())
+        .unwrap_or_else(|| "Token 刷新失败".to_string())
 }
 
 fn merge_local_oauth_refresh_failure_reason(
@@ -913,10 +900,14 @@ impl AppState {
         key_id: &str,
     ) -> Result<Option<crate::provider_transport::GatewayProviderTransportSnapshot>, GatewayError>
     {
-        self.data
-            .read_provider_transport_snapshot(provider_id, endpoint_id, key_id)
-            .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))
+        crate::provider_transport::read_provider_transport_snapshot(
+            self,
+            provider_id,
+            endpoint_id,
+            key_id,
+        )
+        .await
+        .map_err(|err| GatewayError::Internal(err.to_string()))
     }
 
     async fn apply_global_format_conversion_override(
@@ -959,13 +950,38 @@ impl AppState {
             .map_err(|err| GatewayError::Internal(err.to_string()))
     }
 
-    pub(crate) async fn upsert_ldap_module_config(
+    pub(crate) async fn compare_and_swap_ldap_module_config(
         &self,
-        config: &aether_data::repository::auth_modules::StoredLdapModuleConfig,
-    ) -> Result<Option<aether_data::repository::auth_modules::StoredLdapModuleConfig>, GatewayError>
-    {
+        expected: Option<&aether_data::repository::auth_modules::StoredLdapModuleConfig>,
+        replacement: &aether_data::repository::auth_modules::StoredLdapModuleConfig,
+        bind_password_update: &aether_data::repository::auth_modules::LdapBindPasswordUpdate,
+    ) -> Result<
+        Option<aether_data::repository::auth_modules::CompareAndSwapLdapConfigResult>,
+        GatewayError,
+    > {
         self.data
-            .upsert_ldap_module_config(config)
+            .compare_and_swap_ldap_module_config(expected, replacement, bind_password_update)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
+    pub(crate) async fn delete_ldap_module_config_if_matches(
+        &self,
+        expected: &aether_data::repository::auth_modules::StoredLdapModuleConfig,
+    ) -> Result<bool, GatewayError> {
+        self.data
+            .delete_ldap_module_config_if_matches(expected)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
+    pub(crate) async fn compare_and_swap_ldap_bind_password(
+        &self,
+        expected: &str,
+        replacement: &str,
+    ) -> Result<bool, GatewayError> {
+        self.data
+            .compare_and_swap_ldap_bind_password(expected, replacement)
             .await
             .map_err(|err| GatewayError::Internal(err.to_string()))
     }
@@ -991,6 +1007,16 @@ impl AppState {
             .map_err(|err| GatewayError::Internal(err.to_string()))
     }
 
+    pub(crate) async fn has_oauth_links_for_provider(
+        &self,
+        provider_type: &str,
+    ) -> Result<bool, GatewayError> {
+        self.data
+            .has_oauth_links_for_provider(provider_type)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
     pub(crate) async fn get_oauth_provider_config(
         &self,
         provider_type: &str,
@@ -1000,6 +1026,18 @@ impl AppState {
     > {
         self.data
             .get_oauth_provider_config(provider_type)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
+    pub(crate) async fn compare_and_swap_oauth_provider_client_secret(
+        &self,
+        provider_type: &str,
+        expected: &str,
+        replacement: &str,
+    ) -> Result<bool, GatewayError> {
+        self.data
+            .compare_and_swap_oauth_provider_client_secret(provider_type, expected, replacement)
             .await
             .map_err(|err| GatewayError::Internal(err.to_string()))
     }
@@ -1022,18 +1060,95 @@ impl AppState {
         Option<aether_data::repository::oauth_providers::StoredOAuthProviderConfig>,
         GatewayError,
     > {
+        let _mutation_guard = crate::oauth::lock_identity_oauth_mutation().await;
+        let ldap_exclusive = self.get_ldap_module_config().await?.is_some_and(|config| {
+            config.is_enabled
+                && config.is_exclusive
+                && config
+                    .bind_password_encrypted
+                    .as_deref()
+                    .map(str::trim)
+                    .is_some_and(|value| !value.is_empty())
+        });
+        let locked_users_snapshot = if record.is_enabled {
+            0
+        } else {
+            self.count_locked_users_if_oauth_provider_disabled(
+                &record.provider_type,
+                ldap_exclusive,
+            )
+            .await?
+        };
+        match self
+            .data
+            .upsert_oauth_provider_config(record, ldap_exclusive, false, locked_users_snapshot)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))?
+        {
+            Some(
+                aether_data::repository::oauth_providers::UpsertOAuthProviderConfigOutcome::Upserted(
+                    provider,
+                ),
+            ) => Ok(Some(provider)),
+            Some(
+                aether_data::repository::oauth_providers::UpsertOAuthProviderConfigOutcome::DisableRequiresConfirmation {
+                    affected_count,
+                },
+            ) => Err(GatewayError::Client {
+                status: axum::http::StatusCode::CONFLICT,
+                message: format!(
+                    "禁用 OAuth Provider '{}' 会导致 {affected_count} 个用户无法登录",
+                    record.provider_type
+                ),
+            }),
+            None => Ok(None),
+        }
+    }
+
+    pub(crate) async fn upsert_oauth_provider_config_with_force_disable(
+        &self,
+        record: &aether_data::repository::oauth_providers::UpsertOAuthProviderConfigRecord,
+        force_disable: bool,
+    ) -> Result<
+        Option<aether_data::repository::oauth_providers::UpsertOAuthProviderConfigOutcome>,
+        GatewayError,
+    > {
+        let _mutation_guard = crate::oauth::lock_identity_oauth_mutation().await;
+        let ldap_exclusive = self.get_ldap_module_config().await?.is_some_and(|config| {
+            config.is_enabled
+                && config.is_exclusive
+                && config
+                    .bind_password_encrypted
+                    .as_deref()
+                    .map(str::trim)
+                    .is_some_and(|value| !value.is_empty())
+        });
+        let locked_users_snapshot = if record.is_enabled || force_disable {
+            0
+        } else {
+            self.count_locked_users_if_oauth_provider_disabled(
+                &record.provider_type,
+                ldap_exclusive,
+            )
+            .await?
+        };
         self.data
-            .upsert_oauth_provider_config(record)
+            .upsert_oauth_provider_config(
+                record,
+                ldap_exclusive,
+                force_disable,
+                locked_users_snapshot,
+            )
             .await
             .map_err(|err| GatewayError::Internal(err.to_string()))
     }
 
-    pub(crate) async fn delete_oauth_provider_config(
+    pub(crate) async fn delete_oauth_provider_config_if_unlinked(
         &self,
         provider_type: &str,
     ) -> Result<bool, GatewayError> {
         self.data
-            .delete_oauth_provider_config(provider_type)
+            .delete_oauth_provider_config_if_unlinked(provider_type)
             .await
             .map_err(|err| GatewayError::Internal(err.to_string()))
     }
@@ -1305,35 +1420,11 @@ impl AppState {
             .map(|snapshot| (*snapshot).clone()))
     }
 
-    pub(crate) async fn update_provider_catalog_key_oauth_credentials(
-        &self,
-        key_id: &str,
-        encrypted_api_key: &str,
-        encrypted_auth_config: Option<&str>,
-        expires_at_unix_secs: Option<u64>,
-    ) -> Result<bool, GatewayError> {
-        let updated = self
-            .data
-            .update_provider_catalog_key_oauth_credentials(
-                key_id,
-                encrypted_api_key,
-                encrypted_auth_config,
-                expires_at_unix_secs,
-            )
-            .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))?;
-        if updated {
-            self.clear_provider_transport_snapshot_cache();
-        }
-        Ok(updated)
-    }
-
     pub(crate) async fn update_provider_catalog_key_oauth_runtime_state(
         &self,
         key_id: &str,
         oauth_invalid_at_unix_secs: Option<u64>,
         oauth_invalid_reason: Option<&str>,
-        encrypted_auth_config_update: Option<&str>,
         updated_at_unix_secs: Option<u64>,
     ) -> Result<bool, GatewayError> {
         let updated = self
@@ -1342,7 +1433,6 @@ impl AppState {
                 key_id,
                 oauth_invalid_at_unix_secs,
                 oauth_invalid_reason,
-                encrypted_auth_config_update,
                 updated_at_unix_secs,
             )
             .await
@@ -1357,9 +1447,29 @@ impl AppState {
         &self,
         update: &ProviderCatalogKeyOAuthRuntimeStateCasUpdate,
     ) -> Result<bool, GatewayError> {
+        let mut protected = update.clone();
+        let expected_credential = update.expected_credential.clone().ok_or_else(|| {
+            GatewayError::Internal(
+                "provider catalog OAuth credential update requires a complete credential fence"
+                    .to_string(),
+            )
+        })?;
+        self.validate_protected_provider_catalog_key_auth_config(
+            &expected_credential.provider_id,
+            &update.key_id,
+            &update.encrypted_auth_config,
+        )?;
+        if let Some(encrypted_api_key) = update.encrypted_api_key_update.as_deref() {
+            self.validate_protected_provider_catalog_key_api_key(
+                &expected_credential.provider_id,
+                &update.key_id,
+                encrypted_api_key,
+            )?;
+        }
+        protected.expected_credential = Some(expected_credential);
         let updated = self
             .data
-            .compare_and_update_provider_catalog_key_oauth_runtime_state(update)
+            .compare_and_update_provider_catalog_key_oauth_runtime_state(&protected)
             .await
             .map_err(|err| GatewayError::Internal(err.to_string()))?;
         // A conflict means another instance/admin changed the credential.
@@ -1428,7 +1538,7 @@ impl AppState {
                     body_excerpt,
                     ..
                 }) if matches!(status_code, 400 | 401 | 403) => {
-                    if let Err(err) = self
+                    if self
                         .persist_local_oauth_refresh_failure_state(
                             &current_transport,
                             status_code,
@@ -1436,17 +1546,21 @@ impl AppState {
                             false,
                         )
                         .await
+                        .is_err()
                     {
                         tracing::warn!(
                             key_id = %current_transport.key.id,
                             provider_type = %current_transport.provider.provider_type,
-                            error = ?err,
                             "gateway local oauth refresh failure persistence failed"
                         );
                     }
                     return Ok(None);
                 }
-                Err(err) => return Err(GatewayError::Internal(err.to_string())),
+                Err(_) => {
+                    return Err(GatewayError::Internal(
+                        "local oauth refresh failed".to_string(),
+                    ));
+                }
             };
 
             if resolution
@@ -1483,18 +1597,18 @@ impl AppState {
                     .await;
                     return Ok(None);
                 }
-                if let Err(err) = self
+                if self
                     .persist_local_oauth_refresh_entry(
                         &current_transport,
                         &refreshed_entry,
                         expected_credential_fence.as_ref(),
                     )
                     .await
+                    .is_err()
                 {
                     tracing::warn!(
                         key_id = %current_transport.key.id,
                         provider_type = %current_transport.provider.provider_type,
-                        error = ?err,
                         "gateway local oauth refresh persistence failed"
                     );
                     let _ = self
@@ -1680,18 +1794,18 @@ impl AppState {
                     .await;
                     return Ok(None);
                 }
-                if let Err(err) = self
+                if self
                     .persist_local_oauth_refresh_entry(
                         &current_transport,
                         &refreshed_entry,
                         expected_credential_fence.as_ref(),
                     )
                     .await
+                    .is_err()
                 {
                     tracing::warn!(
                         key_id = %current_transport.key.id,
                         provider_type = %current_transport.provider.provider_type,
-                        error = ?err,
                         "gateway manual oauth refresh persistence failed"
                     );
                     let _ = self
@@ -1706,7 +1820,7 @@ impl AppState {
                     return Err(
                         provider_transport::LocalOAuthRefreshError::InvalidResponse {
                             provider_type: "gateway",
-                            message: format!("local oauth refresh persistence failed: {err:?}"),
+                            message: "local oauth refresh persistence failed".to_string(),
                         },
                     );
                 }
@@ -1743,10 +1857,9 @@ impl AppState {
         let Some(lease) = lease else {
             return;
         };
-        if let Err(err) = self.runtime_state.lock_release(&lease).await {
+        if self.runtime_state.lock_release(&lease).await.is_err() {
             tracing::warn!(
                 key_id = %lease.key,
-                error = ?err,
                 "gateway local oauth refresh distributed lease release failed"
             );
         }
@@ -1812,18 +1925,13 @@ impl AppState {
             return Ok(None);
         }
 
-        let stored_api_key = match stored.encrypted_api_key.as_deref() {
-            Some(ciphertext) => Some(
-                decrypt_catalog_secret_with_fallbacks(self.data.encryption_key(), ciphertext)
-                    .ok_or_else(|| {
-                        GatewayError::Internal(
-                            "provider api_key could not be verified for runtime fencing"
-                                .to_string(),
-                        )
-                    })?,
-            ),
-            None => None,
-        };
+        let stored_api_key = self
+            .decrypt_provider_catalog_key_api_key(&stored)
+            .map_err(|_| {
+                GatewayError::Internal(
+                    "provider api_key could not be verified for runtime fencing".to_string(),
+                )
+            })?;
         let transport_api_key = (!transport.key.decrypted_api_key.is_empty())
             .then_some(transport.key.decrypted_api_key.as_str());
         if stored_api_key.as_deref() != transport_api_key {
@@ -1833,14 +1941,18 @@ impl AppState {
         let Some(ciphertext) = stored.encrypted_auth_config.as_deref() else {
             return Ok(None);
         };
-        let plaintext =
-            decrypt_catalog_secret_with_fallbacks(self.data.encryption_key(), ciphertext)
-                .ok_or_else(|| {
-                    GatewayError::Internal(
-                        "provider auth_config could not be verified for runtime fencing"
-                            .to_string(),
-                    )
-                })?;
+        let plaintext = self
+            .decrypt_provider_catalog_key_auth_config(&stored)
+            .map_err(|_| {
+                GatewayError::Internal(
+                    "provider auth_config could not be verified for runtime fencing".to_string(),
+                )
+            })?
+            .ok_or_else(|| {
+                GatewayError::Internal(
+                    "provider auth_config could not be verified for runtime fencing".to_string(),
+                )
+            })?;
         let config = serde_json::from_str::<Value>(&plaintext)
             .map_err(|err| GatewayError::Internal(err.to_string()))?;
         let transport_config = transport
@@ -1925,7 +2037,6 @@ impl AppState {
                 key_id,
                 latest_key.oauth_invalid_at_unix_secs,
                 latest_key.oauth_invalid_reason.as_deref(),
-                None,
                 latest_key.updated_at_unix_secs,
             )
             .await?;
@@ -2365,9 +2476,9 @@ impl AppState {
             return Ok(());
         }
 
-        let Some(encryption_key) = self.data.encryption_key() else {
+        if self.data.encryption_key().is_none() {
             return Ok(());
-        };
+        }
 
         if provider_transport::is_codex_agent_identity_cached_entry(entry) {
             let metadata = entry.metadata.as_ref().ok_or_else(|| {
@@ -2379,9 +2490,11 @@ impl AppState {
                 .map_err(GatewayError::Internal)?;
             let auth_config = serde_json::to_string(metadata)
                 .map_err(|err| GatewayError::Internal(err.to_string()))?;
-            let encrypted_auth_config =
-                encrypt_python_fernet_plaintext(encryption_key, &auth_config)
-                    .map_err(|err| GatewayError::Internal(err.to_string()))?;
+            let encrypted_auth_config = self.seal_provider_catalog_key_auth_config(
+                &transport.provider.id,
+                key_id,
+                &auth_config,
+            )?;
 
             let source_fingerprint = entry.source_fingerprint.as_deref().ok_or_else(|| {
                 GatewayError::Internal(
@@ -2435,16 +2548,14 @@ impl AppState {
                         .to_string(),
                 ));
             }
-            let latest_auth_config = decrypt_catalog_secret_with_fallbacks(
-                Some(encryption_key),
-                expected_encrypted_auth_config.as_str(),
-            )
-            .and_then(|value| serde_json::from_str::<Value>(&value).ok())
-            .ok_or_else(|| {
-                GatewayError::Internal(
-                    "Agent Identity current auth_config could not be verified".to_string(),
-                )
-            })?;
+            let latest_auth_config = self
+                .decrypt_provider_catalog_key_auth_config(&latest_key)?
+                .and_then(|value| serde_json::from_str::<Value>(&value).ok())
+                .ok_or_else(|| {
+                    GatewayError::Internal(
+                        "Agent Identity current auth_config could not be verified".to_string(),
+                    )
+                })?;
             let latest_fingerprint =
                 provider_transport::codex_agent_identity_credential_fingerprint(
                     &latest_auth_config,
@@ -2525,26 +2636,32 @@ impl AppState {
                 )
             })?;
 
-        let encrypted_api_key = encrypt_python_fernet_plaintext(encryption_key, access_token)
-            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        let encrypted_api_key =
+            self.seal_provider_catalog_key_api_key(&transport.provider.id, key_id, access_token)?;
         let encrypted_auth_config = entry
             .metadata
             .as_ref()
             .map(|value| serde_json::to_string(value))
             .transpose()
             .map_err(|err| GatewayError::Internal(err.to_string()))?
-            .map(|value| encrypt_python_fernet_plaintext(encryption_key, value.as_str()))
-            .transpose()
-            .map_err(|err| GatewayError::Internal(err.to_string()))?;
-        let requires_fenced_persistence =
-            provider_transport::supports_local_oauth_request_auth_resolution(transport);
-        if requires_fenced_persistence
-            && (expected_credential_fence.is_none() || encrypted_auth_config.is_none())
-        {
-            return Err(GatewayError::Internal(
+            .map(|value| {
+                self.seal_provider_catalog_key_auth_config(
+                    &transport.provider.id,
+                    key_id,
+                    value.as_str(),
+                )
+            })
+            .transpose()?;
+        let expected_credential_fence = expected_credential_fence.ok_or_else(|| {
+            GatewayError::Internal(
                 "OAuth refresh persistence is missing its credential fence".to_string(),
-            ));
-        }
+            )
+        })?;
+        let encrypted_auth_config = encrypted_auth_config.ok_or_else(|| {
+            GatewayError::Internal(
+                "OAuth refresh persistence is missing its auth_config".to_string(),
+            )
+        })?;
 
         let Some(mut latest_key) = self
             .data
@@ -2557,15 +2674,14 @@ impl AppState {
             return Ok(());
         };
 
-        let observed_credential_matches = expected_credential_fence.is_none_or(|expected| {
-            latest_key.encrypted_auth_config.as_deref()
-                == Some(expected.encrypted_auth_config.as_str())
-                && latest_key.encrypted_api_key == expected.credential.encrypted_api_key
-                && latest_key.auth_type == expected.credential.auth_type
-                && latest_key.provider_id == expected.credential.provider_id
-        });
+        let observed_credential_matches = latest_key.encrypted_auth_config.as_deref()
+            == Some(expected_credential_fence.encrypted_auth_config.as_str())
+            && latest_key.encrypted_api_key
+                == expected_credential_fence.credential.encrypted_api_key
+            && latest_key.auth_type == expected_credential_fence.credential.auth_type
+            && latest_key.provider_id == expected_credential_fence.credential.provider_id;
         latest_key.encrypted_api_key = Some(encrypted_api_key.clone());
-        latest_key.encrypted_auth_config = encrypted_auth_config.clone();
+        latest_key.encrypted_auth_config = Some(encrypted_auth_config.clone());
         latest_key.expires_at_unix_secs = entry.expires_at_unix_secs;
         let (oauth_invalid_at_unix_secs, oauth_invalid_reason) =
             local_oauth_refresh_success_invalid_state(&latest_key);
@@ -2581,70 +2697,33 @@ impl AppState {
         let current_status_snapshot = latest_key.status_snapshot.take();
         latest_key.status_snapshot =
             sync_provider_key_oauth_status_snapshot(current_status_snapshot, &latest_key);
-        let used_fenced_persistence =
-            expected_credential_fence.is_some() && encrypted_auth_config.is_some();
-        let updated = if let (Some(expected_credential_fence), Some(encrypted_auth_config)) =
-            (expected_credential_fence, encrypted_auth_config.as_deref())
-        {
-            if !observed_credential_matches {
-                false
-            } else {
-                self.compare_and_update_provider_catalog_key_oauth_runtime_state(
-                    &ProviderCatalogKeyOAuthRuntimeStateCasUpdate {
-                        key_id: key_id.to_string(),
-                        expected_encrypted_auth_config: Some(
-                            expected_credential_fence.encrypted_auth_config.clone(),
-                        ),
-                        expected_credential: Some(expected_credential_fence.credential.clone()),
-                        expected_upstream_metadata_namespace: None,
-                        encrypted_auth_config: encrypted_auth_config.to_string(),
-                        encrypted_api_key_update: Some(encrypted_api_key.clone()),
-                        expires_at_unix_secs_update: Some(entry.expires_at_unix_secs),
-                        oauth_invalid_at_unix_secs: latest_key.oauth_invalid_at_unix_secs,
-                        oauth_invalid_reason: latest_key.oauth_invalid_reason.clone(),
-                        upstream_metadata_patch: None,
-                        upstream_metadata_namespace_to_remove: None,
-                        status_snapshot_patch: provider_key_oauth_status_snapshot_update(
-                            &latest_key,
-                        )
-                        .status_snapshot_patch,
-                        reset_error_count: false,
-                        updated_at_unix_secs: latest_key.updated_at_unix_secs,
-                    },
-                )
-                .await?
-            }
+        let updated = if !observed_credential_matches {
+            false
         } else {
-            let mut updated = self
-                .update_provider_catalog_key_oauth_credentials(
-                    key_id,
-                    &encrypted_api_key,
-                    encrypted_auth_config.as_deref(),
-                    entry.expires_at_unix_secs,
-                )
-                .await?;
-            if updated {
-                updated = self
-                    .update_provider_catalog_key_oauth_runtime_state(
-                        key_id,
-                        latest_key.oauth_invalid_at_unix_secs,
-                        latest_key.oauth_invalid_reason.as_deref(),
-                        None,
-                        latest_key.updated_at_unix_secs,
-                    )
-                    .await?;
-            }
-            if updated {
-                updated = self
-                    .update_provider_catalog_key_status_snapshot(
-                        &provider_key_oauth_status_snapshot_update(&latest_key),
-                    )
-                    .await?;
-                self.clear_provider_transport_snapshot_cache();
-            }
-            updated
+            self.compare_and_update_provider_catalog_key_oauth_runtime_state(
+                &ProviderCatalogKeyOAuthRuntimeStateCasUpdate {
+                    key_id: key_id.to_string(),
+                    expected_encrypted_auth_config: Some(
+                        expected_credential_fence.encrypted_auth_config.clone(),
+                    ),
+                    expected_credential: Some(expected_credential_fence.credential.clone()),
+                    expected_upstream_metadata_namespace: None,
+                    encrypted_auth_config,
+                    encrypted_api_key_update: Some(encrypted_api_key.clone()),
+                    expires_at_unix_secs_update: Some(entry.expires_at_unix_secs),
+                    oauth_invalid_at_unix_secs: latest_key.oauth_invalid_at_unix_secs,
+                    oauth_invalid_reason: latest_key.oauth_invalid_reason.clone(),
+                    upstream_metadata_patch: None,
+                    upstream_metadata_namespace_to_remove: None,
+                    status_snapshot_patch: provider_key_oauth_status_snapshot_update(&latest_key)
+                        .status_snapshot_patch,
+                    reset_error_count: false,
+                    updated_at_unix_secs: latest_key.updated_at_unix_secs,
+                },
+            )
+            .await?
         };
-        if !updated && (requires_fenced_persistence || used_fenced_persistence) {
+        if !updated {
             return Err(GatewayError::Internal(
                 "OAuth credential changed during refresh persistence".to_string(),
             ));
@@ -2991,7 +3070,6 @@ impl AppState {
                         key_id,
                         latest_key.oauth_invalid_at_unix_secs,
                         latest_key.oauth_invalid_reason.as_deref(),
-                        None,
                         latest_key.updated_at_unix_secs,
                     )
                     .await?;
@@ -3149,7 +3227,7 @@ impl AppState {
             provider_type,
             request_id = %request.request_id,
             method = %plan.method,
-            token_url = %plan.url,
+            token_origin = %crate::handlers::shared::security_log_url_origin(&plan.url),
             content_type = plan.content_type.as_deref().unwrap_or("-"),
             body_bytes_len = ?request.body_bytes.as_ref().map(Vec::len),
             json_body_present = request.json_body.is_some(),
@@ -3189,15 +3267,22 @@ impl AppState {
                 .unwrap_or("-"),
             "gateway local oauth execution request prepared"
         );
-        let result =
-            crate::execution_runtime::execute_execution_runtime_sync_plan(self, None, &plan)
-                .await
-                .map_err(
-                    |err| provider_transport::LocalOAuthRefreshError::InvalidResponse {
-                        provider_type,
-                        message: err.into_message(),
-                    },
-                )?;
+        let bounded_plan = crate::execution_runtime::transport::with_upstream_response_body_limit(
+            &plan,
+            LOCAL_OAUTH_RESPONSE_BODY_LIMIT_BYTES,
+        );
+        let result = crate::execution_runtime::execute_execution_runtime_sync_plan(
+            self,
+            None,
+            &bounded_plan,
+        )
+        .await
+        .map_err(
+            |err| provider_transport::LocalOAuthRefreshError::InvalidResponse {
+                provider_type,
+                message: err.into_message(),
+            },
+        )?;
         let response_body_text = local_oauth_execution_body_text(&result);
         if (200..300).contains(&result.status_code) {
             tracing::info!(
@@ -3349,31 +3434,20 @@ fn local_oauth_execution_body_bytes(
     headers: &BTreeMap<String, String>,
     body: &aether_contracts::ResponseBody,
 ) -> Option<Vec<u8>> {
-    let bytes = body
-        .body_bytes_b64
-        .as_deref()
-        .and_then(|value| STANDARD.decode(value).ok())?;
-    let encoding = headers
-        .get("content-encoding")
-        .map(String::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|value| value.to_ascii_lowercase());
-    match encoding.as_deref() {
-        Some("gzip") => {
-            let mut decoder = GzDecoder::new(bytes.as_slice());
-            let mut out = Vec::new();
-            decoder.read_to_end(&mut out).ok()?;
-            Some(out)
-        }
-        Some("deflate") => {
-            let mut decoder = DeflateDecoder::new(bytes.as_slice());
-            let mut out = Vec::new();
-            decoder.read_to_end(&mut out).ok()?;
-            Some(out)
-        }
-        _ => Some(bytes),
-    }
+    let bytes = body.body_bytes_b64.as_deref().and_then(|value| {
+        crate::execution_runtime::transport::decode_base64_body_with_limit(
+            value,
+            LOCAL_OAUTH_RESPONSE_BODY_LIMIT_BYTES,
+        )
+        .ok()
+    })?;
+    crate::execution_runtime::transport::decode_response_body_bytes_with_limit(
+        headers,
+        &bytes,
+        LOCAL_OAUTH_RESPONSE_BODY_LIMIT_BYTES,
+    )
+    .ok()
+    .map(std::borrow::Cow::into_owned)
 }
 
 fn local_oauth_request_uses_direct_client(url: &str) -> bool {
@@ -3392,7 +3466,7 @@ fn local_oauth_request_uses_direct_client(url: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
+    use std::sync::{Arc, OnceLock};
     use std::time::{Duration, Instant};
 
     use aether_crypto::{encrypt_python_fernet_plaintext, DEVELOPMENT_ENCRYPTION_KEY};
@@ -3451,10 +3525,40 @@ mod tests {
         .expect("endpoint transport should build")
     }
 
-    fn sample_key() -> StoredProviderCatalogKey {
+    fn sample_key_for_provider(provider_id: &str) -> StoredProviderCatalogKey {
+        let encrypted_api_key = if provider_id == "provider-1" {
+            static ENCRYPTED_API_KEY: OnceLock<String> = OnceLock::new();
+            ENCRYPTED_API_KEY
+                .get_or_init(|| {
+                    let credential_state = AppState::new()
+                        .expect("credential state should build")
+                        .with_data_state_for_tests(
+                            GatewayDataState::disabled()
+                                .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+                        );
+                    credential_state
+                        .seal_provider_catalog_key_api_key(
+                            "provider-1",
+                            "key-1",
+                            "plain-upstream-key",
+                        )
+                        .expect("api key should encrypt")
+                })
+                .clone()
+        } else {
+            let credential_state = AppState::new()
+                .expect("credential state should build")
+                .with_data_state_for_tests(
+                    GatewayDataState::disabled()
+                        .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+                );
+            credential_state
+                .seal_provider_catalog_key_api_key(provider_id, "key-1", "plain-upstream-key")
+                .expect("api key should encrypt")
+        };
         StoredProviderCatalogKey::new(
             "key-1".to_string(),
-            "provider-1".to_string(),
+            provider_id.to_string(),
             "default".to_string(),
             "api_key".to_string(),
             None,
@@ -3463,7 +3567,7 @@ mod tests {
         .expect("key should build")
         .with_transport_fields(
             Some(json!(["openai:chat"])),
-            "plain-upstream-key".to_string(),
+            encrypted_api_key,
             None,
             None,
             Some(json!({"openai:chat": 1})),
@@ -3475,12 +3579,24 @@ mod tests {
         .expect("key transport should build")
     }
 
+    fn sample_key() -> StoredProviderCatalogKey {
+        sample_key_for_provider("provider-1")
+    }
+
     fn codex_oauth_state(
         auth_config: &serde_json::Value,
         access_token: &str,
     ) -> (AppState, Arc<InMemoryProviderCatalogReadRepository>, String) {
+        provider_oauth_state("codex", auth_config, access_token)
+    }
+
+    fn provider_oauth_state(
+        provider_type: &str,
+        auth_config: &serde_json::Value,
+        access_token: &str,
+    ) -> (AppState, Arc<InMemoryProviderCatalogReadRepository>, String) {
         let mut provider = sample_provider();
-        provider.provider_type = "codex".to_string();
+        provider.provider_type = provider_type.to_string();
         let encrypted_auth_config =
             encrypt_python_fernet_plaintext(DEVELOPMENT_ENCRYPTION_KEY, &auth_config.to_string())
                 .expect("auth config should encrypt");
@@ -3490,7 +3606,7 @@ mod tests {
         let key = StoredProviderCatalogKey::new(
             "key-1".to_string(),
             "provider-1".to_string(),
-            "Codex OAuth".to_string(),
+            format!("{provider_type} OAuth"),
             "oauth".to_string(),
             None,
             true,
@@ -3535,12 +3651,18 @@ mod tests {
             "private_key": "TEST-PRIVATE-KEY",
             "project_id": "demo-project"
         });
-        let encrypted_auth_config =
-            encrypt_python_fernet_plaintext(DEVELOPMENT_ENCRYPTION_KEY, &auth_config.to_string())
-                .expect("Vertex auth config should encrypt");
-        let encrypted_api_key =
-            encrypt_python_fernet_plaintext(DEVELOPMENT_ENCRYPTION_KEY, "__placeholder__")
-                .expect("Vertex placeholder should encrypt");
+        let credential_state = AppState::new()
+            .expect("credential state should build")
+            .with_data_state_for_tests(
+                GatewayDataState::disabled()
+                    .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+            );
+        let encrypted_auth_config = credential_state
+            .seal_provider_catalog_key_auth_config("provider-1", "key-1", &auth_config.to_string())
+            .expect("Vertex auth config should encrypt");
+        let encrypted_api_key = credential_state
+            .seal_provider_catalog_key_api_key("provider-1", "key-1", "__placeholder__")
+            .expect("Vertex placeholder should encrypt");
         let key = StoredProviderCatalogKey::new(
             "key-1".to_string(),
             "provider-1".to_string(),
@@ -3618,7 +3740,7 @@ mod tests {
         ));
         let data_state = GatewayDataState::with_provider_transport_reader_for_tests(
             repository,
-            "test-encryption-key",
+            DEVELOPMENT_ENCRYPTION_KEY,
         )
         .with_system_config_values_for_tests(vec![(
             "enable_format_conversion".to_string(),
@@ -3829,7 +3951,7 @@ mod tests {
         )));
         let data_state = GatewayDataState::with_provider_transport_reader_for_tests(
             reader.clone(),
-            "test-encryption-key",
+            DEVELOPMENT_ENCRYPTION_KEY,
         );
         let state = AppState::new()
             .expect("state should build")
@@ -3893,7 +4015,7 @@ mod tests {
         ));
         let data_state = GatewayDataState::with_provider_transport_reader_for_tests(
             reader.clone(),
-            "test-encryption-key",
+            DEVELOPMENT_ENCRYPTION_KEY,
         );
         let state = AppState::new()
             .expect("state should build")
@@ -4098,7 +4220,7 @@ mod tests {
         )));
         let data_state = GatewayDataState::with_provider_transport_reader_for_tests(
             reader.clone(),
-            "test-encryption-key",
+            DEVELOPMENT_ENCRYPTION_KEY,
         );
         let state = AppState::new()
             .expect("state should build")
@@ -4136,8 +4258,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn transport_snapshot_error_is_broadcast_to_all_followers() {
         const REQUESTS: usize = 64;
-        let mut mismatched_key = sample_key();
-        mismatched_key.provider_id = "provider-other".to_string();
+        let mismatched_key = sample_key_for_provider("provider-other");
         let inner = Arc::new(InMemoryProviderCatalogReadRepository::seed(
             vec![sample_provider()],
             vec![sample_endpoint()],
@@ -4148,7 +4269,7 @@ mod tests {
         )));
         let data_state = GatewayDataState::with_provider_transport_reader_for_tests(
             reader.clone(),
-            "test-encryption-key",
+            DEVELOPMENT_ENCRYPTION_KEY,
         );
         let state = AppState::new()
             .expect("state should build")
@@ -4388,6 +4509,18 @@ mod tests {
     }
 
     #[test]
+    fn local_oauth_diagnostics_do_not_reflect_unknown_response_credentials() {
+        let body = r#"{"error":{"message":"authorization=Bearer upstream-secret https://user:pass@example.test?q=secret","type":"invalid_request_error","code":"unexpected"}}"#;
+
+        let normalized = super::normalize_local_oauth_refresh_error_message(Some(502), Some(body));
+        assert_eq!(normalized, "HTTP 502");
+        assert_eq!(super::local_oauth_log_excerpt(body), "[redacted]");
+        for secret in ["upstream-secret", "user:pass", "q=secret"] {
+            assert!(!normalized.contains(secret), "leaked {secret}");
+        }
+    }
+
+    #[test]
     fn local_refresh_failure_is_appended_to_access_token_expired_marker() {
         assert_eq!(
             super::merge_local_oauth_refresh_failure_reason(
@@ -4562,6 +4695,70 @@ mod tests {
             super::REMOTE_OAUTH_REFRESH_WAIT_TIMEOUT
                 > Duration::from_millis(super::LOCAL_OAUTH_HTTP_TIMEOUT_MS)
         );
+    }
+
+    #[tokio::test]
+    async fn antigravity_refresh_entry_persists_tokens_and_expiry() {
+        let initial_config = json!({
+            "provider_type": "antigravity",
+            "refreshToken": "legacy-refresh-token",
+            "expires_at": 1,
+        });
+        let (state, repository, _) =
+            provider_oauth_state("antigravity", &initial_config, "stale-access-token");
+        let transport = state
+            .read_provider_transport_snapshot("provider-1", "endpoint-1", "key-1")
+            .await
+            .expect("transport should load")
+            .expect("transport should exist");
+        let expected_credential_fence = state
+            .capture_provider_transport_credential_fence(&transport)
+            .await
+            .expect("credential fence should load")
+            .expect("credential fence should match");
+        let expires_at = 4_102_555_900;
+        let refreshed_entry = crate::provider_transport::CachedOAuthEntry {
+            provider_type: "antigravity".to_string(),
+            auth_header_name: "authorization".to_string(),
+            auth_header_value: "Bearer fresh-access-token".to_string(),
+            expires_at_unix_secs: Some(expires_at),
+            metadata: Some(json!({
+                "provider_type": "antigravity",
+                "refresh_token": "legacy-refresh-token",
+                "expires_at": expires_at,
+            })),
+            source_fingerprint: None,
+        };
+
+        state
+            .persist_local_oauth_refresh_entry(
+                &transport,
+                &refreshed_entry,
+                Some(&expected_credential_fence),
+            )
+            .await
+            .expect("Antigravity refresh should persist");
+
+        let stored = repository
+            .list_keys_by_ids(&["key-1".to_string()])
+            .await
+            .expect("key should reload")
+            .pop()
+            .expect("key should remain");
+        let access_token = state
+            .decrypt_provider_catalog_key_api_key(&stored)
+            .expect("access token should decrypt")
+            .expect("access token should persist");
+        let auth_config = state
+            .decrypt_provider_catalog_key_auth_config(&stored)
+            .expect("auth config should decrypt")
+            .expect("auth config should persist");
+        let auth_config: serde_json::Value =
+            serde_json::from_str(&auth_config).expect("auth config should parse");
+
+        assert_eq!(access_token, "fresh-access-token");
+        assert_eq!(auth_config["refresh_token"], json!("legacy-refresh-token"));
+        assert_eq!(stored.expires_at_unix_secs, Some(expires_at));
     }
 
     #[tokio::test]
@@ -4872,7 +5069,6 @@ mod tests {
                 "key-1",
                 Some(1),
                 Some("[OAUTH_EXPIRED] response raced with quota persistence"),
-                None,
                 Some(1),
             )
             .await
@@ -5039,7 +5235,6 @@ mod tests {
                 "key-1",
                 Some(1),
                 Some("[ACCOUNT_BLOCK] account deactivated"),
-                None,
                 Some(1),
             )
             .await
@@ -5086,7 +5281,6 @@ mod tests {
                 "key-1",
                 Some(1),
                 Some("[OAUTH_EXPIRED] current generation invalid"),
-                None,
                 Some(1),
             )
             .await
@@ -5141,7 +5335,6 @@ mod tests {
                 "key-1",
                 Some(1),
                 Some("[OAUTH_EXPIRED] replacement generation invalid"),
-                None,
                 Some(1),
             )
             .await
@@ -5168,7 +5361,6 @@ mod tests {
                 "key-1",
                 Some(1),
                 Some("[OAUTH_EXPIRED] replacement generation invalid"),
-                None,
                 Some(1),
             )
             .await
@@ -5209,7 +5401,6 @@ mod tests {
                 "key-1",
                 Some(1),
                 Some("[OAUTH_EXPIRED] unordered response"),
-                None,
                 Some(1),
             )
             .await

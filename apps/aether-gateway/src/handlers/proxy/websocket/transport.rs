@@ -7,6 +7,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+use aether_contracts::ProxySnapshot;
 use axum::extract::ws::{CloseFrame as AxumCloseFrame, Message as AxumWsMessage, WebSocket};
 use axum::http::header::{
     ACCEPT, ACCEPT_ENCODING, CONNECTION, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE, HOST,
@@ -22,7 +23,8 @@ use wreq::ws::message::{CloseFrame as WreqCloseFrame, Message as WreqWsMessage};
 
 use crate::ai_serving::AiExecutionDecision;
 use crate::execution_runtime::transport::{
-    build_browser_wreq_client, build_request_headers, ExecutionTransportControls,
+    build_browser_wreq_client, build_request_headers, normalize_execution_proxy_url,
+    validate_execution_upstream_url, ExecutionSafeDnsResolver, ExecutionTransportControls,
 };
 use crate::frontdoor_loop_guard::gateway_frontdoor_self_loop_guard_error;
 use crate::handlers::proxy::websocket::session::{
@@ -100,14 +102,26 @@ fn guarded_websocket_upstream_url(
 }
 
 fn websocket_response_headers(headers: &HeaderMap) -> BTreeMap<String, String> {
+    let connection_declared = aether_http::connection_declared_header_names(
+        headers
+            .get_all(http::header::CONNECTION)
+            .iter()
+            .filter_map(|value| value.to_str().ok()),
+    );
     headers
         .iter()
         .filter(|(name, _)| websocket_response_header_is_safe_to_retain(name))
         .filter_map(|(name, value)| {
+            let normalized = name.as_str().to_ascii_lowercase();
+            if crate::headers::should_skip_response_header(&normalized)
+                || connection_declared.contains(&normalized)
+            {
+                return None;
+            }
             value
                 .to_str()
                 .ok()
-                .map(|value| (name.as_str().to_string(), value.to_string()))
+                .map(|value| (normalized, value.to_string()))
         })
         .collect()
 }
@@ -135,15 +149,13 @@ pub(crate) fn websocket_upstream_url(
     invalid_code: &'static str,
 ) -> Result<Url, &'static str> {
     let mut url = Url::parse(raw).map_err(|_| invalid_code)?;
-    if url.host_str().is_none() || !url.username().is_empty() || url.password().is_some() {
-        return Err(invalid_code);
-    }
-    let websocket_scheme = match url.scheme() {
-        "https" => "wss",
-        "http" => "ws",
-        "wss" | "ws" => return Ok(url),
+    let (http_scheme, websocket_scheme) = match url.scheme() {
+        "https" | "wss" => ("https", "wss"),
+        "http" | "ws" => ("http", "ws"),
         _ => return Err(invalid_code),
     };
+    url.set_scheme(http_scheme).map_err(|_| invalid_code)?;
+    let mut url = validate_execution_upstream_url(url.as_str()).map_err(|_| invalid_code)?;
     url.set_scheme(websocket_scheme).map_err(|_| invalid_code)?;
     Ok(url)
 }
@@ -205,6 +217,7 @@ fn build_websocket_client(
     errors: UpstreamWebSocketErrorCodes,
 ) -> Result<wreq::Client, &'static str> {
     let timeouts = websocket_timeouts(decision);
+    let proxy_url = resolve_websocket_proxy_url(decision.proxy.as_ref(), errors)?;
     if let Some(profile) = decision.transport_profile.as_ref() {
         return build_browser_wreq_client(
             timeouts.as_ref(),
@@ -216,28 +229,63 @@ fn build_websocket_client(
         .map_err(|_| errors.client_build_failed);
     }
 
-    let mut builder = wreq::Client::builder();
+    let mut builder = wreq::Client::builder().no_proxy();
     if let Some(connect_ms) = timeouts.as_ref().and_then(|timeouts| timeouts.connect_ms) {
         builder = builder.connect_timeout(Duration::from_millis(connect_ms));
     }
-    if let Some(proxy) = decision
-        .proxy
-        .as_ref()
-        .filter(|proxy| proxy.enabled != Some(false))
-    {
-        if let Some(proxy_url) = proxy
-            .url
-            .as_deref()
-            .map(str::trim)
-            .filter(|url| !url.is_empty())
-        {
-            let proxy = wreq::Proxy::all(proxy_url).map_err(|_| errors.proxy_invalid)?;
-            builder = builder.proxy(proxy);
-        } else if proxy.node_id.is_some() || proxy.mode.as_deref() == Some("tunnel") {
-            return Err(errors.tunnel_proxy_unsupported);
-        }
+    if let Some(proxy_url) = proxy_url {
+        let proxy = wreq::Proxy::all(proxy_url).map_err(|_| errors.proxy_invalid)?;
+        builder = builder.proxy(proxy);
+    } else {
+        builder = builder.dns_resolver(ExecutionSafeDnsResolver);
     }
     builder.build().map_err(|_| errors.client_build_failed)
+}
+
+fn resolve_websocket_proxy_url(
+    proxy: Option<&ProxySnapshot>,
+    errors: UpstreamWebSocketErrorCodes,
+) -> Result<Option<String>, &'static str> {
+    let Some(proxy) = proxy else {
+        return Ok(None);
+    };
+    if proxy.enabled == Some(false) {
+        return Ok(None);
+    }
+    if let Some(proxy_url) = proxy
+        .url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+    {
+        let parsed = Url::parse(proxy_url).map_err(|_| errors.proxy_invalid)?;
+        if !matches!(
+            parsed.scheme().to_ascii_lowercase().as_str(),
+            "http" | "https" | "socks5" | "socks5h"
+        ) || parsed.host_str().is_none()
+            || !matches!(parsed.path(), "" | "/")
+            || parsed.query().is_some()
+            || parsed.fragment().is_some()
+        {
+            return Err(errors.proxy_invalid);
+        }
+        // Manual proxy nodes bind credentials to the node identity before a
+        // snapshot reaches this path. Reject userinfo on an otherwise
+        // unbound snapshot so an arbitrary decision cannot smuggle proxy
+        // credentials through a URL; preserve the established node-auth URL
+        // form for authenticated manual proxy nodes.
+        if (!parsed.username().is_empty() || parsed.password().is_some()) && proxy.node_id.is_none()
+        {
+            return Err(errors.proxy_invalid);
+        }
+        let normalized =
+            normalize_execution_proxy_url(proxy_url).map_err(|_| errors.proxy_invalid)?;
+        return Ok(Some(normalized));
+    }
+    if proxy.node_id.is_some() || proxy.mode.as_deref() == Some("tunnel") {
+        return Err(errors.tunnel_proxy_unsupported);
+    }
+    Err(errors.proxy_invalid)
 }
 
 pub(crate) fn websocket_timeouts(
@@ -353,6 +401,23 @@ pub(crate) async fn send_upstream_message(
     message: WreqWsMessage,
 ) -> Result<(), WebSocketWriteError> {
     bounded_send(RELAY_WRITE_TIMEOUT, upstream.send(message).map_err(|_| ())).await
+}
+
+/// Queues one frame in the upstream sink without flushing it. Completion means
+/// `start_send` succeeded, so callers must conservatively treat the frame as
+/// possibly delivered even when a later flush fails or is cancelled.
+pub(crate) async fn feed_upstream_message(
+    upstream: &mut wreq::ws::WebSocket,
+    message: WreqWsMessage,
+) -> Result<(), WebSocketWriteError> {
+    bounded_send(RELAY_WRITE_TIMEOUT, upstream.feed(message).map_err(|_| ())).await
+}
+
+/// Flushes frames previously queued with [`feed_upstream_message`].
+pub(crate) async fn flush_upstream_messages(
+    upstream: &mut wreq::ws::WebSocket,
+) -> Result<(), WebSocketWriteError> {
+    bounded_send(RELAY_WRITE_TIMEOUT, upstream.flush().map_err(|_| ())).await
 }
 
 /// Best-effort teardown write.  The caller is already ending the session, so
@@ -567,13 +632,17 @@ pub(crate) async fn close_client_socket(client_socket: &mut WebSocket, code: u16
 #[cfg(test)]
 mod tests {
     use super::{
-        bounded_send, guarded_websocket_upstream_url, responses_websocket_error_event,
+        bounded_send, build_websocket_client, guarded_websocket_upstream_url,
+        resolve_websocket_proxy_url, responses_websocket_error_event,
         responses_websocket_error_event_with_stream_id, websocket_handshake_headers,
         websocket_relay_frame_queue, websocket_response_headers, websocket_upstream_url,
-        WebSocketRelayPumpControl, WebSocketRelayQueueError, WebSocketWriteError,
-        RELAY_FRAME_QUEUE_CAPACITY, RELAY_WRITE_TIMEOUT, TEARDOWN_WRITE_TIMEOUT,
+        UpstreamWebSocketErrorCodes, WebSocketRelayPumpControl, WebSocketRelayQueueError,
+        WebSocketWriteError, RELAY_FRAME_QUEUE_CAPACITY, RELAY_WRITE_TIMEOUT,
+        TEARDOWN_WRITE_TIMEOUT,
     };
+    use crate::ai_serving::AiExecutionDecision;
     use crate::frontdoor_loop_guard::configured_gateway_frontdoor_base_url;
+    use aether_contracts::{ProxySnapshot, ResolvedTransportProfile};
     use axum::http::HeaderMap;
     use std::collections::BTreeMap;
     use std::time::Duration;
@@ -731,20 +800,243 @@ mod tests {
 
     #[test]
     fn maps_http_url_to_websocket_url_without_losing_path_or_query() {
-        let url = websocket_upstream_url(
-            "https://example.test/backend-api/codex/responses?x=1",
-            "invalid",
-        )
-        .expect("URL should be converted");
-        assert_eq!(
-            url.as_str(),
-            "wss://example.test/backend-api/codex/responses?x=1"
-        );
+        for (http_scheme, websocket_scheme) in [("https", "wss"), ("http", "ws")] {
+            let url = websocket_upstream_url(
+                &format!("{http_scheme}://example.test:8080/backend-api/codex/responses?x=1"),
+                "invalid",
+            )
+            .expect("URL should be converted");
+            assert_eq!(
+                url.as_str(),
+                format!("{websocket_scheme}://example.test:8080/backend-api/codex/responses?x=1")
+            );
+        }
     }
 
     #[test]
     fn rejects_upstream_url_with_credentials() {
         assert!(websocket_upstream_url("https://token@example.test/responses", "invalid").is_err());
+    }
+
+    #[test]
+    fn websocket_upstream_url_accepts_ws_and_wss_with_safe_targets() {
+        for allowed in [
+            "wss://example.test/v1/responses",
+            "https://example.test/v1/responses",
+            "ws://example.test:8080/v1/responses",
+            "http://example.test:8080/v1/responses",
+            "http://8.8.8.8:8080/v1/responses",
+            "wss://8.8.8.8/v1/responses",
+            "ws://[2606:4700:4700::1111]:8080/v1/responses",
+            "wss://[2606:4700:4700::1111]/v1/responses",
+            "ws://localhost:8080/v1/responses",
+            "http://127.42.0.1:8080/v1/responses",
+            "ws://[::1]:8080/v1/responses",
+        ] {
+            assert!(
+                websocket_upstream_url(allowed, "invalid").is_ok(),
+                "{allowed}"
+            );
+        }
+        for rejected in [
+            "http://10.0.0.1/v1/responses",
+            "wss://10.0.0.1/v1/responses",
+            "wss://127.0.0.1/v1/responses",
+            "wss://[::1]/v1/responses",
+            "wss://[fd00::1]/v1/responses",
+            "wss://[::ffff:127.0.0.1]/v1/responses",
+            "wss://169.254.169.254/v1/responses",
+            "wss://198.18.78.41/v1/responses",
+            "wss://198.19.1.2/v1/responses",
+            "ws://0.0.0.0:8080/v1/responses",
+            "ws://[::ffff:127.0.0.1]:8080/v1/responses",
+            "wss://example.test/v1/responses#secret",
+            "ws://example.test/v1/responses#secret",
+            "http://token@example.test/v1/responses",
+            "ws://token@example.test/v1/responses",
+            "ftp://example.test/v1/responses",
+        ] {
+            assert!(
+                websocket_upstream_url(rejected, "invalid").is_err(),
+                "{rejected}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn websocket_client_build_defers_provider_dns_for_all_transport_profiles() {
+        let errors = UpstreamWebSocketErrorCodes {
+            upstream_url_missing: "missing",
+            upstream_url_invalid: "upstream_invalid",
+            frontdoor_self_loop: "frontdoor_self_loop",
+            headers_invalid: "headers_invalid",
+            client_build_failed: "client_build_failed",
+            proxy_invalid: "proxy_invalid",
+            tunnel_proxy_unsupported: "tunnel_unsupported",
+            handshake_failed: "handshake_failed",
+            upgrade_rejected: "upgrade_rejected",
+            upgrade_failed: "upgrade_failed",
+        };
+        for profile in [
+            None,
+            Some(ResolvedTransportProfile {
+                profile_id: "chrome136".to_string(),
+                backend: aether_contracts::TRANSPORT_BACKEND_BROWSER_WREQ.to_string(),
+                ..Default::default()
+            }),
+        ] {
+            for proxy in [
+                None,
+                Some(ProxySnapshot {
+                    enabled: Some(false),
+                    url: Some("http://proxy.invalid:8080".to_string()),
+                    ..Default::default()
+                }),
+                Some(ProxySnapshot {
+                    enabled: Some(true),
+                    url: Some("http://proxy.invalid:8080".to_string()),
+                    ..Default::default()
+                }),
+                Some(ProxySnapshot {
+                    enabled: Some(true),
+                    url: Some("socks5h://proxy.invalid:1080".to_string()),
+                    ..Default::default()
+                }),
+            ] {
+                let mut decision: AiExecutionDecision = serde_json::from_value(serde_json::json!({
+                    "action": "proxy",
+                    "upstream_url": "wss://upstream.invalid/v1/responses"
+                }))
+                .expect("minimal provider decision should deserialize");
+                decision.transport_profile = profile.clone();
+                decision.proxy = proxy;
+
+                build_websocket_client(&decision, errors)
+                    .expect("building a client must not resolve the provider or proxy hostname");
+            }
+        }
+    }
+
+    #[test]
+    fn active_websocket_proxy_without_a_target_fails_closed() {
+        let errors = UpstreamWebSocketErrorCodes {
+            upstream_url_missing: "missing",
+            upstream_url_invalid: "upstream_invalid",
+            frontdoor_self_loop: "frontdoor_self_loop",
+            headers_invalid: "headers_invalid",
+            client_build_failed: "client_build_failed",
+            proxy_invalid: "proxy_invalid",
+            tunnel_proxy_unsupported: "tunnel_unsupported",
+            handshake_failed: "handshake_failed",
+            upgrade_rejected: "upgrade_rejected",
+            upgrade_failed: "upgrade_failed",
+        };
+        let missing = ProxySnapshot {
+            enabled: Some(true),
+            ..ProxySnapshot::default()
+        };
+        assert_eq!(
+            resolve_websocket_proxy_url(Some(&missing), errors),
+            Err("proxy_invalid")
+        );
+
+        let tunnel = ProxySnapshot {
+            enabled: Some(true),
+            mode: Some("tunnel".to_string()),
+            ..ProxySnapshot::default()
+        };
+        assert_eq!(
+            resolve_websocket_proxy_url(Some(&tunnel), errors),
+            Err("tunnel_unsupported")
+        );
+    }
+
+    #[tokio::test]
+    async fn websocket_handshake_keeps_provider_dns_remote_for_http_and_socks_proxies() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let errors = UpstreamWebSocketErrorCodes {
+            upstream_url_missing: "missing",
+            upstream_url_invalid: "upstream_invalid",
+            frontdoor_self_loop: "frontdoor_self_loop",
+            headers_invalid: "headers_invalid",
+            client_build_failed: "client_build_failed",
+            proxy_invalid: "proxy_invalid",
+            tunnel_proxy_unsupported: "tunnel_unsupported",
+            handshake_failed: "handshake_failed",
+            upgrade_rejected: "upgrade_rejected",
+            upgrade_failed: "upgrade_failed",
+        };
+        for profile in [
+            None,
+            Some(ResolvedTransportProfile {
+                profile_id: "chrome136".to_string(),
+                backend: aether_contracts::TRANSPORT_BACKEND_BROWSER_WREQ.to_string(),
+                ..Default::default()
+            }),
+        ] {
+            for scheme in ["http", "socks5", "socks5h"] {
+                let listener = crate::test_support::bind_loopback_listener().await.unwrap();
+                let proxy_addr = listener.local_addr().unwrap();
+                let (release, released) = tokio::sync::oneshot::channel::<()>();
+                let server = tokio::spawn(async move {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    if scheme != "http" {
+                        let mut greeting = [0; 2];
+                        stream.read_exact(&mut greeting).await.unwrap();
+                        assert_eq!(greeting[0], 5);
+                        let mut methods = vec![0; greeting[1] as usize];
+                        stream.read_exact(&mut methods).await.unwrap();
+                        assert!(methods.contains(&0));
+                        stream.write_all(&[5, 0]).await.unwrap();
+
+                        let mut request = [0; 4];
+                        stream.read_exact(&mut request).await.unwrap();
+                        assert_eq!(
+                            request,
+                            [5, 1, 0, 3],
+                            "proxy must receive a domain, not an IP"
+                        );
+                        let host_len = stream.read_u8().await.unwrap();
+                        let mut host = vec![0; host_len as usize];
+                        stream.read_exact(&mut host).await.unwrap();
+                        assert_eq!(host, b"provider-dns.invalid");
+                        assert_eq!(stream.read_u16().await.unwrap(), 80);
+                        stream
+                            .write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 80])
+                            .await
+                            .unwrap();
+                    }
+                    let socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                    let _ = released.await;
+                    drop(socket);
+                });
+                let mut decision: AiExecutionDecision = serde_json::from_value(serde_json::json!({
+                    "action": "proxy",
+                    "upstream_url": "ws://provider-dns.invalid/v1/responses",
+                    "proxy": {"enabled": true, "url": format!("{scheme}://{proxy_addr}")}
+                }))
+                .unwrap();
+                decision.transport_profile = profile.clone();
+                let connection = tokio::time::timeout(
+                    Duration::from_secs(5),
+                    super::connect_upstream_websocket(
+                        &decision,
+                        crate::handlers::proxy::websocket::session::RESPONSES_WEBSOCKET_SESSION_LIMITS,
+                        errors,
+                    ),
+                )
+                .await
+                .expect("proxied handshake must not wait for local provider DNS")
+                .unwrap_or_else(|error| panic!("{scheme} handshake failed: {error}"));
+                release.send(()).unwrap();
+                tokio::time::timeout(Duration::from_secs(5), server)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                drop(connection);
+            }
+        }
     }
 
     #[test]
@@ -759,6 +1051,64 @@ mod tests {
                 "responses_websocket_frontdoor_self_loop",
             ),
             Err("responses_websocket_frontdoor_self_loop")
+        );
+    }
+
+    #[test]
+    fn websocket_proxy_url_must_be_an_allowed_origin() {
+        let errors = UpstreamWebSocketErrorCodes {
+            upstream_url_missing: "missing",
+            upstream_url_invalid: "upstream_invalid",
+            frontdoor_self_loop: "frontdoor_self_loop",
+            headers_invalid: "headers_invalid",
+            client_build_failed: "client_build_failed",
+            proxy_invalid: "proxy_invalid",
+            tunnel_proxy_unsupported: "tunnel_unsupported",
+            handshake_failed: "handshake_failed",
+            upgrade_rejected: "upgrade_rejected",
+            upgrade_failed: "upgrade_failed",
+        };
+
+        for value in [
+            "file:///tmp/proxy",
+            "http://proxy.example:8080/path",
+            "http://proxy.example:8080?token=secret",
+            "http://proxy.example:8080#fragment",
+            "http://alice:password@proxy.example:8080",
+        ] {
+            let proxy = ProxySnapshot {
+                enabled: Some(true),
+                url: Some(value.to_string()),
+                ..ProxySnapshot::default()
+            };
+            assert_eq!(
+                resolve_websocket_proxy_url(Some(&proxy), errors),
+                Err("proxy_invalid"),
+                "proxy URL should be rejected: {value}"
+            );
+        }
+
+        let authenticated_node = ProxySnapshot {
+            enabled: Some(true),
+            node_id: Some("manual-node-1".to_string()),
+            url: Some("http://alice:password@proxy.example:8080".to_string()),
+            ..ProxySnapshot::default()
+        };
+        assert_eq!(
+            resolve_websocket_proxy_url(Some(&authenticated_node), errors),
+            Ok(Some(
+                "http://alice:password@proxy.example:8080/".to_string()
+            ))
+        );
+
+        let socks = ProxySnapshot {
+            enabled: Some(true),
+            url: Some("socks5://proxy.example:1080".to_string()),
+            ..ProxySnapshot::default()
+        };
+        assert_eq!(
+            resolve_websocket_proxy_url(Some(&socks), errors),
+            Ok(Some("socks5h://proxy.example:1080".to_string()))
         );
     }
 

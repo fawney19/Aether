@@ -504,8 +504,8 @@ fn projects_uuid_prompt_cache_identity_into_missing_session_headers() {
     );
     assert_eq!(headers.get("x-client-request-id"), None);
     assert_eq!(
-        headers.get("user-agent"),
-        Some(&"codex_cli_rs/0.144.1".to_string())
+        headers.get("user-agent").map(String::as_str),
+        Some(aether_ai_formats::CODEX_CLIENT_USER_AGENT)
     );
     assert_eq!(headers.get("originator"), Some(&"codex_cli_rs".to_string()));
     assert!(!headers.contains_key("version"));
@@ -614,8 +614,8 @@ fn injects_only_codex_client_headers_for_images_requests() {
         Some(&"acc-123".to_string())
     );
     assert_eq!(
-        headers.get("user-agent"),
-        Some(&"codex_cli_rs/0.144.1".to_string())
+        headers.get("user-agent").map(String::as_str),
+        Some(aether_ai_formats::CODEX_CLIENT_USER_AGENT)
     );
     assert_eq!(headers.get("originator"), Some(&"codex_cli_rs".to_string()));
     assert!(!headers.contains_key("version"));
@@ -698,8 +698,8 @@ fn preserves_client_context_headers_and_enforces_codex_provider_identity() {
         Some(&"kept-by-rule-request".to_string())
     );
     assert_eq!(
-        headers.get("user-agent"),
-        Some(&"codex_cli_rs/0.144.1".to_string())
+        headers.get("user-agent").map(String::as_str),
+        Some(aether_ai_formats::CODEX_CLIENT_USER_AGENT)
     );
     assert_eq!(headers.get("originator"), Some(&"codex_cli_rs".to_string()));
     assert_eq!(
@@ -762,8 +762,8 @@ fn compact_projects_uuid_prompt_cache_identity_into_session_headers() {
     );
     assert_eq!(headers.get("x-client-request-id"), None);
     assert_eq!(
-        headers.get("user-agent"),
-        Some(&"codex_cli_rs/0.144.1".to_string())
+        headers.get("user-agent").map(String::as_str),
+        Some(aether_ai_formats::CODEX_CLIENT_USER_AGENT)
     );
     assert_eq!(headers.get("originator"), Some(&"codex_cli_rs".to_string()));
     assert!(!headers.contains_key("version"));

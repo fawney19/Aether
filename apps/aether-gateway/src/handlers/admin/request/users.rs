@@ -105,6 +105,16 @@ impl<'a> AdminAppState<'a> {
         self.app.update_user_group(group_id, record).await
     }
 
+    pub(crate) async fn restore_user_group_if_matches(
+        &self,
+        expected: &aether_data::repository::users::StoredUserGroup,
+        restored: &aether_data::repository::users::StoredUserGroup,
+    ) -> Result<bool, GatewayError> {
+        self.app
+            .restore_user_group_if_matches(expected, restored)
+            .await
+    }
+
     pub(crate) async fn delete_user_group(&self, group_id: &str) -> Result<bool, GatewayError> {
         self.app.delete_user_group(group_id).await
     }
@@ -149,6 +159,17 @@ impl<'a> AdminAppState<'a> {
     ) -> Result<Vec<aether_data::repository::users::StoredUserGroup>, GatewayError> {
         self.app
             .replace_user_groups_for_user(user_id, group_ids)
+            .await
+    }
+
+    pub(crate) async fn restore_user_groups_if_matches(
+        &self,
+        user_id: &str,
+        expected_group_ids: &[String],
+        restored_group_ids: &[String],
+    ) -> Result<bool, GatewayError> {
+        self.app
+            .restore_user_groups_if_matches(user_id, expected_group_ids, restored_group_ids)
             .await
     }
 
@@ -246,6 +267,18 @@ impl<'a> AdminAppState<'a> {
             .await
     }
 
+    pub(crate) async fn initialize_auth_user_wallet_with_outcome(
+        &self,
+        user_id: &str,
+        initial_gift_usd: f64,
+        unlimited: bool,
+    ) -> Result<Option<aether_data::repository::wallet::InitializeAuthWalletOutcome>, GatewayError>
+    {
+        self.app
+            .initialize_auth_user_wallet_with_outcome(user_id, initial_gift_usd, unlimited)
+            .await
+    }
+
     pub(crate) async fn initialize_auth_api_key_wallet(
         &self,
         api_key_id: &str,
@@ -257,14 +290,85 @@ impl<'a> AdminAppState<'a> {
             .await
     }
 
+    pub(crate) async fn initialize_auth_api_key_wallet_with_outcome(
+        &self,
+        api_key_id: &str,
+        initial_gift_usd: f64,
+        unlimited: bool,
+    ) -> Result<Option<aether_data::repository::wallet::InitializeAuthWalletOutcome>, GatewayError>
+    {
+        self.app
+            .initialize_auth_api_key_wallet_with_outcome(api_key_id, initial_gift_usd, unlimited)
+            .await
+    }
+
+    pub(crate) async fn delete_wallet_if_unreferenced(
+        &self,
+        wallet_id: &str,
+        owner: aether_data::repository::wallet::WalletLookupKey<'_>,
+    ) -> Result<bool, GatewayError> {
+        self.app
+            .delete_wallet_if_unreferenced(wallet_id, owner)
+            .await
+    }
+
+    pub(crate) async fn delete_wallet_if_snapshot_matches_and_unreferenced(
+        &self,
+        expected: &aether_data::repository::wallet::StoredWalletSnapshot,
+        owner: aether_data::repository::wallet::WalletLookupKey<'_>,
+    ) -> Result<bool, GatewayError> {
+        self.app
+            .delete_wallet_if_snapshot_matches_and_unreferenced(expected, owner)
+            .await
+    }
+
+    pub(crate) async fn restore_wallet_if_snapshot_matches(
+        &self,
+        before: &aether_data::repository::wallet::StoredWalletSnapshot,
+        after: &aether_data::repository::wallet::StoredWalletSnapshot,
+        owner: aether_data::repository::wallet::WalletLookupKey<'_>,
+    ) -> Result<bool, GatewayError> {
+        self.app
+            .restore_wallet_if_snapshot_matches(before, after, owner)
+            .await
+    }
+
     pub(crate) async fn update_local_auth_user_profile(
         &self,
         user_id: &str,
+        email_present: bool,
         email: Option<String>,
+        email_verified: Option<bool>,
         username: Option<String>,
     ) -> Result<Option<aether_data::repository::users::StoredUserAuthRecord>, GatewayError> {
         self.app
-            .update_local_auth_user_profile(user_id, email, username)
+            .update_local_auth_user_profile(user_id, email_present, email, email_verified, username)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn restore_local_auth_user_state_if_matches(
+        &self,
+        expected_auth: &aether_data::repository::users::StoredUserAuthRecord,
+        restored_auth: &aether_data::repository::users::StoredUserAuthRecord,
+        expected_export: &aether_data::repository::users::StoredUserExportRow,
+        restored_export: &aether_data::repository::users::StoredUserExportRow,
+        expected_model_capability_settings: Option<&serde_json::Value>,
+        restored_model_capability_settings: Option<serde_json::Value>,
+        expected_feature_settings: Option<&serde_json::Value>,
+        restored_feature_settings: Option<serde_json::Value>,
+    ) -> Result<bool, GatewayError> {
+        self.app
+            .restore_local_auth_user_state_if_matches(
+                expected_auth,
+                restored_auth,
+                expected_export,
+                restored_export,
+                expected_model_capability_settings,
+                restored_model_capability_settings,
+                expected_feature_settings,
+                restored_feature_settings,
+            )
             .await
     }
 
@@ -276,6 +380,34 @@ impl<'a> AdminAppState<'a> {
     ) -> Result<Option<aether_data::repository::users::StoredUserAuthRecord>, GatewayError> {
         self.app
             .update_local_auth_user_password_hash(user_id, password_hash, updated_at)
+            .await
+    }
+
+    pub(crate) async fn restore_local_auth_user_password_hash_if_matches(
+        &self,
+        user_id: &str,
+        expected_password_hash: Option<&str>,
+        password_hash: Option<String>,
+        updated_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, GatewayError> {
+        self.app
+            .restore_local_auth_user_password_hash_if_matches(
+                user_id,
+                expected_password_hash,
+                password_hash,
+                updated_at,
+            )
+            .await
+    }
+
+    pub(crate) async fn reset_local_auth_user_password_and_revoke_sessions(
+        &self,
+        user_id: &str,
+        password_hash: String,
+        changed_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, GatewayError> {
+        self.app
+            .reset_local_auth_user_password_and_revoke_sessions(user_id, password_hash, changed_at)
             .await
     }
 
@@ -456,6 +588,16 @@ impl<'a> AdminAppState<'a> {
         self.app.delete_local_auth_user(user_id).await
     }
 
+    pub(crate) async fn rollback_provisional_auth_user_with_wallet(
+        &self,
+        user_id: &str,
+        wallet_id: Option<&str>,
+    ) -> Result<(), GatewayError> {
+        self.app
+            .rollback_provisional_auth_user_with_wallet(user_id, wallet_id)
+            .await
+    }
+
     pub(crate) async fn list_user_sessions(
         &self,
         user_id: &str,
@@ -623,6 +765,16 @@ impl<'a> AdminAppState<'a> {
     ) -> Result<Option<aether_data::repository::auth::StoredAuthApiKeyExportRecord>, GatewayError>
     {
         self.app.update_standalone_api_key_basic(record).await
+    }
+
+    pub(crate) async fn restore_api_key_if_matches(
+        &self,
+        expected: &aether_data::repository::auth::StoredAuthApiKeyExportRecord,
+        restored: &aether_data::repository::auth::StoredAuthApiKeyExportRecord,
+    ) -> Result<bool, GatewayError> {
+        self.app
+            .restore_api_key_if_matches(expected, restored)
+            .await
     }
 
     pub(crate) async fn set_standalone_api_key_active(

@@ -7,11 +7,22 @@ const BOOTSTRAP_ADMIN_EMAIL_ENVS: &[&str] = &["ADMIN_EMAIL"];
 const BOOTSTRAP_ADMIN_USERNAME_ENVS: &[&str] = &["ADMIN_USERNAME"];
 const BOOTSTRAP_ADMIN_PASSWORD_ENVS: &[&str] = &["ADMIN_PASSWORD"];
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 struct BootstrapAdminConfig {
     email: Option<String>,
     username: String,
     password: String,
+}
+
+impl std::fmt::Debug for BootstrapAdminConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BootstrapAdminConfig")
+            .field("email", &self.email)
+            .field("username", &self.username)
+            .field("password", &"[REDACTED]")
+            .finish()
+    }
 }
 
 impl BootstrapAdminConfig {
@@ -493,6 +504,14 @@ mod tests {
                 password: "Secret123!".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn bootstrap_admin_config_debug_output_redacts_password() {
+        let config = bootstrap_config();
+        let debug = format!("{config:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("Secret123!"));
     }
 
     #[test]

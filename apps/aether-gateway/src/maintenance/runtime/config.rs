@@ -115,9 +115,6 @@ pub(super) fn usage_cleanup_window(
     usage_cleanup_window_with_override(now_utc, settings, None)
 }
 
-/// Clamp is non-aggressive: each tier's cutoff becomes `max(policy_cutoff, now - override)`.
-/// A later cutoff = fewer records deleted, so the override can only make cleanup more
-/// conservative than the configured retention, never more destructive.
 pub(super) fn usage_cleanup_window_with_override(
     now_utc: DateTime<Utc>,
     settings: UsageCleanupSettings,
@@ -135,9 +132,9 @@ pub(super) fn usage_cleanup_window_with_override(
     };
     let manual_cutoff = now_utc - override_duration;
     UsageCleanupWindow {
-        detail_cutoff: policy.detail_cutoff.max(manual_cutoff),
-        compressed_cutoff: policy.compressed_cutoff.max(manual_cutoff),
-        header_cutoff: policy.header_cutoff.max(manual_cutoff),
-        log_cutoff: policy.log_cutoff.max(manual_cutoff),
+        detail_cutoff: policy.detail_cutoff.min(manual_cutoff),
+        compressed_cutoff: policy.compressed_cutoff.min(manual_cutoff),
+        header_cutoff: policy.header_cutoff.min(manual_cutoff),
+        log_cutoff: policy.log_cutoff.min(manual_cutoff),
     }
 }

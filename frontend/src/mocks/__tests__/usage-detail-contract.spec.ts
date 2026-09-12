@@ -41,7 +41,7 @@ describe('usage detail demo contracts', () => {
       params: { include_bodies: true },
     })
 
-    expect(response?.data?.response_body).toEqual({
+    expect(response?.data).toHaveProperty('response_body', {
       error: {
         type: 'invalid_request',
         message: 'This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request. To get authorized for security work, join the Trusted Access for Cyber program: https://chatgpt.com/cyber',

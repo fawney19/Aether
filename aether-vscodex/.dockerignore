@@ -1,0 +1,10 @@
+.git
+.github
+node_modules
+test
+fixtures
+vscode-extension
+*.vsix
+coverage
+data
+.DS_Store

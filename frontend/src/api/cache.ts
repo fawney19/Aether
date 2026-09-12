@@ -89,7 +89,7 @@ export const cacheApi = {
    * 获取缓存统计信息
    */
   async getStats(): Promise<CacheStats> {
-    const response = await api.get('/api/admin/monitoring/cache/stats')
+    const response = await api.get<{ data: CacheStats }>('/api/admin/monitoring/cache/stats')
     return response.data.data
   },
 
@@ -97,7 +97,7 @@ export const cacheApi = {
    * 获取缓存配置
    */
   async getConfig(): Promise<CacheConfig> {
-    const response = await api.get('/api/admin/monitoring/cache/config')
+    const response = await api.get<{ data: CacheConfig }>('/api/admin/monitoring/cache/config')
     return response.data.data
   },
 
@@ -107,7 +107,7 @@ export const cacheApi = {
    * @param userIdentifier 用户标识符，支持：用户名、邮箱、User UUID、API Key ID
    */
   async getUserAffinity(userIdentifier: string): Promise<UserAffinity[] | null> {
-    const response = await api.get(`/api/admin/monitoring/cache/affinity/${userIdentifier}`)
+    const response = await api.get<{ status: string; affinities: UserAffinity[] }>(`/api/admin/monitoring/cache/affinity/${userIdentifier}`)
     if (response.data.status === 'not_found') {
       return null
     }
@@ -151,7 +151,7 @@ export const cacheApi = {
    * 清除所有缓存
    */
   async clearAllCache(): Promise<{ count: number }> {
-    const response = await api.delete('/api/admin/monitoring/cache')
+    const response = await api.delete<{ count: number }>('/api/admin/monitoring/cache')
     return response.data
   },
 
@@ -159,7 +159,7 @@ export const cacheApi = {
    * 清除指定Provider的所有缓存
    */
   async clearProviderCache(providerId: string): Promise<{ count: number; provider_id: string }> {
-    const response = await api.delete(`/api/admin/monitoring/cache/providers/${providerId}`)
+    const response = await api.delete<{ count: number; provider_id: string }>(`/api/admin/monitoring/cache/providers/${providerId}`)
     return response.data
   },
 
@@ -167,7 +167,13 @@ export const cacheApi = {
    * 获取缓存亲和性列表
    */
   async listAffinities(keyword?: string): Promise<AffinityListResponse> {
-    const response = await api.get('/api/admin/monitoring/cache/affinities', {
+    const response = await api.get<{
+      data?: {
+        items?: UserAffinity[]
+        meta?: { total?: number }
+        matched_user_id?: string | null
+      }
+    }>('/api/admin/monitoring/cache/affinities', {
       params: keyword ? { keyword } : undefined
     })
     const data = response.data.data ?? {}
@@ -212,7 +218,7 @@ export const redisCacheApi = {
    * 获取 Redis 缓存分类概览
    */
   async getCategories(): Promise<RedisCacheCategoriesResponse> {
-    const response = await api.get('/api/admin/monitoring/cache/redis-keys')
+    const response = await api.get<{ data: RedisCacheCategoriesResponse }>('/api/admin/monitoring/cache/redis-keys')
     return response.data.data
   },
 
@@ -220,7 +226,7 @@ export const redisCacheApi = {
    * 清除指定分类的 Redis 缓存
    */
   async clearCategory(category: string): Promise<{ status: string; message: string; category: string; deleted_count: number }> {
-    const response = await api.delete(`/api/admin/monitoring/cache/redis-keys/${category}`)
+    const response = await api.delete<{ status: string; message: string; category: string; deleted_count: number }>(`/api/admin/monitoring/cache/redis-keys/${category}`)
     return response.data
   }
 }
@@ -308,7 +314,7 @@ export const cacheAnalysisApi = {
     api_key_id?: string
     hours?: number
   }): Promise<TTLAnalysisResponse> {
-    const response = await api.get('/api/admin/usage/cache-affinity/ttl-analysis', { params })
+    const response = await api.get<TTLAnalysisResponse>('/api/admin/usage/cache-affinity/ttl-analysis', { params })
     return response.data
   },
 
@@ -320,7 +326,7 @@ export const cacheAnalysisApi = {
     api_key_id?: string
     hours?: number
   }): Promise<CacheHitAnalysisResponse> {
-    const response = await api.get('/api/admin/usage/cache-affinity/hit-analysis', { params })
+    const response = await api.get<CacheHitAnalysisResponse>('/api/admin/usage/cache-affinity/hit-analysis', { params })
     return response.data
   },
 
@@ -339,7 +345,7 @@ export const cacheAnalysisApi = {
     return cachedRequest(
       cacheKey,
       async () => {
-        const response = await api.get('/api/admin/usage/cache-affinity/interval-timeline', { params })
+        const response = await api.get<IntervalTimelineResponse>('/api/admin/usage/cache-affinity/interval-timeline', { params })
         return response.data
       },
       30000
@@ -408,7 +414,7 @@ export const modelMappingCacheApi = {
    * 获取模型映射缓存统计
    */
   async getStats(): Promise<ModelMappingCacheStats> {
-    const response = await api.get('/api/admin/monitoring/cache/model-mapping/stats')
+    const response = await api.get<{ data: ModelMappingCacheStats }>('/api/admin/monitoring/cache/model-mapping/stats')
     return response.data.data
   },
 
@@ -416,7 +422,7 @@ export const modelMappingCacheApi = {
    * 清除所有模型映射缓存
    */
   async clearAll(): Promise<ClearModelMappingCacheResponse> {
-    const response = await api.delete('/api/admin/monitoring/cache/model-mapping')
+    const response = await api.delete<ClearModelMappingCacheResponse>('/api/admin/monitoring/cache/model-mapping')
     return response.data
   },
 
@@ -424,7 +430,7 @@ export const modelMappingCacheApi = {
    * 清除指定模型名称的映射缓存
    */
   async clearByName(modelName: string): Promise<ClearModelMappingCacheResponse> {
-    const response = await api.delete(`/api/admin/monitoring/cache/model-mapping/${encodeURIComponent(modelName)}`)
+    const response = await api.delete<ClearModelMappingCacheResponse>(`/api/admin/monitoring/cache/model-mapping/${encodeURIComponent(modelName)}`)
     return response.data
   },
 
@@ -432,7 +438,7 @@ export const modelMappingCacheApi = {
    * 清除指定 Provider 和 GlobalModel 的映射缓存
    */
   async clearProviderModel(providerId: string, globalModelId: string): Promise<ClearModelMappingCacheResponse> {
-    const response = await api.delete(`/api/admin/monitoring/cache/model-mapping/provider/${providerId}/${globalModelId}`)
+    const response = await api.delete<ClearModelMappingCacheResponse>(`/api/admin/monitoring/cache/model-mapping/provider/${providerId}/${globalModelId}`)
     return response.data
   }
 }

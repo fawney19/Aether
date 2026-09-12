@@ -21,7 +21,7 @@
             : 'border-border hover:border-muted-foreground/40',
           showManualInput ? 'opacity-0 pointer-events-none' : 'opacity-100',
         ]"
-        :inert="showManualInput ? '' : undefined"
+        :inert="showManualInput ? true : undefined"
         :aria-hidden="showManualInput"
         data-testid="json-import-file-panel"
         @click="fileInputRef?.click()"
@@ -47,7 +47,7 @@
       <div
         class="space-y-1.5 transition-opacity duration-150"
         :class="showManualInput ? 'opacity-100' : 'opacity-0 pointer-events-none'"
-        :inert="showManualInput ? undefined : ''"
+        :inert="showManualInput ? undefined : true"
         :aria-hidden="!showManualInput"
         data-testid="json-import-manual-panel"
       >

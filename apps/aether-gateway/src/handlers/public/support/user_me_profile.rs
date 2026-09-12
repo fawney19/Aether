@@ -12,25 +12,28 @@ use crate::handlers::shared::{
 };
 
 use super::{
-    auth_password_policy_level, base_url_from_request, build_auth_error_response,
-    resolve_authenticated_local_user, validate_auth_register_password, AppState,
-    GatewayPublicRequestContext,
+    auth_email_is_verified, auth_password_policy_level, base_url_from_request,
+    build_auth_error_response, build_auth_json_response, build_auth_refresh_cookie_clear_header,
+    consume_auth_email_registration_proof, resolve_authenticated_local_user,
+    validate_auth_register_password, AppState, GatewayPublicRequestContext,
 };
 
 const USERS_ME_PROFILE_STORAGE_UNAVAILABLE_DETAIL: &str = "用户资料存储暂不可用";
 const USERS_ME_CREDENTIAL_STORAGE_UNAVAILABLE_DETAIL: &str = "用户凭证存储暂不可用";
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct UsersMeUpdateProfileRequest {
     #[serde(default)]
     email: Option<String>,
+    #[serde(default)]
+    email_verification_token: Option<String>,
     #[serde(default)]
     username: Option<String>,
     #[serde(default, deserialize_with = "deserialize_optional_json_patch")]
     feature_settings: Option<Option<serde_json::Value>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct UsersMeChangePasswordRequest {
     #[serde(default, alias = "current_password")]
     old_password: Option<String>,
@@ -45,6 +48,7 @@ pub(super) async fn handle_users_me_client_config_get(
     state: &AppState,
     request_context: &GatewayPublicRequestContext,
     headers: &http::HeaderMap,
+    remote_addr: &std::net::SocketAddr,
 ) -> Response<Body> {
     if let Err(response) = resolve_authenticated_local_user(state, request_context, headers).await {
         return response;
@@ -59,7 +63,7 @@ pub(super) async fn handle_users_me_client_config_get(
         .unwrap_or_else(|| "Aether".to_string());
 
     Json(json!({
-        "base_url": base_url_from_request(headers, request_context),
+        "base_url": base_url_from_request(headers, request_context, remote_addr),
         "site_name": site_name,
     }))
     .into_response()
@@ -90,7 +94,15 @@ pub(super) async fn handle_users_me_detail_put(
     };
 
     let email = normalize_users_me_optional_non_empty_string(payload.email);
+    let email_verification_token = payload
+        .email_verification_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
     let username = normalize_users_me_optional_non_empty_string(payload.username);
+    let email_changed = email
+        .as_deref()
+        .is_some_and(|value| auth.user.email.as_deref() != Some(value));
     let feature_settings = match payload.feature_settings {
         Some(value) => {
             let current = match state.read_user_feature_settings(&auth.user.id).await {
@@ -136,6 +148,39 @@ pub(super) async fn handle_users_me_detail_put(
         }
     }
 
+    if email_changed {
+        let Some(verification_token) = email_verification_token else {
+            return build_auth_error_response(
+                http::StatusCode::BAD_REQUEST,
+                "修改邮箱前请先完成新邮箱验证",
+                false,
+            );
+        };
+        match auth_email_is_verified(
+            state,
+            email.as_deref().unwrap_or_default(),
+            verification_token,
+        )
+        .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                return build_auth_error_response(
+                    http::StatusCode::BAD_REQUEST,
+                    "邮箱验证凭据无效或已过期，请重新验证",
+                    false,
+                );
+            }
+            Err(err) => {
+                return build_auth_error_response(
+                    http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("email verification lookup failed: {err:?}"),
+                    false,
+                );
+            }
+        }
+    }
+
     if let Some(username) = username.as_deref() {
         match state
             .is_other_user_auth_username_taken(username, &auth.user.id)
@@ -159,39 +204,74 @@ pub(super) async fn handle_users_me_detail_put(
         }
     }
 
+    if email_changed {
+        let verification_token =
+            email_verification_token.expect("email change token checked above");
+        match consume_auth_email_registration_proof(
+            state,
+            email.as_deref().unwrap_or_default(),
+            verification_token,
+        )
+        .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                return build_auth_error_response(
+                    http::StatusCode::CONFLICT,
+                    "邮箱验证凭据已被使用，请重新验证",
+                    false,
+                );
+            }
+            Err(err) => {
+                return build_auth_error_response(
+                    http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("email verification consume failed: {err:?}"),
+                    false,
+                );
+            }
+        }
+    }
+
     match state
-        .update_local_auth_user_profile(&auth.user.id, email, username)
+        .update_local_auth_user_profile(
+            &auth.user.id,
+            email.is_some(),
+            email,
+            email_changed.then_some(true),
+            username,
+        )
         .await
     {
-        Ok(Some(_)) => {
-            if let Some(feature_settings) = feature_settings {
-                match state
-                    .update_user_feature_settings(&auth.user.id, feature_settings)
-                    .await
-                {
-                    Ok(_) => {}
-                    Err(err) => {
-                        return build_auth_error_response(
-                            http::StatusCode::INTERNAL_SERVER_ERROR,
-                            format!("user feature settings update failed: {err:?}"),
-                            false,
-                        )
-                    }
-                }
-            }
-            Json(json!({ "message": "个人信息更新成功" })).into_response()
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return build_auth_error_response(
+                http::StatusCode::SERVICE_UNAVAILABLE,
+                USERS_ME_PROFILE_STORAGE_UNAVAILABLE_DETAIL,
+                false,
+            )
         }
-        Ok(None) => build_auth_error_response(
-            http::StatusCode::SERVICE_UNAVAILABLE,
-            USERS_ME_PROFILE_STORAGE_UNAVAILABLE_DETAIL,
-            false,
-        ),
-        Err(err) => build_auth_error_response(
-            http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("user profile update failed: {err:?}"),
-            false,
-        ),
+        Err(err) => {
+            return build_auth_error_response(
+                http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("user profile update failed: {err:?}"),
+                false,
+            )
+        }
     }
+
+    if let Some(feature_settings) = feature_settings {
+        if let Err(err) = state
+            .update_user_feature_settings(&auth.user.id, feature_settings)
+            .await
+        {
+            return build_auth_error_response(
+                http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("user feature settings update failed: {err:?}"),
+                false,
+            );
+        }
+    }
+    Json(json!({ "message": "个人信息更新成功" })).into_response()
 }
 
 pub(super) async fn handle_users_me_password_patch(
@@ -281,15 +361,21 @@ pub(super) async fn handle_users_me_password_patch(
     };
     let updated_at = chrono::Utc::now();
     match state
-        .update_local_auth_user_password_hash(&auth.user.id, password_hash, updated_at)
+        .change_local_auth_password_and_revoke_sessions(
+            &auth.user.id,
+            &auth.session_id,
+            current_password_hash,
+            password_hash,
+            updated_at,
+        )
         .await
     {
-        Ok(Some(_)) => {}
-        Ok(None) => {
+        Ok(true) => {}
+        Ok(false) => {
             return build_auth_error_response(
                 http::StatusCode::SERVICE_UNAVAILABLE,
                 USERS_ME_CREDENTIAL_STORAGE_UNAVAILABLE_DETAIL,
-                false,
+                true,
             )
         }
         Err(err) => {
@@ -301,36 +387,14 @@ pub(super) async fn handle_users_me_password_patch(
         }
     }
 
-    let sessions = match state.list_user_sessions(&auth.user.id).await {
-        Ok(value) => value,
-        Err(err) => {
-            return build_auth_error_response(
-                http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("user session lookup failed: {err:?}"),
-                false,
-            )
-        }
-    };
-    for session in sessions {
-        if session.id == auth.session_id {
-            continue;
-        }
-        if let Err(err) = state
-            .revoke_user_session(&auth.user.id, &session.id, updated_at, "password_changed")
-            .await
-        {
-            return build_auth_error_response(
-                http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("user session revoke failed: {err:?}"),
-                false,
-            );
-        }
-    }
-
     let action = if current_password_hash.is_some() {
         "修改"
     } else {
         "设置"
     };
-    Json(json!({ "message": format!("密码{action}成功") })).into_response()
+    build_auth_json_response(
+        http::StatusCode::OK,
+        json!({ "message": format!("密码{action}成功") }),
+        Some(build_auth_refresh_cookie_clear_header()),
+    )
 }

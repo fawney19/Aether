@@ -1,8 +1,10 @@
 use std::collections::BTreeMap;
 
 use super::headers::{
-    is_aether_internal_header, is_upstream_credential_header, normalize_upstream_accept_encoding,
-    should_skip_upstream_complete_passthrough_header, should_skip_upstream_passthrough_header,
+    declared_connection_header_names, is_aether_internal_header, is_upstream_credential_header,
+    normalize_upstream_accept_encoding, remove_declared_connection_headers,
+    should_skip_upstream_complete_passthrough_header_with_connection,
+    should_skip_upstream_passthrough_header_with_connection,
 };
 use super::snapshot::GatewayProviderTransportSnapshot;
 
@@ -13,13 +15,17 @@ fn collect_passthrough_headers(
     headers: &http::HeaderMap,
     extra_headers: &BTreeMap<String, String>,
 ) -> BTreeMap<String, String> {
+    let declared_connection_headers = declared_connection_header_names(headers, extra_headers);
     let mut out = BTreeMap::new();
     for (name, value) in headers.iter() {
         let Ok(value) = value.to_str() else {
             continue;
         };
         let key = name.as_str().to_ascii_lowercase();
-        if should_skip_upstream_passthrough_header(&key) {
+        if should_skip_upstream_passthrough_header_with_connection(
+            &key,
+            &declared_connection_headers,
+        ) {
             continue;
         }
         let Some(value) = normalize_passthrough_header_value(&key, value) else {
@@ -30,7 +36,10 @@ fn collect_passthrough_headers(
 
     for (key, value) in extra_headers {
         let normalized_key = key.to_ascii_lowercase();
-        if should_skip_upstream_passthrough_header(&normalized_key) {
+        if should_skip_upstream_passthrough_header_with_connection(
+            &normalized_key,
+            &declared_connection_headers,
+        ) {
             continue;
         }
         let Some(value) = normalize_passthrough_header_value(&normalized_key, value) else {
@@ -46,13 +55,17 @@ fn collect_complete_passthrough_headers(
     headers: &http::HeaderMap,
     extra_headers: &BTreeMap<String, String>,
 ) -> BTreeMap<String, String> {
+    let declared_connection_headers = declared_connection_header_names(headers, extra_headers);
     let mut out = BTreeMap::new();
     for (name, value) in headers.iter() {
         let Ok(value) = value.to_str() else {
             continue;
         };
         let key = name.as_str().to_ascii_lowercase();
-        if should_skip_upstream_complete_passthrough_header(&key) {
+        if should_skip_upstream_complete_passthrough_header_with_connection(
+            &key,
+            &declared_connection_headers,
+        ) {
             continue;
         }
         let Some(value) = normalize_passthrough_header_value(&key, value) else {
@@ -63,7 +76,10 @@ fn collect_complete_passthrough_headers(
 
     for (key, value) in extra_headers {
         let normalized_key = key.to_ascii_lowercase();
-        if should_skip_upstream_complete_passthrough_header(&normalized_key) {
+        if should_skip_upstream_complete_passthrough_header_with_connection(
+            &normalized_key,
+            &declared_connection_headers,
+        ) {
             continue;
         }
         let Some(value) = normalize_passthrough_header_value(&normalized_key, value) else {
@@ -101,6 +117,8 @@ pub fn build_passthrough_headers(
             .trim()
             .to_string()
     });
+    let declared_connection_headers = declared_connection_header_names(headers, extra_headers);
+    remove_declared_connection_headers(&mut out, &declared_connection_headers);
     out.remove("content-length");
     out
 }
@@ -112,8 +130,10 @@ pub fn build_openai_passthrough_headers(
     extra_headers: &BTreeMap<String, String>,
     content_type: Option<&str>,
 ) -> BTreeMap<String, String> {
+    let declared_connection_headers = declared_connection_header_names(headers, extra_headers);
     let mut out = build_passthrough_headers(headers, extra_headers, content_type);
     ensure_upstream_auth_header(&mut out, auth_header, auth_value);
+    remove_declared_connection_headers(&mut out, &declared_connection_headers);
     out
 }
 
@@ -122,7 +142,9 @@ pub fn build_complete_passthrough_headers(
     extra_headers: &BTreeMap<String, String>,
     content_type: Option<&str>,
 ) -> BTreeMap<String, String> {
+    let declared_connection_headers = declared_connection_header_names(headers, extra_headers);
     let mut out = collect_complete_passthrough_headers(headers, extra_headers);
+    remove_declared_connection_headers(&mut out, &declared_connection_headers);
     out.entry("content-type".to_string()).or_insert_with(|| {
         content_type
             .filter(|value| !value.trim().is_empty())
@@ -130,6 +152,7 @@ pub fn build_complete_passthrough_headers(
             .trim()
             .to_string()
     });
+    remove_declared_connection_headers(&mut out, &declared_connection_headers);
     out.remove("content-length");
     out
 }
@@ -141,8 +164,10 @@ pub fn build_complete_passthrough_headers_with_auth(
     extra_headers: &BTreeMap<String, String>,
     content_type: Option<&str>,
 ) -> BTreeMap<String, String> {
+    let declared_connection_headers = declared_connection_header_names(headers, extra_headers);
     let mut out = build_complete_passthrough_headers(headers, extra_headers, content_type);
     replace_upstream_auth_headers(&mut out, auth_header, auth_value);
+    remove_declared_connection_headers(&mut out, &declared_connection_headers);
     out
 }
 
@@ -153,6 +178,7 @@ pub fn build_claude_passthrough_headers(
     extra_headers: &BTreeMap<String, String>,
     content_type: Option<&str>,
 ) -> BTreeMap<String, String> {
+    let declared_connection_headers = declared_connection_header_names(headers, extra_headers);
     let mut out = build_openai_passthrough_headers(
         headers,
         auth_header,
@@ -164,7 +190,10 @@ pub fn build_claude_passthrough_headers(
     for (name, value) in extra_headers {
         let key = name.to_ascii_lowercase();
         let value = value.trim();
-        if value.is_empty() || !should_restore_claude_passthrough_header(&key) {
+        if value.is_empty()
+            || !should_restore_claude_passthrough_header(&key)
+            || declared_connection_headers.contains(&key)
+        {
             continue;
         }
 
@@ -185,7 +214,10 @@ pub fn build_claude_passthrough_headers(
         };
         let key = name.as_str().to_ascii_lowercase();
         let value = value.trim();
-        if value.is_empty() || !should_restore_claude_passthrough_header(&key) {
+        if value.is_empty()
+            || !should_restore_claude_passthrough_header(&key)
+            || declared_connection_headers.contains(&key)
+        {
             continue;
         }
 
@@ -202,6 +234,7 @@ pub fn build_claude_passthrough_headers(
 
     out.entry("anthropic-version".to_string())
         .or_insert_with(|| DEFAULT_ANTHROPIC_VERSION.to_string());
+    remove_declared_connection_headers(&mut out, &declared_connection_headers);
     out
 }
 
@@ -211,8 +244,10 @@ pub fn build_passthrough_headers_with_auth(
     auth_value: &str,
     extra_headers: &BTreeMap<String, String>,
 ) -> BTreeMap<String, String> {
+    let declared_connection_headers = declared_connection_header_names(headers, extra_headers);
     let mut out = collect_passthrough_headers(headers, extra_headers);
     replace_upstream_auth_headers(&mut out, auth_header, auth_value);
+    remove_declared_connection_headers(&mut out, &declared_connection_headers);
     out.remove("content-length");
     out
 }
@@ -357,9 +392,9 @@ fn bearer_auth_value(secret: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_claude_passthrough_headers, build_complete_passthrough_headers_with_auth,
-        build_openai_passthrough_headers, resolve_local_openai_bearer_auth,
-        resolve_local_standard_auth,
+        build_claude_passthrough_headers, build_complete_passthrough_headers,
+        build_complete_passthrough_headers_with_auth, build_openai_passthrough_headers,
+        resolve_local_openai_bearer_auth, resolve_local_standard_auth,
     };
     use crate::snapshot::{
         GatewayProviderTransportEndpoint, GatewayProviderTransportKey,
@@ -493,6 +528,67 @@ mod tests {
             built.get("accept-encoding").map(String::as_str),
             Some("gzip")
         );
+    }
+
+    #[test]
+    fn passthrough_headers_strip_connection_declared_fields() {
+        let mut headers = http::HeaderMap::new();
+        headers.append(
+            http::header::CONNECTION,
+            http::HeaderValue::from_static("X-Internal-Hop, keep-alive"),
+        );
+        headers.append(
+            http::header::CONNECTION,
+            http::HeaderValue::from_static("x-extra-hop"),
+        );
+        headers.insert(
+            "x-internal-hop",
+            http::HeaderValue::from_static("private-value"),
+        );
+        headers.insert(
+            "x-extra-hop",
+            http::HeaderValue::from_static("private-value-2"),
+        );
+        headers.insert("x-public", http::HeaderValue::from_static("ok"));
+
+        let extra = BTreeMap::from([
+            (
+                "Connection".to_string(),
+                "X-Extra-From-Connection".to_string(),
+            ),
+            ("X-Extra-From-Connection".to_string(), "secret".to_string()),
+        ]);
+        let built = build_openai_passthrough_headers(
+            &headers,
+            "authorization",
+            "Bearer upstream",
+            &extra,
+            Some("application/json"),
+        );
+
+        assert_eq!(built.get("x-public").map(String::as_str), Some("ok"));
+        assert!(!built.contains_key("connection"));
+        assert!(!built.contains_key("x-internal-hop"));
+        assert!(!built.contains_key("x-extra-hop"));
+        assert!(built
+            .keys()
+            .all(|name| { !name.eq_ignore_ascii_case("x-extra-from-connection") }));
+    }
+
+    #[test]
+    fn complete_passthrough_headers_strip_connection_declared_fields_from_extra_headers() {
+        let headers = http::HeaderMap::new();
+        let extra = BTreeMap::from([
+            ("Connection".to_string(), "x-private-hop".to_string()),
+            ("X-Private-Hop".to_string(), "secret".to_string()),
+            ("x-public".to_string(), "ok".to_string()),
+        ]);
+
+        let built = build_complete_passthrough_headers(&headers, &extra, None);
+
+        assert_eq!(built.get("x-public").map(String::as_str), Some("ok"));
+        assert!(!built.contains_key("connection"));
+        assert!(!built.contains_key("x-private-hop"));
     }
 
     #[test]

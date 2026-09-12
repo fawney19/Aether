@@ -6,6 +6,13 @@ use aether_data_contracts::repository::video_tasks::{
     VideoTaskQueryFilter, VideoTaskStatusCount,
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VideoTaskRouteAccess {
+    Allowed,
+    NotFound,
+    Denied,
+}
+
 impl AppState {
     pub(crate) async fn read_data_backed_video_task_response(
         &self,
@@ -14,6 +21,18 @@ impl AppState {
     ) -> Result<Option<video_tasks::LocalVideoTaskReadResponse>, GatewayError> {
         self.data
             .read_video_task_response(route_family, request_path)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
+    pub(crate) async fn read_data_backed_video_task_response_for_user(
+        &self,
+        route_family: Option<&str>,
+        request_path: &str,
+        user_id: &str,
+    ) -> Result<Option<video_tasks::LocalVideoTaskReadResponse>, GatewayError> {
+        self.data
+            .read_video_task_response_for_user(route_family, request_path, user_id)
             .await
             .map_err(|err| GatewayError::Internal(err.to_string()))
     }
@@ -38,12 +57,72 @@ impl AppState {
             .map_err(|err| GatewayError::Internal(err.to_string()))
     }
 
+    pub(crate) async fn find_video_task_by_id_for_user(
+        &self,
+        task_id: &str,
+        user_id: &str,
+    ) -> Result<Option<StoredVideoTask>, GatewayError> {
+        self.data
+            .find_video_task_for_user(VideoTaskLookupKey::Id(task_id), user_id)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
+    pub(crate) async fn find_video_task_by_short_id_for_user(
+        &self,
+        short_id: &str,
+        user_id: &str,
+    ) -> Result<Option<StoredVideoTask>, GatewayError> {
+        self.data
+            .find_video_task_for_user(VideoTaskLookupKey::ShortId(short_id), user_id)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
     pub(crate) async fn upsert_video_task_snapshot(
         &self,
         snapshot: &video_tasks::LocalVideoTaskSnapshot,
     ) -> Result<Option<StoredVideoTask>, GatewayError> {
+        let mut record = snapshot.to_upsert_record();
+        // Reconstructed snapshots intentionally omit sensitive/request-only fields. Preserve the
+        // persisted row's immutable identity and request-shape scalars before writing lifecycle
+        // changes back, so the repository can continue enforcing immutable-field integrity.
+        let existing_by_id = self
+            .data
+            .find_video_task(VideoTaskLookupKey::Id(record.id.as_str()))
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        let existing = if existing_by_id.is_some() {
+            existing_by_id
+        } else if let Some(short_id) = record.short_id.as_deref() {
+            self.data
+                .find_video_task(VideoTaskLookupKey::ShortId(short_id))
+                .await
+                .map_err(|err| GatewayError::Internal(err.to_string()))?
+        } else {
+            None
+        };
+        if let Some(existing) = existing {
+            record.id = existing.id;
+            record.short_id = existing.short_id;
+            record.request_id = existing.request_id;
+            record.user_id = existing.user_id;
+            record.api_key_id = existing.api_key_id;
+            record.external_task_id = existing.external_task_id;
+            record.provider_id = existing.provider_id;
+            record.endpoint_id = existing.endpoint_id;
+            record.key_id = existing.key_id;
+            record.client_api_format = existing.client_api_format;
+            record.provider_api_format = existing.provider_api_format;
+            record.format_converted = existing.format_converted;
+            record.model = existing.model;
+            record.duration_seconds = existing.duration_seconds;
+            record.resolution = existing.resolution;
+            record.aspect_ratio = existing.aspect_ratio;
+            record.size = existing.size;
+        }
         self.data
-            .upsert_video_task(snapshot.to_upsert_record())
+            .upsert_video_task(record)
             .await
             .map_err(|err| GatewayError::Internal(err.to_string()))
     }
@@ -75,6 +154,50 @@ impl AppState {
         };
         self.video_tasks.record_snapshot(snapshot);
         Ok(true)
+    }
+
+    pub(crate) async fn hydrate_video_task_for_route_for_user(
+        &self,
+        route_family: Option<&str>,
+        request_path: &str,
+        user_id: &str,
+    ) -> Result<VideoTaskRouteAccess, GatewayError> {
+        let user_id = user_id.trim();
+        if user_id.is_empty() {
+            return Ok(VideoTaskRouteAccess::Denied);
+        }
+        let Some(lookup) =
+            video_tasks::resolve_video_task_hydration_lookup_key(route_family, request_path)
+        else {
+            return Ok(VideoTaskRouteAccess::NotFound);
+        };
+
+        if let Some(task) = self
+            .data
+            .find_video_task_for_user(lookup, user_id)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))?
+        {
+            if !self.video_tasks.hydrate_from_stored_task(&task) {
+                if let Some(snapshot) = self.reconstruct_video_task_snapshot(&task).await? {
+                    self.video_tasks.record_snapshot(snapshot);
+                }
+            }
+            return Ok(VideoTaskRouteAccess::Allowed);
+        }
+
+        Ok(
+            match self
+                .video_tasks
+                .snapshot_for_route(route_family, request_path)
+            {
+                Some(snapshot) if snapshot.belongs_to_user(user_id) => {
+                    VideoTaskRouteAccess::Allowed
+                }
+                Some(_) => VideoTaskRouteAccess::Denied,
+                None => VideoTaskRouteAccess::NotFound,
+            },
+        )
     }
 
     pub(crate) async fn reconstruct_video_task_snapshot(

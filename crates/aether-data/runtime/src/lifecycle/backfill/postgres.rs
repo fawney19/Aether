@@ -8,6 +8,8 @@ use tracing::{error, info, warn};
 
 use super::types::PendingBackfillInfo;
 
+// Historical backfill manifests must remain available after they are applied;
+// deployed databases retain their versions for startup compatibility checks.
 static BACKFILL_MIGRATOR: Migrator = sqlx::migrate!("./backfills/postgres");
 
 const SCHEMA_BACKFILLS_TABLE_EXISTS_SQL: &str =
@@ -55,7 +57,7 @@ pub(super) struct AppliedBackfill {
 }
 
 pub async fn run_backfills(pool: &PgPool) -> Result<(), MigrateError> {
-    let mut conn = pool.acquire().await?;
+    let mut conn = aether_data_postgres::acquire_postgres_migration_connection(pool).await?;
 
     if BACKFILL_MIGRATOR.locking {
         conn.lock().await?;
@@ -155,17 +157,23 @@ async fn run_backfills_locked(conn: &mut PgConnection) -> Result<(), MigrateErro
 async fn pending_backfills_locked(
     conn: &mut PgConnection,
 ) -> Result<Vec<PendingBackfillInfo>, MigrateError> {
-    ensure_schema_backfills_table(conn).await?;
+    if !schema_backfills_table_exists(conn).await? {
+        return Ok(pending_backfills_from_applied(&[]));
+    }
     let applied_backfills = list_applied_backfills(conn).await?;
     validate_applied_backfills(&applied_backfills)?;
     Ok(pending_backfills_from_applied(&applied_backfills))
 }
 
-async fn ensure_schema_backfills_table(conn: &mut PgConnection) -> Result<(), MigrateError> {
-    let exists: bool = query_scalar(SCHEMA_BACKFILLS_TABLE_EXISTS_SQL)
+async fn schema_backfills_table_exists(conn: &mut PgConnection) -> Result<bool, MigrateError> {
+    query_scalar(SCHEMA_BACKFILLS_TABLE_EXISTS_SQL)
         .fetch_one(&mut *conn)
-        .await?;
-    if exists {
+        .await
+        .map_err(Into::into)
+}
+
+async fn ensure_schema_backfills_table(conn: &mut PgConnection) -> Result<(), MigrateError> {
+    if schema_backfills_table_exists(conn).await? {
         return Ok(());
     }
     query(ENSURE_SCHEMA_BACKFILLS_TABLE_SQL)

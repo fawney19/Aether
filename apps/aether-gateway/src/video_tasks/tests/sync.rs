@@ -253,6 +253,13 @@ fn rust_authoritative_service_reads_openai_task_from_local_registry() {
         response.body_json.get("status").and_then(Value::as_str),
         Some("queued")
     );
+
+    assert!(service
+        .read_response_for_user(Some("openai"), "/v1/videos/task-local-123", "user-foreign",)
+        .is_none());
+    assert!(service
+        .read_response_for_user(Some("openai"), "/v1/videos/task-local-123", "user-123",)
+        .is_some());
 }
 
 #[test]

@@ -13,24 +13,6 @@ use aether_data_contracts::repository::provider_catalog::{
 pub(crate) struct ProviderOAuthRepository;
 
 impl ProviderOAuthRepository {
-    pub(crate) async fn update_provider_catalog_key_oauth_credentials(
-        state: &AdminAppState<'_>,
-        key_id: &str,
-        encrypted_api_key: &str,
-        encrypted_auth_config: Option<&str>,
-        expires_at_unix_secs: Option<u64>,
-    ) -> Result<bool, GatewayError> {
-        state
-            .app()
-            .update_provider_catalog_key_oauth_credentials(
-                key_id,
-                encrypted_api_key,
-                encrypted_auth_config,
-                expires_at_unix_secs,
-            )
-            .await
-    }
-
     pub(crate) async fn clear_provider_catalog_key_oauth_invalid_marker(
         state: &AdminAppState<'_>,
         key_id: &str,

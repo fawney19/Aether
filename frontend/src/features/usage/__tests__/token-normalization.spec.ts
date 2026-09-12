@@ -42,12 +42,13 @@ describe('usage token normalization', () => {
   })
 
   it('does not subtract cache read tokens for Claude usage', () => {
-    expect(getEffectiveInputTokens({
+    const usage = {
       input_tokens: 4941,
       cache_creation_input_tokens: 687,
       cache_read_input_tokens: 52873,
       output_tokens: 973,
       api_format: 'claude:messages',
-    })).toBe(4941)
+    }
+    expect(getEffectiveInputTokens(usage)).toBe(4941)
   })
 })

@@ -1,13 +1,14 @@
 use crate::handlers::admin::request::AdminAppState;
 use aether_data::repository::oauth_providers::{
-    EncryptedSecretUpdate, UpsertOAuthProviderConfigRecord,
+    validate_oauth_frontend_callback_url, validate_oauth_provider_endpoint_config,
+    validate_oauth_redirect_uri, EncryptedSecretUpdate, UpsertOAuthProviderConfigRecord,
 };
 use axum::http;
 use serde::Deserialize;
 use serde_json::json;
-use url::Url;
+use url::{Host, Url};
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub(crate) struct AdminOAuthProviderUpsertRequest {
     pub(super) display_name: String,
     pub(super) client_id: String,
@@ -122,7 +123,9 @@ pub(super) fn admin_oauth_is_supported_provider(provider_type: &str) -> bool {
     })
 }
 
-fn admin_oauth_builtin_allowed_domains(provider_type: &str) -> Option<&'static [&'static str]> {
+pub(super) fn admin_oauth_builtin_allowed_domains(
+    provider_type: &str,
+) -> Option<&'static [&'static str]> {
     if provider_type.eq_ignore_ascii_case("linuxdo") {
         Some(&["linux.do", "connect.linux.do", "connect.linuxdo.org"])
     } else {
@@ -130,7 +133,9 @@ fn admin_oauth_builtin_allowed_domains(provider_type: &str) -> Option<&'static [
     }
 }
 
-fn admin_oauth_custom_allowed_domains(extra_config: Option<&serde_json::Value>) -> Vec<String> {
+pub(super) fn admin_oauth_custom_allowed_domains(
+    extra_config: Option<&serde_json::Value>,
+) -> Vec<String> {
     extra_config
         .and_then(serde_json::Value::as_object)
         .and_then(|object| {
@@ -146,41 +151,56 @@ fn admin_oauth_custom_allowed_domains(extra_config: Option<&serde_json::Value>) 
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
                 .map(|value| value.trim_end_matches('.').to_ascii_lowercase())
+                .filter(|value| value.parse::<std::net::IpAddr>().is_err())
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default()
 }
 
-fn validate_admin_oauth_frontend_callback_url(url: &str) -> Result<(), String> {
-    let parsed = Url::parse(url).map_err(|_| "frontend_callback_url 必须是绝对 URL".to_string())?;
-    if !matches!(parsed.scheme(), "http" | "https") {
-        return Err("frontend_callback_url scheme 必须是 http/https".to_string());
-    }
-    if parsed.host_str().is_none() {
-        return Err("frontend_callback_url 必须是绝对 URL".to_string());
-    }
-    let path = parsed.path().trim_end_matches('/');
-    if !path.ends_with("/auth/callback") {
-        return Err("frontend_callback_url 路径必须以 /auth/callback 结尾".to_string());
-    }
-    Ok(())
+pub(super) fn validate_admin_oauth_url_override(
+    url: &str,
+    allowed_domains: &[&str],
+) -> Result<(), String> {
+    validate_admin_oauth_url_override_with_options(url, allowed_domains, false)
 }
 
-fn validate_admin_oauth_redirect_uri(url: &str) -> Result<(), String> {
-    let parsed = Url::parse(url).map_err(|_| "redirect_uri 必须是绝对 URL".to_string())?;
-    if !matches!(parsed.scheme(), "http" | "https") {
-        return Err("redirect_uri scheme 必须是 http/https".to_string());
-    }
-    if parsed.host_str().is_none() {
-        return Err("redirect_uri 必须是绝对 URL".to_string());
-    }
-    Ok(())
+fn validate_admin_oauth_authorization_url_override(
+    url: &str,
+    allowed_domains: &[&str],
+) -> Result<(), String> {
+    validate_admin_oauth_url_override_with_options(url, allowed_domains, true)
 }
 
-fn validate_admin_oauth_url_override(url: &str, allowed_domains: &[&str]) -> Result<(), String> {
+fn validate_admin_oauth_url_override_with_options(
+    url: &str,
+    allowed_domains: &[&str],
+    reject_authorization_parameters: bool,
+) -> Result<(), String> {
     let parsed = Url::parse(url).map_err(|_| "端点覆盖必须是 https 绝对 URL".to_string())?;
     if parsed.scheme() != "https" || parsed.host_str().is_none() {
         return Err("端点覆盖必须是 https 绝对 URL".to_string());
+    }
+    if matches!(parsed.host(), Some(Host::Ipv4(_)) | Some(Host::Ipv6(_))) {
+        return Err("端点覆盖必须使用 DNS 主机名，不能使用 IP 字面量".to_string());
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() || parsed.fragment().is_some() {
+        return Err("端点覆盖不得包含 URL 凭据或 fragment".to_string());
+    }
+    if reject_authorization_parameters
+        && parsed.query_pairs().any(|(name, _)| {
+            matches!(
+                name.to_ascii_lowercase().as_str(),
+                "response_type"
+                    | "client_id"
+                    | "redirect_uri"
+                    | "state"
+                    | "scope"
+                    | "code_challenge"
+                    | "code_challenge_method"
+            )
+        })
+    {
+        return Err("authorization endpoint 不得预置 OAuth authorization 参数".to_string());
     }
     let host = parsed
         .host_str()
@@ -205,6 +225,17 @@ fn validate_admin_oauth_url_override_for_domains(
         .map(String::as_str)
         .collect::<Vec<_>>();
     validate_admin_oauth_url_override(url, &allowed)
+}
+
+fn validate_admin_oauth_authorization_url_override_for_domains(
+    url: &str,
+    allowed_domains: &[String],
+) -> Result<(), String> {
+    let allowed = allowed_domains
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    validate_admin_oauth_authorization_url_override(url, &allowed)
 }
 
 pub(super) fn build_admin_oauth_upsert_record(
@@ -236,8 +267,8 @@ pub(super) fn build_admin_oauth_upsert_record(
         return Err("frontend_callback_url 不能为空".to_string());
     }
 
-    validate_admin_oauth_frontend_callback_url(frontend_callback_url)?;
-    validate_admin_oauth_redirect_uri(redirect_uri)?;
+    validate_oauth_frontend_callback_url(frontend_callback_url)?;
+    validate_oauth_redirect_uri(redirect_uri)?;
 
     let is_custom_oidc = admin_oauth_is_custom_provider_type(&provider_type);
     let custom_allowed_domains = if is_custom_oidc {
@@ -268,16 +299,26 @@ pub(super) fn build_admin_oauth_upsert_record(
             let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
                 return Err(format!("custom_oidc 必须配置 {field_name}"));
             };
-            validate_admin_oauth_url_override_for_domains(value, &custom_allowed_domains)?;
+            if field_name == "authorization_url_override" {
+                validate_admin_oauth_authorization_url_override_for_domains(
+                    value,
+                    &custom_allowed_domains,
+                )?;
+            } else {
+                validate_admin_oauth_url_override_for_domains(value, &custom_allowed_domains)?;
+            }
         }
     }
 
     if let Some(value) = payload.authorization_url_override.as_deref().map(str::trim) {
         if !value.is_empty() {
             if let Some(allowed_domains) = builtin_allowed_domains {
-                validate_admin_oauth_url_override(value, allowed_domains)?;
+                validate_admin_oauth_authorization_url_override(value, allowed_domains)?;
             } else {
-                validate_admin_oauth_url_override_for_domains(value, &custom_allowed_domains)?;
+                validate_admin_oauth_authorization_url_override_for_domains(
+                    value,
+                    &custom_allowed_domains,
+                )?;
             }
         }
     }
@@ -322,40 +363,34 @@ pub(super) fn build_admin_oauth_upsert_record(
         return Err("scopes 不能为空".to_string());
     }
 
-    let client_secret_encrypted = match payload.client_secret.as_deref() {
-        None => EncryptedSecretUpdate::Preserve,
-        Some(raw) => {
-            let secret = raw.trim();
-            if secret == "__CLEAR__" {
-                EncryptedSecretUpdate::Clear
-            } else if secret.is_empty() {
-                EncryptedSecretUpdate::Preserve
-            } else {
-                let encrypted = state
-                    .encrypt_catalog_secret_with_fallbacks(secret)
-                    .ok_or_else(|| "gateway 未配置 OAuth provider 加密密钥".to_string())?;
-                EncryptedSecretUpdate::Set(encrypted)
-            }
-        }
-    };
+    validate_oauth_provider_endpoint_config(
+        &provider_type,
+        payload.authorization_url_override.as_deref(),
+        payload.token_url_override.as_deref(),
+        payload.userinfo_url_override.as_deref(),
+        payload.extra_config.as_ref(),
+    )?;
 
-    Ok(UpsertOAuthProviderConfigRecord {
+    let authorization_url_override = payload.authorization_url_override.and_then(|value| {
+        let value = value.trim().to_string();
+        (!value.is_empty()).then_some(value)
+    });
+    let token_url_override = payload.token_url_override.and_then(|value| {
+        let value = value.trim().to_string();
+        (!value.is_empty()).then_some(value)
+    });
+    let userinfo_url_override = payload.userinfo_url_override.and_then(|value| {
+        let value = value.trim().to_string();
+        (!value.is_empty()).then_some(value)
+    });
+    let mut record = UpsertOAuthProviderConfigRecord {
         provider_type,
         display_name: display_name.to_string(),
         client_id: client_id.to_string(),
-        client_secret_encrypted,
-        authorization_url_override: payload.authorization_url_override.and_then(|value| {
-            let value = value.trim().to_string();
-            (!value.is_empty()).then_some(value)
-        }),
-        token_url_override: payload.token_url_override.and_then(|value| {
-            let value = value.trim().to_string();
-            (!value.is_empty()).then_some(value)
-        }),
-        userinfo_url_override: payload.userinfo_url_override.and_then(|value| {
-            let value = value.trim().to_string();
-            (!value.is_empty()).then_some(value)
-        }),
+        client_secret_encrypted: EncryptedSecretUpdate::Preserve,
+        authorization_url_override,
+        token_url_override,
+        userinfo_url_override,
         scopes: payload.scopes.map(|items| {
             items
                 .into_iter()
@@ -372,5 +407,27 @@ pub(super) fn build_admin_oauth_upsert_record(
             (!value.is_empty()).then_some(value)
         }),
         is_enabled: payload.is_enabled,
-    })
+    };
+    record.client_secret_encrypted = match payload.client_secret.as_deref() {
+        None => EncryptedSecretUpdate::Preserve,
+        Some(raw) => {
+            let secret = raw.trim();
+            if secret == "__CLEAR__" {
+                EncryptedSecretUpdate::Clear
+            } else if secret.is_empty() {
+                EncryptedSecretUpdate::Preserve
+            } else {
+                let encrypted =
+                    crate::handlers::shared::seal_identity_oauth_provider_client_secret(
+                        state.as_ref(),
+                        &record,
+                        secret,
+                    )
+                    .map_err(str::to_string)?;
+                EncryptedSecretUpdate::Set(encrypted)
+            }
+        }
+    };
+
+    Ok(record)
 }

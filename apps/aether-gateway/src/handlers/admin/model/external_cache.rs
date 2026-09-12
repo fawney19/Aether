@@ -10,6 +10,7 @@ use axum::http;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
+use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 use tracing::warn;
 
@@ -19,10 +20,18 @@ const ADMIN_EXTERNAL_MODELS_CACHE_VERSION: u8 = 2;
 const ADMIN_EXTERNAL_MODELS_CACHE_TTL_SECS: u64 = 15 * 60;
 const ADMIN_EXTERNAL_MODELS_SOURCE_URL_ENV: &str = "AETHER_GATEWAY_EXTERNAL_MODELS_URL";
 const ADMIN_EXTERNAL_MODELS_SOURCE_URL_DEFAULT: &str = "https://models.dev/api.json";
+const ADMIN_EXTERNAL_MODELS_OFFICIAL_HOST: &str = "models.dev";
+const ADMIN_EXTERNAL_MODELS_OFFICIAL_PATH: &str = "/api.json";
 pub(in crate::handlers::admin) const ADMIN_EXTERNAL_MODELS_PROXY_NODE_CONFIG_KEY: &str =
     "external_models_proxy_node_id";
 const ADMIN_EXTERNAL_MODELS_CONNECT_TIMEOUT_MS: u64 = 10_000;
-const ADMIN_EXTERNAL_MODELS_TOTAL_TIMEOUT_MS: u64 = 300_000;
+const ADMIN_EXTERNAL_MODELS_TOTAL_TIMEOUT_MS: u64 = 30_000;
+const ADMIN_EXTERNAL_MODELS_RESPONSE_LIMIT_BYTES: usize = 8 * 1024 * 1024;
+// Keep the cache envelope bounded independently of the upstream body limit.
+// Normalization adds a small amount of metadata, while a corrupted/shared
+// runtime KV value must never be allowed to drive an unbounded serde
+// allocation during cache reads.
+const ADMIN_EXTERNAL_MODELS_CACHE_MAX_BYTES: usize = 16 * 1024 * 1024;
 pub(crate) const ADMIN_EXTERNAL_MODELS_CONFIG_MUTATION_LOCK_KEY: &str =
     "admin:external_models_proxy_node_config:mutation";
 const ADMIN_EXTERNAL_MODELS_CONFIG_MUTATION_LOCK_TTL: Duration = Duration::from_secs(10 * 60);
@@ -32,6 +41,13 @@ struct AdminExternalModelsCacheEnvelope {
     schema_version: u8,
     proxy_node_id: Option<String>,
     payload: Value,
+}
+
+#[derive(Debug)]
+struct ResolvedAdminExternalModelsSource {
+    url: url::Url,
+    host: String,
+    addresses: Vec<SocketAddr>,
 }
 
 #[cfg(test)]
@@ -76,13 +92,139 @@ fn admin_external_models_source_url() -> String {
         .unwrap_or_else(|| ADMIN_EXTERNAL_MODELS_SOURCE_URL_DEFAULT.to_string())
 }
 
+fn parse_admin_external_models_source_url(
+    raw_url: &str,
+    allow_insecure_test_target: bool,
+) -> Result<(url::Url, String, u16), GatewayError> {
+    let url = url::Url::parse(raw_url)
+        .map_err(|_| GatewayError::Internal("external models source URL is invalid".to_string()))?;
+    let allowed_scheme =
+        url.scheme() == "https" || (allow_insecure_test_target && url.scheme() == "http");
+    if !allowed_scheme
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(GatewayError::Internal(
+            "external models source must be an HTTPS URL without credentials, query, or fragment"
+                .to_string(),
+        ));
+    }
+    let host = url.host_str().map(ToOwned::to_owned).ok_or_else(|| {
+        GatewayError::Internal("external models source is missing a host".to_string())
+    })?;
+    let port = url.port_or_known_default().ok_or_else(|| {
+        GatewayError::Internal("external models source is missing a port".to_string())
+    })?;
+    Ok((url, host, port))
+}
+
+fn validate_admin_external_models_source_addresses(
+    url: &url::Url,
+    addresses: &[SocketAddr],
+    allow_insecure_test_target: bool,
+) -> Result<(), GatewayError> {
+    if addresses.is_empty() {
+        return Err(GatewayError::Internal(
+            "external models source DNS resolution returned no addresses".to_string(),
+        ));
+    }
+    if !allow_insecure_test_target
+        && addresses.iter().any(|address| {
+            aether_http::is_private_or_reserved_ip(address.ip())
+                && !(is_official_external_models_catalog_url(url)
+                    && aether_http::is_ipv4_benchmarking_fake_ip(address.ip()))
+        })
+    {
+        return Err(GatewayError::Internal(
+            "external models source resolves to a private or reserved address".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn is_official_external_models_catalog_url(url: &url::Url) -> bool {
+    url.scheme() == "https"
+        && url
+            .host_str()
+            .is_some_and(|host| host.eq_ignore_ascii_case(ADMIN_EXTERNAL_MODELS_OFFICIAL_HOST))
+        && url.port_or_known_default() == Some(443)
+        && url.path() == ADMIN_EXTERNAL_MODELS_OFFICIAL_PATH
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.query().is_none()
+        && url.fragment().is_none()
+}
+
+async fn resolve_admin_external_models_source(
+    raw_url: &str,
+    allow_insecure_test_target: bool,
+) -> Result<ResolvedAdminExternalModelsSource, GatewayError> {
+    let (url, host, port) =
+        parse_admin_external_models_source_url(raw_url, allow_insecure_test_target)?;
+    let addresses = if let Ok(ip) = host.parse::<IpAddr>() {
+        vec![SocketAddr::new(ip, port)]
+    } else {
+        aether_http::lookup_host_with_limits(
+            host.as_str(),
+            port,
+            aether_http::DEFAULT_DNS_LOOKUP_TIMEOUT,
+        )
+        .await
+        .map_err(|_| {
+            GatewayError::Internal("external models source DNS resolution failed".to_string())
+        })?
+    };
+    validate_admin_external_models_source_addresses(&url, &addresses, allow_insecure_test_target)?;
+    Ok(ResolvedAdminExternalModelsSource {
+        url,
+        host,
+        addresses,
+    })
+}
+
+fn build_admin_external_models_direct_client(
+    source: &ResolvedAdminExternalModelsSource,
+) -> Result<reqwest::Client, GatewayError> {
+    let mut builder = aether_http::apply_http_client_config(
+        reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none()),
+        &aether_http::HttpClientConfig {
+            connect_timeout_ms: Some(ADMIN_EXTERNAL_MODELS_CONNECT_TIMEOUT_MS),
+            request_timeout_ms: Some(ADMIN_EXTERNAL_MODELS_TOTAL_TIMEOUT_MS),
+            http2_adaptive_window: true,
+            ..aether_http::HttpClientConfig::default()
+        },
+    );
+    if source.host.parse::<IpAddr>().is_err() {
+        builder = builder.resolve_to_addrs(&source.host, &source.addresses);
+    }
+    builder.build().map_err(|_| {
+        GatewayError::Internal("external models HTTP client initialization failed".to_string())
+    })
+}
+
 fn normalize_admin_external_models_payload(payload: serde_json::Value) -> serde_json::Value {
     mark_external_models_official_providers(&payload).unwrap_or(payload)
 }
 
 fn classify_admin_external_models_transport_error(message: &str) -> &'static str {
     let message = message.to_ascii_lowercase();
-    if message.contains("timed out") || message.contains("timeout") {
+    if message.contains("dns resolution")
+        || message.contains("dns lookup")
+        || (message.contains("resolve") && message.contains("host"))
+    {
+        "dns_resolution"
+    } else if message.contains("private or reserved")
+        || message.contains("ssrf")
+        || message.contains("address policy")
+    {
+        "ssrf_blocked"
+    } else if message.contains("invalid") && message.contains("url") {
+        "invalid_url"
+    } else if message.contains("timed out") || message.contains("timeout") {
         "timeout"
     } else if message.contains("relay") || message.contains("tunnel") {
         "relay"
@@ -96,6 +238,8 @@ fn classify_admin_external_models_transport_error(message: &str) -> &'static str
         "response_decode"
     } else if message.contains("connect") || message.contains("dns") || message.contains("tcp") {
         "connect"
+    } else if message.contains("source returned http") || message.contains("status ") {
+        "upstream_http"
     } else if message.contains("header") || message.contains("method") || message.contains("build")
     {
         "request_build"
@@ -116,6 +260,11 @@ async fn store_admin_external_models_cache(
     };
     let serialized =
         serde_json::to_string(&envelope).map_err(|err| GatewayError::Internal(err.to_string()))?;
+    if serialized.len() > ADMIN_EXTERNAL_MODELS_CACHE_MAX_BYTES {
+        return Err(GatewayError::Internal(
+            "external models cache envelope exceeds the allowed size".to_string(),
+        ));
+    }
     state
         .as_ref()
         .runtime_kv_setex(
@@ -125,6 +274,13 @@ async fn store_admin_external_models_cache(
         )
         .await?;
     Ok(())
+}
+
+fn parse_admin_external_models_cache(raw: &str) -> Option<AdminExternalModelsCacheEnvelope> {
+    if raw.len() > ADMIN_EXTERNAL_MODELS_CACHE_MAX_BYTES {
+        return None;
+    }
+    serde_json::from_str::<AdminExternalModelsCacheEnvelope>(raw).ok()
 }
 
 fn normalize_admin_external_models_proxy_node_id(
@@ -345,8 +501,15 @@ async fn fetch_admin_external_models_from_source(
     request_id: &str,
     proxy_node_id: Option<&str>,
 ) -> Result<serde_json::Value, GatewayError> {
-    let url = admin_external_models_source_url();
+    let source_url = admin_external_models_source_url();
+    // A proxy/tunnel resolves the target in its own network namespace. Do not
+    // resolve it locally first: local DNS may be unavailable, may intentionally
+    // return synthetic addresses, or may not be able to see an internal target
+    // that the configured proxy can reach. URL shape is still validated below,
+    // and the direct path retains the local DNS validation/pinning guard.
+    let parsed_source = parse_admin_external_models_source_url(&source_url, cfg!(test))?;
     if let Some(node_id) = proxy_node_id {
+        let (source_url, _host, _port) = parsed_source;
         let Some(proxy) = state.resolve_admin_proxy_node_snapshot(Some(node_id)).await else {
             warn!(
                 request_id = %request_id,
@@ -374,7 +537,7 @@ async fn fetch_admin_external_models_from_source(
             ),
             (
                 EXECUTION_REQUEST_FOLLOW_REDIRECTS_HEADER.to_string(),
-                "true".to_string(),
+                "false".to_string(),
             ),
         ]);
         let plan = ExecutionPlan {
@@ -385,7 +548,7 @@ async fn fetch_admin_external_models_from_source(
             endpoint_id: String::new(),
             key_id: String::new(),
             method: http::Method::GET.as_str().to_string(),
-            url,
+            url: source_url.to_string(),
             headers,
             content_type: None,
             content_encoding: None,
@@ -409,8 +572,12 @@ async fn fetch_admin_external_models_from_source(
                 ..ExecutionTimeouts::default()
             }),
         };
+        let bounded_plan = crate::execution_runtime::transport::with_upstream_response_body_limit(
+            &plan,
+            ADMIN_EXTERNAL_MODELS_RESPONSE_LIMIT_BYTES,
+        );
         let result = match state
-            .execute_execution_runtime_sync_plan(Some(request_id), &plan)
+            .execute_execution_runtime_sync_plan(Some(request_id), &bounded_plan)
             .await
         {
             Ok(result) => result,
@@ -444,19 +611,65 @@ async fn fetch_admin_external_models_from_source(
         return Ok(normalize_admin_external_models_payload(payload));
     }
 
-    let response = state
-        .http_client()
-        .get(&url)
+    let (url, host, port) = parsed_source;
+    let addresses = if let Ok(ip) = host.parse::<IpAddr>() {
+        vec![SocketAddr::new(ip, port)]
+    } else {
+        aether_http::lookup_host_with_limits(
+            host.as_str(),
+            port,
+            aether_http::DEFAULT_DNS_LOOKUP_TIMEOUT,
+        )
+        .await
+        .map_err(|_| {
+            GatewayError::Internal("external models source DNS resolution failed".to_string())
+        })?
+    };
+    validate_admin_external_models_source_addresses(&url, &addresses, cfg!(test))?;
+    let source = ResolvedAdminExternalModelsSource {
+        url,
+        host,
+        addresses,
+    };
+
+    let client = build_admin_external_models_direct_client(&source)?;
+    let response = client
+        .get(source.url)
+        .header(reqwest::header::ACCEPT, "application/json")
+        .header(
+            reqwest::header::USER_AGENT,
+            "aether-gateway/external-models",
+        )
         .send()
         .await
-        .map_err(|err| GatewayError::Internal(err.to_string()))?;
-    let response = response
-        .error_for_status()
-        .map_err(|err| GatewayError::Internal(err.to_string()))?;
-    let payload = response
-        .json::<serde_json::Value>()
-        .await
-        .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        .map_err(|err| {
+            let error_message = err.to_string();
+            let transport_error_kind =
+                classify_admin_external_models_transport_error(&error_message);
+            warn!(
+                request_id = %request_id,
+                transport_error_kind,
+                "external models direct request failed"
+            );
+            GatewayError::Internal("external models source request failed".to_string())
+        })?;
+    if !response.status().is_success() {
+        return Err(GatewayError::Internal(format!(
+            "external models source returned HTTP {}",
+            response.status().as_u16()
+        )));
+    }
+    let body = aether_http::read_response_bytes_with_limit(
+        response,
+        ADMIN_EXTERNAL_MODELS_RESPONSE_LIMIT_BYTES,
+    )
+    .await
+    .map_err(|_| {
+        GatewayError::Internal("external models source response read failed".to_string())
+    })?;
+    let payload = serde_json::from_slice::<serde_json::Value>(&body).map_err(|_| {
+        GatewayError::Internal("external models source returned invalid JSON".to_string())
+    })?;
     Ok(normalize_admin_external_models_payload(payload))
 }
 
@@ -470,8 +683,8 @@ pub(crate) async fn read_admin_external_models_cache(
         .runtime_kv_get(ADMIN_EXTERNAL_MODELS_CACHE_KEY)
         .await?
     {
-        match serde_json::from_str::<AdminExternalModelsCacheEnvelope>(&raw) {
-            Ok(envelope)
+        match parse_admin_external_models_cache(&raw) {
+            Some(envelope)
                 if envelope.schema_version == ADMIN_EXTERNAL_MODELS_CACHE_VERSION
                     && envelope.proxy_node_id == proxy_node_id =>
             {
@@ -479,25 +692,36 @@ pub(crate) async fn read_admin_external_models_cache(
                     envelope.payload,
                 )));
             }
-            Ok(_) => {}
-            Err(err) => {
-                warn!(error = %err, "failed to parse cached external models payload");
-            }
+            Some(_) => {}
+            None => warn!("failed to parse cached external models payload"),
         }
     }
 
     match fetch_admin_external_models_from_source(state, request_id, proxy_node_id.as_deref()).await
     {
         Ok(payload) => {
-            if let Err(err) =
-                store_admin_external_models_cache(state, proxy_node_id.as_deref(), &payload).await
+            if store_admin_external_models_cache(state, proxy_node_id.as_deref(), &payload)
+                .await
+                .is_err()
             {
-                warn!(error = ?err, "failed to store fetched external models cache");
+                warn!("failed to store fetched external models cache");
             }
             Ok(Some(payload))
         }
-        Err(err) => {
-            warn!(error = ?err, "failed to fetch external models catalog");
+        Err(error) => {
+            // Keep the client-facing response generic, but leave an actionable,
+            // low-cardinality diagnostic for operators.  The underlying error
+            // is intentionally not logged here because a future transport
+            // implementation could include URL, proxy, or credential details.
+            let error_message = error.into_message();
+            let transport_error_kind =
+                classify_admin_external_models_transport_error(&error_message);
+            warn!(
+                request_id = %request_id,
+                proxy_mode = if proxy_node_id.is_some() { "configured_node" } else { "direct" },
+                transport_error_kind,
+                "failed to fetch external models catalog"
+            );
             Ok(None)
         }
     }
@@ -518,7 +742,10 @@ mod tests {
     use super::{
         admin_external_models_source_url, classify_admin_external_models_transport_error,
         normalize_admin_external_models_payload, normalize_admin_external_models_proxy_node_id,
-        read_admin_external_models_cache, set_admin_external_models_source_url_for_tests,
+        parse_admin_external_models_cache, parse_admin_external_models_source_url,
+        read_admin_external_models_cache, resolve_admin_external_models_source,
+        set_admin_external_models_source_url_for_tests,
+        validate_admin_external_models_source_addresses, ADMIN_EXTERNAL_MODELS_CACHE_MAX_BYTES,
     };
     use crate::handlers::admin::request::AdminAppState;
     use crate::tests::{start_server, AppState};
@@ -564,12 +791,22 @@ mod tests {
     fn classifies_external_models_transport_errors_without_exposing_details() {
         for (message, expected) in [
             ("request timeout after 300000ms", "timeout"),
+            (
+                "external models source DNS resolution failed",
+                "dns_resolution",
+            ),
+            (
+                "external models source resolves to a private or reserved address",
+                "ssrf_blocked",
+            ),
+            ("external models source URL is invalid", "invalid_url"),
             ("hub relay request failed", "relay"),
             ("invalid proxy configuration", "proxy_config"),
             ("upstream response body exceeds limit", "response_too_large"),
             ("upstream response is not valid JSON", "invalid_json"),
             ("failed to decode content-encoding gzip", "response_decode"),
             ("tcp connect error", "connect"),
+            ("external models source returned HTTP 503", "upstream_http"),
             ("invalid upstream header value", "request_build"),
             ("opaque execution failure", "unknown_transport"),
         ] {
@@ -588,6 +825,102 @@ mod tests {
             admin_external_models_source_url(),
             "http://127.0.0.1:12345/api"
         );
+    }
+
+    #[test]
+    fn production_external_models_source_requires_safe_https_url_shape() {
+        assert!(
+            parse_admin_external_models_source_url("https://models.dev/api.json", false).is_ok()
+        );
+
+        for source_url in [
+            "http://models.dev/api.json",
+            "file:///etc/passwd",
+            "https://user:secret@models.dev/api.json",
+            "https://models.dev/api.json?next=http://169.254.169.254",
+            "https://models.dev/api.json#fragment",
+        ] {
+            assert!(
+                parse_admin_external_models_source_url(source_url, false).is_err(),
+                "source URL should be rejected: {source_url}"
+            );
+        }
+    }
+
+    #[test]
+    fn external_models_cache_parser_rejects_oversized_runtime_values() {
+        let oversized = "x".repeat(ADMIN_EXTERNAL_MODELS_CACHE_MAX_BYTES + 1);
+        assert!(parse_admin_external_models_cache(&oversized).is_none());
+
+        let valid = r#"{"schema_version":2,"proxy_node_id":null,"payload":{}}"#;
+        assert!(parse_admin_external_models_cache(valid).is_some());
+    }
+
+    #[tokio::test]
+    async fn production_external_models_source_rejects_private_ip_literals() {
+        for source_url in [
+            "https://127.0.0.1/api.json",
+            "https://169.254.169.254/latest/meta-data",
+            "https://[::1]/api.json",
+        ] {
+            assert!(
+                resolve_admin_external_models_source(source_url, false)
+                    .await
+                    .is_err(),
+                "private source URL should be rejected: {source_url}"
+            );
+        }
+    }
+
+    #[test]
+    fn official_external_models_catalog_allows_benchmarking_fake_ip_addresses() {
+        let url = url::Url::parse("https://models.dev/api.json")
+            .expect("official catalog URL should parse");
+
+        for address in ["198.18.75.234:443", "198.19.255.254:443"] {
+            let address = address
+                .parse()
+                .expect("fake IP socket address should parse");
+            assert!(
+                validate_admin_external_models_source_addresses(&url, &[address], false).is_ok(),
+                "official catalog should accept local proxy fake IP {address}"
+            );
+        }
+    }
+
+    #[test]
+    fn custom_external_models_sources_reject_benchmarking_fake_ip_addresses() {
+        let fake_ip = "198.18.75.234:443"
+            .parse()
+            .expect("fake IP socket address should parse");
+
+        for source_url in [
+            "https://catalog.example/api.json",
+            "https://models.dev/other.json",
+            "https://models.dev:444/api.json",
+        ] {
+            let url = url::Url::parse(source_url).expect("custom catalog URL should parse");
+            assert!(
+                validate_admin_external_models_source_addresses(&url, &[fake_ip], false).is_err(),
+                "custom source must reject the benchmarking fake IP: {source_url}"
+            );
+        }
+    }
+
+    #[test]
+    fn official_external_models_catalog_still_rejects_private_addresses() {
+        let url = url::Url::parse("https://models.dev/api.json")
+            .expect("official catalog URL should parse");
+
+        for address in ["127.0.0.1:443", "10.0.0.1:443", "169.254.169.254:443"] {
+            let address = address
+                .parse()
+                .expect("private socket address should parse");
+            assert!(
+                validate_admin_external_models_source_addresses(&url, &[address], false).is_err(),
+                "official catalog must reject private address {address}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -621,6 +954,40 @@ mod tests {
         assert_eq!(payload["openai"]["official"], json!(true));
         assert_eq!(payload["openai"]["models"]["gpt-5"]["name"], json!("GPT-5"));
 
+        upstream_handle.abort();
+    }
+
+    #[tokio::test]
+    async fn direct_external_models_fetch_does_not_follow_redirects() {
+        let upstream = Router::new()
+            .route(
+                "/redirect",
+                get(|| async { axum::response::Redirect::temporary("/api.json") }),
+            )
+            .route(
+                "/api.json",
+                get(|| async {
+                    Json(json!({
+                        "openai": {
+                            "name": "redirected payload",
+                            "models": {}
+                        }
+                    }))
+                }),
+            );
+        let (upstream_url, upstream_handle) = start_server(upstream).await;
+        let _guard =
+            set_admin_external_models_source_url_for_tests(&format!("{upstream_url}/redirect"));
+
+        let state = AppState::new().expect("gateway should build");
+        let payload = read_admin_external_models_cache(
+            &AdminAppState::new(&state),
+            "external-models-redirect",
+        )
+        .await
+        .expect("external models read should not fail");
+
+        assert!(payload.is_none(), "redirected payload must not be accepted");
         upstream_handle.abort();
     }
 }

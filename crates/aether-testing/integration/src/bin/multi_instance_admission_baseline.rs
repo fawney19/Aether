@@ -9,11 +9,11 @@ use aether_runtime_state::{
     RedisClientConfig, RuntimeSemaphore, RuntimeSemaphoreConfig, RuntimeState,
 };
 use aether_testkit::{
-    init_test_runtime_for, run_multi_url_http_load_probe, BenchmarkRuntimeSampler,
-    BenchmarkRuntimeSnapshot, ExecutionRuntimeHarness, ExecutionRuntimeHarnessConfig,
-    GatewayHarness, GatewayHarnessConfig, HttpLoadProbeConfig, HttpLoadProbeResponseMode,
-    ManagedRedisServer, MultiUrlHttpLoadProbeResult, SpawnedServer, TunnelHarness,
-    TunnelHarnessConfig, GATEWAY_HARNESS_API_KEY,
+    init_test_runtime_for, insert_tunnel_harness_auth_headers, run_multi_url_http_load_probe,
+    BenchmarkRuntimeSampler, BenchmarkRuntimeSnapshot, ExecutionRuntimeHarness,
+    ExecutionRuntimeHarnessConfig, GatewayHarness, GatewayHarnessConfig, HttpLoadProbeConfig,
+    HttpLoadProbeResponseMode, ManagedRedisServer, MultiUrlHttpLoadProbeResult, SpawnedServer,
+    TunnelHarness, TunnelHarnessConfig, GATEWAY_HARNESS_API_KEY, TUNNEL_HARNESS_NODE_ID,
 };
 use axum::body::to_bytes;
 use axum::extract::Request;
@@ -94,8 +94,13 @@ struct WebSocketAdmissionProbeResult {
     runtime: BenchmarkRuntimeSnapshot,
 }
 
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let _log_shutdown = aether_runtime::LogShutdownGuard::new();
+    run()
+}
+
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn run() -> Result<(), Box<dyn std::error::Error>> {
     init_test_runtime_for("multi-instance-admission-baseline");
     let config = parse_args(std::env::args().skip(1).collect())?;
     let report = run_suite(&config).await?;
@@ -493,12 +498,8 @@ async fn run_tunnel_proxy_connection_probe(
                 let mut request = url
                     .into_client_request()
                     .map_err(|err| format!("failed to build websocket request: {err}"))?;
-                request.headers_mut().insert(
-                    "x-node-id",
-                    format!("baseline-node-{worker_index}-{current}")
-                        .parse()
-                        .map_err(|err| format!("failed to build x-node-id header: {err}"))?,
-                );
+                insert_tunnel_harness_auth_headers(request.headers_mut(), TUNNEL_HARNESS_NODE_ID)
+                    .map_err(|err| format!("failed to build tunnel auth headers: {err}"))?;
                 request.headers_mut().insert(
                     aether_contracts::tunnel::TUNNEL_PROTOCOL_VERSION_HEADER,
                     aether_contracts::tunnel::CURRENT_TUNNEL_PROTOCOL_VERSION_STR

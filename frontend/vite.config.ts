@@ -80,6 +80,7 @@ export default defineConfig(({ mode }) => {
           target: gatewayTarget,
           changeOrigin: true,
           secure: false,
+          ws: true,
         },
         '/v1/': {
           target: gatewayTarget,

@@ -15,6 +15,7 @@ pub struct UsageRuntimeConfig {
     pub consumer_group: String,
     pub dlq_stream_key: String,
     pub stream_maxlen: usize,
+    pub queue_payload_max_bytes: usize,
     pub consumer_batch_size: usize,
     pub consumer_block_ms: u64,
     pub reclaim_idle_ms: u64,
@@ -47,6 +48,7 @@ impl Default for UsageRuntimeConfig {
             consumer_group: "usage_consumers".to_string(),
             dlq_stream_key: "usage:events:dlq".to_string(),
             stream_maxlen: 200_000,
+            queue_payload_max_bytes: 1024 * 1024,
             consumer_batch_size: 128,
             consumer_block_ms: 500,
             reclaim_idle_ms: 60_000,
@@ -90,6 +92,11 @@ impl UsageRuntimeConfig {
                 "usage runtime dlq_stream_key cannot be empty".to_string(),
             ));
         }
+        if self.stream_key == self.dlq_stream_key {
+            return Err(DataLayerError::InvalidConfiguration(
+                "usage runtime stream_key and dlq_stream_key must be different".to_string(),
+            ));
+        }
         if self.worker_count == 0 {
             return Err(DataLayerError::InvalidConfiguration(
                 "usage runtime worker_count must be positive".to_string(),
@@ -122,6 +129,11 @@ impl UsageRuntimeConfig {
         if self.stream_maxlen == 0 {
             return Err(DataLayerError::InvalidConfiguration(
                 "usage runtime stream_maxlen must be positive".to_string(),
+            ));
+        }
+        if self.queue_payload_max_bytes == 0 {
+            return Err(DataLayerError::InvalidConfiguration(
+                "usage runtime queue_payload_max_bytes must be positive".to_string(),
             ));
         }
         if self.consumer_batch_size == 0 {
@@ -214,6 +226,19 @@ mod tests {
     }
 
     #[test]
+    fn enabled_config_rejects_dead_letter_stream_equal_to_source() {
+        let mut config = UsageRuntimeConfig::default();
+        config.dlq_stream_key = config.stream_key.clone();
+        assert!(config.validate().is_ok());
+        config.enabled = true;
+        assert!(matches!(
+            config.validate(),
+            Err(aether_data_contracts::DataLayerError::InvalidConfiguration(message))
+                if message.contains("must be different")
+        ));
+    }
+
+    #[test]
     fn enabled_config_rejects_zero_terminal_submission_limit() {
         let config = UsageRuntimeConfig {
             enabled: true,
@@ -221,5 +246,21 @@ mod tests {
             ..UsageRuntimeConfig::default()
         };
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn queue_payload_limit_defaults_to_one_mib_and_rejects_zero_when_enabled() {
+        let mut config = UsageRuntimeConfig::default();
+        assert_eq!(config.queue_payload_max_bytes, 1024 * 1024);
+        config.queue_payload_max_bytes = 0;
+        assert!(config.validate().is_ok());
+        config.enabled = true;
+        assert!(matches!(
+            config.validate(),
+            Err(aether_data_contracts::DataLayerError::InvalidConfiguration(message))
+                if message.contains("queue_payload_max_bytes")
+        ));
+        config.queue_payload_max_bytes = 1;
+        assert!(config.validate().is_ok());
     }
 }

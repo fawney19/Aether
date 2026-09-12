@@ -159,6 +159,7 @@ fn finalize_openai_chat_provider_request_body(
         openai_responses_reasoning_replay_policy(
             transport.provider.provider_type.as_str(),
             transport.endpoint.base_url.as_str(),
+            mapped_model,
         ),
     )
     .err()
@@ -2183,7 +2184,7 @@ mod tests {
             client_surface: None,
             gateway_credential_carrier: None,
             client_session_affinity: None,
-            original_client_session_id: None,
+            provider_outbound_context: None,
             routing_policy: None,
             routing_trace_seed: None,
             routing_context: None,
@@ -2742,7 +2743,7 @@ mod tests {
                 .provider_request_headers
                 .get("x-client-version")
                 .map(String::as_str),
-            Some("1.2.3")
+            Some("4.3.0")
         );
         assert_eq!(
             payload
@@ -2762,7 +2763,7 @@ mod tests {
         assert_eq!(payload.provider_request_body["model"], "gemini-2.5-pro");
         assert_eq!(
             payload.provider_request_body["userAgent"],
-            "antigravity/cli/1.0.16 (aidev_client; os_type=linux; arch=arm64; auth_method=consumer)"
+            "vscode/1.X.X (Antigravity/4.3.0)"
         );
         assert_eq!(payload.provider_request_body["requestType"], "agent");
         assert!(payload.provider_request_body.get("contents").is_none());

@@ -20,7 +20,7 @@ const VIDEO_TASK_POLL_CLAIM_SECONDS: u64 = 30;
 
 #[derive(Debug, Clone)]
 struct VideoTaskRefreshError {
-    message: String,
+    category: &'static str,
     permanent: bool,
 }
 
@@ -55,7 +55,7 @@ pub(crate) async fn execute_video_task_refresh_plan(
             warn!(
                 event_name = "video_task_refresh_failed",
                 log_type = "event",
-                error = %err.message,
+                error_category = err.category,
                 permanent = err.permanent,
                 "gateway video task refresh failed"
             );
@@ -79,23 +79,32 @@ async fn poll_video_tasks_once(state: &AppState, batch_size: usize) -> Result<us
     let mut refreshed = 0usize;
     for (index, task) in tasks.into_iter().enumerate() {
         let trace_id = format!("video-task-poller-{index}");
+        let Some(snapshot) = state.reconstruct_video_task_snapshot(&task).await? else {
+            continue;
+        };
         let Some(refresh_plan) = state
             .video_tasks
-            .prepare_poll_refresh_plan_for_stored_task(&task, &trace_id)
+            .prepare_poll_refresh_plan_for_snapshot(snapshot.clone(), &trace_id)
         else {
             continue;
         };
 
         match fetch_video_task_refresh_attempt(state, &refresh_plan).await? {
             VideoTaskRefreshAttempt::Success { provider_body } => {
-                let Some(updated) =
-                    build_successful_poll_update(&task, &provider_body, now_unix_secs)?
+                let Some(updated) = build_successful_poll_update(
+                    &task,
+                    snapshot.clone(),
+                    &provider_body,
+                    now_unix_secs,
+                )?
                 else {
                     continue;
                 };
                 match state.update_active_video_task(updated).await? {
                     Some(stored) => {
-                        if let Some(snapshot) = LocalVideoTaskSnapshot::from_stored_task(&stored) {
+                        if let Some(snapshot) =
+                            state.reconstruct_video_task_snapshot(&stored).await?
+                        {
                             state.video_tasks.record_snapshot(snapshot);
                         }
                         info!(
@@ -116,7 +125,9 @@ async fn poll_video_tasks_once(state: &AppState, batch_size: usize) -> Result<us
                 let updated = build_failed_poll_update(&task, &err, now_unix_secs);
                 match state.update_active_video_task(updated).await? {
                     Some(stored) => {
-                        if let Some(snapshot) = LocalVideoTaskSnapshot::from_stored_task(&stored) {
+                        if let Some(snapshot) =
+                            state.reconstruct_video_task_snapshot(&stored).await?
+                        {
                             state.video_tasks.record_snapshot(snapshot);
                         }
                         info!(
@@ -190,9 +201,9 @@ async fn fetch_video_task_refresh_attempt(
     .await
     {
         Ok(result) => result,
-        Err(err) => {
+        Err(_) => {
             return Ok(VideoTaskRefreshAttempt::Error(VideoTaskRefreshError {
-                message: format!("{err:?}"),
+                category: "transport_error",
                 permanent: false,
             }));
         }
@@ -209,7 +220,7 @@ async fn fetch_video_task_refresh_attempt(
         .and_then(|body| body.as_object().cloned())
     else {
         return Ok(VideoTaskRefreshAttempt::Error(VideoTaskRefreshError {
-            message: "video task refresh missing json provider body".to_string(),
+            category: "invalid_provider_response",
             permanent: false,
         }));
     };
@@ -223,20 +234,19 @@ fn classify_refresh_result_error(result: &ExecutionResult) -> VideoTaskRefreshEr
         .as_ref()
         .and_then(|error| error.upstream_status)
         .unwrap_or(result.status_code);
-    let message = result
-        .error
-        .as_ref()
-        .map(|error| error.message.clone())
-        .or_else(|| {
-            result
-                .body
-                .as_ref()
-                .and_then(|body| body.json_body.as_ref())
-                .and_then(|value| value.get("error"))
-                .and_then(Value::as_str)
-                .map(str::to_string)
-        })
-        .unwrap_or_else(|| format!("upstream returned {status_code}"));
+    let category = if status_code == 401 {
+        "authentication_error"
+    } else if status_code == 403 {
+        "permission_denied"
+    } else if status_code == 404 {
+        "not_found"
+    } else if status_code == 429 {
+        "rate_limit"
+    } else if status_code >= 500 {
+        "server_error"
+    } else {
+        "provider_error"
+    };
     let permanent = result.error.as_ref().map_or(
         matches!(status_code, 400 | 401 | 403 | 404 | 422),
         |error| match error.kind {
@@ -253,17 +263,18 @@ fn classify_refresh_result_error(result: &ExecutionResult) -> VideoTaskRefreshEr
         },
     );
 
-    VideoTaskRefreshError { message, permanent }
+    VideoTaskRefreshError {
+        category,
+        permanent,
+    }
 }
 
 fn build_successful_poll_update(
     task: &StoredVideoTask,
+    mut snapshot: LocalVideoTaskSnapshot,
     provider_body: &Map<String, Value>,
     now_unix_secs: u64,
 ) -> Result<Option<UpsertVideoTask>, GatewayError> {
-    let Some(mut snapshot) = LocalVideoTaskSnapshot::from_stored_task(task) else {
-        return Ok(None);
-    };
     snapshot.apply_provider_body(provider_body);
 
     let mut record = snapshot.to_upsert_record();
@@ -283,10 +294,7 @@ fn build_successful_poll_update(
     record.format_converted = task.format_converted;
     record.model = task.model.clone().or(record.model);
     record.prompt = task.prompt.clone().or(record.prompt);
-    record.original_request_body = task
-        .original_request_body
-        .clone()
-        .or(record.original_request_body);
+    record.original_request_body = None;
     record.duration_seconds = task.duration_seconds.or(record.duration_seconds);
     record.resolution = task.resolution.clone().or(record.resolution);
     record.aspect_ratio = task.aspect_ratio.clone().or(record.aspect_ratio);
@@ -309,17 +317,11 @@ fn build_successful_poll_update(
     if record.status.is_active() && record.poll_count >= record.max_poll_count {
         record.status = VideoTaskStatus::Failed;
         record.error_code = Some("poll_timeout".to_string());
-        record.error_message = Some(format!("Task timed out after {} polls", record.poll_count));
+        record.error_message = None;
         record.completed_at_unix_secs = Some(now_unix_secs);
         record.next_poll_at_unix_secs = None;
     }
-    record.request_metadata = merge_video_task_request_metadata(
-        task.request_metadata.clone(),
-        &snapshot,
-        Some(provider_body),
-        None,
-    )
-    .map_err(|err| GatewayError::Internal(err.to_string()))?;
+    record.request_metadata = None;
 
     Ok(Some(record))
 }
@@ -332,11 +334,11 @@ fn build_failed_poll_update(
     let mut record = stored_task_to_upsert(task);
     record.updated_at_unix_secs = now_unix_secs;
     record.poll_count = task.poll_count.saturating_add(1);
-    record.progress_message = Some(format!("Poll error: {}", err.message));
+    record.progress_message = None;
     if err.permanent {
         record.status = VideoTaskStatus::Failed;
         record.error_code = Some("poll_permanent_error".to_string());
-        record.error_message = Some(err.message.clone());
+        record.error_message = None;
         record.completed_at_unix_secs = Some(now_unix_secs);
         record.next_poll_at_unix_secs = None;
     } else {
@@ -348,28 +350,15 @@ fn build_failed_poll_update(
     if record.status.is_active() && record.poll_count >= record.max_poll_count {
         record.status = VideoTaskStatus::Failed;
         record.error_code = Some("poll_timeout".to_string());
-        record.error_message = Some(format!("Task timed out after {} polls", record.poll_count));
+        record.error_message = None;
         record.completed_at_unix_secs = Some(now_unix_secs);
         record.next_poll_at_unix_secs = None;
     }
-    record.request_metadata = LocalVideoTaskSnapshot::from_stored_task(task)
-        .and_then(|snapshot| {
-            merge_video_task_request_metadata(
-                task.request_metadata.clone(),
-                &snapshot,
-                None,
-                Some(err),
-            )
-            .ok()
-            .flatten()
-        })
-        .or(task.request_metadata.clone());
+    record.request_metadata = None;
     record
 }
 
 fn stored_task_to_upsert(task: &StoredVideoTask) -> UpsertVideoTask {
-    let snapshot_record =
-        LocalVideoTaskSnapshot::from_stored_task(task).map(|snapshot| snapshot.to_upsert_record());
     UpsertVideoTask {
         id: task.id.clone(),
         short_id: task.short_id.clone(),
@@ -386,39 +375,15 @@ fn stored_task_to_upsert(task: &StoredVideoTask) -> UpsertVideoTask {
         provider_api_format: task.provider_api_format.clone(),
         format_converted: task.format_converted,
         model: task.model.clone(),
-        prompt: task.prompt.clone().or_else(|| {
-            snapshot_record
-                .as_ref()
-                .and_then(|record| record.prompt.clone())
-        }),
-        original_request_body: task.original_request_body.clone().or_else(|| {
-            snapshot_record
-                .as_ref()
-                .and_then(|record| record.original_request_body.clone())
-        }),
-        duration_seconds: task.duration_seconds.or_else(|| {
-            snapshot_record
-                .as_ref()
-                .and_then(|record| record.duration_seconds)
-        }),
-        resolution: task.resolution.clone().or_else(|| {
-            snapshot_record
-                .as_ref()
-                .and_then(|record| record.resolution.clone())
-        }),
-        aspect_ratio: task.aspect_ratio.clone().or_else(|| {
-            snapshot_record
-                .as_ref()
-                .and_then(|record| record.aspect_ratio.clone())
-        }),
-        size: task.size.clone().or_else(|| {
-            snapshot_record
-                .as_ref()
-                .and_then(|record| record.size.clone())
-        }),
+        prompt: task.prompt.clone(),
+        original_request_body: None,
+        duration_seconds: task.duration_seconds,
+        resolution: task.resolution.clone(),
+        aspect_ratio: task.aspect_ratio.clone(),
+        size: task.size.clone(),
         status: task.status,
         progress_percent: task.progress_percent,
-        progress_message: task.progress_message.clone(),
+        progress_message: None,
         retry_count: task.retry_count,
         poll_interval_seconds: task.poll_interval_seconds.max(1),
         next_poll_at_unix_secs: task.next_poll_at_unix_secs,
@@ -429,9 +394,9 @@ fn stored_task_to_upsert(task: &StoredVideoTask) -> UpsertVideoTask {
         completed_at_unix_secs: task.completed_at_unix_secs,
         updated_at_unix_secs: task.updated_at_unix_secs,
         error_code: task.error_code.clone(),
-        error_message: task.error_message.clone(),
+        error_message: None,
         video_url: task.video_url.clone(),
-        request_metadata: task.request_metadata.clone(),
+        request_metadata: None,
     }
 }
 
@@ -441,44 +406,6 @@ fn compute_poll_backoff_seconds(poll_interval_seconds: u32, retry_count: u32) ->
     u64::from(poll_interval_seconds)
         .saturating_mul(multiplier)
         .min(MAX_VIDEO_TASK_POLL_BACKOFF_SECONDS)
-}
-
-fn merge_video_task_request_metadata(
-    existing: Option<Value>,
-    snapshot: &LocalVideoTaskSnapshot,
-    provider_body: Option<&Map<String, Value>>,
-    poll_error: Option<&VideoTaskRefreshError>,
-) -> Result<Option<Value>, serde_json::Error> {
-    let mut metadata = match existing {
-        Some(Value::Object(object)) => object,
-        _ => Map::new(),
-    };
-    metadata.insert(
-        "rust_owner".to_string(),
-        Value::String("async_task".to_string()),
-    );
-    metadata.insert(
-        "rust_local_snapshot".to_string(),
-        serde_json::to_value(snapshot)?,
-    );
-    if let Some(provider_body) = provider_body {
-        metadata.insert(
-            "poll_raw_response".to_string(),
-            Value::Object(provider_body.clone()),
-        );
-        metadata.remove("poll_error");
-    }
-    if let Some(poll_error) = poll_error {
-        metadata.insert(
-            "poll_error".to_string(),
-            serde_json::json!({
-                "message": poll_error.message,
-                "permanent": poll_error.permanent,
-                "observed_at_unix_secs": now_unix_secs(),
-            }),
-        );
-    }
-    Ok(Some(Value::Object(metadata)))
 }
 
 pub(crate) async fn finalize_video_task_if_terminal(state: &AppState, task: &StoredVideoTask) {
@@ -543,9 +470,9 @@ fn build_video_task_terminal_usage_event(task: &StoredVideoTask) -> Option<Usage
             return None;
         }
     };
-    let provider_name = LocalVideoTaskSnapshot::from_stored_task(task)
-        .and_then(|snapshot| snapshot.provider_name().map(str::to_string))
-        .or_else(|| task.provider_id.clone())
+    let provider_name = task
+        .provider_id
+        .clone()
         .unwrap_or_else(|| "unknown".to_string());
     let response_time_ms = task
         .submitted_at_unix_secs
@@ -580,10 +507,10 @@ fn build_video_task_terminal_usage_event(task: &StoredVideoTask) -> Option<Usage
             has_format_conversion: Some(task.format_converted),
             is_stream: Some(false),
             status_code,
-            error_message: task.error_message.clone().or(task.error_code.clone()),
+            error_message: task.error_code.clone(),
             response_time_ms,
-            request_body: task.original_request_body.clone(),
-            request_metadata: task.request_metadata.clone(),
+            request_body: None,
+            request_metadata: None,
             ..UsageEventData::default()
         },
     ))
@@ -701,48 +628,36 @@ mod tests {
     }
 
     #[test]
-    fn stored_task_to_upsert_restores_sparse_fields_from_snapshot() {
+    fn stored_task_to_upsert_does_not_restore_sensitive_legacy_snapshot_fields() {
         let record = stored_task_to_upsert(&sample_sparse_stored_task());
 
-        assert_eq!(record.prompt.as_deref(), Some("hello"));
-        assert_eq!(
-            record.original_request_body,
-            Some(json!({
-                "prompt": "hello",
-                "seconds": "4",
-                "resolution": "720p",
-                "aspect_ratio": "16:9",
-                "size": "1280x720"
-            }))
-        );
-        assert_eq!(record.duration_seconds, Some(4));
-        assert_eq!(record.resolution.as_deref(), Some("720p"));
-        assert_eq!(record.aspect_ratio.as_deref(), Some("16:9"));
-        assert_eq!(record.size.as_deref(), Some("1280x720"));
+        assert!(record.prompt.is_none());
+        assert!(record.original_request_body.is_none());
+        assert!(record.duration_seconds.is_none());
+        assert!(record.resolution.is_none());
+        assert!(record.aspect_ratio.is_none());
+        assert!(record.size.is_none());
+        assert!(record.progress_message.is_none());
+        assert!(record.error_message.is_none());
+        assert!(record.request_metadata.is_none());
     }
 
     #[test]
-    fn failed_poll_update_keeps_snapshot_backed_request_body() {
+    fn failed_poll_update_drops_snapshot_backed_sensitive_fields() {
         let record = build_failed_poll_update(
             &sample_sparse_stored_task(),
             &VideoTaskRefreshError {
-                message: "temporary failure".to_string(),
+                category: "transport_error",
                 permanent: false,
             },
             100,
         );
 
-        assert_eq!(
-            record.original_request_body,
-            Some(json!({
-                "prompt": "hello",
-                "seconds": "4",
-                "resolution": "720p",
-                "aspect_ratio": "16:9",
-                "size": "1280x720"
-            }))
-        );
-        assert_eq!(record.prompt.as_deref(), Some("hello"));
-        assert_eq!(record.resolution.as_deref(), Some("720p"));
+        assert!(record.original_request_body.is_none());
+        assert!(record.prompt.is_none());
+        assert!(record.resolution.is_none());
+        assert!(record.progress_message.is_none());
+        assert!(record.error_message.is_none());
+        assert!(record.request_metadata.is_none());
     }
 }

@@ -40,58 +40,18 @@ fn pure_policy_crates_do_not_depend_on_runtime_adapters() {
 
 #[test]
 fn database_adapters_are_independent_driver_boundaries() {
-    let adapters = [
-        (
-            "crates/aether-data/adapters/postgres/Cargo.toml",
-            "features = [\"postgres\"",
-            ["features = [\"mysql\"", "features = [\"sqlite\""],
-        ),
-        (
-            "crates/aether-data/adapters/mysql/Cargo.toml",
-            "features = [\"mysql\"",
-            ["features = [\"postgres\"", "features = [\"sqlite\""],
-        ),
-        (
-            "crates/aether-data/adapters/sqlite/Cargo.toml",
-            "features = [\"sqlite\"",
-            ["features = [\"postgres\"", "features = [\"mysql\""],
-        ),
-    ];
-
-    for (manifest_path, expected_driver, other_drivers) in adapters {
-        let manifest = read_workspace_file(manifest_path);
-        assert!(manifest.contains("aether-data-contracts.workspace = true"));
-        assert!(manifest.contains(expected_driver));
-        assert_manifest_excludes(
-            manifest_path,
-            &[other_drivers[0], other_drivers[1], "aether-gateway", "axum"],
-        );
-    }
+    let path = "crates/aether-data/adapters/postgres/Cargo.toml";
+    let manifest = read_workspace_file(path);
+    assert!(manifest.contains("aether-data-contracts.workspace = true"));
+    assert!(manifest.contains("features = [\"postgres\""));
+    assert_manifest_excludes(path, &["aether-gateway", "axum"]);
 }
 
 #[test]
 fn data_facade_preserves_legacy_driver_paths_without_owning_driver_code() {
-    for (path, adapter) in [
-        (
-            "crates/aether-data/runtime/src/driver/postgres.rs",
-            "aether_data_postgres",
-        ),
-        (
-            "crates/aether-data/runtime/src/driver/mysql.rs",
-            "aether_data_mysql",
-        ),
-        (
-            "crates/aether-data/runtime/src/driver/sqlite.rs",
-            "aether_data_sqlite",
-        ),
-    ] {
-        let source = read_workspace_file(path);
-        assert!(
-            source.contains(&format!("pub use {adapter}::*;")),
-            "{path} should remain a thin compatibility facade"
-        );
-        assert!(!source.contains("sqlx::"));
-    }
+    let source = read_workspace_file("crates/aether-data/runtime/src/driver/postgres.rs");
+    assert!(source.contains("pub use aether_data_postgres::*;"));
+    assert!(!source.contains("sqlx::"));
 }
 
 #[test]
@@ -183,32 +143,16 @@ fn tunnel_binary_uses_shared_tunnel_boundary_without_gateway_runtime_dependency(
 fn data_facade_defaults_to_postgres_and_gateway_selects_all_drivers_explicitly() {
     let data_manifest = read_workspace_file("crates/aether-data/runtime/Cargo.toml");
     assert!(data_manifest.contains("default = [\"postgres\"]"));
-    for dependency in [
-        "aether-data-postgres = { workspace = true, optional = true }",
-        "aether-data-mysql = { workspace = true, optional = true }",
-        "aether-data-sqlite = { workspace = true, optional = true }",
-    ] {
-        assert!(
-            data_manifest.contains(dependency),
-            "aether-data should keep {dependency} optional"
-        );
-    }
-    assert!(
-        !data_manifest.contains("features = [\"postgres\", \"mysql\", \"sqlite\"\"]"),
-        "aether-data must not unconditionally enable every sqlx driver"
-    );
+    assert!(data_manifest.contains("aether-data-postgres = { workspace = true, optional = true }"));
+    assert!(data_manifest.contains("postgres = [\"dep:aether-data-postgres\", \"sqlx/postgres\"]"));
+    assert!(data_manifest.contains("all-drivers = [\"postgres\"]"));
 
     let gateway_manifest = read_workspace_file("apps/aether-gateway/Cargo.toml");
     assert!(gateway_manifest
         .contains("aether-data = { workspace = true, features = [\"all-drivers\"] }"));
 
     let data_lib = read_workspace_file("crates/aether-data/runtime/src/lib.rs");
-    for backend in ["PostgresBackend", "MysqlBackend", "SqliteBackend"] {
-        assert!(
-            data_lib.contains(&format!("pub use backend::{backend};")),
-            "aether-data should expose enabled backends symmetrically at its facade root"
-        );
-    }
+    assert!(data_lib.contains("pub use backend::PostgresBackend;"));
 }
 
 #[test]
@@ -219,58 +163,11 @@ fn data_query_helpers_belong_to_adapters_not_the_runtime_facade() {
         "aether-data should not keep a direct query-helper dependency after SQL repositories move to adapters"
     );
 
-    for adapter_manifest in [
-        "crates/aether-data/adapters/postgres/Cargo.toml",
-        "crates/aether-data/adapters/mysql/Cargo.toml",
-        "crates/aether-data/adapters/sqlite/Cargo.toml",
-    ] {
-        let manifest = read_workspace_file(adapter_manifest);
-        assert!(
-            manifest.contains("aether-data-query.workspace = true"),
-            "{adapter_manifest} should own its query-helper dependency"
-        );
-    }
+    let manifest = read_workspace_file("crates/aether-data/adapters/postgres/Cargo.toml");
+    assert!(manifest.contains("aether-data-query.workspace = true"));
 
     let query_helpers = read_workspace_file("crates/aether-data/query/src/lib.rs");
-    for dialect in ["Postgres", "MySql", "Sqlite"] {
-        assert!(
-            query_helpers.contains(dialect),
-            "aether-data-query should render the {dialect} dialect"
-        );
-    }
-}
-
-#[test]
-fn sql_adapters_centralize_error_mapping_boilerplate() {
-    for (adapter, driver) in [
-        ("aether-data-mysql", "mysql"),
-        ("aether-data-sqlite", "sqlite"),
-    ] {
-        let root = format!("crates/aether-data/adapters/{driver}/src");
-        let files = collect_workspace_rust_files(&root);
-        let trait_owners = files
-            .iter()
-            .filter(|path| {
-                std::fs::read_to_string(path)
-                    .expect("adapter source should be readable")
-                    .contains("trait SqlResultExt<T>")
-            })
-            .collect::<Vec<_>>();
-
-        assert_eq!(
-            trait_owners.len(),
-            1,
-            "{adapter} should have exactly one SqlResultExt owner, found: {trait_owners:?}"
-        );
-        assert_eq!(
-            trait_owners[0].file_name().and_then(|name| name.to_str()),
-            Some("error.rs"),
-            "{adapter} should keep SQL error mapping in src/error.rs"
-        );
-
-        let lib = read_workspace_file(&format!("crates/aether-data/adapters/{driver}/src/lib.rs"));
-        assert!(lib.contains("mod error;"));
-    }
+    assert!(query_helpers.contains("Postgres"));
 }
 
 #[test]
@@ -286,7 +183,8 @@ fn gateway_tunnel_protocol_path_is_a_thin_compatibility_facade() {
 fn frontdoor_owns_bounded_request_body_buffering() {
     let frontdoor = read_workspace_file("crates/aether-gateway/frontdoor/src/body.rs");
     assert!(frontdoor.contains("acquire_many_owned"));
-    assert!(frontdoor.contains("to_bytes(body, body_limit)"));
+    assert!(frontdoor.contains("body.into_data_stream()"));
+    assert!(frontdoor.contains("try_reserve_bytes"));
     assert!(frontdoor.contains("BodyBufferReservation"));
 
     let gateway = read_workspace_file("apps/aether-gateway/src/handlers/proxy/body_buffer.rs");

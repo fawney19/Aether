@@ -22,10 +22,10 @@ export interface ProxyNode {
   tunnel_mode: boolean
   tunnel_connected: boolean
   tunnel_connected_at: string | null
-  // 手动节点专用字段。列表接口返回脱敏密码，详情接口返回明文密码。
+  // 手动节点专用字段。密码永不通过节点接口返回，仅提供是否已配置的状态。
   proxy_url?: string
   proxy_username?: string
-  proxy_password?: string
+  has_proxy_password?: boolean
   // 硬件信息（aether-tunnel 节点）
   hardware_info: Record<string, unknown> | null
   estimated_max_concurrency: number | null

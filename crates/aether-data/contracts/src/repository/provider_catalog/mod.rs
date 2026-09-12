@@ -4,11 +4,12 @@ mod types;
 pub use snapshot::ProviderCatalogSnapshot;
 pub use types::{
     ProviderCatalogKeyAdaptiveState, ProviderCatalogKeyAdaptiveStateUpdate,
-    ProviderCatalogKeyAdminCasUpdate, ProviderCatalogKeyHealthStateUpdate,
-    ProviderCatalogKeyListOrder, ProviderCatalogKeyListQuery,
+    ProviderCatalogKeyAdminCasUpdate, ProviderCatalogKeyCredentialsCasUpdate,
+    ProviderCatalogKeyHealthStateUpdate, ProviderCatalogKeyListOrder, ProviderCatalogKeyListQuery,
     ProviderCatalogKeyOAuthCredentialCasDelete, ProviderCatalogKeyOAuthCredentialFence,
     ProviderCatalogKeyOAuthRuntimeStateCasUpdate, ProviderCatalogKeyRuntimeMetadataUpdate,
-    ProviderCatalogKeyStatusSnapshotUpdate, ProviderCatalogReadRepository,
+    ProviderCatalogKeyStatusSnapshotUpdate, ProviderCatalogProviderConfigCasUpdate,
+    ProviderCatalogProxyCasUpdate, ProviderCatalogReadRepository,
     ProviderCatalogUpstreamMetadataNamespaceExpectation,
     ProviderCatalogUpstreamMetadataNamespaceUpdate, ProviderCatalogWriteRepository,
     StoredProviderCatalogEndpoint, StoredProviderCatalogKey,

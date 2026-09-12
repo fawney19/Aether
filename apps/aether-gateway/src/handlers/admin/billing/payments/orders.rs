@@ -5,7 +5,8 @@ use super::{
     build_admin_payments_backend_unavailable_response, build_admin_payments_bad_request_response,
     normalize_admin_payment_currency, normalize_admin_payment_optional_string,
     normalize_admin_payment_positive_number, parse_admin_payments_limit,
-    parse_admin_payments_offset, AdminPaymentOrderCreditRequest,
+    parse_admin_payments_offset, prepare_admin_payment_gateway_response_for_storage,
+    AdminPaymentOrderCreditRequest,
 };
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::handlers::admin::shared::{attach_admin_audit_response, query_param_value};
@@ -124,7 +125,9 @@ async fn close_direct_gateway_order_before_terminal_mark(
             )))
         }
     };
-    if order.status != "pending" || !matches!(order.payment_method.as_str(), "alipay" | "wxpay") {
+    if order.status != "pending"
+        || !matches!(order.payment_method.as_str(), "alipay" | "wxpay" | "stripe")
+    {
         return Ok(None);
     }
     crate::handlers::shared::close_direct_gateway_order(state.app(), &order)
@@ -231,6 +234,8 @@ async fn build_admin_payment_credit_order_response(
             "gateway_response 必须为对象",
         ));
     }
+    let gateway_response =
+        prepare_admin_payment_gateway_response_for_storage(payload.gateway_response);
     let operator_id = admin_payment_operator_id(request_context);
     match state
         .admin_credit_payment_order(
@@ -239,7 +244,7 @@ async fn build_admin_payment_credit_order_response(
             pay_amount,
             pay_currency.as_deref(),
             exchange_rate,
-            payload.gateway_response,
+            gateway_response,
             operator_id.as_deref(),
         )
         .await?

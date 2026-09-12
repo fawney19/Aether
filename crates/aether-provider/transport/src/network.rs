@@ -320,13 +320,28 @@ fn proxy_snapshot_from_value(value: &Value) -> Option<ProxySnapshot> {
     let mode = json_string_field(object, "mode");
     let node_id = json_string_field(object, "node_id");
     let label = json_string_field(object, "label");
-    let url = json_string_field(object, "url").or_else(|| json_string_field(object, "proxy_url"));
+    let url = json_string_field(object, "url")
+        .or_else(|| json_string_field(object, "proxy_url"))
+        .and_then(|proxy_url| {
+            proxy_url_with_auth(
+                &proxy_url,
+                json_proxy_credential_field(object, "username"),
+                json_proxy_credential_field(object, "password"),
+            )
+        });
 
     let mut extra = Map::new();
     for (key, value) in object {
         if matches!(
             key.as_str(),
-            "enabled" | "mode" | "node_id" | "label" | "url" | "proxy_url"
+            "enabled"
+                | "mode"
+                | "node_id"
+                | "label"
+                | "url"
+                | "proxy_url"
+                | "username"
+                | "password"
         ) {
             continue;
         }
@@ -354,6 +369,35 @@ fn json_string_field(object: &Map<String, Value>, key: &str) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
+}
+
+fn json_proxy_credential_field<'a>(object: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
+    object
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+}
+
+fn proxy_url_with_auth(
+    proxy_url: &str,
+    username: Option<&str>,
+    password: Option<&str>,
+) -> Option<String> {
+    let username = username.filter(|value| !value.is_empty());
+    let password = password.filter(|value| !value.is_empty());
+    let mut parsed = url::Url::parse(proxy_url).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https" | "socks5" | "socks5h")
+        || parsed.host_str().is_none()
+    {
+        return None;
+    }
+    if username.is_none() && password.is_none() {
+        return Some(parsed.to_string());
+    }
+    let username = username.unwrap_or("");
+    parsed.set_username(username).ok()?;
+    parsed.set_password(password).ok()?;
+    Some(parsed.to_string())
 }
 
 #[cfg(test)]
@@ -518,6 +562,43 @@ mod tests {
         assert_eq!(snapshot.node_id.as_deref(), Some("proxy-node-1"));
         assert_eq!(snapshot.url, None);
         assert_eq!(snapshot.extra, Some(json!({"kind":"manual"})));
+    }
+
+    #[test]
+    fn resolves_authenticated_inline_proxy_without_secret_extra_fields() {
+        let mut transport = sample_transport();
+        transport.key.proxy = Some(json!({
+            "url": "socks5h://proxy.example:1080",
+            "username": " alice ",
+            "password": " p:ss ",
+            "kind": "manual",
+        }));
+
+        let snapshot = resolve_transport_proxy_snapshot(&transport)
+            .expect("authenticated proxy snapshot should resolve");
+
+        assert_eq!(
+            snapshot.url.as_deref(),
+            Some("socks5h://%20alice%20:%20p%3Ass%20@proxy.example:1080")
+        );
+        assert_eq!(snapshot.extra, Some(json!({"kind":"manual"})));
+    }
+
+    #[test]
+    fn resolves_legacy_password_only_inline_proxy() {
+        let mut transport = sample_transport();
+        transport.key.proxy = Some(json!({
+            "url": "http://proxy.example:8080",
+            "password": "legacy-password",
+        }));
+
+        let snapshot = resolve_transport_proxy_snapshot(&transport)
+            .expect("password-only proxy snapshot should resolve");
+        assert_eq!(
+            snapshot.url.as_deref(),
+            Some("http://:legacy-password@proxy.example:8080/")
+        );
+        assert!(snapshot.extra.is_none());
     }
 
     #[tokio::test]

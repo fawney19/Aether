@@ -191,6 +191,46 @@ pub(super) fn inspect_prefetched_stream_body(
     }
 }
 
+fn append_error_frame_payload(
+    body: &mut Vec<u8>,
+    chunk_b64: Option<&str>,
+    text: Option<&str>,
+) -> Result<bool, GatewayError> {
+    let remaining = MAX_ERROR_BODY_BYTES.saturating_sub(body.len());
+    if remaining == 0 {
+        return Ok(false);
+    }
+
+    if let Some(chunk_b64) = chunk_b64 {
+        // Do not decode an attacker-controlled megabyte-scale base64 value
+        // merely to retain the first 16 KiB of an error body. A standard
+        // base64 value representing at most `remaining` bytes cannot exceed
+        // this length.
+        let max_encoded_len = remaining
+            .saturating_add(2)
+            .checked_div(3)
+            .unwrap_or(usize::MAX)
+            .saturating_mul(4);
+        if chunk_b64.len() > max_encoded_len {
+            warn!(
+                encoded_bytes = chunk_b64.len(),
+                max_encoded_bytes = max_encoded_len,
+                "execution runtime error frame body exceeded capture limit"
+            );
+            return Ok(false);
+        }
+        let chunk = base64::engine::general_purpose::STANDARD
+            .decode(chunk_b64)
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        body.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+    } else if let Some(text) = text {
+        let text_bytes = text.as_bytes();
+        body.extend_from_slice(&text_bytes[..text_bytes.len().min(remaining)]);
+    }
+
+    Ok(body.len() < MAX_ERROR_BODY_BYTES)
+}
+
 pub(super) async fn collect_error_body<R>(
     lines: &mut FramedRead<R, LinesCodec>,
 ) -> Result<Vec<u8>, GatewayError>
@@ -201,23 +241,19 @@ where
     while let Some(frame) = read_next_frame(lines).await? {
         match frame.payload {
             StreamFramePayload::Data { chunk_b64, text } => {
-                let chunk = if let Some(chunk_b64) = chunk_b64 {
-                    base64::engine::general_purpose::STANDARD
-                        .decode(chunk_b64)
-                        .map_err(|err| GatewayError::Internal(err.to_string()))?
-                } else {
-                    text.unwrap_or_default().into_bytes()
-                };
-                body.extend_from_slice(&chunk);
-                if body.len() >= MAX_ERROR_BODY_BYTES {
-                    body.truncate(MAX_ERROR_BODY_BYTES);
+                if !append_error_frame_payload(&mut body, chunk_b64.as_deref(), text.as_deref())? {
                     break;
                 }
             }
             StreamFramePayload::Telemetry { .. } => {}
             StreamFramePayload::Eof { .. } => break,
             StreamFramePayload::Error { error } => {
-                warn!(error = %error.message, "execution runtime stream emitted error frame while collecting error body");
+                warn!(
+                    error_kind = ?error.kind,
+                    error_phase = ?error.phase,
+                    upstream_status = ?error.upstream_status,
+                    "execution runtime stream emitted error frame while collecting error body"
+                );
                 break;
             }
             StreamFramePayload::Headers { .. } => {}
@@ -241,4 +277,33 @@ where
         return Ok(Some(frame));
     }
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{append_error_frame_payload, MAX_ERROR_BODY_BYTES};
+
+    #[test]
+    fn oversized_base64_error_frame_is_rejected_before_decode() {
+        let mut body = Vec::new();
+        let encoded = "x".repeat((MAX_ERROR_BODY_BYTES + 2) / 3 * 4 + 1);
+
+        let keep_reading = append_error_frame_payload(&mut body, Some(&encoded), None)
+            .expect("oversized frame should be handled without a decode error");
+
+        assert!(!keep_reading);
+        assert!(body.is_empty());
+    }
+
+    #[test]
+    fn error_frame_payload_is_capped_to_remaining_capture_budget() {
+        let mut body = vec![b'a'; MAX_ERROR_BODY_BYTES - 2];
+
+        let keep_reading = append_error_frame_payload(&mut body, None, Some("hello"))
+            .expect("text payload should append");
+
+        assert!(!keep_reading);
+        assert_eq!(body.len(), MAX_ERROR_BODY_BYTES);
+        assert_eq!(&body[MAX_ERROR_BODY_BYTES - 2..], b"he");
+    }
 }

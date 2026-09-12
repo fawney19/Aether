@@ -327,7 +327,7 @@ async fn gateway_executes_gemini_cli_stream_via_local_decision_gate_with_local_s
                     });
                 let frames = concat!(
                     "{\"type\":\"headers\",\"payload\":{\"kind\":\"headers\",\"status_code\":200,\"headers\":{\"content-type\":\"text/event-stream\"}}}\n",
-                    "{\"type\":\"data\",\"payload\":{\"kind\":\"data\",\"text\":\"data: {\\\"candidates\\\":[]}\\n\\n\"}}\n",
+                    "{\"type\":\"data\",\"payload\":{\"kind\":\"data\",\"text\":\"data: {\\\"candidates\\\":[{\\\"content\\\":{\\\"parts\\\":[{\\\"text\\\":\\\"ok\\\"}]},\\\"finishReason\\\":\\\"STOP\\\"}]}\\n\\n\"}}\n",
                     "{\"type\":\"telemetry\",\"payload\":{\"kind\":\"telemetry\",\"telemetry\":{\"elapsed_ms\":34,\"upstream_bytes\":26}}}\n",
                     "{\"type\":\"eof\",\"payload\":{\"kind\":\"eof\"}}\n"
                 );
@@ -369,6 +369,11 @@ async fn gateway_executes_gemini_cli_stream_via_local_decision_gate_with_local_s
             provider_catalog_repository,
             Arc::clone(&request_candidate_repository),
             DEVELOPMENT_ENCRYPTION_KEY,
+        )
+        .attach_proxy_node_repository_for_tests(
+            crate::tests::ai_execute::ai_execute_proxy_node_repository([
+                "proxy-node-gemini-cli-local",
+            ]),
         ),
     );
     let gateway = build_router_with_state(gateway_state);
@@ -392,7 +397,7 @@ async fn gateway_executes_gemini_cli_stream_via_local_decision_gate_with_local_s
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
         strip_sse_keepalive_comments(&response.text().await.expect("body should read")),
-        "data: {\"candidates\":[]}\n\n"
+        "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"ok\"}]},\"finishReason\":\"STOP\"}]}\n\n"
     );
 
     let seen_execution_runtime_request = seen_execution_runtime
@@ -843,7 +848,7 @@ async fn gateway_executes_gemini_cli_stream_via_local_decision_gate_after_oauth_
                     });
                 let frames = concat!(
                     "{\"type\":\"headers\",\"payload\":{\"kind\":\"headers\",\"status_code\":200,\"headers\":{\"content-type\":\"text/event-stream\"}}}\n",
-                    "{\"type\":\"data\",\"payload\":{\"kind\":\"data\",\"text\":\"data: {\\\"response\\\":{\\\"candidates\\\":[]},\\\"remainingCredits\\\":42,\\\"consumedCredits\\\":1,\\\"traceId\\\":\\\"trace-upstream-1\\\"}\\n\\n\"}}\n",
+                    "{\"type\":\"data\",\"payload\":{\"kind\":\"data\",\"text\":\"data: {\\\"response\\\":{\\\"candidates\\\":[{\\\"content\\\":{\\\"parts\\\":[{\\\"text\\\":\\\"ok\\\"}]},\\\"finishReason\\\":\\\"STOP\\\"}]},\\\"remainingCredits\\\":42,\\\"consumedCredits\\\":1,\\\"traceId\\\":\\\"trace-upstream-1\\\"}\\n\\n\"}}\n",
                     "{\"type\":\"telemetry\",\"payload\":{\"kind\":\"telemetry\",\"telemetry\":{\"elapsed_ms\":34,\"upstream_bytes\":26}}}\n",
                     "{\"type\":\"eof\",\"payload\":{\"kind\":\"eof\"}}\n"
                 );
@@ -886,7 +891,12 @@ async fn gateway_executes_gemini_cli_stream_via_local_decision_gate_after_oauth_
         crate::provider_transport::LocalOAuthRefreshCoordinator::with_adapters_for_tests(vec![
             Arc::new(
                 crate::provider_transport::oauth_refresh::GenericOAuthRefreshAdapter::default()
-                    .with_token_url_for_tests("gemini_cli", format!("{refresh_url}/oauth/token")),
+                    .with_token_url_for_tests("gemini_cli", format!("{refresh_url}/oauth/token"))
+                    .with_oauth_credentials_for_tests(
+                        "gemini_cli",
+                        "test-gemini-client-id",
+                        "test-gemini-client-secret",
+                    ),
             ),
         ]);
     let gateway_state = build_state_with_execution_runtime_override(execution_runtime_url.clone())
@@ -897,6 +907,11 @@ async fn gateway_executes_gemini_cli_stream_via_local_decision_gate_after_oauth_
             provider_catalog_repository,
             Arc::clone(&request_candidate_repository),
             DEVELOPMENT_ENCRYPTION_KEY,
+        )
+        .attach_proxy_node_repository_for_tests(
+            crate::tests::ai_execute::ai_execute_proxy_node_repository([
+                "proxy-node-gemini-cli-oauth-local",
+            ]),
         ),
     )
     .with_oauth_refresh_coordinator_for_tests(oauth_refresh);
@@ -921,7 +936,7 @@ async fn gateway_executes_gemini_cli_stream_via_local_decision_gate_after_oauth_
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
         strip_sse_keepalive_comments(&response.text().await.expect("body should read")),
-        "data: {\"candidates\":[]}\n\n"
+        "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"ok\"}]},\"finishReason\":\"STOP\"}]}\n\n"
     );
 
     let seen_refresh_request = seen_refresh
@@ -936,12 +951,12 @@ async fn gateway_executes_gemini_cli_stream_via_local_decision_gate_after_oauth_
     assert!(seen_refresh_request
         .body
         .contains("grant_type=refresh_token"));
-    assert!(seen_refresh_request.body.contains(
-        "client_id=681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com"
-    ));
     assert!(seen_refresh_request
         .body
-        .contains("client_secret=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"));
+        .contains("client_id=test-gemini-client-id"));
+    assert!(seen_refresh_request
+        .body
+        .contains("client_secret=test-gemini-client-secret"));
     assert!(seen_refresh_request
         .body
         .contains("refresh_token=rt-gemini-cli-stream-local-123"));
@@ -1342,7 +1357,7 @@ async fn gateway_executes_vertex_ai_gemini_cli_stream_via_local_decision_gate_wi
                     });
                 let frames = concat!(
                     "{\"type\":\"headers\",\"payload\":{\"kind\":\"headers\",\"status_code\":200,\"headers\":{\"content-type\":\"text/event-stream\"}}}\n",
-                    "{\"type\":\"data\",\"payload\":{\"kind\":\"data\",\"text\":\"data: {\\\"candidates\\\":[]}\\n\\n\"}}\n",
+                    "{\"type\":\"data\",\"payload\":{\"kind\":\"data\",\"text\":\"data: {\\\"candidates\\\":[{\\\"content\\\":{\\\"parts\\\":[{\\\"text\\\":\\\"ok\\\"}]},\\\"finishReason\\\":\\\"STOP\\\"}]}\\n\\n\"}}\n",
                     "{\"type\":\"telemetry\",\"payload\":{\"kind\":\"telemetry\",\"telemetry\":{\"elapsed_ms\":34,\"upstream_bytes\":26}}}\n",
                     "{\"type\":\"eof\",\"payload\":{\"kind\":\"eof\"}}\n"
                 );
@@ -1410,7 +1425,7 @@ async fn gateway_executes_vertex_ai_gemini_cli_stream_via_local_decision_gate_wi
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
         strip_sse_keepalive_comments(&response.text().await.expect("body should read")),
-        "data: {\"candidates\":[]}\n\n"
+        "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"ok\"}]},\"finishReason\":\"STOP\"}]}\n\n"
     );
 
     let seen_execution_runtime_request = seen_execution_runtime
@@ -1908,7 +1923,12 @@ async fn gateway_executes_antigravity_gemini_cli_stream_via_local_decision_gate_
         crate::provider_transport::LocalOAuthRefreshCoordinator::with_adapters_for_tests(vec![
             Arc::new(
                 crate::provider_transport::oauth_refresh::GenericOAuthRefreshAdapter::default()
-                    .with_token_url_for_tests("antigravity", format!("{refresh_url}/oauth/token")),
+                    .with_token_url_for_tests("antigravity", format!("{refresh_url}/oauth/token"))
+                    .with_oauth_credentials_for_tests(
+                        "antigravity",
+                        "test-antigravity-client-id",
+                        "test-antigravity-client-secret",
+                    ),
             ),
         ]);
     let data_state =
@@ -1919,6 +1939,7 @@ async fn gateway_executes_antigravity_gemini_cli_stream_via_local_decision_gate_
             Arc::clone(&request_candidate_repository),
             DEVELOPMENT_ENCRYPTION_KEY,
         )
+        .with_system_default_routing_group_for_tests()
         .with_system_config_values_for_tests([(
             crate::constants::ANTIGRAVITY_BEARER_BRIDGE_CONFIG_KEY.to_string(),
             json!({
@@ -1992,12 +2013,12 @@ async fn gateway_executes_antigravity_gemini_cli_stream_via_local_decision_gate_
     assert!(seen_refresh_request
         .body
         .contains("grant_type=refresh_token"));
-    assert!(seen_refresh_request.body.contains(
-        "client_id=1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
-    ));
     assert!(seen_refresh_request
         .body
-        .contains("client_secret=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"));
+        .contains("client_id=test-antigravity-client-id"));
+    assert!(seen_refresh_request
+        .body
+        .contains("client_secret=test-antigravity-client-secret"));
     assert!(seen_refresh_request
         .body
         .contains("refresh_token=rt-antigravity-cli-stream-local-123"));
@@ -2021,7 +2042,7 @@ async fn gateway_executes_antigravity_gemini_cli_stream_via_local_decision_gate_
         "Bearer refreshed-antigravity-cli-stream-access-token"
     );
     assert_eq!(seen_execution_runtime_request.x_client_name, "antigravity");
-    assert_eq!(seen_execution_runtime_request.x_client_version, "1.2.3");
+    assert_eq!(seen_execution_runtime_request.x_client_version, "4.3.0");
     assert_eq!(
         seen_execution_runtime_request.x_vscode_sessionid,
         "sess-antigravity-stream-local-123"

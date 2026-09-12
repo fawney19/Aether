@@ -17,18 +17,14 @@ pub mod lifecycle;
 pub mod maintenance;
 pub mod repository;
 
-#[cfg(feature = "mysql")]
-pub use backend::MysqlBackend;
 #[cfg(feature = "postgres")]
 pub use backend::PostgresBackend;
-#[cfg(feature = "sqlite")]
-pub use backend::SqliteBackend;
 pub use backend::{
     DataBackends, DataLeaseBackends, DataReadRepositories, DataTransactionBackends,
     DataWriteRepositories,
 };
 pub use config::DataLayerConfig;
-pub use database::{DatabaseDriver, SqlDatabaseConfig, SqlPoolConfig, DEFAULT_SQLITE_DATABASE_URL};
+pub use database::{DatabaseDriver, SqlDatabaseConfig, SqlPoolConfig};
 pub use error::DataLayerError;
 pub use maintenance::{
     DatabaseMaintenanceSummary, DatabasePoolSummary, DatabasePostgresActivityGroup,

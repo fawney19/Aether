@@ -1,5 +1,6 @@
 use super::value::build_admin_provider_summary_value;
 use crate::handlers::admin::request::AdminAppState;
+use crate::GatewayError;
 use aether_data_contracts::repository::provider_catalog::{
     StoredProviderCatalogEndpoint, StoredProviderCatalogKey,
 };
@@ -10,19 +11,23 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub(crate) async fn build_admin_provider_summary_payload(
     state: &AdminAppState<'_>,
     provider_id: &str,
-) -> Option<serde_json::Value> {
+) -> Result<Option<serde_json::Value>, GatewayError> {
     let state = state.as_ref();
     if !state.has_provider_catalog_data_reader() {
-        return None;
+        return Err(GatewayError::Internal(
+            "Admin provider catalog data unavailable".to_string(),
+        ));
     }
 
     let provider_ids = vec![provider_id.to_string()];
-    let provider = state
+    let Some(provider) = state
         .read_provider_catalog_providers_by_ids(&provider_ids)
-        .await
-        .ok()?
+        .await?
         .into_iter()
-        .next()?;
+        .next()
+    else {
+        return Ok(None);
+    };
     let (
         endpoints_result,
         keys_result,
@@ -36,8 +41,8 @@ pub(crate) async fn build_admin_provider_summary_payload(
         state.list_provider_model_stats(&provider_ids),
         state.list_active_global_model_ids_by_provider_ids(&provider_ids),
     );
-    let endpoints = endpoints_result.ok().unwrap_or_default();
-    let keys = keys_result.ok().unwrap_or_default();
+    let endpoints = endpoints_result?;
+    let keys = keys_result?;
     let quota_snapshot = quota_snapshot_result.ok().flatten();
     let model_stats = model_stats_result
         .ok()
@@ -57,7 +62,7 @@ pub(crate) async fn build_admin_provider_summary_payload(
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    Some(build_admin_provider_summary_value(
+    Ok(Some(build_admin_provider_summary_value(
         &provider,
         &endpoints,
         &keys,
@@ -65,7 +70,7 @@ pub(crate) async fn build_admin_provider_summary_payload(
         model_stats.as_ref(),
         active_global_model_ids,
         now_unix_secs,
-    ))
+    )))
 }
 
 pub(crate) async fn build_admin_providers_summary_payload(
@@ -94,11 +99,7 @@ pub(crate) async fn build_admin_providers_summary_payload(
         normalized_api_format != "all" && !normalized_api_format.is_empty();
     let requires_model_filter = normalized_model_id != "all" && !normalized_model_id.is_empty();
 
-    let mut providers = state
-        .list_provider_catalog_providers(false)
-        .await
-        .ok()
-        .unwrap_or_default();
+    let mut providers = state.list_provider_catalog_providers(false).await.ok()?;
     let all_provider_ids = providers
         .iter()
         .map(|provider| provider.id.clone())
@@ -109,8 +110,7 @@ pub(crate) async fn build_admin_providers_summary_payload(
         state
             .list_provider_catalog_endpoints_by_provider_ids(&all_provider_ids)
             .await
-            .ok()
-            .unwrap_or_default()
+            .ok()?
     };
     let active_global_model_refs = if !requires_model_filter || all_provider_ids.is_empty() {
         Vec::new()
@@ -202,8 +202,8 @@ pub(crate) async fn build_admin_providers_summary_payload(
             state.list_active_global_model_ids_by_provider_ids(&provider_ids),
         );
         (
-            endpoints_result.ok().unwrap_or_default(),
-            keys_result.ok().unwrap_or_default(),
+            endpoints_result.ok()?,
+            keys_result.ok()?,
             model_stats_result.ok().unwrap_or_default(),
             active_global_model_refs_result.ok().unwrap_or_default(),
         )

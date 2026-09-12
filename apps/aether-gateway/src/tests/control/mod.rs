@@ -23,6 +23,7 @@ use aether_data::repository::proxy_nodes::{
     InMemoryProxyNodeRepository, ProxyNodeReadRepository, StoredProxyNode, StoredProxyNodeEvent,
 };
 use aether_data::repository::quota::InMemoryProviderQuotaRepository;
+use aether_data::repository::users::InMemoryUserReadRepository;
 use aether_data::repository::wallet::InMemoryWalletRepository;
 use aether_data_contracts::repository::{
     candidates::{RequestCandidateStatus, StoredRequestCandidate},
@@ -48,6 +49,8 @@ mod admin;
 mod helpers;
 mod internal;
 mod proxy;
+
+pub(super) use helpers::issue_test_admin_access_token as issue_shared_test_admin_access_token;
 
 use super::{
     build_router, build_router_with_execution_runtime_override, build_router_with_state,

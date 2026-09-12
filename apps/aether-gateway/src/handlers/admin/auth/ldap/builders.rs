@@ -1,9 +1,10 @@
 use super::shared::*;
 use crate::handlers::admin::request::AdminAppState;
 use crate::GatewayError;
+use aether_data::repository::auth_modules::{LdapBindPasswordUpdate, StoredLdapModuleConfig};
 use serde::Deserialize;
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub(super) struct AdminLdapConfigUpdateRequest {
     server_url: String,
     bind_dn: String,
@@ -28,7 +29,7 @@ pub(super) struct AdminLdapConfigUpdateRequest {
     connect_timeout: i32,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Default, Deserialize)]
 pub(super) struct AdminLdapConfigTestRequest {
     #[serde(default)]
     server_url: Option<String>,
@@ -56,7 +57,7 @@ pub(super) struct AdminLdapConfigTestRequest {
     connect_timeout: Option<i32>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(super) struct AdminLdapConnectionTestConfig {
     server_url: String,
     bind_dn: String,
@@ -66,13 +67,26 @@ pub(super) struct AdminLdapConnectionTestConfig {
     connect_timeout: i32,
 }
 
+pub(super) struct AdminLdapConfigUpdate {
+    pub(super) expected: Option<StoredLdapModuleConfig>,
+    pub(super) replacement: StoredLdapModuleConfig,
+    pub(super) bind_password_update: LdapBindPasswordUpdate,
+}
+
 pub(super) async fn build_admin_ldap_update_config(
     state: &AdminAppState<'_>,
     payload: AdminLdapConfigUpdateRequest,
-) -> Result<aether_data::repository::auth_modules::StoredLdapModuleConfig, String> {
+) -> Result<AdminLdapConfigUpdate, String> {
     let server_url = admin_ldap_trim_required(payload.server_url, "LDAP 服务器地址不能为空")?;
+    let server_url = admin_ldap_normalize_server_url(&server_url, payload.use_starttls)
+        .ok_or_else(|| {
+            "LDAP 服务器地址必须使用 ldaps://，或在启用 StartTLS 时使用 ldap://；不得包含凭据、查询参数或片段"
+                .to_string()
+        })?;
     let bind_dn = admin_ldap_trim_required(payload.bind_dn, "绑定 DN 不能为空")?;
     let base_dn = admin_ldap_trim_required(payload.base_dn, "Base DN 不能为空")?;
+    admin_ldap_validate_distinguished_name(&bind_dn, "绑定 DN")?;
+    admin_ldap_validate_distinguished_name(&base_dn, "Base DN")?;
     let user_search_filter =
         admin_ldap_trim_required(payload.user_search_filter, "搜索过滤器不能为空")?;
     admin_ldap_validate_search_filter(&user_search_filter)?;
@@ -80,38 +94,41 @@ pub(super) async fn build_admin_ldap_update_config(
     let email_attr = admin_ldap_trim_required(payload.email_attr, "邮箱属性不能为空")?;
     let display_name_attr =
         admin_ldap_trim_required(payload.display_name_attr, "显示名称属性不能为空")?;
+    admin_ldap_validate_attribute_description(&username_attr, "用户名属性")?;
+    admin_ldap_validate_attribute_description(&email_attr, "邮箱属性")?;
+    admin_ldap_validate_attribute_description(&display_name_attr, "显示名称属性")?;
     if !(1..=60).contains(&payload.connect_timeout) {
         return Err("连接超时时间必须在 1 到 60 秒之间".to_string());
     }
 
-    let existing = state
+    let mut existing = state
         .get_ldap_module_config()
         .await
         .map_err(|err| format!("{err:?}"))?;
-    let bind_password_update_requested = payload
-        .bind_password
-        .as_ref()
-        .is_some_and(|value| !value.is_empty());
-    let bind_password = match payload.bind_password {
-        Some(value) if value.is_empty() => Some(String::new()),
-        Some(value) => Some(admin_ldap_trim_required(value, "绑定密码不能为空")?),
-        None => None,
-    };
+    if payload.bind_password.is_none() {
+        if let Some(config) = existing.as_ref() {
+            crate::handlers::shared::decrypt_or_migrate_ldap_bind_password(state.app(), config)
+                .await
+                .map_err(|_| "已保存的 LDAP 绑定密码无法解密".to_string())?;
+            existing = state
+                .get_ldap_module_config()
+                .await
+                .map_err(|err| format!("{err:?}"))?;
+        }
+    }
+    let requested_bind_password = payload.bind_password;
     let is_new_config = existing.is_none();
-    if is_new_config && bind_password.as_deref().unwrap_or("").is_empty() {
+    let will_have_password = match requested_bind_password.as_deref() {
+        Some(value) => !value.trim().is_empty(),
+        None => existing
+            .as_ref()
+            .and_then(|config| config.bind_password_encrypted.as_deref())
+            .map(str::trim)
+            .is_some_and(|value: &str| !value.is_empty()),
+    };
+    if is_new_config && !will_have_password {
         return Err("首次配置 LDAP 时必须设置绑定密码".to_string());
     }
-
-    let will_have_password = bind_password
-        .as_ref()
-        .map(|value| !value.is_empty())
-        .unwrap_or_else(|| {
-            existing
-                .as_ref()
-                .and_then(|config| config.bind_password_encrypted.as_deref())
-                .map(str::trim)
-                .is_some_and(|value: &str| !value.is_empty())
-        });
 
     if payload.is_exclusive && !payload.is_enabled {
         return Err("仅允许 LDAP 登录 需要先启用 LDAP 认证".to_string());
@@ -135,31 +152,58 @@ pub(super) async fn build_admin_ldap_update_config(
         }
     }
 
-    let bind_password_encrypted = match bind_password {
-        Some(value) if value.is_empty() => None,
-        Some(value) => state.encrypt_catalog_secret_with_fallbacks(&value),
-        None => existing.and_then(|config| config.bind_password_encrypted),
+    let replacement = StoredLdapModuleConfig {
+        server_url,
+        bind_dn,
+        // The repository ignores this field for config mutations. Password changes are
+        // carried exclusively by `bind_password_update`, so Preserve never copies an old
+        // ciphertext into the replacement record.
+        bind_password_encrypted: None,
+        base_dn,
+        user_search_filter: Some(user_search_filter),
+        username_attr: Some(username_attr),
+        email_attr: Some(email_attr),
+        display_name_attr: Some(display_name_attr),
+        is_enabled: payload.is_enabled,
+        is_exclusive: payload.is_exclusive,
+        use_starttls: payload.use_starttls,
+        connect_timeout: Some(payload.connect_timeout),
     };
-    if bind_password_update_requested && bind_password_encrypted.is_none() {
-        return Err("LDAP 绑定密码加密失败，请检查 Rust 数据加密配置".to_string());
-    }
-
-    Ok(
-        aether_data::repository::auth_modules::StoredLdapModuleConfig {
-            server_url,
-            bind_dn,
-            bind_password_encrypted,
-            base_dn,
-            user_search_filter: Some(user_search_filter),
-            username_attr: Some(username_attr),
-            email_attr: Some(email_attr),
-            display_name_attr: Some(display_name_attr),
-            is_enabled: payload.is_enabled,
-            is_exclusive: payload.is_exclusive,
-            use_starttls: payload.use_starttls,
-            connect_timeout: Some(payload.connect_timeout),
-        },
-    )
+    let bind_password_update = match requested_bind_password {
+        Some(value) if value.is_empty() => LdapBindPasswordUpdate::Clear,
+        Some(value) => {
+            let password = admin_ldap_trim_required(value, "绑定密码不能为空")?;
+            let ciphertext = state
+                .encrypt_ldap_bind_password(&replacement, &password)
+                .ok_or_else(|| "LDAP 绑定密码加密失败，请检查 Rust 数据加密配置".to_string())?;
+            LdapBindPasswordUpdate::Set(ciphertext)
+        }
+        None => {
+            if let Some(existing_config) = existing.as_ref() {
+                if existing_config
+                    .bind_password_encrypted
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty())
+                    && !crate::handlers::shared::ldap_bind_password_binding_matches(
+                        existing_config,
+                        &replacement,
+                    )
+                    .unwrap_or(false)
+                {
+                    return Err(
+                        "修改 LDAP 服务器、StartTLS、bind DN 或 Base DN 时必须重新提供绑定密码"
+                            .to_string(),
+                    );
+                }
+            }
+            LdapBindPasswordUpdate::Preserve
+        }
+    };
+    Ok(AdminLdapConfigUpdate {
+        expected: existing,
+        replacement,
+        bind_password_update,
+    })
 }
 
 pub(super) async fn build_admin_ldap_test_config(
@@ -167,7 +211,16 @@ pub(super) async fn build_admin_ldap_test_config(
     payload: AdminLdapConfigTestRequest,
 ) -> Result<Option<AdminLdapConnectionTestConfig>, String> {
     if let Some(value) = payload.user_search_filter.as_deref() {
-        admin_ldap_validate_search_filter(value.trim())?;
+        admin_ldap_validate_search_filter(value)?;
+    }
+    for (value, label) in [
+        (payload.username_attr.as_deref(), "用户名属性"),
+        (payload.email_attr.as_deref(), "邮箱属性"),
+        (payload.display_name_attr.as_deref(), "显示名称属性"),
+    ] {
+        if let Some(value) = value {
+            admin_ldap_validate_attribute_description(value.trim(), label)?;
+        }
     }
     if let Some(connect_timeout) = payload.connect_timeout {
         if !(1..=60).contains(&connect_timeout) {
@@ -199,9 +252,14 @@ pub(super) async fn build_admin_ldap_test_config(
         .as_ref()
         .and_then(|config| config.connect_timeout)
         .unwrap_or_else(admin_ldap_default_connect_timeout);
-    let mut bind_password = saved
-        .as_ref()
-        .and_then(|config| admin_ldap_read_saved_bind_password(state, config));
+    let mut bind_password = match saved.as_ref() {
+        Some(config) => {
+            crate::handlers::shared::decrypt_or_migrate_ldap_bind_password(state.app(), config)
+                .await
+                .map_err(|_| "已保存的 LDAP 绑定密码无法解密".to_string())?
+        }
+        None => None,
+    };
 
     if let Some(value) = payload.server_url {
         server_url = Some(admin_ldap_trim_required(value, "LDAP 服务器地址不能为空")?);
@@ -239,11 +297,21 @@ pub(super) async fn build_admin_ldap_test_config(
         return Ok(None);
     }
 
+    let server_url = server_url.expect("server_url already checked");
+    let server_url = admin_ldap_normalize_server_url(&server_url, use_starttls).ok_or_else(|| {
+        "LDAP 服务器地址必须使用 ldaps://，或在启用 StartTLS 时使用 ldap://；不得包含凭据、查询参数或片段"
+            .to_string()
+    })?;
+    let bind_dn = bind_dn.expect("bind_dn already checked");
+    let base_dn = base_dn.expect("base_dn already checked");
+    admin_ldap_validate_distinguished_name(&bind_dn, "绑定 DN")?;
+    admin_ldap_validate_distinguished_name(&base_dn, "Base DN")?;
+
     Ok(Some(AdminLdapConnectionTestConfig {
-        server_url: server_url.expect("server_url already checked"),
-        bind_dn: bind_dn.expect("bind_dn already checked"),
+        server_url,
+        bind_dn,
         bind_password: bind_password.expect("bind_password already checked"),
-        base_dn: base_dn.expect("base_dn already checked"),
+        base_dn,
         use_starttls,
         connect_timeout,
     }))
@@ -270,7 +338,8 @@ pub(super) async fn admin_ldap_test_connection(
 }
 
 fn admin_ldap_test_connection_blocking(config: AdminLdapConnectionTestConfig) -> (bool, String) {
-    let Some(server_url): Option<String> = admin_ldap_normalize_server_url(&config.server_url)
+    let Some(server_url): Option<String> =
+        admin_ldap_normalize_server_url(&config.server_url, config.use_starttls)
     else {
         return (false, ADMIN_LDAP_TEST_FAILURE_MESSAGE.to_string());
     };
@@ -302,51 +371,21 @@ fn admin_ldap_trim_required(value: String, detail: &str) -> Result<String, Strin
 }
 
 fn admin_ldap_validate_search_filter(value: &str) -> Result<(), String> {
-    if value.is_empty() {
-        return Err("搜索过滤器不能为空".to_string());
-    }
-    if !value.contains("{username}") {
-        return Err("搜索过滤器必须包含 {username} 占位符".to_string());
-    }
-
-    let mut depth = 0i32;
-    let mut max_depth = 0i32;
-    for ch in value.chars() {
-        if ch == '(' {
-            depth += 1;
-            max_depth = max_depth.max(depth);
-        } else if ch == ')' {
-            depth -= 1;
-            if depth < 0 {
-                return Err("搜索过滤器括号不匹配".to_string());
-            }
-        }
-    }
-    if depth != 0 {
-        return Err("搜索过滤器括号不匹配".to_string());
-    }
-    if max_depth > 5 {
-        return Err("搜索过滤器嵌套层数过深（最多5层）".to_string());
-    }
-    if value.len() > 200 {
-        return Err("搜索过滤器过长（最多200字符）".to_string());
-    }
-    Ok(())
+    crate::handlers::shared::ldap_search_filter_is_valid(value)
+        .then_some(())
+        .ok_or_else(|| {
+            "搜索过滤器格式无效，必须包含 {username} 且使用唯一、有限的外层括号结构".to_string()
+        })
 }
 
-fn admin_ldap_read_saved_bind_password(
-    state: &AdminAppState<'_>,
-    config: &aether_data::repository::auth_modules::StoredLdapModuleConfig,
-) -> Option<String> {
-    config
-        .bind_password_encrypted
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .and_then(|value| {
-            state
-                .decrypt_catalog_secret_with_fallbacks(value)
-                .or_else(|| Some(value.to_string()))
-        })
-        .filter(|value| !value.trim().is_empty())
+fn admin_ldap_validate_distinguished_name(value: &str, label: &str) -> Result<(), String> {
+    crate::handlers::shared::ldap_distinguished_name_is_valid(value)
+        .then_some(())
+        .ok_or_else(|| format!("{label}格式无效或过长"))
+}
+
+fn admin_ldap_validate_attribute_description(value: &str, label: &str) -> Result<(), String> {
+    crate::handlers::shared::ldap_attribute_description_is_valid(value)
+        .then_some(())
+        .ok_or_else(|| format!("{label}必须是有效的 LDAP 属性名称"))
 }

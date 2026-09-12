@@ -29,7 +29,7 @@ use crate::handlers::shared::{
     parse_catalog_auth_config_json, provider_key_health_summary,
     provider_key_status_snapshot_payload,
 };
-use crate::model_fetch::ModelFetchRuntimeState;
+use crate::model_fetch::{safe_model_fetch_error, ModelFetchRuntimeState};
 use crate::provider_key_auth::{
     provider_key_auth_semantics, provider_key_configured_api_formats,
     provider_key_inherits_provider_api_formats,
@@ -63,7 +63,7 @@ use aether_data_contracts::repository::provider_catalog::{
     StoredProviderCatalogEndpoint, StoredProviderCatalogKey, StoredProviderCatalogProvider,
 };
 use aether_model_fetch::{
-    aggregate_models_for_cache, fetch_models_from_transports, json_string_list,
+    aggregate_models_for_cache, fetch_models_from_transports_for_management, json_string_list,
     model_catalog_upstream_metadata, preset_models_for_provider, selected_models_fetch_endpoints,
     upstream_metadata_namespace_updates,
 };
@@ -319,6 +319,15 @@ fn provider_query_codex_preset_fallback(
     })
 }
 
+fn provider_query_project_model_fetch_errors(
+    errors: impl IntoIterator<Item = String>,
+) -> Vec<String> {
+    errors
+        .into_iter()
+        .map(|error| safe_model_fetch_error(&error))
+        .collect()
+}
+
 async fn provider_query_persist_preset_models(
     state: &AdminAppState<'_>,
     provider: &StoredProviderCatalogProvider,
@@ -496,10 +505,34 @@ async fn provider_query_fetch_models_for_key(
     key: &StoredProviderCatalogKey,
     force_refresh: bool,
 ) -> Result<ProviderQueryKeyFetchResult, GatewayError> {
+    let is_codex = provider.provider_type.trim().eq_ignore_ascii_case("codex");
+    let codex_catalog = if is_codex {
+        crate::model_fetch::read_codex_management_catalog(state.app(), &provider.id, &key.id).await
+    } else {
+        None
+    };
     if !force_refresh {
-        if let Some(cached_models) =
+        // Read through the live, credential-scoped directory before the admin cache.
+        // Never reuse the old versionless cache for Codex (including cached presets).
+        let cached_models = if is_codex {
+            codex_catalog
+                .as_ref()
+                .and_then(|catalog| catalog.models.as_ref())
+                .filter(|_| {
+                    selected_models_fetch_endpoints(endpoints, key)
+                        .iter()
+                        .any(|endpoint| endpoint.api_format == "openai:responses")
+                })
+                .map(|models| {
+                    aether_model_fetch::project_codex_models_for_legacy_cache([(
+                        "openai:responses",
+                        models.as_slice(),
+                    )])
+                })
+        } else {
             provider_query_read_cached_models(state, &provider.id, &key.id).await
-        {
+        };
+        if let Some(cached_models) = cached_models {
             let models = provider_query_filter_models_for_key(provider, key, cached_models);
             return Ok(ProviderQueryKeyFetchResult {
                 models,
@@ -561,30 +594,51 @@ async fn provider_query_fetch_models_for_key(
         });
     }
 
-    let outcome = match fetch_models_from_transports(state.app(), &transports).await {
-        Ok(outcome) => outcome,
-        Err(err) => {
-            all_errors.push(err);
-            if let Some(fallback) =
-                provider_query_codex_preset_fallback(provider, &all_errors.join("; "))
-            {
-                provider_query_persist_preset_models(state, provider, key, &fallback.models)
-                    .await?;
-                return Ok(fallback);
+    let client_version = is_codex.then(|| {
+        codex_catalog
+            .as_ref()
+            .map(|catalog| catalog.client_version.as_str())
+            .unwrap_or(crate::ai_serving::CODEX_CLIENT_VERSION)
+    });
+    let outcome =
+        match fetch_models_from_transports_for_management(state.app(), &transports, client_version)
+            .await
+        {
+            Ok(outcome) => outcome,
+            Err(err) => {
+                all_errors.extend(provider_query_project_model_fetch_errors([err]));
+                if let Some(fallback) =
+                    provider_query_codex_preset_fallback(provider, &all_errors.join("; "))
+                {
+                    provider_query_persist_preset_models(state, provider, key, &fallback.models)
+                        .await?;
+                    return Ok(fallback);
+                }
+                return Ok(ProviderQueryKeyFetchResult {
+                    models: Vec::new(),
+                    error: Some(all_errors.join("; ")),
+                    warning: None,
+                    from_cache: false,
+                    has_success: false,
+                });
             }
-            return Ok(ProviderQueryKeyFetchResult {
-                models: Vec::new(),
-                error: Some(all_errors.join("; ")),
-                warning: None,
-                from_cache: false,
-                has_success: false,
-            });
-        }
-    };
+        };
 
-    all_errors.extend(outcome.errors);
+    all_errors.extend(provider_query_project_model_fetch_errors(outcome.errors));
     let unique_models = outcome.legacy_models;
     if outcome.has_success && !unique_models.is_empty() {
+        if all_errors.is_empty() && outcome.native_codex_catalog {
+            if let Some(catalog) = codex_catalog.as_ref() {
+                crate::model_fetch::store_codex_management_catalog(
+                    state.app(),
+                    catalog,
+                    &transports,
+                    outcome.cached_models,
+                    outcome.etag.as_deref(),
+                )
+                .await;
+            }
+        }
         <AppState as ModelFetchRuntimeState>::write_upstream_models_cache(
             state.app(),
             &provider.id,
@@ -1025,5 +1079,33 @@ mod tests {
             models[2]["model_test_capabilities"]["openai:image"]["supports_edit"],
             json!(true)
         );
+    }
+
+    #[test]
+    fn provider_query_projects_transport_errors_before_exposing_them() {
+        let projected = provider_query_project_model_fetch_errors(vec![
+            "HTTP 401 response body: Authorization: Bearer upstream-secret".to_string(),
+            "connection failed for https://user:password@example.test/v1/models?key=secret"
+                .to_string(),
+        ]);
+
+        assert_eq!(
+            projected,
+            [
+                "Upstream models fetch authentication failed (status 401)",
+                "Upstream models fetch connection failed",
+            ]
+        );
+        let exposed = projected.join("; ");
+        for secret in [
+            "upstream-secret",
+            "Bearer",
+            "user",
+            "password",
+            "example.test",
+            "?key=secret",
+        ] {
+            assert!(!exposed.contains(secret));
+        }
     }
 }

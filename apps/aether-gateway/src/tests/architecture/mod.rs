@@ -36,7 +36,7 @@ pub(super) fn assert_no_sqlx_queries(root_relative_path: &str) {
             let source = fs::read_to_string(&path).expect("source file should be readable");
             let hits = patterns
                 .iter()
-                .filter(|pattern| source.contains(**pattern))
+                .filter(|pattern| source_contains_sql_pattern(&source, pattern))
                 .copied()
                 .collect::<Vec<_>>();
             if hits.is_empty() {
@@ -52,6 +52,32 @@ pub(super) fn assert_no_sqlx_queries(root_relative_path: &str) {
         "disallowed SQL ownership violations:\n{}",
         violations.join("\n")
     );
+}
+
+fn source_contains_sql_pattern(source: &str, pattern: &str) -> bool {
+    if pattern == "PostgresPool" {
+        source
+            .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+            .any(|identifier| identifier == pattern)
+    } else {
+        source.contains(pattern)
+    }
+}
+
+#[test]
+fn sql_pool_scan_distinguishes_pool_types_from_repository_names() {
+    assert!(source_contains_sql_pattern(
+        "pool: PostgresPool",
+        "PostgresPool"
+    ));
+    assert!(source_contains_sql_pattern(
+        "PostgresPool::connect(url)",
+        "PostgresPool"
+    ));
+    assert!(!source_contains_sql_pattern(
+        "PostgresPoolMemberScoreRepository::new(pool)",
+        "PostgresPool"
+    ));
 }
 
 pub(super) fn assert_no_sensitive_log_patterns(root_relative_path: &str, patterns: &[&str]) {

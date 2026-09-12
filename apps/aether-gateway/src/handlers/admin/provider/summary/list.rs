@@ -1,5 +1,6 @@
 use crate::handlers::admin::request::AdminAppState;
 use crate::handlers::admin::shared::unix_secs_to_rfc3339;
+use aether_admin::provider::redaction::admin_secret_safe_url;
 use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogEndpoint;
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
@@ -87,7 +88,9 @@ pub(crate) async fn build_admin_providers_payload(
                     "id": provider_id.clone(),
                     "name": provider.name,
                     "api_format": endpoint.map(|item| item.api_format.clone()),
-                    "base_url": endpoint.map(|item| item.base_url.clone()),
+                    "base_url": endpoint
+                        .map(|item| admin_secret_safe_url(Some(&item.base_url)))
+                        .unwrap_or(serde_json::Value::Null),
                     "api_key": has_any_key_by_provider.contains(&provider_id).then_some("***"),
                     "priority": provider.provider_priority,
                     "is_active": provider.is_active,

@@ -4,11 +4,14 @@ use std::sync::RwLock;
 use async_trait::async_trait;
 
 use super::{
-    normalize_user_group_name, LdapAuthUserProvisioningOutcome, StoredUserAuthRecord,
+    is_valid_bcrypt_hash, last_oauth_unbind_denial, normalize_user_group_name,
+    BindUserOAuthLinkOutcome, BindUserOAuthLinkSessionExpectation, DeleteUserOAuthLinkOutcome,
+    LdapAuthUserProvisioningOutcome, ResolveOAuthLinkedUserOutcome, StoredUserAuthRecord,
     StoredUserExportRow, StoredUserGroup, StoredUserGroupMember, StoredUserGroupMembership,
     StoredUserOAuthLinkSummary, StoredUserPreferenceRecord, StoredUserSessionRecord,
     StoredUserSummary, UpsertUserGroupRecord, UserExportListQuery, UserExportSortBy,
-    UserExportSummary, UserReadRepository,
+    UserExportSummary, UserReadRepository, LAST_ACTIVE_ADMIN_DELETE_DENIED,
+    LAST_ACTIVE_ADMIN_UPDATE_DENIED,
 };
 use crate::DataLayerError;
 
@@ -194,20 +197,21 @@ impl InMemoryUserReadRepository {
     }
 }
 
-fn looks_like_bcrypt_hash(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    value.len() == 60
-        && matches!(value.get(0..4), Some("$2a$") | Some("$2b$") | Some("$2y$"))
-        && bytes.get(4).is_some_and(u8::is_ascii_digit)
-        && bytes.get(5).is_some_and(u8::is_ascii_digit)
-        && bytes.get(6) == Some(&b'$')
-}
-
 fn normalize_optional_json_value(value: Option<serde_json::Value>) -> Option<serde_json::Value> {
     match value {
         Some(serde_json::Value::Null) | None => None,
         Some(value) => Some(value),
     }
+}
+
+fn normalized_ids(values: &[String]) -> Vec<String> {
+    values
+        .iter()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 fn find_memory_ldap_user_id(
@@ -694,6 +698,25 @@ impl UserReadRepository for InMemoryUserReadRepository {
         Ok(Some(group))
     }
 
+    async fn restore_user_group_if_matches(
+        &self,
+        expected: &StoredUserGroup,
+        restored: &StoredUserGroup,
+    ) -> Result<bool, DataLayerError> {
+        if self.read_only || expected.id != restored.id || expected.id.trim().is_empty() {
+            return Ok(false);
+        }
+        let mut groups = self.groups_by_id.write().expect("user repository lock");
+        let Some(current) = groups.get(&expected.id) else {
+            return Ok(false);
+        };
+        if current != expected {
+            return Ok(false);
+        }
+        groups.insert(restored.id.clone(), restored.clone());
+        Ok(true)
+    }
+
     async fn delete_user_group(&self, group_id: &str) -> Result<bool, DataLayerError> {
         if self.read_only {
             return Ok(false);
@@ -836,6 +859,43 @@ impl UserReadRepository for InMemoryUserReadRepository {
         }
         self.list_user_groups_by_ids(&existing_group_ids.into_iter().collect::<Vec<_>>())
             .await
+    }
+
+    async fn restore_user_groups_if_matches(
+        &self,
+        user_id: &str,
+        expected_group_ids: &[String],
+        restored_group_ids: &[String],
+    ) -> Result<bool, DataLayerError> {
+        if self.read_only {
+            return Ok(false);
+        }
+        let expected = normalized_ids(expected_group_ids);
+        let restored = normalized_ids(restored_group_ids);
+        let groups = self.groups_by_id.read().expect("user repository lock");
+        if restored
+            .iter()
+            .any(|group_id| !groups.contains_key(group_id))
+        {
+            return Ok(false);
+        }
+        let mut members = self.group_members.write().expect("user repository lock");
+        let mut current = members
+            .keys()
+            .filter(|(_, candidate_user_id)| candidate_user_id == user_id)
+            .map(|(group_id, _)| group_id.clone())
+            .collect::<Vec<_>>();
+        current.sort();
+        current.dedup();
+        if current != expected {
+            return Ok(false);
+        }
+        members.retain(|(_, candidate_user_id), _| candidate_user_id != user_id);
+        let now = chrono::Utc::now();
+        for group_id in restored {
+            members.insert((group_id, user_id.to_string()), now);
+        }
+        Ok(true)
     }
 
     async fn add_user_to_group(
@@ -1016,6 +1076,46 @@ impl UserReadRepository for InMemoryUserReadRepository {
             .cloned())
     }
 
+    async fn resolve_enabled_oauth_linked_user(
+        &self,
+        provider_type: &str,
+        provider_user_id: &str,
+        provider_username: Option<&str>,
+        provider_email: Option<&str>,
+        extra_data: Option<serde_json::Value>,
+        verified_email: Option<&str>,
+        touched_at: chrono::DateTime<chrono::Utc>,
+        provider_enabled_snapshot: bool,
+    ) -> Result<ResolveOAuthLinkedUserOutcome, DataLayerError> {
+        if !provider_enabled_snapshot {
+            return Ok(ResolveOAuthLinkedUserOutcome::ProviderUnavailable);
+        }
+        let Some(mut user) = self
+            .find_oauth_linked_user(provider_type, provider_user_id)
+            .await?
+        else {
+            return Ok(ResolveOAuthLinkedUserOutcome::NotLinked);
+        };
+        self.touch_oauth_link(
+            provider_type,
+            provider_user_id,
+            provider_username,
+            provider_email,
+            extra_data,
+            touched_at,
+        )
+        .await?;
+        if let Some(verified_email) = verified_email {
+            if self
+                .upgrade_oauth_email_verification_if_matches(&user.id, verified_email, touched_at)
+                .await?
+            {
+                user.email_verified = true;
+            }
+        }
+        Ok(ResolveOAuthLinkedUserOutcome::Linked(user))
+    }
+
     async fn touch_oauth_link(
         &self,
         provider_type: &str,
@@ -1056,6 +1156,7 @@ impl UserReadRepository for InMemoryUserReadRepository {
     async fn create_oauth_auth_user(
         &self,
         email: Option<String>,
+        email_verified: bool,
         username: String,
         created_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<Option<StoredUserAuthRecord>, DataLayerError> {
@@ -1066,7 +1167,7 @@ impl UserReadRepository for InMemoryUserReadRepository {
         let user = StoredUserAuthRecord::new(
             uuid::Uuid::new_v4().to_string(),
             email,
-            true,
+            email_verified,
             username,
             None,
             "user".to_string(),
@@ -1129,7 +1230,57 @@ impl UserReadRepository for InMemoryUserReadRepository {
             .count() as u64)
     }
 
-    async fn upsert_user_oauth_link(
+    async fn has_oauth_links_for_provider(
+        &self,
+        provider_type: &str,
+    ) -> Result<bool, DataLayerError> {
+        let provider_type = provider_type.trim();
+        Ok(self
+            .oauth_links_by_id
+            .read()
+            .expect("user repository lock")
+            .values()
+            .any(|link| link.provider_type == provider_type))
+    }
+
+    async fn count_locked_users_if_oauth_provider_disabled(
+        &self,
+        provider_type: &str,
+        enabled_provider_types_snapshot: &[String],
+        ldap_exclusive: bool,
+    ) -> Result<usize, DataLayerError> {
+        let provider_type = provider_type.trim();
+        let enabled = enabled_provider_types_snapshot
+            .iter()
+            .map(|value| value.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        let links = self.oauth_links_by_id.read().expect("user repository lock");
+        let users = self.auth_by_id.read().expect("user repository lock");
+        Ok(users
+            .values()
+            .filter(|user| user.is_active && !user.is_deleted)
+            .filter(|user| {
+                links
+                    .values()
+                    .any(|link| link.user_id == user.id && link.provider_type == provider_type)
+            })
+            .filter(|user| {
+                !links.values().any(|link| {
+                    link.user_id == user.id
+                        && link.provider_type != provider_type
+                        && enabled.contains(link.provider_type.as_str())
+                })
+            })
+            .filter(|user| {
+                user.auth_source.eq_ignore_ascii_case("oauth")
+                    || (ldap_exclusive
+                        && user.auth_source.eq_ignore_ascii_case("local")
+                        && !user.role.eq_ignore_ascii_case("admin"))
+            })
+            .count())
+    }
+
+    async fn bind_user_oauth_link_if_provider_enabled(
         &self,
         user_id: &str,
         provider_type: &str,
@@ -1138,27 +1289,66 @@ impl UserReadRepository for InMemoryUserReadRepository {
         provider_email: Option<&str>,
         extra_data: Option<serde_json::Value>,
         linked_at: chrono::DateTime<chrono::Utc>,
-    ) -> Result<(), DataLayerError> {
+        provider_enabled_snapshot: bool,
+        session_expectation: Option<&BindUserOAuthLinkSessionExpectation>,
+    ) -> Result<BindUserOAuthLinkOutcome, DataLayerError> {
         if self.read_only {
-            return Ok(());
+            return Ok(BindUserOAuthLinkOutcome::UserNotFound);
         }
 
         let provider_type = provider_type.trim().to_string();
         let provider_user_id = provider_user_id.trim().to_string();
+        if provider_type.is_empty() || provider_user_id.is_empty() {
+            return Err(DataLayerError::InvalidInput(
+                "OAuth provider type and subject must not be empty".to_string(),
+            ));
+        }
+        if !provider_enabled_snapshot {
+            return Ok(BindUserOAuthLinkOutcome::ProviderDisabled);
+        }
+        let users = self.auth_by_id.read().expect("user repository lock");
+        let Some(user) = users.get(user_id) else {
+            return Ok(BindUserOAuthLinkOutcome::UserNotFound);
+        };
+        let sessions =
+            session_expectation.map(|_| self.sessions_by_id.read().expect("user repository lock"));
+        if let Some(expectation) = session_expectation {
+            let checked_at = std::cmp::max(expectation.checked_at, chrono::Utc::now());
+            let session_is_current = sessions
+                .as_ref()
+                .and_then(|sessions| sessions.get(&expectation.session_id))
+                .is_some_and(|session| {
+                    user.is_active
+                        && !user.is_deleted
+                        && user.security_version == expectation.security_version
+                        && session.user_id == user_id
+                        && session.client_device_id == expectation.client_device_id
+                        && session.security_version == expectation.security_version
+                        && !session.is_revoked()
+                        && !session.is_expired(checked_at)
+                });
+            if !session_is_current {
+                return Ok(BindUserOAuthLinkOutcome::SessionUnavailable);
+            }
+        }
         let mut links = self
             .oauth_links_by_id
             .write()
             .expect("user repository lock");
-        if let Some(link) = links
-            .values_mut()
-            .find(|link| link.user_id == user_id && link.provider_type == provider_type)
+        if let Some(link) = links.values().find(|link| {
+            link.provider_type == provider_type && link.provider_user_id == provider_user_id
+        }) {
+            return Ok(if link.user_id == user_id {
+                BindUserOAuthLinkOutcome::IdentityAlreadyBoundToUser
+            } else {
+                BindUserOAuthLinkOutcome::IdentityBoundToAnotherUser
+            });
+        }
+        if links
+            .values()
+            .any(|link| link.user_id == user_id && link.provider_type == provider_type)
         {
-            link.provider_user_id = provider_user_id;
-            link.provider_username = provider_username.map(ToOwned::to_owned);
-            link.provider_email = provider_email.map(ToOwned::to_owned);
-            link.extra_data = extra_data;
-            link.last_login_at = Some(linked_at);
-            return Ok(());
+            return Ok(BindUserOAuthLinkOutcome::UserAlreadyLinkedProvider);
         }
         let link = StoredMemoryOAuthLink {
             id: uuid::Uuid::new_v4().to_string(),
@@ -1172,26 +1362,82 @@ impl UserReadRepository for InMemoryUserReadRepository {
             last_login_at: Some(linked_at),
         };
         links.insert(link.id.clone(), link);
-        Ok(())
+        Ok(BindUserOAuthLinkOutcome::Bound)
+    }
+
+    async fn upgrade_oauth_email_verification_if_matches(
+        &self,
+        user_id: &str,
+        verified_email: &str,
+        _verified_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, DataLayerError> {
+        if self.read_only {
+            return Ok(false);
+        }
+        let verified_email = verified_email.trim();
+        let mut users = self.auth_by_id.write().expect("user repository lock");
+        let Some(user) = users.get_mut(user_id) else {
+            return Ok(false);
+        };
+        if user.email_verified
+            || !user
+                .email
+                .as_deref()
+                .is_some_and(|email| email.trim().eq_ignore_ascii_case(verified_email))
+        {
+            return Ok(false);
+        }
+        user.email_verified = true;
+        Ok(true)
     }
 
     async fn delete_user_oauth_link(
         &self,
         user_id: &str,
         provider_type: &str,
-    ) -> Result<bool, DataLayerError> {
+        local_password_login_allowed: bool,
+        enabled_provider_types_snapshot: &[String],
+    ) -> Result<DeleteUserOAuthLinkOutcome, DataLayerError> {
         if self.read_only {
-            return Ok(false);
+            return Ok(DeleteUserOAuthLinkOutcome::NotFound);
         }
 
         let provider_type = provider_type.trim();
+        let users = self.auth_by_id.read().expect("user repository lock");
+        let Some(user) = users.get(user_id) else {
+            return Ok(DeleteUserOAuthLinkOutcome::NotFound);
+        };
         let mut links = self
             .oauth_links_by_id
             .write()
             .expect("user repository lock");
-        let before = links.len();
+        let target_exists = links
+            .values()
+            .any(|link| link.user_id == user_id && link.provider_type == provider_type);
+        if !target_exists {
+            return Ok(DeleteUserOAuthLinkOutcome::NotFound);
+        }
+        // The in-memory provider repository has a separate lock, so callers pass a
+        // point-in-time enabled-provider snapshot. SQL implementations instead read
+        // and lock provider rows in the same database transaction.
+        let has_remaining_enabled_oauth_link = links.values().any(|link| {
+            link.user_id == user_id
+                && link.provider_type != provider_type
+                && enabled_provider_types_snapshot
+                    .iter()
+                    .any(|enabled| enabled == &link.provider_type)
+        });
+        if !has_remaining_enabled_oauth_link {
+            if let Some(outcome) = last_oauth_unbind_denial(
+                &user.auth_source,
+                user.password_hash.as_deref(),
+                local_password_login_allowed,
+            ) {
+                return Ok(outcome);
+            }
+        }
         links.retain(|_, link| !(link.user_id == user_id && link.provider_type == provider_type));
-        Ok(links.len() != before)
+        Ok(DeleteUserOAuthLinkOutcome::Deleted)
     }
 
     async fn get_or_create_ldap_auth_user(
@@ -1324,7 +1570,9 @@ impl UserReadRepository for InMemoryUserReadRepository {
     async fn update_local_auth_user_profile(
         &self,
         user_id: &str,
+        email_present: bool,
         email: Option<String>,
+        email_verified: Option<bool>,
         username: Option<String>,
     ) -> Result<Option<StoredUserAuthRecord>, DataLayerError> {
         if self.read_only {
@@ -1338,8 +1586,11 @@ impl UserReadRepository for InMemoryUserReadRepository {
 
         let old_email = user.email.clone();
         let old_username = user.username.clone();
-        if let Some(email) = email {
-            user.email = Some(email);
+        if email_present {
+            user.email = email;
+        }
+        if let Some(email_verified) = email_verified {
+            user.email_verified = email_verified;
         }
         if let Some(username) = username {
             user.username = username;
@@ -1374,6 +1625,201 @@ impl UserReadRepository for InMemoryUserReadRepository {
         Ok(Some(updated))
     }
 
+    async fn restore_local_auth_user_state_if_matches(
+        &self,
+        expected_auth: &StoredUserAuthRecord,
+        restored_auth: &StoredUserAuthRecord,
+        expected_export: &StoredUserExportRow,
+        restored_export: &StoredUserExportRow,
+        expected_model_capability_settings: Option<&serde_json::Value>,
+        restored_model_capability_settings: Option<serde_json::Value>,
+        expected_feature_settings: Option<&serde_json::Value>,
+        restored_feature_settings: Option<serde_json::Value>,
+    ) -> Result<bool, DataLayerError> {
+        if self.read_only
+            || expected_auth.id != restored_auth.id
+            || expected_export.id != expected_auth.id
+            || restored_export.id != restored_auth.id
+        {
+            return Ok(false);
+        }
+
+        let mut users = self.auth_by_id.write().expect("user repository lock");
+        let Some(current) = users.get(expected_auth.id.as_str()) else {
+            return Ok(false);
+        };
+        if !current.matches_restore_state(expected_auth) {
+            return Ok(false);
+        }
+        let current_model = self
+            .model_settings_by_user_id
+            .read()
+            .expect("user repository lock")
+            .get(&expected_auth.id)
+            .cloned();
+        let current_feature = self
+            .feature_settings_by_user_id
+            .read()
+            .expect("user repository lock")
+            .get(&expected_auth.id)
+            .cloned();
+        if current_model.as_ref() != expected_model_capability_settings
+            || current_feature.as_ref() != expected_feature_settings
+        {
+            return Ok(false);
+        }
+        let current_export = self
+            .export_rows
+            .read()
+            .expect("user repository lock")
+            .iter()
+            .find(|row| row.id == expected_auth.id)
+            .cloned();
+        if current_export.as_ref().is_some_and(|row| {
+            row.rate_limit != expected_export.rate_limit
+                || row.rate_limit_mode != expected_export.rate_limit_mode
+        }) {
+            return Ok(false);
+        }
+
+        let removes_active_admin = current.role.eq_ignore_ascii_case("admin")
+            && current.is_active
+            && !current.is_deleted
+            && (!restored_auth.role.eq_ignore_ascii_case("admin") || !restored_auth.is_active);
+        if removes_active_admin
+            && users
+                .values()
+                .filter(|user| {
+                    user.role.eq_ignore_ascii_case("admin") && user.is_active && !user.is_deleted
+                })
+                .count()
+                <= 1
+        {
+            return Err(DataLayerError::InvalidInput(
+                LAST_ACTIVE_ADMIN_UPDATE_DENIED.to_string(),
+            ));
+        }
+
+        let old_email = current.email.clone();
+        let old_username = current.username.clone();
+        let security_state_changed =
+            current.role != restored_auth.role || current.is_active != restored_auth.is_active;
+        let user = users
+            .get_mut(expected_auth.id.as_str())
+            .expect("user existence checked while holding write lock");
+        user.email = restored_auth.email.clone();
+        user.email_verified = restored_auth.email_verified;
+        user.username = restored_auth.username.clone();
+        user.role = restored_auth.role.clone();
+        user.allowed_providers = restored_auth.allowed_providers.clone();
+        user.allowed_providers_mode = restored_auth.allowed_providers_mode.clone();
+        user.allowed_api_formats = restored_auth.allowed_api_formats.clone();
+        user.allowed_api_formats_mode = restored_auth.allowed_api_formats_mode.clone();
+        user.allowed_models = restored_auth.allowed_models.clone();
+        user.allowed_models_mode = restored_auth.allowed_models_mode.clone();
+        user.is_active = restored_auth.is_active;
+        if security_state_changed {
+            user.security_version = user.security_version.checked_add(1).ok_or_else(|| {
+                DataLayerError::UnexpectedValue("users.security_version overflow".to_string())
+            })?;
+        }
+        let updated = user.clone();
+        drop(users);
+
+        let mut identifiers = self
+            .auth_by_identifier
+            .write()
+            .expect("user repository lock");
+        identifiers.remove(&old_username);
+        if let Some(old_email) = old_email {
+            identifiers.remove(&old_email);
+        }
+        identifiers.insert(updated.username.clone(), updated.id.clone());
+        if let Some(email) = updated.email.as_ref() {
+            identifiers.insert(email.clone(), updated.id.clone());
+        }
+        drop(identifiers);
+        if let Some(summary) = self
+            .by_id
+            .write()
+            .expect("user repository lock")
+            .get_mut(&updated.id)
+        {
+            summary.email = updated.email.clone();
+            summary.username = updated.username.clone();
+            summary.role = updated.role.clone();
+            summary.is_active = updated.is_active;
+        }
+        let restored_model_capability_settings =
+            normalize_optional_json_value(restored_model_capability_settings);
+        let restored_feature_settings = normalize_optional_json_value(restored_feature_settings);
+        {
+            let mut settings = self
+                .model_settings_by_user_id
+                .write()
+                .expect("user repository lock");
+            match restored_model_capability_settings.clone() {
+                Some(value) => {
+                    settings.insert(updated.id.clone(), value);
+                }
+                None => {
+                    settings.remove(&updated.id);
+                }
+            }
+        }
+        {
+            let mut settings = self
+                .feature_settings_by_user_id
+                .write()
+                .expect("user repository lock");
+            match restored_feature_settings.clone() {
+                Some(value) => {
+                    settings.insert(updated.id.clone(), value);
+                }
+                None => {
+                    settings.remove(&updated.id);
+                }
+            }
+        }
+        if let Some(row) = self
+            .export_rows
+            .write()
+            .expect("user repository lock")
+            .iter_mut()
+            .find(|row| row.id == updated.id)
+        {
+            row.email = updated.email.clone();
+            row.email_verified = updated.email_verified;
+            row.username = updated.username.clone();
+            row.role = updated.role.clone();
+            row.auth_source = updated.auth_source.clone();
+            row.allowed_providers = updated.allowed_providers.clone();
+            row.allowed_providers_mode = updated.allowed_providers_mode.clone();
+            row.allowed_api_formats = updated.allowed_api_formats.clone();
+            row.allowed_api_formats_mode = updated.allowed_api_formats_mode.clone();
+            row.allowed_models = updated.allowed_models.clone();
+            row.allowed_models_mode = updated.allowed_models_mode.clone();
+            row.rate_limit = restored_export.rate_limit;
+            row.rate_limit_mode = restored_export.rate_limit_mode.clone();
+            row.model_capability_settings = restored_model_capability_settings.clone();
+            row.feature_settings = restored_feature_settings.clone();
+            row.is_active = updated.is_active;
+        }
+        if security_state_changed {
+            let now = chrono::Utc::now();
+            let mut sessions = self.sessions_by_id.write().expect("user repository lock");
+            for session in sessions
+                .values_mut()
+                .filter(|session| session.user_id == updated.id && session.revoked_at.is_none())
+            {
+                session.revoked_at = Some(now);
+                session.revoke_reason = Some("user_security_state_changed".to_string());
+                session.updated_at = Some(now);
+            }
+        }
+        Ok(true)
+    }
+
     async fn update_local_auth_user_password_hash(
         &self,
         user_id: &str,
@@ -1389,7 +1835,106 @@ impl UserReadRepository for InMemoryUserReadRepository {
             return Ok(None);
         };
         user.password_hash = Some(password_hash);
+        user.security_version = user.security_version.checked_add(1).ok_or_else(|| {
+            DataLayerError::UnexpectedValue("users.security_version overflow".to_string())
+        })?;
         Ok(Some(user.clone()))
+    }
+
+    async fn restore_local_auth_user_password_hash_if_matches(
+        &self,
+        user_id: &str,
+        expected_password_hash: Option<&str>,
+        password_hash: Option<String>,
+        _updated_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, DataLayerError> {
+        if self.read_only {
+            return Ok(false);
+        }
+
+        let mut auth_by_id = self.auth_by_id.write().expect("user repository lock");
+        let Some(user) = auth_by_id.get_mut(user_id) else {
+            return Ok(false);
+        };
+        if user.password_hash.as_deref() != expected_password_hash {
+            return Ok(false);
+        }
+        user.password_hash = password_hash;
+        user.security_version = user.security_version.checked_add(1).ok_or_else(|| {
+            DataLayerError::UnexpectedValue("users.security_version overflow".to_string())
+        })?;
+        Ok(true)
+    }
+
+    async fn reset_local_auth_user_password_and_revoke_sessions(
+        &self,
+        user_id: &str,
+        password_hash: String,
+        changed_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, DataLayerError> {
+        if self.read_only {
+            return Ok(false);
+        }
+        let mut users = self.auth_by_id.write().expect("user repository lock");
+        let mut sessions = self.sessions_by_id.write().expect("user repository lock");
+        let Some(user) = users.get_mut(user_id).filter(|user| !user.is_deleted) else {
+            return Ok(false);
+        };
+        user.password_hash = Some(password_hash);
+        user.security_version = user.security_version.checked_add(1).ok_or_else(|| {
+            DataLayerError::UnexpectedValue("users.security_version overflow".to_string())
+        })?;
+        for session in sessions
+            .values_mut()
+            .filter(|session| session.user_id == user_id && !session.is_revoked())
+        {
+            session.revoked_at = Some(changed_at);
+            session.revoke_reason = Some("admin_password_reset".to_string());
+            session.updated_at = Some(changed_at);
+        }
+        Ok(true)
+    }
+
+    async fn change_local_auth_password_and_revoke_sessions(
+        &self,
+        user_id: &str,
+        current_session_id: &str,
+        expected_password_hash: Option<&str>,
+        next_password_hash: String,
+        changed_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, DataLayerError> {
+        if self.read_only {
+            return Ok(false);
+        }
+        let mut users = self.auth_by_id.write().expect("user repository lock");
+        let mut sessions = self.sessions_by_id.write().expect("user repository lock");
+        let Some(user) = users.get_mut(user_id) else {
+            return Ok(false);
+        };
+        if user.password_hash.as_deref() != expected_password_hash
+            || !user.is_active
+            || user.is_deleted
+        {
+            return Ok(false);
+        }
+        if !sessions.get(current_session_id).is_some_and(|session| {
+            session.user_id == user_id && !session.is_revoked() && !session.is_expired(changed_at)
+        }) {
+            return Ok(false);
+        }
+        user.password_hash = Some(next_password_hash);
+        user.security_version = user.security_version.checked_add(1).ok_or_else(|| {
+            DataLayerError::UnexpectedValue("users.security_version overflow".to_string())
+        })?;
+        for session in sessions
+            .values_mut()
+            .filter(|session| session.user_id == user_id && !session.is_revoked())
+        {
+            session.revoked_at = Some(changed_at);
+            session.revoke_reason = Some("password_changed".to_string());
+            session.updated_at = Some(changed_at);
+        }
+        Ok(true)
     }
 
     async fn update_local_auth_user_admin_fields(
@@ -1411,9 +1956,36 @@ impl UserReadRepository for InMemoryUserReadRepository {
         }
 
         let mut auth_by_id = self.auth_by_id.write().expect("user repository lock");
-        let Some(user) = auth_by_id.get_mut(user_id) else {
+        let Some(current_user) = auth_by_id.get(user_id) else {
             return Ok(None);
         };
+        let current_role = current_user.role.clone();
+        let current_active = current_user.is_active;
+        let current_deleted = current_user.is_deleted;
+        let next_role = role.as_deref().unwrap_or(current_role.as_str());
+        let next_active = is_active.unwrap_or(current_active);
+        if current_role.eq_ignore_ascii_case("admin")
+            && current_active
+            && !current_deleted
+            && (!next_role.eq_ignore_ascii_case("admin") || !next_active)
+            && auth_by_id
+                .values()
+                .filter(|user| {
+                    user.role.eq_ignore_ascii_case("admin") && user.is_active && !user.is_deleted
+                })
+                .count()
+                <= 1
+        {
+            return Err(DataLayerError::InvalidInput(
+                LAST_ACTIVE_ADMIN_UPDATE_DENIED.to_string(),
+            ));
+        }
+        let security_state_changed =
+            !current_role.eq_ignore_ascii_case(next_role) || current_active != next_active;
+        let mut sessions = self.sessions_by_id.write().expect("user repository lock");
+        let user = auth_by_id
+            .get_mut(user_id)
+            .expect("user existence checked while holding write lock");
         if let Some(role) = role {
             user.role = role;
         }
@@ -1456,7 +2028,22 @@ impl UserReadRepository for InMemoryUserReadRepository {
         if let Some(is_active) = is_active {
             user.is_active = is_active;
         }
+        if security_state_changed {
+            user.security_version = user.security_version.checked_add(1).ok_or_else(|| {
+                DataLayerError::UnexpectedValue("users.security_version overflow".to_string())
+            })?;
+            let revoked_at = chrono::Utc::now();
+            for session in sessions
+                .values_mut()
+                .filter(|session| session.user_id == user_id && session.revoked_at.is_none())
+            {
+                session.revoked_at = Some(revoked_at);
+                session.revoke_reason = Some("user_security_state_changed".to_string());
+                session.updated_at = Some(revoked_at);
+            }
+        }
         let updated = user.clone();
+        drop(sessions);
         drop(auth_by_id);
 
         if let Some(summary) = self
@@ -1727,11 +2314,28 @@ impl UserReadRepository for InMemoryUserReadRepository {
             return Ok(false);
         }
 
-        let removed = self
-            .auth_by_id
-            .write()
-            .expect("user repository lock")
-            .remove(user_id);
+        let mut auth_by_id = self.auth_by_id.write().expect("user repository lock");
+        if auth_by_id.get(user_id).is_some_and(|user| {
+            user.role.eq_ignore_ascii_case("admin") && user.is_active && !user.is_deleted
+        }) && auth_by_id
+            .values()
+            .filter(|user| {
+                user.role.eq_ignore_ascii_case("admin") && user.is_active && !user.is_deleted
+            })
+            .count()
+            <= 1
+        {
+            return Err(DataLayerError::InvalidInput(
+                LAST_ACTIVE_ADMIN_DELETE_DENIED.to_string(),
+            ));
+        }
+        let mut sessions = self.sessions_by_id.write().expect("user repository lock");
+        let removed = auth_by_id.remove(user_id);
+        if removed.is_some() {
+            sessions.retain(|_, session| session.user_id != user_id);
+        }
+        drop(sessions);
+        drop(auth_by_id);
         let Some(removed) = removed else {
             return Ok(false);
         };
@@ -1747,6 +2351,30 @@ impl UserReadRepository for InMemoryUserReadRepository {
             .write()
             .expect("user repository lock")
             .retain(|key, _| key.1 != user_id);
+        self.preferences_by_user_id
+            .write()
+            .expect("user repository lock")
+            .remove(user_id);
+        self.model_settings_by_user_id
+            .write()
+            .expect("user repository lock")
+            .remove(user_id);
+        self.feature_settings_by_user_id
+            .write()
+            .expect("user repository lock")
+            .remove(user_id);
+        self.ldap_dn_by_user_id
+            .write()
+            .expect("user repository lock")
+            .remove(user_id);
+        self.ldap_username_by_user_id
+            .write()
+            .expect("user repository lock")
+            .remove(user_id);
+        self.export_rows
+            .write()
+            .expect("user repository lock")
+            .retain(|row| row.id != user_id);
 
         let mut identifiers = self
             .auth_by_identifier
@@ -1834,6 +2462,55 @@ impl UserReadRepository for InMemoryUserReadRepository {
             .or(session.updated_at)
             .or(session.last_seen_at)
             .unwrap_or_else(chrono::Utc::now);
+        let users = self.auth_by_id.read().expect("user repository lock");
+        let Some(user) = users.get(&session.user_id) else {
+            return Ok(None);
+        };
+        if !user.is_active || user.is_deleted || user.security_version != session.security_version {
+            return Ok(None);
+        }
+        let mut sessions = self.sessions_by_id.write().expect("user repository lock");
+        for existing in sessions.values_mut() {
+            if existing.user_id == session.user_id
+                && existing.client_device_id == session.client_device_id
+                && existing.revoked_at.is_none()
+                && !existing.is_expired(now)
+            {
+                existing.revoked_at = Some(now);
+                existing.revoke_reason = Some("replaced_by_new_login".to_string());
+                existing.updated_at = Some(now);
+            }
+        }
+        sessions.insert(session.id.clone(), session.clone());
+        Ok(Some(session.clone()))
+    }
+
+    async fn create_user_session_if_password_matches(
+        &self,
+        session: &StoredUserSessionRecord,
+        expected_password_hash: &str,
+    ) -> Result<Option<StoredUserSessionRecord>, DataLayerError> {
+        if self.read_only {
+            return Ok(None);
+        }
+        let mut users = self.auth_by_id.write().expect("user repository lock");
+        let Some(user) = users.get_mut(&session.user_id) else {
+            return Ok(None);
+        };
+        if user.password_hash.as_deref() != Some(expected_password_hash)
+            || !user.auth_source.eq_ignore_ascii_case("local")
+            || !user.is_active
+            || user.is_deleted
+            || user.security_version != session.security_version
+        {
+            return Ok(None);
+        }
+        let now = session
+            .created_at
+            .or(session.updated_at)
+            .or(session.last_seen_at)
+            .unwrap_or_else(chrono::Utc::now);
+        user.last_login_at = Some(now);
         let mut sessions = self.sessions_by_id.write().expect("user repository lock");
         for existing in sessions.values_mut() {
             if existing.user_id == session.user_id
@@ -1907,7 +2584,7 @@ impl UserReadRepository for InMemoryUserReadRepository {
         &self,
         user_id: &str,
         session_id: &str,
-        previous_refresh_token_hash: &str,
+        expected_refresh_token_hash: &str,
         next_refresh_token_hash: &str,
         rotated_at: chrono::DateTime<chrono::Utc>,
         expires_at: chrono::DateTime<chrono::Utc>,
@@ -1919,13 +2596,15 @@ impl UserReadRepository for InMemoryUserReadRepository {
         }
 
         let mut sessions = self.sessions_by_id.write().expect("user repository lock");
-        let Some(session) = sessions
-            .get_mut(session_id)
-            .filter(|s| s.user_id == user_id)
-        else {
+        let Some(session) = sessions.get_mut(session_id).filter(|session| {
+            session.user_id == user_id
+                && session.refresh_token_hash == expected_refresh_token_hash
+                && !session.is_revoked()
+                && !session.is_expired(rotated_at)
+        }) else {
             return Ok(false);
         };
-        session.prev_refresh_token_hash = Some(previous_refresh_token_hash.to_string());
+        session.prev_refresh_token_hash = Some(expected_refresh_token_hash.to_string());
         session.refresh_token_hash = next_refresh_token_hash.to_string();
         session.rotated_at = Some(rotated_at);
         session.expires_at = Some(expires_at);
@@ -2019,7 +2698,7 @@ impl UserReadRepository for InMemoryUserReadRepository {
                     && user
                         .password_hash
                         .as_deref()
-                        .is_some_and(looks_like_bcrypt_hash)
+                        .is_some_and(is_valid_bcrypt_hash)
             })
             .count() as u64)
     }
@@ -2027,8 +2706,27 @@ impl UserReadRepository for InMemoryUserReadRepository {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
     use crate::repository::users::{UserExportListQuery, UserReadRepository};
+
+    fn user_group_record(name: &str, priority: i32) -> UpsertUserGroupRecord {
+        UpsertUserGroupRecord {
+            name: name.to_string(),
+            description: Some(format!("{name} description")),
+            priority,
+            allowed_providers: Some(vec!["provider-a".to_string()]),
+            allowed_providers_mode: "specific".to_string(),
+            allowed_api_formats: Some(vec!["chat".to_string()]),
+            allowed_api_formats_mode: "specific".to_string(),
+            allowed_models: Some(vec!["model-a".to_string()]),
+            allowed_models_mode: "specific".to_string(),
+            rate_limit: Some(10),
+            rate_limit_mode: "custom".to_string(),
+            provider_key_policies: Default::default(),
+        }
+    }
 
     #[tokio::test]
     async fn lists_seeded_users() {
@@ -2048,6 +2746,73 @@ mod tests {
             .expect("lookup should succeed");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0], user);
+    }
+
+    #[tokio::test]
+    async fn restores_user_group_only_when_complete_snapshot_matches() {
+        let repository = InMemoryUserReadRepository::default();
+        let before = repository
+            .create_user_group(user_group_record("cas-group", 1))
+            .await
+            .expect("group creation should succeed")
+            .expect("group should be created");
+        let after = repository
+            .update_user_group(&before.id, user_group_record("cas-group-imported", 2))
+            .await
+            .expect("group update should succeed")
+            .expect("group should exist");
+
+        assert!(repository
+            .restore_user_group_if_matches(&after, &before)
+            .await
+            .expect("matching group restore should succeed"));
+        assert_eq!(
+            repository
+                .find_user_group_by_id(&before.id)
+                .await
+                .expect("group lookup should succeed"),
+            Some(before.clone())
+        );
+
+        let current_after_second_update = repository
+            .update_user_group(&before.id, user_group_record("cas-group-concurrent", 3))
+            .await
+            .expect("second group update should succeed")
+            .expect("group should exist");
+        assert!(!repository
+            .restore_user_group_if_matches(&after, &before)
+            .await
+            .expect("stale group restore should return a conflict"));
+        assert_eq!(
+            repository
+                .find_user_group_by_id(&before.id)
+                .await
+                .expect("group lookup should succeed"),
+            Some(current_after_second_update)
+        );
+    }
+
+    #[tokio::test]
+    async fn user_group_restore_rejects_identity_mismatch_and_missing_rows() {
+        let repository = InMemoryUserReadRepository::default();
+        let expected = repository
+            .create_user_group(user_group_record("cas-identity", 1))
+            .await
+            .expect("group creation should succeed")
+            .expect("group should be created");
+        let mut different_id = expected.clone();
+        different_id.id = "different-group-id".to_string();
+        assert!(!repository
+            .restore_user_group_if_matches(&expected, &different_id)
+            .await
+            .expect("identity mismatch should return false"));
+
+        let mut missing = expected.clone();
+        missing.id = "missing-group-id".to_string();
+        assert!(!repository
+            .restore_user_group_if_matches(&missing, &missing)
+            .await
+            .expect("missing row should return false"));
     }
 
     #[tokio::test]
@@ -2214,14 +2979,25 @@ mod tests {
         let updated = repository
             .update_local_auth_user_profile(
                 "user-1",
+                true,
                 Some("alice2@example.com".to_string()),
+                Some(true),
                 Some("alice2".to_string()),
             )
             .await
             .expect("profile update should succeed")
             .expect("profile update should return user");
         assert_eq!(updated.email.as_deref(), Some("alice2@example.com"));
+        assert!(updated.email_verified);
         assert_eq!(updated.username, "alice2");
+
+        let cleared = repository
+            .update_local_auth_user_profile("user-1", true, None, Some(false), None)
+            .await
+            .expect("nullable email update should succeed")
+            .expect("user should exist");
+        assert!(cleared.email.is_none());
+        assert!(!cleared.email_verified);
         assert!(repository
             .find_user_auth_by_identifier("alice@example.com")
             .await
@@ -2318,7 +3094,7 @@ mod tests {
             None
         );
         assert!(repository
-            .update_local_auth_user_profile("missing-user", None, None)
+            .update_local_auth_user_profile("missing-user", false, None, None, None)
             .await
             .expect("missing profile update should succeed")
             .is_none());
@@ -2335,6 +3111,288 @@ mod tests {
             .await
             .expect("deleted username lookup should succeed")
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn restores_nullable_password_only_when_expected_hash_matches() {
+        let user = StoredUserAuthRecord::new(
+            "user-password-cas".to_string(),
+            Some("password-cas@example.com".to_string()),
+            true,
+            "password-cas".to_string(),
+            Some("imported-hash".to_string()),
+            "user".to_string(),
+            "local".to_string(),
+            None,
+            None,
+            None,
+            true,
+            false,
+            None,
+            None,
+        )
+        .expect("auth user should build");
+        let repository = InMemoryUserReadRepository::seed_auth_users([user]);
+
+        assert!(repository
+            .restore_local_auth_user_password_hash_if_matches(
+                "user-password-cas",
+                Some("imported-hash"),
+                None,
+                chrono::Utc::now(),
+            )
+            .await
+            .expect("nullable restore should succeed"));
+        assert!(repository
+            .find_user_auth_by_id("user-password-cas")
+            .await
+            .expect("user lookup should succeed")
+            .expect("user should exist")
+            .password_hash
+            .is_none());
+
+        assert!(!repository
+            .restore_local_auth_user_password_hash_if_matches(
+                "user-password-cas",
+                Some("stale-hash"),
+                Some("old-hash".to_string()),
+                chrono::Utc::now(),
+            )
+            .await
+            .expect("conflicting restore should return false"));
+        assert!(repository
+            .find_user_auth_by_id("user-password-cas")
+            .await
+            .expect("user lookup should succeed")
+            .expect("user should exist")
+            .password_hash
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn hard_delete_preserves_last_admin_then_cleans_owned_memory_state() {
+        let now = chrono::Utc::now();
+        let admin = StoredUserAuthRecord::new(
+            "admin-delete-target".to_string(),
+            Some("admin-delete@example.com".to_string()),
+            true,
+            "admin-delete".to_string(),
+            Some("password-hash".to_string()),
+            "admin".to_string(),
+            "local".to_string(),
+            None,
+            None,
+            None,
+            true,
+            false,
+            Some(now),
+            None,
+        )
+        .expect("admin should build");
+        let export_row = StoredUserExportRow::new(
+            admin.id.clone(),
+            admin.email.clone(),
+            admin.email_verified,
+            admin.username.clone(),
+            admin.password_hash.clone(),
+            admin.role.clone(),
+            admin.auth_source.clone(),
+            None,
+            None,
+            None,
+            None,
+            Some(serde_json::json!({"gpt-4.1": {"enabled": true}})),
+            true,
+        )
+        .expect("export row should build")
+        .with_feature_settings(Some(serde_json::json!({"feature": true})));
+        let session = StoredUserSessionRecord::new(
+            "admin-delete-session".to_string(),
+            admin.id.clone(),
+            "admin-delete-device".to_string(),
+            None,
+            StoredUserSessionRecord::hash_refresh_token("admin-delete-refresh"),
+            None,
+            None,
+            Some(now),
+            Some(now + chrono::Duration::hours(1)),
+            None,
+            None,
+            None,
+            None,
+            Some(now),
+            Some(now),
+        )
+        .expect("session should build");
+        let preferences = StoredUserPreferenceRecord {
+            user_id: admin.id.clone(),
+            avatar_url: None,
+            bio: None,
+            default_provider_id: None,
+            default_provider_name: None,
+            theme: "system".to_string(),
+            language: "zh-CN".to_string(),
+            timezone: "Asia/Shanghai".to_string(),
+            email_notifications: true,
+            usage_alerts: true,
+            announcement_notifications: true,
+        };
+        let repository = InMemoryUserReadRepository::seed_auth_users([admin.clone()])
+            .with_export_users([export_row])
+            .with_user_preferences([preferences])
+            .with_user_sessions([session]);
+        repository
+            .oauth_links_by_id
+            .write()
+            .expect("user repository lock")
+            .insert(
+                "admin-delete-oauth".to_string(),
+                StoredMemoryOAuthLink {
+                    id: "admin-delete-oauth".to_string(),
+                    user_id: admin.id.clone(),
+                    provider_type: "test".to_string(),
+                    provider_user_id: "admin-delete-subject".to_string(),
+                    provider_username: None,
+                    provider_email: admin.email.clone(),
+                    extra_data: None,
+                    linked_at: now,
+                    last_login_at: None,
+                },
+            );
+        repository
+            .group_members
+            .write()
+            .expect("user repository lock")
+            .insert(("group-1".to_string(), admin.id.clone()), now);
+        repository
+            .model_settings_by_user_id
+            .write()
+            .expect("user repository lock")
+            .insert(admin.id.clone(), serde_json::json!({"model": true}));
+        repository
+            .feature_settings_by_user_id
+            .write()
+            .expect("user repository lock")
+            .insert(admin.id.clone(), serde_json::json!({"feature": true}));
+        repository
+            .ldap_dn_by_user_id
+            .write()
+            .expect("user repository lock")
+            .insert(admin.id.clone(), "uid=admin-delete,dc=example".to_string());
+        repository
+            .ldap_username_by_user_id
+            .write()
+            .expect("user repository lock")
+            .insert(admin.id.clone(), "admin-delete-ldap".to_string());
+
+        let error = repository
+            .delete_local_auth_user(&admin.id)
+            .await
+            .expect_err("last active admin delete must be rejected");
+        assert!(crate::repository::users::is_last_active_admin_delete_denied(&error));
+        assert!(repository
+            .auth_by_id
+            .read()
+            .expect("user repository lock")
+            .contains_key(&admin.id));
+        assert!(repository
+            .sessions_by_id
+            .read()
+            .expect("user repository lock")
+            .values()
+            .any(|session| session.user_id == admin.id));
+        assert!(repository
+            .oauth_links_by_id
+            .read()
+            .expect("user repository lock")
+            .values()
+            .any(|link| link.user_id == admin.id));
+
+        repository
+            .create_local_auth_user_with_settings(
+                Some("admin-keeper@example.com".to_string()),
+                true,
+                "admin-keeper".to_string(),
+                "password-hash".to_string(),
+                "admin".to_string(),
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("second admin creation should succeed")
+            .expect("second admin should exist");
+        assert!(repository
+            .delete_local_auth_user(&admin.id)
+            .await
+            .expect("delete with another active admin should succeed"));
+
+        assert!(!repository
+            .by_id
+            .read()
+            .expect("user repository lock")
+            .contains_key(&admin.id));
+        assert!(!repository
+            .auth_by_id
+            .read()
+            .expect("user repository lock")
+            .contains_key(&admin.id));
+        assert!(!repository
+            .auth_by_identifier
+            .read()
+            .expect("user repository lock")
+            .values()
+            .any(|user_id| user_id == &admin.id));
+        assert!(!repository
+            .sessions_by_id
+            .read()
+            .expect("user repository lock")
+            .values()
+            .any(|session| session.user_id == admin.id));
+        assert!(!repository
+            .oauth_links_by_id
+            .read()
+            .expect("user repository lock")
+            .values()
+            .any(|link| link.user_id == admin.id));
+        assert!(!repository
+            .group_members
+            .read()
+            .expect("user repository lock")
+            .keys()
+            .any(|(_, user_id)| user_id == &admin.id));
+        assert!(!repository
+            .preferences_by_user_id
+            .read()
+            .expect("user repository lock")
+            .contains_key(&admin.id));
+        assert!(!repository
+            .model_settings_by_user_id
+            .read()
+            .expect("user repository lock")
+            .contains_key(&admin.id));
+        assert!(!repository
+            .feature_settings_by_user_id
+            .read()
+            .expect("user repository lock")
+            .contains_key(&admin.id));
+        assert!(!repository
+            .ldap_dn_by_user_id
+            .read()
+            .expect("user repository lock")
+            .contains_key(&admin.id));
+        assert!(!repository
+            .ldap_username_by_user_id
+            .read()
+            .expect("user repository lock")
+            .contains_key(&admin.id));
+        assert!(!repository
+            .export_rows
+            .read()
+            .expect("user repository lock")
+            .iter()
+            .any(|row| row.id == admin.id));
     }
 
     #[tokio::test]
@@ -2430,6 +3488,7 @@ mod tests {
         let user = repository
             .create_oauth_auth_user(
                 Some("OAuth@Example.com".to_string()),
+                false,
                 "oauth_user".to_string(),
                 now,
             )
@@ -2437,6 +3496,7 @@ mod tests {
             .expect("oauth user should create")
             .expect("oauth user should exist");
         assert_eq!(user.auth_source, "oauth");
+        assert!(!user.email_verified);
         assert_eq!(
             repository
                 .find_active_user_auth_by_email_ci("oauth@example.com")
@@ -2447,7 +3507,7 @@ mod tests {
         );
 
         repository
-            .upsert_user_oauth_link(
+            .bind_user_oauth_link(
                 &user.id,
                 "linuxdo",
                 "subject-1",
@@ -2488,15 +3548,430 @@ mod tests {
             )
             .await
             .expect("link should touch"));
-        assert!(repository
-            .delete_user_oauth_link(&user.id, "linuxdo")
+        assert_eq!(
+            repository
+                .delete_user_oauth_link(&user.id, "linuxdo", false, &["linuxdo".to_string()],)
+                .await
+                .expect("last link deletion should resolve"),
+            DeleteUserOAuthLinkOutcome::LastOAuthBinding
+        );
+        repository
+            .bind_user_oauth_link(
+                &user.id,
+                "github",
+                "subject-2",
+                Some("alice"),
+                Some("alice@example.com"),
+                None,
+                now,
+            )
             .await
-            .expect("link should delete"));
+            .expect("second link should upsert");
+        assert_eq!(
+            repository
+                .delete_user_oauth_link(
+                    &user.id,
+                    "linuxdo",
+                    false,
+                    &["linuxdo".to_string(), "github".to_string()],
+                )
+                .await
+                .expect("link should delete"),
+            DeleteUserOAuthLinkOutcome::Deleted
+        );
+    }
+
+    #[tokio::test]
+    async fn oauth_bind_rejects_unavailable_session_without_creating_link_in_memory() {
+        let now = chrono::Utc::now();
+        let user = StoredUserAuthRecord::new(
+            "oauth-bind-user".to_string(),
+            Some("oauth-bind@example.com".to_string()),
+            true,
+            "oauth-bind-user".to_string(),
+            None,
+            "user".to_string(),
+            "oauth".to_string(),
+            None,
+            None,
+            None,
+            true,
+            false,
+            Some(now),
+            None,
+        )
+        .expect("oauth bind user should build")
+        .with_security_version(7)
+        .expect("user security version should be valid");
+        let valid_session = StoredUserSessionRecord::new(
+            "oauth-bind-session".to_string(),
+            user.id.clone(),
+            "oauth-bind-device".to_string(),
+            None,
+            StoredUserSessionRecord::hash_refresh_token("oauth-bind-refresh"),
+            None,
+            None,
+            Some(now),
+            Some(now + chrono::Duration::hours(1)),
+            None,
+            None,
+            None,
+            None,
+            Some(now),
+            Some(now),
+        )
+        .expect("oauth bind session should build")
+        .with_security_version(7)
+        .expect("session security version should be valid");
+
+        let mut revoked_session = valid_session.clone();
+        revoked_session.revoked_at = Some(now);
+        let mut expired_session = valid_session.clone();
+        expired_session.expires_at = Some(now - chrono::Duration::seconds(1));
+        let cases = [
+            (
+                "revoked",
+                revoked_session,
+                BindUserOAuthLinkSessionExpectation::new(
+                    "oauth-bind-session",
+                    "oauth-bind-device",
+                    7,
+                    now,
+                )
+                .expect("revoked expectation should build"),
+            ),
+            (
+                "expired",
+                expired_session,
+                BindUserOAuthLinkSessionExpectation::new(
+                    "oauth-bind-session",
+                    "oauth-bind-device",
+                    7,
+                    now,
+                )
+                .expect("expired expectation should build"),
+            ),
+            (
+                "device-mismatch",
+                valid_session.clone(),
+                BindUserOAuthLinkSessionExpectation::new(
+                    "oauth-bind-session",
+                    "other-device",
+                    7,
+                    now,
+                )
+                .expect("device expectation should build"),
+            ),
+            (
+                "security-version-mismatch",
+                valid_session,
+                BindUserOAuthLinkSessionExpectation::new(
+                    "oauth-bind-session",
+                    "oauth-bind-device",
+                    6,
+                    now,
+                )
+                .expect("security expectation should build"),
+            ),
+        ];
+
+        for (case, session, expectation) in cases {
+            let repository = InMemoryUserReadRepository::seed_auth_users([user.clone()])
+                .with_user_sessions([session]);
+            let subject = format!("subject-{case}");
+            assert_eq!(
+                repository
+                    .bind_user_oauth_link_if_provider_enabled(
+                        &user.id,
+                        "linuxdo",
+                        &subject,
+                        None,
+                        None,
+                        None,
+                        now,
+                        true,
+                        Some(&expectation),
+                    )
+                    .await
+                    .expect("session-bound OAuth bind should resolve"),
+                BindUserOAuthLinkOutcome::SessionUnavailable,
+                "case {case} should reject",
+            );
+            assert_eq!(
+                repository
+                    .count_user_oauth_links(&user.id)
+                    .await
+                    .expect("OAuth links should count"),
+                0,
+                "case {case} must not create a link",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_oauth_binds_preserve_single_identity_owner_in_memory() {
+        let repository = Arc::new(InMemoryUserReadRepository::default());
+        let now = chrono::Utc::now();
+        let first_user = repository
+            .create_oauth_auth_user(None, false, "bind-first".to_string(), now)
+            .await
+            .expect("first user should create")
+            .expect("first user should exist");
+        let second_user = repository
+            .create_oauth_auth_user(None, false, "bind-second".to_string(), now)
+            .await
+            .expect("second user should create")
+            .expect("second user should exist");
+        let barrier = Arc::new(tokio::sync::Barrier::new(3));
+
+        let first_repository = Arc::clone(&repository);
+        let first_barrier = Arc::clone(&barrier);
+        let first_id = first_user.id.clone();
+        let first = tokio::spawn(async move {
+            first_barrier.wait().await;
+            first_repository
+                .bind_user_oauth_link(
+                    &first_id,
+                    "linuxdo",
+                    "shared-subject",
+                    None,
+                    None,
+                    None,
+                    now,
+                )
+                .await
+                .expect("first bind should resolve")
+        });
+        let second_repository = Arc::clone(&repository);
+        let second_barrier = Arc::clone(&barrier);
+        let second_id = second_user.id.clone();
+        let second = tokio::spawn(async move {
+            second_barrier.wait().await;
+            second_repository
+                .bind_user_oauth_link(
+                    &second_id,
+                    "linuxdo",
+                    "shared-subject",
+                    None,
+                    None,
+                    None,
+                    now,
+                )
+                .await
+                .expect("second bind should resolve")
+        });
+        barrier.wait().await;
+        let outcomes = [
+            first.await.expect("first bind task should join"),
+            second.await.expect("second bind task should join"),
+        ];
+
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| **outcome == BindUserOAuthLinkOutcome::Bound)
+                .count(),
+            1
+        );
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| {
+                    **outcome == BindUserOAuthLinkOutcome::IdentityBoundToAnotherUser
+                })
+                .count(),
+            1
+        );
+        assert!(repository
+            .find_oauth_link_owner("linuxdo", "shared-subject")
+            .await
+            .expect("identity owner should load")
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn concurrent_oauth_unbinds_preserve_one_login_method_in_memory() {
+        let now = chrono::Utc::now();
+        let repository = Arc::new(InMemoryUserReadRepository::default());
+        let user = repository
+            .create_oauth_auth_user(
+                Some("concurrent-oauth@example.com".to_string()),
+                true,
+                "concurrent-oauth".to_string(),
+                now,
+            )
+            .await
+            .expect("oauth user should create")
+            .expect("oauth user should exist");
+        for (provider_type, subject) in [("linuxdo", "subject-1"), ("github", "subject-2")] {
+            repository
+                .bind_user_oauth_link(&user.id, provider_type, subject, None, None, None, now)
+                .await
+                .expect("oauth link should upsert");
+        }
+
+        let barrier = Arc::new(tokio::sync::Barrier::new(3));
+        let first_repository = Arc::clone(&repository);
+        let first_barrier = Arc::clone(&barrier);
+        let first_user_id = user.id.clone();
+        let first = tokio::spawn(async move {
+            first_barrier.wait().await;
+            first_repository
+                .delete_user_oauth_link(
+                    &first_user_id,
+                    "linuxdo",
+                    false,
+                    &["linuxdo".to_string(), "github".to_string()],
+                )
+                .await
+                .expect("first unlink should resolve")
+        });
+        let second_repository = Arc::clone(&repository);
+        let second_barrier = Arc::clone(&barrier);
+        let second_user_id = user.id.clone();
+        let second = tokio::spawn(async move {
+            second_barrier.wait().await;
+            second_repository
+                .delete_user_oauth_link(
+                    &second_user_id,
+                    "github",
+                    false,
+                    &["linuxdo".to_string(), "github".to_string()],
+                )
+                .await
+                .expect("second unlink should resolve")
+        });
+        barrier.wait().await;
+        let outcomes = [
+            first.await.expect("first unlink task should join"),
+            second.await.expect("second unlink task should join"),
+        ];
+
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| **outcome == DeleteUserOAuthLinkOutcome::Deleted)
+                .count(),
+            1
+        );
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| **outcome == DeleteUserOAuthLinkOutcome::LastOAuthBinding)
+                .count(),
+            1
+        );
+        assert_eq!(
+            repository
+                .count_user_oauth_links(&user.id)
+                .await
+                .expect("remaining links should count"),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn oauth_unbind_in_memory_only_counts_enabled_provider_links() {
+        let repository = InMemoryUserReadRepository::default();
+        let now = chrono::Utc::now();
+        let user = repository
+            .create_oauth_auth_user(
+                Some("enabled-link@example.com".to_string()),
+                true,
+                "enabled-link".to_string(),
+                now,
+            )
+            .await
+            .expect("oauth user should create")
+            .expect("oauth user should exist");
+        for (provider_type, subject) in [("linuxdo", "subject-1"), ("github", "subject-2")] {
+            repository
+                .bind_user_oauth_link(&user.id, provider_type, subject, None, None, None, now)
+                .await
+                .expect("oauth link should upsert");
+        }
+        let enabled_provider_types_snapshot = ["linuxdo".to_string()];
+
+        assert_eq!(
+            repository
+                .delete_user_oauth_link(
+                    &user.id,
+                    "linuxdo",
+                    false,
+                    &enabled_provider_types_snapshot,
+                )
+                .await
+                .expect("enabled link deletion should resolve"),
+            DeleteUserOAuthLinkOutcome::LastOAuthBinding
+        );
+        assert_eq!(
+            repository
+                .delete_user_oauth_link(
+                    &user.id,
+                    "github",
+                    false,
+                    &enabled_provider_types_snapshot,
+                )
+                .await
+                .expect("disabled link deletion should resolve"),
+            DeleteUserOAuthLinkOutcome::Deleted
+        );
+        assert!(repository
+            .has_user_oauth_provider_link(&user.id, "linuxdo")
+            .await
+            .expect("enabled provider link lookup should work"));
+    }
+
+    #[tokio::test]
+    async fn oauth_unbind_in_memory_respects_ldap_exclusive_local_login_policy() {
+        let valid_hash = "$2b$12$4qL4tdcsFwVaDTw5Ck3xzu8GpNdre56DiNR6Dnw7t6gCXaEnqAe7G".to_string();
+        let user = StoredUserAuthRecord::new(
+            "ldap-exclusive-local".to_string(),
+            Some("ldap-exclusive-local@example.com".to_string()),
+            true,
+            "ldap-exclusive-local".to_string(),
+            Some(valid_hash),
+            "user".to_string(),
+            "local".to_string(),
+            None,
+            None,
+            None,
+            true,
+            false,
+            None,
+            None,
+        )
+        .expect("local user should build");
+        let repository = InMemoryUserReadRepository::seed_auth_users([user.clone()]);
+        repository
+            .bind_user_oauth_link(
+                &user.id,
+                "linuxdo",
+                "subject-1",
+                None,
+                None,
+                None,
+                chrono::Utc::now(),
+            )
+            .await
+            .expect("oauth link should upsert");
+
+        assert_eq!(
+            repository
+                .delete_user_oauth_link(&user.id, "linuxdo", false, &["linuxdo".to_string()],)
+                .await
+                .expect("unlink should resolve"),
+            DeleteUserOAuthLinkOutcome::LastLoginMethod
+        );
+        assert!(repository
+            .has_user_oauth_provider_link(&user.id, "linuxdo")
+            .await
+            .expect("oauth link lookup should work"));
     }
 
     #[tokio::test]
     async fn counts_active_admin_auth_users() {
-        let valid_hash = format!("$2b$12${}", "a".repeat(53));
+        let valid_hash = "$2b$12$4qL4tdcsFwVaDTw5Ck3xzu8GpNdre56DiNR6Dnw7t6gCXaEnqAe7G".to_string();
         let admin = StoredUserAuthRecord::new(
             "admin-1".to_string(),
             Some("admin@example.com".to_string()),
@@ -2590,6 +4065,23 @@ mod tests {
     #[tokio::test]
     async fn manages_user_sessions_in_memory() {
         let now = chrono::Utc::now();
+        let user = StoredUserAuthRecord::new(
+            "user-1".to_string(),
+            Some("session-user@example.com".to_string()),
+            true,
+            "session-user".to_string(),
+            None,
+            "user".to_string(),
+            "oauth".to_string(),
+            None,
+            None,
+            None,
+            true,
+            false,
+            Some(now),
+            None,
+        )
+        .expect("session user should build");
         let session = StoredUserSessionRecord::new(
             "session-1".to_string(),
             "user-1".to_string(),
@@ -2608,7 +4100,7 @@ mod tests {
             Some(now),
         )
         .expect("session should build");
-        let repository = InMemoryUserReadRepository::default();
+        let repository = InMemoryUserReadRepository::seed_auth_users([user]);
 
         assert_eq!(
             repository
@@ -2648,6 +4140,19 @@ mod tests {
             )
             .await
             .expect("session should rotate"));
+        assert!(!repository
+            .rotate_user_session_refresh_token(
+                "user-1",
+                "session-1",
+                &StoredUserSessionRecord::hash_refresh_token("refresh-1"),
+                &StoredUserSessionRecord::hash_refresh_token("refresh-race-loser"),
+                now + chrono::Duration::minutes(2),
+                now + chrono::Duration::hours(2),
+                None,
+                None,
+            )
+            .await
+            .expect("stale session rotation should be rejected"));
         let rotated = repository
             .find_user_session("user-1", "session-1")
             .await
@@ -2666,6 +4171,379 @@ mod tests {
             .await
             .expect("sessions should list")
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn security_state_change_revokes_sessions_without_reactivation() {
+        let now = chrono::Utc::now();
+        let user = StoredUserAuthRecord::new(
+            "security-state-user".to_string(),
+            Some("security-state@example.com".to_string()),
+            true,
+            "security-state-user".to_string(),
+            None,
+            "user".to_string(),
+            "oauth".to_string(),
+            None,
+            None,
+            None,
+            true,
+            false,
+            Some(now),
+            None,
+        )
+        .expect("security-state user should build");
+        let session = StoredUserSessionRecord::new(
+            "security-state-session".to_string(),
+            user.id.clone(),
+            "security-state-device".to_string(),
+            None,
+            StoredUserSessionRecord::hash_refresh_token("security-state-refresh"),
+            None,
+            None,
+            Some(now),
+            Some(now + chrono::Duration::hours(1)),
+            None,
+            None,
+            None,
+            None,
+            Some(now),
+            Some(now),
+        )
+        .expect("security-state session should build");
+        let repository = InMemoryUserReadRepository::seed_auth_users([user])
+            .with_user_sessions([session.clone()]);
+
+        repository
+            .update_local_auth_user_admin_fields(
+                "security-state-user",
+                None,
+                false,
+                None,
+                false,
+                None,
+                false,
+                None,
+                false,
+                None,
+                Some(false),
+            )
+            .await
+            .expect("disable should succeed")
+            .expect("user should exist");
+        let revoked = repository
+            .find_user_session("security-state-user", "security-state-session")
+            .await
+            .expect("revoked session should load")
+            .expect("revoked session should remain stored");
+        assert!(revoked.is_revoked());
+        assert_eq!(
+            revoked.revoke_reason.as_deref(),
+            Some("user_security_state_changed")
+        );
+
+        repository
+            .update_local_auth_user_admin_fields(
+                "security-state-user",
+                None,
+                false,
+                None,
+                false,
+                None,
+                false,
+                None,
+                false,
+                None,
+                Some(true),
+            )
+            .await
+            .expect("reactivation should succeed")
+            .expect("user should exist");
+        assert!(repository
+            .list_user_sessions("security-state-user")
+            .await
+            .expect("sessions should list")
+            .is_empty());
+        assert!(repository
+            .create_user_session(&session)
+            .await
+            .expect("stale login should resolve")
+            .is_none());
+        let current_version = repository
+            .find_user_auth_by_id("security-state-user")
+            .await
+            .expect("user lookup should resolve")
+            .expect("user should exist")
+            .security_version;
+        let fresh_session = session
+            .with_security_version(current_version)
+            .expect("security version should be valid");
+        assert!(repository
+            .create_user_session(&fresh_session)
+            .await
+            .expect("fresh login should resolve")
+            .is_some());
+
+        repository
+            .update_local_auth_user_admin_fields(
+                "security-state-user",
+                Some("audit_admin".to_string()),
+                false,
+                None,
+                false,
+                None,
+                false,
+                None,
+                false,
+                None,
+                None,
+            )
+            .await
+            .expect("role update should succeed")
+            .expect("user should exist");
+        assert!(repository
+            .list_user_sessions("security-state-user")
+            .await
+            .expect("sessions should list")
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn unchanged_security_state_preserves_sessions() {
+        let now = chrono::Utc::now();
+        let user = StoredUserAuthRecord::new(
+            "unchanged-security-user".to_string(),
+            None,
+            false,
+            "unchanged-security-user".to_string(),
+            None,
+            "user".to_string(),
+            "oauth".to_string(),
+            None,
+            None,
+            None,
+            true,
+            false,
+            Some(now),
+            None,
+        )
+        .expect("unchanged-security user should build");
+        let session = StoredUserSessionRecord::new(
+            "unchanged-security-session".to_string(),
+            user.id.clone(),
+            "unchanged-security-device".to_string(),
+            None,
+            StoredUserSessionRecord::hash_refresh_token("unchanged-security-refresh"),
+            None,
+            None,
+            Some(now),
+            Some(now + chrono::Duration::hours(1)),
+            None,
+            None,
+            None,
+            None,
+            Some(now),
+            Some(now),
+        )
+        .expect("unchanged-security session should build");
+        let repository =
+            InMemoryUserReadRepository::seed_auth_users([user]).with_user_sessions([session]);
+
+        repository
+            .update_local_auth_user_admin_fields(
+                "unchanged-security-user",
+                Some("USER".to_string()),
+                false,
+                None,
+                false,
+                None,
+                false,
+                None,
+                false,
+                None,
+                Some(true),
+            )
+            .await
+            .expect("idempotent security update should succeed")
+            .expect("user should exist");
+        assert_eq!(
+            repository
+                .list_user_sessions("unchanged-security-user")
+                .await
+                .expect("sessions should list")
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn password_change_revokes_sessions_and_fences_stale_login() {
+        let now = chrono::Utc::now();
+        let user = StoredUserAuthRecord::new(
+            "user-password-fence".to_string(),
+            Some("fence@example.com".to_string()),
+            true,
+            "fence-user".to_string(),
+            Some("old-password-hash".to_string()),
+            "user".to_string(),
+            "local".to_string(),
+            None,
+            None,
+            None,
+            true,
+            false,
+            Some(now),
+            None,
+        )
+        .expect("user should build");
+        let current = StoredUserSessionRecord::new(
+            "session-current".to_string(),
+            user.id.clone(),
+            "device-current".to_string(),
+            None,
+            StoredUserSessionRecord::hash_refresh_token("refresh-current"),
+            None,
+            None,
+            Some(now),
+            Some(now + chrono::Duration::hours(1)),
+            None,
+            None,
+            None,
+            None,
+            Some(now),
+            Some(now),
+        )
+        .expect("current session should build");
+        let stale_login = StoredUserSessionRecord::new(
+            "session-stale-login".to_string(),
+            user.id.clone(),
+            "device-stale-login".to_string(),
+            None,
+            StoredUserSessionRecord::hash_refresh_token("refresh-stale"),
+            None,
+            None,
+            Some(now),
+            Some(now + chrono::Duration::hours(1)),
+            None,
+            None,
+            None,
+            None,
+            Some(now),
+            Some(now),
+        )
+        .expect("stale login session should build");
+        let repository =
+            InMemoryUserReadRepository::seed_auth_users([user]).with_user_sessions([current]);
+
+        assert!(repository
+            .change_local_auth_password_and_revoke_sessions(
+                "user-password-fence",
+                "session-current",
+                Some("old-password-hash"),
+                "new-password-hash".to_string(),
+                now,
+            )
+            .await
+            .expect("password change should succeed"));
+        assert!(repository
+            .list_user_sessions("user-password-fence")
+            .await
+            .expect("sessions should list")
+            .is_empty());
+        assert!(repository
+            .create_user_session_if_password_matches(&stale_login, "old-password-hash")
+            .await
+            .expect("stale login should resolve")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn admin_password_reset_revokes_sessions_and_fences_stale_login() {
+        let now = chrono::Utc::now();
+        let user = StoredUserAuthRecord::new(
+            "user-admin-reset-fence".to_string(),
+            Some("admin-reset@example.com".to_string()),
+            true,
+            "admin-reset-user".to_string(),
+            Some("old-password-hash".to_string()),
+            "user".to_string(),
+            "local".to_string(),
+            None,
+            None,
+            None,
+            true,
+            false,
+            Some(now),
+            None,
+        )
+        .expect("user should build");
+        let active = StoredUserSessionRecord::new(
+            "session-before-admin-reset".to_string(),
+            user.id.clone(),
+            "device-before-admin-reset".to_string(),
+            None,
+            StoredUserSessionRecord::hash_refresh_token("refresh-before-admin-reset"),
+            None,
+            None,
+            Some(now),
+            Some(now + chrono::Duration::hours(1)),
+            None,
+            None,
+            None,
+            None,
+            Some(now),
+            Some(now),
+        )
+        .expect("active session should build");
+        let stale_login = StoredUserSessionRecord::new(
+            "session-stale-admin-reset-login".to_string(),
+            user.id.clone(),
+            "device-stale-admin-reset-login".to_string(),
+            None,
+            StoredUserSessionRecord::hash_refresh_token("refresh-stale-admin-reset"),
+            None,
+            None,
+            Some(now),
+            Some(now + chrono::Duration::hours(1)),
+            None,
+            None,
+            None,
+            None,
+            Some(now),
+            Some(now),
+        )
+        .expect("stale login session should build");
+        let repository =
+            InMemoryUserReadRepository::seed_auth_users([user]).with_user_sessions([active]);
+
+        assert!(repository
+            .reset_local_auth_user_password_and_revoke_sessions(
+                "user-admin-reset-fence",
+                "new-password-hash".to_string(),
+                now,
+            )
+            .await
+            .expect("admin password reset should succeed"));
+        assert!(repository
+            .list_user_sessions("user-admin-reset-fence")
+            .await
+            .expect("sessions should list")
+            .is_empty());
+        assert!(repository
+            .create_user_session_if_password_matches(&stale_login, "old-password-hash")
+            .await
+            .expect("stale login should resolve")
+            .is_none());
+        assert_eq!(
+            repository
+                .find_user_auth_by_id("user-admin-reset-fence")
+                .await
+                .expect("user lookup should succeed")
+                .expect("user should exist")
+                .password_hash
+                .as_deref(),
+            Some("new-password-hash")
+        );
     }
 
     #[tokio::test]

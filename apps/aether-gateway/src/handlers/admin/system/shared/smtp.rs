@@ -1,12 +1,15 @@
 use crate::email_delivery::{probe_smtp_connection, system_config_u16, SmtpDeliveryConfig};
 use crate::handlers::admin::request::AdminAppState;
-use crate::handlers::shared::{system_config_bool, system_config_string};
+use crate::handlers::shared::{
+    decrypt_or_migrate_smtp_password, smtp_password_binding, system_config_bool,
+    system_config_string,
+};
 use crate::GatewayError;
 use axum::body::Bytes;
 use serde::Deserialize;
 use serde_json::json;
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Default, Deserialize)]
 struct AdminSmtpTestRequest {
     smtp_host: Option<serde_json::Value>,
     smtp_port: Option<serde_json::Value>,
@@ -18,7 +21,7 @@ struct AdminSmtpTestRequest {
     smtp_from_name: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct ResolvedSmtpConfig {
     host: Option<String>,
     port: u16,
@@ -75,43 +78,70 @@ async fn resolve_admin_smtp_config(
         .read_system_config_json_value("smtp_from_name")
         .await?;
 
-    let stored_password = system_config_string(smtp_password.as_ref()).map(|value| {
-        state
-            .decrypt_catalog_secret_with_fallbacks(&value)
-            .unwrap_or(value)
-    });
+    let host = request
+        .smtp_host
+        .as_ref()
+        .and_then(|value| system_config_string(Some(value)))
+        .or_else(|| system_config_string(smtp_host.as_ref()));
+    let port = request
+        .smtp_port
+        .as_ref()
+        .map(|value| system_config_u16(Some(value), 587))
+        .unwrap_or_else(|| system_config_u16(smtp_port.as_ref(), 587));
+    let user = request
+        .smtp_user
+        .as_ref()
+        .and_then(|value| system_config_string(Some(value)))
+        .or_else(|| system_config_string(smtp_user.as_ref()));
+    let use_tls = request
+        .smtp_use_tls
+        .as_ref()
+        .map(|value| system_config_bool(Some(value), true))
+        .unwrap_or_else(|| system_config_bool(smtp_use_tls.as_ref(), true));
+    let use_ssl = request
+        .smtp_use_ssl
+        .as_ref()
+        .map(|value| system_config_bool(Some(value), false))
+        .unwrap_or_else(|| system_config_bool(smtp_use_ssl.as_ref(), false));
+    let requested_password = request
+        .smtp_password
+        .as_ref()
+        .and_then(|value| system_config_string(Some(value)));
+    let password = if requested_password.is_some() {
+        requested_password
+    } else {
+        let saved_binding = system_config_string(smtp_host.as_ref()).and_then(|saved_host| {
+            smtp_password_binding(
+                &saved_host,
+                system_config_u16(smtp_port.as_ref(), 587),
+                system_config_string(smtp_user.as_ref()).as_deref(),
+                system_config_bool(smtp_use_tls.as_ref(), true),
+                system_config_bool(smtp_use_ssl.as_ref(), false),
+            )
+        });
+        let effective_binding = host.as_deref().and_then(|effective_host| {
+            smtp_password_binding(effective_host, port, user.as_deref(), use_tls, use_ssl)
+        });
+        match (saved_binding.as_ref(), effective_binding.as_ref()) {
+            (Some(saved), Some(effective)) if saved == effective => {
+                match system_config_string(smtp_password.as_ref()) {
+                    Some(value) => Some(
+                        decrypt_or_migrate_smtp_password(state.as_ref(), effective, value).await?,
+                    ),
+                    None => None,
+                }
+            }
+            _ => None,
+        }
+    };
 
     Ok(ResolvedSmtpConfig {
-        host: request
-            .smtp_host
-            .as_ref()
-            .and_then(|value| system_config_string(Some(value)))
-            .or_else(|| system_config_string(smtp_host.as_ref())),
-        port: request
-            .smtp_port
-            .as_ref()
-            .map(|value| system_config_u16(Some(value), 587))
-            .unwrap_or_else(|| system_config_u16(smtp_port.as_ref(), 587)),
-        user: request
-            .smtp_user
-            .as_ref()
-            .and_then(|value| system_config_string(Some(value)))
-            .or_else(|| system_config_string(smtp_user.as_ref())),
-        password: request
-            .smtp_password
-            .as_ref()
-            .and_then(|value| system_config_string(Some(value)))
-            .or(stored_password),
-        use_tls: request
-            .smtp_use_tls
-            .as_ref()
-            .map(|value| system_config_bool(Some(value), true))
-            .unwrap_or_else(|| system_config_bool(smtp_use_tls.as_ref(), true)),
-        use_ssl: request
-            .smtp_use_ssl
-            .as_ref()
-            .map(|value| system_config_bool(Some(value), false))
-            .unwrap_or_else(|| system_config_bool(smtp_use_ssl.as_ref(), false)),
+        host,
+        port,
+        user,
+        password,
+        use_tls,
+        use_ssl,
         from_email: request
             .smtp_from_email
             .as_ref()

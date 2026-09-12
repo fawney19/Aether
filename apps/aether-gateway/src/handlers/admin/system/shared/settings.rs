@@ -28,6 +28,7 @@ use std::time::Duration;
 const AETHER_RELEASES_API_URL: &str =
     "https://api.github.com/repos/fawney19/Aether/releases?per_page=20";
 const AETHER_RELEASE_TAG_URL_BASE: &str = "https://github.com/fawney19/Aether/releases/tag";
+const MAX_GITHUB_RELEASES_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 const SOURCE_BUILD_UPDATE_BLOCKER: &str = "当前为源码构建，请使用 git pull 后重新编译。";
 const SOURCE_BUILD_RELEASE_BLOCKER: &str = "当前为源码构建，请手动切换到对应标签后重新编译。";
 
@@ -348,18 +349,22 @@ async fn fetch_github_releases_with_client(
             rate_limited: false,
         })?;
     let status = response.status();
+    let body =
+        aether_http::read_response_bytes_with_limit(response, MAX_GITHUB_RELEASES_RESPONSE_BYTES)
+            .await
+            .map_err(|err| GitHubReleaseFetchError {
+                message: format!("读取 GitHub Releases 响应失败: {err}"),
+                rate_limited: false,
+            })?;
     if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
+        let body = String::from_utf8_lossy(&body);
         return Err(github_release_response_error(status, &body));
     }
 
-    response
-        .json()
-        .await
-        .map_err(|err| GitHubReleaseFetchError {
-            message: format!("解析 GitHub Releases 失败: {err}"),
-            rate_limited: false,
-        })
+    serde_json::from_slice(&body).map_err(|err| GitHubReleaseFetchError {
+        message: format!("解析 GitHub Releases 失败: {err}"),
+        rate_limited: false,
+    })
 }
 
 fn github_release_response_error(

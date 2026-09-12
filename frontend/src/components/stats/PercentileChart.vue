@@ -91,7 +91,7 @@ const chartOptions = computed(() => ({
   scales: {
     y: {
       ticks: {
-        callback: (value: number) => `${value}s`
+        callback: (value: string | number) => `${value}s`
       }
     }
   }

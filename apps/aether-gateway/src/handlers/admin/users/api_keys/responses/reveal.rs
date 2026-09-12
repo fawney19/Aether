@@ -3,6 +3,8 @@ use super::super::helpers::attach_audit_response;
 use super::super::paths::admin_user_api_key_full_key_parts;
 
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
+use crate::handlers::admin::shared::mark_sensitive_admin_response_no_store;
+use crate::handlers::shared::decrypt_or_migrate_auth_api_key_secret;
 use crate::GatewayError;
 use axum::{
     body::Body,
@@ -51,19 +53,24 @@ pub(crate) async fn build_admin_reveal_user_api_key_response(
             .into_response());
     }
 
-    let Some(full_key) = state.decrypt_catalog_secret_with_fallbacks(ciphertext) else {
-        return Ok((
-            http::StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "detail": "解密密钥失败" })),
-        )
-            .into_response());
+    let full_key = match decrypt_or_migrate_auth_api_key_secret(state.app(), &record).await {
+        Ok(value) => value,
+        Err(_) => {
+            return Ok((
+                http::StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "detail": "解密或校验密钥失败" })),
+            )
+                .into_response())
+        }
     };
 
-    Ok(attach_audit_response(
-        Json(json!({ "key": full_key })).into_response(),
-        "admin_user_api_key_revealed",
-        "reveal_user_api_key",
-        "user_api_key",
-        &key_id,
+    Ok(mark_sensitive_admin_response_no_store(
+        attach_audit_response(
+            Json(json!({ "key": full_key })).into_response(),
+            "admin_user_api_key_revealed",
+            "reveal_user_api_key",
+            "user_api_key",
+            &key_id,
+        ),
     ))
 }

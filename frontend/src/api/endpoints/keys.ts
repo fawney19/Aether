@@ -37,7 +37,7 @@ export interface ModelCapabilitiesResponse {
  * 获取所有能力定义
  */
 export async function getAllCapabilities(): Promise<CapabilityDefinition[]> {
-  const response = await client.get('/api/capabilities')
+  const response = await client.get<{ capabilities: CapabilityDefinition[] }>('/api/capabilities')
   return response.data.capabilities
 }
 
@@ -45,7 +45,7 @@ export async function getAllCapabilities(): Promise<CapabilityDefinition[]> {
  * 获取用户可配置的能力列表
  */
 export async function getUserConfigurableCapabilities(): Promise<CapabilityDefinition[]> {
-  const response = await client.get('/api/capabilities/user-configurable')
+  const response = await client.get<{ capabilities: CapabilityDefinition[] }>('/api/capabilities/user-configurable')
   return response.data.capabilities
 }
 
@@ -53,7 +53,7 @@ export async function getUserConfigurableCapabilities(): Promise<CapabilityDefin
  * 获取指定模型支持的能力列表
  */
 export async function getModelCapabilities(modelName: string): Promise<ModelCapabilitiesResponse> {
-  const response = await client.get(`/api/capabilities/model/${encodeURIComponent(modelName)}`)
+  const response = await client.get<ModelCapabilitiesResponse>(`/api/capabilities/model/${encodeURIComponent(modelName)}`)
   return response.data
 }
 
@@ -68,7 +68,7 @@ export interface RevealKeyResult {
 }
 
 export async function revealEndpointKey(keyId: string): Promise<RevealKeyResult> {
-  const response = await client.get(`/api/admin/endpoints/keys/${keyId}/reveal`)
+  const response = await client.get<RevealKeyResult>(`/api/admin/endpoints/keys/${keyId}/reveal`)
   return response.data
 }
 
@@ -76,7 +76,7 @@ export async function revealEndpointKey(keyId: string): Promise<RevealKeyResult>
  * 导出 OAuth Key 凭据（扁平 JSON，用于跨实例迁移）
  */
 export async function exportKey(keyId: string): Promise<Record<string, unknown>> {
-  const response = await client.get(`/api/admin/endpoints/keys/${keyId}/export`)
+  const response = await client.get<Record<string, unknown>>(`/api/admin/endpoints/keys/${keyId}/export`)
   return response.data
 }
 
@@ -84,7 +84,7 @@ export async function exportKey(keyId: string): Promise<Record<string, unknown>>
  * 删除 Key
  */
 export async function deleteEndpointKey(keyId: string): Promise<{ message: string }> {
-  const response = await client.delete(`/api/admin/endpoints/keys/${keyId}`)
+  const response = await client.delete<{ message: string }>(`/api/admin/endpoints/keys/${keyId}`)
   return response.data
 }
 
@@ -98,7 +98,7 @@ export interface BatchDeleteKeysResult {
 }
 
 export async function batchDeleteEndpointKeys(ids: string[]): Promise<BatchDeleteKeysResult> {
-  const response = await client.post('/api/admin/endpoints/keys/batch-delete', { ids })
+  const response = await client.post<BatchDeleteKeysResult>('/api/admin/endpoints/keys/batch-delete', { ids })
   return response.data
 }
 
@@ -215,7 +215,7 @@ export async function addProviderKey(
     model_exclude_patterns?: string[]  // 模型排除规则
   }
 ): Promise<EndpointAPIKey> {
-  const response = await client.post(`/api/admin/endpoints/providers/${providerId}/keys`, data)
+  const response = await client.post<EndpointAPIKey>(`/api/admin/endpoints/providers/${providerId}/keys`, data)
   return response.data
 }
 
@@ -251,7 +251,7 @@ export async function updateProviderKey(
   }>,
   requestOptions?: KeyRequestOptions,
 ): Promise<EndpointAPIKey> {
-  const response = await client.put(
+  const response = await client.put<EndpointAPIKey>(
     `/api/admin/endpoints/keys/${keyId}`,
     data,
     requestOptions,
@@ -263,7 +263,7 @@ export async function updateProviderKey(
  * 清除 Key 的 OAuth 失效标记
  */
 export async function clearOAuthInvalid(keyId: string): Promise<{ message: string }> {
-  const response = await client.post(`/api/admin/endpoints/keys/${keyId}/clear-oauth-invalid`)
+  const response = await client.post<{ message: string }>(`/api/admin/endpoints/keys/${keyId}/clear-oauth-invalid`)
   return response.data
 }
 
@@ -275,7 +275,11 @@ export async function resetProviderKeyCycleStats(keyId: string): Promise<{
   reset_at: number
   windows: number
 }> {
-  const response = await client.post(`/api/admin/endpoints/keys/${keyId}/reset-cycle-stats`)
+  const response = await client.post<{
+  message: string
+  reset_at: number
+  windows: number
+}>(`/api/admin/endpoints/keys/${keyId}/reset-cycle-stats`)
   return response.data
 }
 
@@ -311,7 +315,7 @@ export async function refreshProviderQuota(
   keyIds?: string[],
 ): Promise<RefreshQuotaResult> {
   const body = keyIds && keyIds.length > 0 ? { key_ids: keyIds } : undefined
-  const response = await client.post(
+  const response = await client.post<RefreshQuotaResult>(
     `/api/admin/endpoints/providers/${providerId}/refresh-quota`,
     body,
     { timeout: 5 * 60 * 1000 },
@@ -350,7 +354,7 @@ export async function consumeCodexResetCredit(
   keyId: string,
   payload: ConsumeCodexResetCreditPayload,
 ): Promise<ConsumeCodexResetCreditResult> {
-  const response = await client.post(
+  const response = await client.post<ConsumeCodexResetCreditResult>(
     `/api/admin/endpoints/keys/${keyId}/codex-reset-credit/consume`,
     payload,
     { timeout: 5 * 60 * 1000 },
@@ -383,7 +387,7 @@ export async function batchImportOAuth(
   credentials: string,
   proxyNodeId?: string
 ): Promise<BatchImportResult> {
-  const response = await client.post(`/api/admin/provider-oauth/providers/${providerId}/batch-import`, {
+  const response = await client.post<BatchImportResult>(`/api/admin/provider-oauth/providers/${providerId}/batch-import`, {
     credentials,
     proxy_node_id: proxyNodeId || undefined,
   })

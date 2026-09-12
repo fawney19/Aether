@@ -7,17 +7,19 @@ use tracing::{info, warn};
 use crate::data::GatewayDataState;
 use crate::{AppState, GatewayError};
 
+use super::cleanup_runs::cleanup_data_layer_error_category;
 use super::{
     advance_proxy_upgrade_rollout_once, cleanup_audit_logs_once,
     cleanup_expired_gemini_file_mappings_once, cleanup_proxy_node_metrics_once,
     cleanup_request_candidates_once, cleanup_stale_pending_requests_once,
     cleanup_stale_proxy_nodes_once, collect_proxy_upgrade_rollout_probes, now_unix_secs,
-    perform_db_maintenance_once, perform_manual_usage_cleanup_once, perform_provider_checkin_once,
+    perform_automatic_usage_cleanup_once, perform_db_maintenance_once,
+    perform_manual_usage_cleanup_once, perform_provider_checkin_once,
     perform_stats_aggregation_once, perform_stats_hourly_aggregation_once,
-    perform_usage_cleanup_once, perform_wallet_daily_usage_aggregation_once,
-    record_admin_cleanup_run, record_completed_cleanup_run, record_failed_cleanup_run,
-    record_proxy_upgrade_traffic_success, summarize_database_pool, AdminCleanupRunRecord,
-    ManualUsageCleanupOptions,
+    perform_wallet_daily_usage_aggregation_once, record_admin_cleanup_run,
+    record_completed_cleanup_run, record_failed_cleanup_run,
+    record_proxy_upgrade_traffic_success_for_generation, summarize_database_pool,
+    AdminCleanupRunRecord, ManualUsageCleanupOptions,
 };
 
 pub(super) async fn run_audit_cleanup_once(data: &GatewayDataState) -> Result<(), DataLayerError> {
@@ -120,14 +122,19 @@ pub(super) async fn run_proxy_upgrade_rollout_once(state: &AppState) -> Result<(
             .await
         {
             Ok(status) if (200..300).contains(&status) => {
-                let _ = record_proxy_upgrade_traffic_success(&state.data, &probe.node_id).await?;
+                let _ = record_proxy_upgrade_traffic_success_for_generation(
+                    &state.data,
+                    &probe.node_id,
+                    &probe.tunnel_generation,
+                )
+                .await?;
                 probe_recorded = true;
                 info!(
                     event_name = "proxy_upgrade_rollout_probe_succeeded",
                     log_type = "ops",
                     worker = "proxy_upgrade_rollout",
                     node_id = %probe.node_id,
-                    url = %probe.url,
+                    probe_origin = %crate::handlers::shared::security_log_url_origin(&probe.url),
                     status,
                     "gateway confirmed proxy upgrade health probe"
                 );
@@ -138,7 +145,7 @@ pub(super) async fn run_proxy_upgrade_rollout_once(state: &AppState) -> Result<(
                     log_type = "ops",
                     worker = "proxy_upgrade_rollout",
                     node_id = %probe.node_id,
-                    url = %probe.url,
+                    probe_origin = %crate::handlers::shared::security_log_url_origin(&probe.url),
                     status,
                     "gateway proxy upgrade health probe returned non-success status"
                 );
@@ -149,7 +156,7 @@ pub(super) async fn run_proxy_upgrade_rollout_once(state: &AppState) -> Result<(
                     log_type = "ops",
                     worker = "proxy_upgrade_rollout",
                     node_id = %probe.node_id,
-                    url = %probe.url,
+                    probe_origin = %crate::handlers::shared::security_log_url_origin(&probe.url),
                     error = %error,
                     "gateway proxy upgrade health probe failed"
                 );
@@ -237,7 +244,7 @@ pub(super) async fn run_stats_aggregation_once(
 pub(super) async fn run_usage_cleanup_once(data: &GatewayDataState) -> Result<(), DataLayerError> {
     let started_at_unix_secs = now_unix_secs();
     let started_at = Instant::now();
-    let summary = match perform_usage_cleanup_once(data).await {
+    let summary = match perform_automatic_usage_cleanup_once(data).await {
         Ok(summary) => summary,
         Err(err) => {
             record_failed_cleanup_run(
@@ -265,6 +272,8 @@ pub(super) async fn run_usage_cleanup_once(data: &GatewayDataState) -> Result<()
             "header_cleaned": summary.header_cleaned,
             "keys_cleaned": summary.keys_cleaned,
             "records_deleted": summary.records_deleted,
+            "cost_reservations_deleted": summary.cost_reservations_deleted,
+            "request_admissions_deleted": summary.request_admissions_deleted,
         }),
         format!(
             "请求记录自动清理完成，影响 {} 项",
@@ -275,6 +284,8 @@ pub(super) async fn run_usage_cleanup_once(data: &GatewayDataState) -> Result<()
                 .saturating_add(summary.header_cleaned)
                 .saturating_add(summary.keys_cleaned)
                 .saturating_add(summary.records_deleted)
+                .saturating_add(summary.cost_reservations_deleted)
+                .saturating_add(summary.request_admissions_deleted)
         ),
     )
     .await;
@@ -284,6 +295,8 @@ pub(super) async fn run_usage_cleanup_once(data: &GatewayDataState) -> Result<()
         || summary.header_cleaned > 0
         || summary.keys_cleaned > 0
         || summary.records_deleted > 0
+        || summary.cost_reservations_deleted > 0
+        || summary.request_admissions_deleted > 0
     {
         info!(
             event_name = "usage_cleanup_completed",
@@ -295,6 +308,8 @@ pub(super) async fn run_usage_cleanup_once(data: &GatewayDataState) -> Result<()
             header_cleaned = summary.header_cleaned,
             keys_cleaned = summary.keys_cleaned,
             records_deleted = summary.records_deleted,
+            cost_reservations_deleted = summary.cost_reservations_deleted,
+            request_admissions_deleted = summary.request_admissions_deleted,
             "gateway finished usage cleanup"
         );
     }
@@ -384,6 +399,8 @@ pub(crate) async fn run_manual_usage_cleanup_once(
             "header_cleaned": summary.header_cleaned,
             "keys_cleaned": summary.keys_cleaned,
             "records_deleted": summary.records_deleted,
+            "cost_reservations_deleted": summary.cost_reservations_deleted,
+            "request_admissions_deleted": summary.request_admissions_deleted,
             "mode": options.mode.as_str(),
             "requested_older_than_days": options.requested_older_than_days,
             "targets": options.targets,
@@ -401,6 +418,8 @@ pub(crate) async fn run_manual_usage_cleanup_once(
         requested_older_than_days = options.requested_older_than_days,
         actor_user_id = actor_user_id.as_deref(),
         total_affected = total,
+        cost_reservations_deleted = summary.cost_reservations_deleted,
+        request_admissions_deleted = summary.request_admissions_deleted,
         "gateway finished manual usage cleanup"
     );
     Ok(summary)
@@ -476,7 +495,7 @@ async fn run_manual_usage_cleanup_task(
                     None,
                     actor_user_id.as_deref(),
                 ),
-                error: Some(err.to_string()),
+                error: Some(cleanup_data_layer_error_category(&err).to_string()),
             };
             if let Err(record_err) = record_admin_cleanup_run(&data, record).await {
                 warn!(error = %record_err, "failed to record manual usage cleanup failure");
@@ -496,6 +515,8 @@ fn usage_cleanup_total(
         .saturating_add(summary.header_cleaned)
         .saturating_add(summary.keys_cleaned)
         .saturating_add(summary.records_deleted)
+        .saturating_add(summary.cost_reservations_deleted)
+        .saturating_add(summary.request_admissions_deleted)
 }
 
 fn manual_usage_cleanup_start_message(options: ManualUsageCleanupOptions) -> String {
@@ -549,6 +570,8 @@ fn manual_usage_cleanup_progress_summary(
         "header_cleaned": summary.header_cleaned,
         "keys_cleaned": summary.keys_cleaned,
         "records_deleted": summary.records_deleted,
+        "cost_reservations_deleted": summary.cost_reservations_deleted,
+        "request_admissions_deleted": summary.request_admissions_deleted,
         "total": usage_cleanup_total(summary),
         "actor_user_id": actor_user_id,
     })
@@ -564,7 +587,7 @@ impl std::fmt::Display for ManualUsageCleanupError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::AlreadyRunning => f.write_str("a usage cleanup run is already in progress"),
-            Self::DataLayer(err) => write!(f, "{err}"),
+            Self::DataLayer(_) => f.write_str("usage cleanup data operation failed"),
         }
     }
 }
@@ -597,19 +620,48 @@ pub(super) fn run_pool_monitor_once(data: &GatewayDataState) {
     );
 }
 
-pub(super) async fn run_pending_cleanup_once(
-    data: &GatewayDataState,
-) -> Result<(), DataLayerError> {
-    let summary = cleanup_stale_pending_requests_once(data).await?;
-    if summary.failed > 0 || summary.recovered > 0 {
+pub(super) async fn run_pending_cleanup_once(app: &AppState) -> Result<(), DataLayerError> {
+    let data = &app.data;
+    let cleanup_result = cleanup_stale_pending_requests_once(data).await;
+    let referral_result = if data.has_referral_data_backend() {
+        Some(app.reconcile_referral_rewards_once().await)
+    } else {
+        None
+    };
+    let summary = cleanup_result.as_ref().copied().unwrap_or_default();
+    let referral_summary = referral_result
+        .as_ref()
+        .and_then(|result| result.as_ref().ok().copied())
+        .unwrap_or_default();
+    if summary.failed > 0
+        || summary.recovered > 0
+        || cleanup_result.is_err()
+        || referral_result.as_ref().is_some_and(Result::is_err)
+        || referral_summary.order_attempted > 0
+        || referral_summary.reward_attempted > 0
+        || referral_summary.reversal_attempted > 0
+    {
         info!(
             event_name = "pending_cleanup_completed",
             log_type = "ops",
             worker = "pending_cleanup",
             failed = summary.failed,
             recovered = summary.recovered,
+            referral_order_attempted = referral_summary.order_attempted,
+            referral_order_repaired = referral_summary.order_repaired,
+            referral_reward_attempted = referral_summary.reward_attempted,
+            referral_reward_applied = referral_summary.reward_applied,
+            referral_reversal_attempted = referral_summary.reversal_attempted,
+            referral_reversal_applied = referral_summary.reversal_applied,
+            referral_deferred = referral_summary.deferred,
             "gateway cleaned stale pending and streaming requests"
         );
+    }
+    if let Err(error) = cleanup_result {
+        return Err(error);
+    }
+    if let Some(Err(error)) = referral_result {
+        return Err(DataLayerError::UnexpectedValue(error.into_message()));
     }
     Ok(())
 }

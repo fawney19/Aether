@@ -46,6 +46,21 @@ describe('authApi turnstile payloads', () => {
     })
   })
 
+  it('binds verification and status requests to the verification session token', async () => {
+    await authApi.verifyEmail('alice@example.com', '123456', 'verification-session-token')
+    await authApi.getVerificationStatus('alice@example.com', 'verification-session-token')
+
+    expect(postMock).toHaveBeenNthCalledWith(1, '/api/auth/verify-email', {
+      email: 'alice@example.com',
+      code: '123456',
+      verification_token: 'verification-session-token',
+    })
+    expect(postMock).toHaveBeenNthCalledWith(2, '/api/auth/verification-status', {
+      email: 'alice@example.com',
+      verification_token: 'verification-session-token',
+    })
+  })
+
   it('refreshes auth token without a request body', async () => {
     postMock.mockResolvedValue({ data: { access_token: 'new-access-token' } })
 
@@ -53,5 +68,13 @@ describe('authApi turnstile payloads', () => {
 
     expect(postMock).toHaveBeenCalledWith('/api/auth/refresh')
     expect(setTokenMock).toHaveBeenCalledWith('new-access-token')
+  })
+
+  it('publishes login session availability without changing the token payload', async () => {
+    postMock.mockResolvedValue({ data: { access_token: 'login-access-token' } })
+
+    await authApi.login({ email: 'alice@example.com', password: 'secret123' })
+
+    expect(setTokenMock).toHaveBeenCalledWith('login-access-token', true)
   })
 })

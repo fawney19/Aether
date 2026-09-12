@@ -30,7 +30,7 @@ describe('JsonImportInput', () => {
     expect(filePanel?.getAttribute('aria-hidden')).toBe('false')
     expect(filePanel?.hasAttribute('inert')).toBe(false)
     expect(manualPanel?.getAttribute('aria-hidden')).toBe('true')
-    expect(manualPanel?.getAttribute('inert')).toBe('')
+    expect(manualPanel?.hasAttribute('inert')).toBe(true)
 
     root.querySelector<HTMLButtonElement>('[data-testid="json-import-mode-toggle"]')?.click()
     await nextTick()
@@ -38,7 +38,7 @@ describe('JsonImportInput', () => {
     expect(root.querySelector('[data-testid="json-import-file-panel"]')).toBe(filePanel)
     expect(root.querySelector('[data-testid="json-import-manual-panel"]')).toBe(manualPanel)
     expect(filePanel?.getAttribute('aria-hidden')).toBe('true')
-    expect(filePanel?.getAttribute('inert')).toBe('')
+    expect(filePanel?.hasAttribute('inert')).toBe(true)
     expect(manualPanel?.getAttribute('aria-hidden')).toBe('false')
     expect(manualPanel?.hasAttribute('inert')).toBe(false)
 
@@ -53,7 +53,7 @@ describe('JsonImportInput', () => {
     await nextTick()
     expect(value.value).toBe('')
     expect(filePanel?.hasAttribute('inert')).toBe(false)
-    expect(manualPanel?.getAttribute('inert')).toBe('')
+    expect(manualPanel?.hasAttribute('inert')).toBe(true)
 
     app.unmount()
     root.remove()

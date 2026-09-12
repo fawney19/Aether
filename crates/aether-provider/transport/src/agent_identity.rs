@@ -91,6 +91,35 @@ struct AgentIdentityAssertionEnvelope {
     signature: String,
 }
 
+const MAX_AGENT_IDENTITY_PRIVATE_KEY_DER_BYTES: usize = 4 * 1024;
+const MAX_AGENT_IDENTITY_ASSERTION_ENVELOPE_BYTES: usize = 64 * 1024;
+const MAX_AGENT_IDENTITY_SIGNATURE_BYTES: usize = 128;
+const MAX_AGENT_IDENTITY_ENCRYPTED_TASK_ID_BYTES: usize = 64 * 1024;
+
+fn maximum_base64_len_for_decoded_limit(limit: usize) -> usize {
+    limit
+        .saturating_add(2)
+        .checked_div(3)
+        .unwrap_or(usize::MAX)
+        .saturating_mul(4)
+}
+
+fn decode_standard_base64_with_limit(value: &str, limit: usize) -> Option<Vec<u8>> {
+    if value.len() > maximum_base64_len_for_decoded_limit(limit) {
+        return None;
+    }
+    let decoded = STANDARD.decode(value).ok()?;
+    (decoded.len() <= limit).then_some(decoded)
+}
+
+fn decode_urlsafe_base64_with_limit(value: &str, limit: usize) -> Option<Vec<u8>> {
+    if value.len() > maximum_base64_len_for_decoded_limit(limit) {
+        return None;
+    }
+    let decoded = URL_SAFE_NO_PAD.decode(value).ok()?;
+    (decoded.len() <= limit).then_some(decoded)
+}
+
 #[derive(Debug, Deserialize)]
 struct AgentTaskRegistrationResponse {
     #[serde(default)]
@@ -288,7 +317,9 @@ pub fn codex_agent_identity_authorization_matches_transport(
     let Some(encoded) = encoded_agent_identity_assertion(authorization) else {
         return false;
     };
-    let Ok(envelope_bytes) = URL_SAFE_NO_PAD.decode(encoded) else {
+    let Some(envelope_bytes) =
+        decode_urlsafe_base64_with_limit(encoded, MAX_AGENT_IDENTITY_ASSERTION_ENVELOPE_BYTES)
+    else {
         return false;
     };
     let Ok(envelope) = serde_json::from_slice::<AgentIdentityAssertionEnvelope>(&envelope_bytes)
@@ -310,7 +341,10 @@ pub fn codex_agent_identity_authorization_matches_transport(
     if runtime_id != credentials.runtime_id || task_id != current_task_id || timestamp.is_empty() {
         return false;
     }
-    let Ok(signature_bytes) = STANDARD.decode(envelope.signature.trim()) else {
+    let Some(signature_bytes) = decode_standard_base64_with_limit(
+        envelope.signature.trim(),
+        MAX_AGENT_IDENTITY_SIGNATURE_BYTES,
+    ) else {
         return false;
     };
     let Ok(signature) = Signature::from_slice(&signature_bytes) else {
@@ -481,9 +515,11 @@ fn agent_identity_credentials(config: &Value) -> Result<AgentIdentityCredentials
     let encoded_private_key =
         string_from_maps(root, nested, &["agent_private_key", "agentPrivateKey"])
             .ok_or_else(|| "Agent Identity agent_private_key is required".to_string())?;
-    let private_key_der = STANDARD
-        .decode(encoded_private_key)
-        .map_err(|_| "Agent Identity agent_private_key must be base64 PKCS#8".to_string())?;
+    let private_key_der = decode_standard_base64_with_limit(
+        &encoded_private_key,
+        MAX_AGENT_IDENTITY_PRIVATE_KEY_DER_BYTES,
+    )
+    .ok_or_else(|| "Agent Identity agent_private_key must be base64 PKCS#8".to_string())?;
     let signing_key = SigningKey::from_pkcs8_der(&private_key_der).map_err(|_| {
         "Agent Identity agent_private_key must be an Ed25519 PKCS#8 key".to_string()
     })?;
@@ -829,9 +865,11 @@ fn decrypt_agent_task_id(
     credentials: &AgentIdentityCredentials,
     encrypted_task_id: &str,
 ) -> Result<String, String> {
-    let ciphertext = STANDARD
-        .decode(encrypted_task_id.trim())
-        .map_err(|_| "Agent Identity encrypted_task_id must be base64".to_string())?;
+    let ciphertext = decode_standard_base64_with_limit(
+        encrypted_task_id.trim(),
+        MAX_AGENT_IDENTITY_ENCRYPTED_TASK_ID_BYTES,
+    )
+    .ok_or_else(|| "Agent Identity encrypted_task_id must be valid bounded base64".to_string())?;
     let seed = credentials.signing_key.to_bytes();
     let digest = Sha512::digest(seed);
     let mut curve_private_key = [0u8; 32];
@@ -1238,6 +1276,34 @@ mod tests {
             &sample_transport(replacement_config),
             &assertion,
         ));
+    }
+
+    #[test]
+    fn agent_identity_rejects_oversized_base64_before_decode() {
+        let encoded_limit = super::maximum_base64_len_for_decoded_limit(
+            super::MAX_AGENT_IDENTITY_ASSERTION_ENVELOPE_BYTES,
+        );
+        let assertion = format!("AgentAssertion {}", "A".repeat(encoded_limit + 1));
+        assert!(!codex_agent_identity_authorization_matches_transport(
+            &sample_transport(test_auth_config(Some("task-test"))),
+            &assertion,
+        ));
+
+        let mut config = test_auth_config(Some("task-test"));
+        let private_key_limit = super::maximum_base64_len_for_decoded_limit(
+            super::MAX_AGENT_IDENTITY_PRIVATE_KEY_DER_BYTES,
+        );
+        config["agent_private_key"] = json!("A".repeat(private_key_limit + 1));
+        assert!(agent_identity_credentials(&config).is_err());
+
+        let credentials =
+            agent_identity_credentials(&test_auth_config(None)).expect("credentials should parse");
+        let encrypted_task_id_limit = super::maximum_base64_len_for_decoded_limit(
+            super::MAX_AGENT_IDENTITY_ENCRYPTED_TASK_ID_BYTES,
+        );
+        assert!(
+            decrypt_agent_task_id(&credentials, &"A".repeat(encrypted_task_id_limit + 1),).is_err()
+        );
     }
 
     #[test]

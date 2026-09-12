@@ -4,8 +4,9 @@ use sqlx::{PgPool, Row};
 use aether_data_contracts::repository::billing::{
     AdminBillingCollectorRecord, AdminBillingCollectorWriteInput, AdminBillingMutationOutcome,
     AdminBillingPresetApplyResult, AdminBillingRuleRecord, AdminBillingRuleWriteInput,
-    BillingPlanRecord, BillingPlanWriteInput, BillingReadRepository, PaymentGatewayConfigRecord,
-    PaymentGatewayConfigWriteInput, StoredBillingModelContext, UserDailyQuotaAvailabilityRecord,
+    BillingPlanRecord, BillingPlanWriteInput, BillingReadRepository,
+    PaymentGatewayConfigCasWriteInput, PaymentGatewayConfigRecord, PaymentGatewayConfigWriteInput,
+    PaymentGatewaySecretCasUpdate, StoredBillingModelContext, UserDailyQuotaAvailabilityRecord,
     UserPlanEntitlementRecord,
 };
 use aether_data_contracts::DataLayerError;
@@ -718,6 +719,120 @@ LIMIT 1
         row.as_ref().map(map_payment_gateway_config_row).transpose()
     }
 
+    async fn compare_and_swap_payment_gateway_secret(
+        &self,
+        update: &PaymentGatewaySecretCasUpdate,
+    ) -> Result<bool, DataLayerError> {
+        let result = sqlx::query(
+            r#"
+UPDATE payment_gateway_configs
+SET merchant_key_encrypted = $3
+WHERE provider = $1
+  AND merchant_key_encrypted = $2
+            "#,
+        )
+        .bind(update.provider.trim().to_ascii_lowercase())
+        .bind(&update.expected_merchant_key_encrypted)
+        .bind(&update.merchant_key_encrypted)
+        .execute(&self.pool)
+        .await
+        .map_postgres_err()?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    async fn compare_and_swap_payment_gateway_config(
+        &self,
+        mutation: &PaymentGatewayConfigCasWriteInput,
+    ) -> Result<AdminBillingMutationOutcome<PaymentGatewayConfigRecord>, DataLayerError> {
+        let input = &mutation.input;
+        let provider = input.provider.trim().to_ascii_lowercase();
+        let row = if mutation.expected_existing {
+            sqlx::query(
+                r#"
+UPDATE payment_gateway_configs
+SET
+  enabled = $2,
+  endpoint_url = $3,
+  callback_base_url = $4,
+  merchant_id = $5,
+  merchant_key_encrypted = CASE
+    WHEN $11::BOOL THEN payment_gateway_configs.merchant_key_encrypted
+    ELSE $6
+  END,
+  pay_currency = $7,
+  usd_exchange_rate = $8,
+  min_recharge_usd = $9,
+  channels_json = $10,
+  updated_at = NOW()
+WHERE provider = $1
+  AND merchant_key_encrypted IS NOT DISTINCT FROM $12
+RETURNING
+  provider, enabled, endpoint_url, callback_base_url, merchant_id,
+  merchant_key_encrypted, pay_currency,
+  CAST(usd_exchange_rate AS DOUBLE PRECISION) AS usd_exchange_rate,
+  CAST(min_recharge_usd AS DOUBLE PRECISION) AS min_recharge_usd,
+  channels_json,
+  CAST(EXTRACT(EPOCH FROM created_at) AS BIGINT) AS created_at_unix_secs,
+  CAST(EXTRACT(EPOCH FROM updated_at) AS BIGINT) AS updated_at_unix_secs
+                "#,
+            )
+            .bind(&provider)
+            .bind(input.enabled)
+            .bind(&input.endpoint_url)
+            .bind(input.callback_base_url.as_deref())
+            .bind(&input.merchant_id)
+            .bind(input.merchant_key_encrypted.as_deref())
+            .bind(&input.pay_currency)
+            .bind(input.usd_exchange_rate)
+            .bind(input.min_recharge_usd)
+            .bind(&input.channels_json)
+            .bind(input.preserve_existing_secret)
+            .bind(mutation.expected_merchant_key_encrypted.as_deref())
+            .fetch_optional(&self.pool)
+            .await
+            .map_postgres_err()?
+        } else {
+            sqlx::query(
+                r#"
+INSERT INTO payment_gateway_configs (
+  provider, enabled, endpoint_url, callback_base_url, merchant_id,
+  merchant_key_encrypted, pay_currency, usd_exchange_rate, min_recharge_usd,
+  channels_json, created_at, updated_at
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())
+ON CONFLICT (provider) DO NOTHING
+RETURNING
+  provider, enabled, endpoint_url, callback_base_url, merchant_id,
+  merchant_key_encrypted, pay_currency,
+  CAST(usd_exchange_rate AS DOUBLE PRECISION) AS usd_exchange_rate,
+  CAST(min_recharge_usd AS DOUBLE PRECISION) AS min_recharge_usd,
+  channels_json,
+  CAST(EXTRACT(EPOCH FROM created_at) AS BIGINT) AS created_at_unix_secs,
+  CAST(EXTRACT(EPOCH FROM updated_at) AS BIGINT) AS updated_at_unix_secs
+                "#,
+            )
+            .bind(&provider)
+            .bind(input.enabled)
+            .bind(&input.endpoint_url)
+            .bind(input.callback_base_url.as_deref())
+            .bind(&input.merchant_id)
+            .bind(input.merchant_key_encrypted.as_deref())
+            .bind(&input.pay_currency)
+            .bind(input.usd_exchange_rate)
+            .bind(input.min_recharge_usd)
+            .bind(&input.channels_json)
+            .fetch_optional(&self.pool)
+            .await
+            .map_postgres_err()?
+        };
+        match row.as_ref() {
+            Some(row) => Ok(AdminBillingMutationOutcome::Applied(
+                map_payment_gateway_config_row(row)?,
+            )),
+            None => Ok(AdminBillingMutationOutcome::NotFound),
+        }
+    }
+
     async fn upsert_payment_gateway_config(
         &self,
         input: &PaymentGatewayConfigWriteInput,
@@ -999,19 +1114,54 @@ ORDER BY expires_at ASC, created_at ASC
         ))
     }
 
+    async fn revoke_user_plan_entitlement(
+        &self,
+        user_id: &str,
+        entitlement_id: &str,
+    ) -> Result<AdminBillingMutationOutcome<()>, DataLayerError> {
+        let result = sqlx::query(
+            r#"
+UPDATE user_plan_entitlements
+SET status = 'revoked',
+    expires_at = LEAST(expires_at, NOW()),
+    updated_at = NOW()
+WHERE id = $1
+  AND user_id = $2
+  AND status = 'active'
+  AND expires_at > NOW()
+            "#,
+        )
+        .bind(entitlement_id)
+        .bind(user_id)
+        .execute(&self.pool)
+        .await
+        .map_postgres_err()?;
+        if result.rows_affected() == 0 {
+            Ok(AdminBillingMutationOutcome::NotFound)
+        } else {
+            Ok(AdminBillingMutationOutcome::Applied(()))
+        }
+    }
+
     async fn find_user_daily_quota_availability(
         &self,
         user_id: &str,
     ) -> Result<Option<UserDailyQuotaAvailabilityRecord>, DataLayerError> {
         let rows = sqlx::query(
             r#"
-SELECT id, entitlements_snapshot
+SELECT
+    user_plan_entitlements.id,
+    user_plan_entitlements.entitlements_snapshot,
+    billing_plans.entitlements_json AS plan_entitlements_json
 FROM user_plan_entitlements
-WHERE user_id = $1
-  AND status = 'active'
-  AND starts_at <= NOW()
-  AND expires_at > NOW()
-ORDER BY expires_at ASC, created_at ASC, id ASC
+JOIN billing_plans ON billing_plans.id = user_plan_entitlements.plan_id
+WHERE user_plan_entitlements.user_id = $1
+    AND user_plan_entitlements.status = 'active'
+    AND user_plan_entitlements.starts_at <= NOW()
+    AND user_plan_entitlements.expires_at > NOW()
+ORDER BY user_plan_entitlements.expires_at ASC,
+                 user_plan_entitlements.created_at ASC,
+                 user_plan_entitlements.id ASC
             "#,
         )
         .bind(user_id)
@@ -1024,9 +1174,12 @@ ORDER BY expires_at ASC, created_at ASC, id ASC
             let entitlement_id: String = row.try_get("id").map_postgres_err()?;
             let entitlements: serde_json::Value =
                 row.try_get("entitlements_snapshot").map_postgres_err()?;
+            let plan_entitlements: serde_json::Value =
+                row.try_get("plan_entitlements_json").map_postgres_err()?;
             grants.extend(daily_quota_grants_from_entitlement(
                 &entitlement_id,
                 &entitlements,
+                daily_quota_wallet_overage_policy(&plan_entitlements),
                 now,
             )?);
         }
@@ -1160,6 +1313,7 @@ fn daily_quota_usage_date(
 fn daily_quota_grants_from_entitlement(
     entitlement_id: &str,
     entitlements: &serde_json::Value,
+    current_allow_wallet_overage: Option<bool>,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<Vec<DailyQuotaGrant>, DataLayerError> {
     let mut grants = Vec::new();
@@ -1185,13 +1339,25 @@ fn daily_quota_grants_from_entitlement(
                     .and_then(serde_json::Value::as_str),
                 now,
             )?,
-            allow_wallet_overage: item
-                .get("allow_wallet_overage")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false),
+            allow_wallet_overage: current_allow_wallet_overage.unwrap_or_else(|| {
+                item.get("allow_wallet_overage")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false)
+            }),
         });
     }
     Ok(grants)
+}
+
+fn daily_quota_wallet_overage_policy(entitlements: &serde_json::Value) -> Option<bool> {
+    entitlements.as_array()?.iter().find_map(|item| {
+        (item.get("type").and_then(serde_json::Value::as_str) == Some("daily_quota"))
+            .then(|| {
+                item.get("allow_wallet_overage")
+                    .and_then(serde_json::Value::as_bool)
+            })
+            .flatten()
+    })
 }
 
 fn map_payment_gateway_config_row(

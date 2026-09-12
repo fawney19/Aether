@@ -41,7 +41,7 @@ describe('useSystemConfig', () => {
   })
 
   it('loads config keys in one request and keeps change detection disabled until the baseline is ready', async () => {
-    let resolveConfigs: ((value: Array<{ key: string, value: unknown, is_set?: boolean }>) => void) | null = null
+    let resolveConfigs!: (value: Array<{ key: string, value: unknown, is_set?: boolean }>) => void
     getAllSystemConfigsMock.mockImplementation(() => new Promise((resolve) => {
       resolveConfigs = resolve
     }))
@@ -56,10 +56,9 @@ describe('useSystemConfig', () => {
     expect(state.systemConfigLoading.value).toBe(true)
     expect(state.hasLogConfigChanges.value).toBe(false)
 
-    resolveConfigs?.([
+    resolveConfigs([
       { key: 'request_record_level', value: 'basic' },
       { key: 'proxy_node_metrics_cleanup_batch_size', value: 5000 },
-      { key: 'enable_standard_text_sync_heartbeat', value: false },
     ])
     await loadPromise
 
@@ -71,58 +70,33 @@ describe('useSystemConfig', () => {
     expect(state.hasLogConfigChanges.value).toBe(true)
   })
 
-  it('loads and saves the standard text sync heartbeat flag as a basic config item', async () => {
-    getAllSystemConfigsMock.mockResolvedValue([
-      { key: 'enable_standard_text_sync_heartbeat', value: false },
-    ])
-    updateSystemConfigMock.mockResolvedValue({})
-
-    const state = useSystemConfig()
-    await state.loadSystemConfig()
-
-    expect(state.systemConfig.value.enable_standard_text_sync_heartbeat).toBe(false)
-    state.systemConfig.value.enable_standard_text_sync_heartbeat = true
-    expect(state.hasBasicConfigChanges.value).toBe(true)
-
-    await state.saveBasicConfig()
-
-    expect(updateSystemConfigMock).toHaveBeenCalledWith(
-      'enable_standard_text_sync_heartbeat',
-      true,
-      '标准文本非流式心跳开关：开启后外层 HTTP 状态固定为 200，上游失败写入响应体'
-    )
-    expect(state.hasBasicConfigChanges.value).toBe(false)
-  })
-
-  it('keeps Cyber failover disabled by default and saves the enabled state', async () => {
-    getAllSystemConfigsMock.mockResolvedValue([])
-    updateSystemConfigMock.mockResolvedValue({})
-
-    const state = useSystemConfig()
-    await state.loadSystemConfig()
-
-    expect(state.systemConfig.value.cyber_continue_failover).toBe(false)
-    state.systemConfig.value.cyber_continue_failover = true
-    expect(state.hasBasicConfigChanges.value).toBe(true)
-
-    await state.saveBasicConfig()
-
-    expect(updateSystemConfigMock).toHaveBeenCalledWith(
-      'cyber_continue_failover',
-      true,
-      'Cyber继续转移开关：开启后在响应内容开始前将Cyber Policy错误按普通错误继续故障转移，可能增加首字等待时间'
-    )
-    expect(state.hasBasicConfigChanges.value).toBe(false)
-  })
-
   it('uses backend-compatible defaults when config rows have not been persisted yet', async () => {
     getAllSystemConfigsMock.mockResolvedValue([])
 
     const state = useSystemConfig()
     await state.loadSystemConfig()
 
-    expect(state.systemConfig.value.request_record_level).toBe('full')
+    expect(state.systemConfig.value.request_record_level).toBe('basic')
     expect(state.systemConfig.value).not.toHaveProperty('max_request_body_size')
     expect(state.systemConfig.value).not.toHaveProperty('max_response_body_size')
+  })
+
+  it('saves only the proxy node and ignores retired DNS allowlist settings', async () => {
+    getAllSystemConfigsMock.mockResolvedValue([
+      { key: 'system_proxy_node_id', value: 'node-1' },
+      { key: 'execution_extra_trusted_dns_hosts', value: ['custom.example.com'] },
+    ])
+    updateSystemConfigMock.mockResolvedValue(undefined)
+    const state = useSystemConfig()
+    await state.loadSystemConfig()
+    expect(state.systemConfig.value).not.toHaveProperty('execution_extra_trusted_dns_hosts')
+    state.systemConfig.value.system_proxy_node_id = 'node-2'
+    expect(state.hasProxyConfigChanges.value).toBe(true)
+    await state.saveProxyConfig()
+    expect(updateSystemConfigMock).toHaveBeenCalledTimes(1)
+    expect(updateSystemConfigMock).toHaveBeenCalledWith(
+      'system_proxy_node_id', 'node-2', '系统默认代理节点 ID'
+    )
+    expect(state.hasProxyConfigChanges.value).toBe(false)
   })
 })

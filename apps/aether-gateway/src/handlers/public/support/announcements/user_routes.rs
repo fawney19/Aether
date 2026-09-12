@@ -11,7 +11,7 @@ use crate::AppState;
 
 use super::super::{build_unhandled_public_support_response, resolve_authenticated_local_user};
 use super::announcements_shared::{
-    announcements_bad_request_response, announcements_internal_detail,
+    announcement_is_public_at, announcements_bad_request_response, announcements_internal_detail,
     announcements_internal_error_response, announcements_not_found_response,
     build_public_announcement_payload, read_status_announcement_id_from_path,
 };
@@ -136,7 +136,9 @@ pub(crate) async fn maybe_build_local_announcement_user_response(
                     None => return Some(build_unhandled_public_support_response(request_context)),
                 };
             match state.find_announcement_by_id(announcement_id).await {
-                Ok(Some(_)) => {}
+                Ok(Some(announcement))
+                    if announcement_is_public_at(&announcement, now_unix_secs) => {}
+                Ok(Some(_)) => return Some(announcements_not_found_response()),
                 Ok(None) => return Some(announcements_not_found_response()),
                 Err(err) => {
                     return Some(announcements_internal_error_response(

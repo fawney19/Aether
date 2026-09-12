@@ -3,11 +3,14 @@ use futures_util::TryStreamExt;
 use sqlx::{PgPool, Postgres, QueryBuilder, Row};
 
 use aether_data_contracts::repository::users::{
-    normalize_user_group_name, LdapAuthUserProvisioningOutcome, StoredUserAuthRecord,
+    is_valid_bcrypt_hash, last_oauth_unbind_denial, normalize_user_group_name,
+    BindUserOAuthLinkOutcome, BindUserOAuthLinkSessionExpectation, DeleteUserOAuthLinkOutcome,
+    LdapAuthUserProvisioningOutcome, ResolveOAuthLinkedUserOutcome, StoredUserAuthRecord,
     StoredUserExportRow, StoredUserGroup, StoredUserGroupMember, StoredUserGroupMembership,
     StoredUserOAuthLinkSummary, StoredUserPreferenceRecord, StoredUserSessionRecord,
     StoredUserSummary, UpsertUserGroupRecord, UserExportListQuery, UserExportSortBy,
-    UserExportSummary, UserReadRepository,
+    UserExportSummary, UserReadRepository, LAST_ACTIVE_ADMIN_DELETE_DENIED,
+    LAST_ACTIVE_ADMIN_UPDATE_DENIED,
 };
 use aether_data_contracts::DataLayerError;
 
@@ -25,6 +28,92 @@ FROM users
 WHERE id = ANY($1::text[])
 ORDER BY id ASC
 "#;
+
+const POSTGRES_LOCK_ACTIVE_ADMINS_SQL: &str = r#"
+SELECT id
+FROM users
+WHERE role = 'admin'::userrole
+  AND is_active IS TRUE
+  AND is_deleted IS FALSE
+ORDER BY id
+FOR UPDATE
+"#;
+
+const POSTGRES_DELETE_USER_IF_WALLET_ABSENT_SQL: &str = r#"
+DELETE FROM users
+WHERE id = $1
+  AND NOT EXISTS (
+    SELECT 1
+    FROM wallets AS wallet
+    WHERE wallet.user_id = $2
+       OR EXISTS (
+         SELECT 1
+         FROM api_keys AS api_key
+         WHERE api_key.id = wallet.api_key_id
+           AND api_key.user_id = $3
+       )
+  )
+"#;
+
+const POSTGRES_DELETE_USER_API_KEYS_SQL: &str = "DELETE FROM api_keys WHERE user_id = $1";
+
+const POSTGRES_DELETE_USER_DEPENDENTS_SQL: &[&str] = &[
+    "DELETE FROM usage_request_admissions WHERE subject_id = $1",
+    "DELETE FROM usage_cost_reservations WHERE subject_id = $1",
+    "DELETE FROM gemini_file_mappings WHERE user_id = $1",
+    "DELETE FROM api_key_provider_mappings WHERE api_key_id IN (SELECT id FROM api_keys WHERE user_id = $1)",
+    POSTGRES_DELETE_USER_API_KEYS_SQL,
+    "DELETE FROM management_tokens WHERE user_id = $1",
+    "DELETE FROM user_sessions WHERE user_id = $1",
+    "DELETE FROM user_oauth_links WHERE user_id = $1",
+    "DELETE FROM user_group_members WHERE user_id = $1",
+    "DELETE FROM user_preferences WHERE user_id = $1",
+    "DELETE FROM user_invite_codes WHERE user_id = $1",
+    "DELETE FROM announcement_reads WHERE user_id = $1",
+];
+
+const POSTGRES_PREPARE_USER_FACTS_FOR_DELETION_SQL: &[&str] = &[
+    "UPDATE referral_rewards SET status = CASE WHEN status IN ('pending', 'failed', 'applying') THEN 'voided' ELSE status END, failure_reason = NULL, admin_note = NULL, updated_at = NOW() WHERE $1 IN (inviter_user_id, invitee_user_id)",
+    "UPDATE referral_rewards SET failure_reason = NULL, admin_note = NULL, updated_at = NOW() WHERE admin_operator_id = $1",
+    "UPDATE user_referrals SET invite_code_snapshot = 'deleted-user', source_json = NULL, updated_at = NOW() WHERE $1 IN (inviter_user_id, invitee_user_id)",
+    "UPDATE user_plan_entitlements SET status = CASE WHEN status = 'active' THEN 'revoked' ELSE status END, expires_at = LEAST(expires_at, NOW()), updated_at = NOW() WHERE user_id = $1",
+    "UPDATE wallets SET status = 'disabled', updated_at = NOW() WHERE user_id = $1",
+    "UPDATE wallets SET status = 'disabled', updated_at = NOW() WHERE api_key_id IN (SELECT id FROM api_keys WHERE user_id = $1)",
+    "UPDATE audit_logs SET description = 'deleted user event', ip_address = NULL, user_agent = NULL, event_metadata = NULL, error_message = NULL WHERE user_id = $1",
+    "UPDATE audit_logs SET description = 'deleted API key event', ip_address = NULL, user_agent = NULL, event_metadata = NULL, error_message = NULL WHERE api_key_id IN (SELECT id FROM api_keys WHERE user_id = $1)",
+    "UPDATE wallet_transactions SET description = NULL WHERE wallet_id IN (SELECT id FROM wallets WHERE user_id = $1)",
+    "UPDATE wallet_transactions SET description = NULL WHERE wallet_id IN (SELECT id FROM wallets WHERE api_key_id IN (SELECT id FROM api_keys WHERE user_id = $1))",
+    "UPDATE wallet_transactions SET description = NULL WHERE operator_id = $1",
+    "UPDATE payment_callbacks SET payload = NULL, error_message = NULL WHERE EXISTS (SELECT 1 FROM payment_orders AS history_order WHERE history_order.user_id = $1 AND (history_order.id = payment_callbacks.payment_order_id OR (payment_callbacks.order_no IS NOT NULL AND history_order.order_no = payment_callbacks.order_no)))",
+    "UPDATE payment_callbacks SET payload = NULL, error_message = NULL WHERE EXISTS (SELECT 1 FROM payment_orders AS history_order JOIN wallets AS history_wallet ON history_wallet.id = history_order.wallet_id WHERE history_wallet.user_id = $1 AND (history_order.id = payment_callbacks.payment_order_id OR (payment_callbacks.order_no IS NOT NULL AND history_order.order_no = payment_callbacks.order_no)))",
+    "UPDATE payment_callbacks SET payload = NULL, error_message = NULL WHERE EXISTS (SELECT 1 FROM payment_orders AS history_order JOIN wallets AS history_wallet ON history_wallet.id = history_order.wallet_id WHERE history_wallet.api_key_id IN (SELECT id FROM api_keys WHERE user_id = $1) AND (history_order.id = payment_callbacks.payment_order_id OR (payment_callbacks.order_no IS NOT NULL AND history_order.order_no = payment_callbacks.order_no)))",
+    "UPDATE payment_orders SET gateway_response = NULL WHERE user_id = $1",
+    "UPDATE payment_orders SET gateway_response = NULL WHERE wallet_id IN (SELECT id FROM wallets WHERE api_key_id IN (SELECT id FROM api_keys WHERE user_id = $1))",
+    "UPDATE refund_requests SET reason = NULL, payout_reference = NULL, payout_proof = NULL, failure_reason = NULL WHERE user_id = $1",
+    "UPDATE refund_requests SET reason = NULL, payout_reference = NULL, payout_proof = NULL, failure_reason = NULL WHERE $1 IN (requested_by, approved_by, processed_by)",
+    "UPDATE refund_requests SET reason = NULL, payout_reference = NULL, payout_proof = NULL, failure_reason = NULL WHERE wallet_id IN (SELECT id FROM wallets WHERE user_id = $1)",
+    "UPDATE refund_requests SET reason = NULL, payout_reference = NULL, payout_proof = NULL, failure_reason = NULL WHERE wallet_id IN (SELECT id FROM wallets WHERE api_key_id IN (SELECT id FROM api_keys WHERE user_id = $1))",
+    "UPDATE redeem_code_batches SET description = NULL WHERE created_by = $1",
+];
+
+const POSTGRES_ANONYMIZE_USER_HISTORY_SQL: &[&str] = &[
+    "UPDATE request_candidates SET username = NULL, api_key_name = NULL WHERE user_id = $1",
+    "UPDATE video_tasks SET username = NULL, api_key_name = NULL WHERE user_id = $1",
+    "UPDATE usage SET username = NULL, api_key_name = NULL WHERE user_id = $1",
+    "UPDATE stats_user_daily SET username = NULL WHERE user_id = $1",
+    "UPDATE stats_user_summary SET username = NULL WHERE user_id = $1",
+    "UPDATE stats_user_daily_model SET username = NULL WHERE user_id = $1",
+    "UPDATE stats_user_daily_provider SET username = NULL WHERE user_id = $1",
+    "UPDATE stats_user_daily_api_format SET username = NULL WHERE user_id = $1",
+    "UPDATE stats_user_daily_model_provider SET username = NULL WHERE user_id = $1",
+    "UPDATE stats_user_daily_cost_savings SET username = NULL WHERE user_id = $1",
+    "UPDATE stats_user_daily_cost_savings_provider SET username = NULL WHERE user_id = $1",
+    "UPDATE stats_user_daily_cost_savings_model SET username = NULL WHERE user_id = $1",
+    "UPDATE stats_user_daily_cost_savings_model_provider SET username = NULL WHERE user_id = $1",
+];
+
+const POSTGRES_ANONYMIZE_USER_API_KEY_HISTORY_SQL: &str =
+    "UPDATE stats_daily_api_key SET api_key_name = NULL WHERE api_key_id IN (SELECT id FROM api_keys WHERE user_id = $1)";
 
 const LIST_USERS_BY_USERNAME_SEARCH_SQL: &str = r#"
 SELECT
@@ -131,14 +220,14 @@ WHERE role = 'admin'::userrole
   AND is_active IS TRUE
 "#;
 
-const COUNT_ACTIVE_LOCAL_ADMIN_USERS_WITH_VALID_PASSWORD_SQL: &str = r#"
-SELECT COUNT(*)::BIGINT AS total
+const LIST_ACTIVE_LOCAL_ADMIN_PASSWORD_HASHES_SQL: &str = r#"
+SELECT password_hash
 FROM users
 WHERE role = 'admin'::userrole
   AND auth_source = 'local'::authsource
   AND is_deleted IS FALSE
   AND is_active IS TRUE
-  AND password_hash ~ '^\$2[aby]\$\d{2}\$.{53}$'
+  AND password_hash IS NOT NULL
 "#;
 
 const FIND_EXPORT_USER_BY_ID_SQL: &str = r#"
@@ -184,6 +273,7 @@ SELECT
   allowed_models_mode,
   is_active,
   is_deleted,
+  security_version,
   created_at,
   last_login_at
 FROM users
@@ -208,6 +298,7 @@ SELECT
   allowed_models_mode,
   is_active,
   is_deleted,
+  security_version,
   created_at,
   last_login_at
 FROM users
@@ -232,6 +323,7 @@ SELECT
   allowed_models_mode,
   is_active,
   is_deleted,
+  security_version,
   created_at,
   last_login_at
 FROM users
@@ -256,6 +348,7 @@ SELECT
   allowed_models_mode,
   is_active,
   is_deleted,
+  security_version,
   created_at,
   last_login_at
 FROM users
@@ -280,6 +373,7 @@ SELECT
   allowed_models_mode,
   is_active,
   is_deleted,
+  security_version,
   created_at,
   last_login_at
 FROM users
@@ -305,6 +399,7 @@ SELECT
   allowed_models_mode,
   is_active,
   is_deleted,
+  security_version,
   created_at,
   last_login_at
 FROM users
@@ -345,6 +440,7 @@ SELECT
   users.allowed_models_mode,
   users.is_active,
   users.is_deleted,
+  users.security_version,
   users.created_at,
   users.last_login_at
 FROM user_oauth_links
@@ -405,12 +501,7 @@ INSERT INTO user_oauth_links (
   last_login_at
 )
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)
-ON CONFLICT (user_id, provider_type) DO UPDATE
-SET provider_user_id = EXCLUDED.provider_user_id,
-    provider_username = EXCLUDED.provider_username,
-    provider_email = EXCLUDED.provider_email,
-    extra_data = EXCLUDED.extra_data,
-    last_login_at = EXCLUDED.last_login_at
+ON CONFLICT DO NOTHING
 "#;
 
 const TOUCH_AUTH_USER_LAST_LOGIN_SQL: &str = r#"
@@ -514,7 +605,7 @@ LEFT JOIN providers p
 
 const FIND_USER_SESSION_SQL: &str = r#"
 SELECT
-  id, user_id, client_device_id, device_label, refresh_token_hash,
+  id, user_id, security_version, client_device_id, device_label, refresh_token_hash,
   prev_refresh_token_hash, rotated_at, last_seen_at, expires_at, revoked_at,
   revoke_reason, ip_address, user_agent, created_at, updated_at
 FROM user_sessions
@@ -524,7 +615,7 @@ LIMIT 1
 
 const LIST_USER_SESSIONS_SQL: &str = r#"
 SELECT
-  id, user_id, client_device_id, device_label, refresh_token_hash,
+  id, user_id, security_version, client_device_id, device_label, refresh_token_hash,
   prev_refresh_token_hash, rotated_at, last_seen_at, expires_at, revoked_at,
   revoke_reason, ip_address, user_agent, created_at, updated_at
 FROM user_sessions
@@ -545,12 +636,12 @@ WHERE user_id = $1
 
 const CREATE_USER_SESSION_SQL: &str = r#"
 INSERT INTO user_sessions (
-  id, user_id, client_device_id, device_label, device_type, ip_address,
-  user_agent, refresh_token_hash, last_seen_at, expires_at, created_at, updated_at
+  id, user_id, security_version, client_device_id, device_label, device_type,
+  ip_address, user_agent, refresh_token_hash, last_seen_at, expires_at, created_at, updated_at
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 RETURNING
-  id, user_id, client_device_id, device_label, refresh_token_hash,
+  id, user_id, security_version, client_device_id, device_label, refresh_token_hash,
   prev_refresh_token_hash, rotated_at, last_seen_at, expires_at, revoked_at,
   revoke_reason, ip_address, user_agent, created_at, updated_at
 "#;
@@ -580,7 +671,11 @@ SET prev_refresh_token_hash = $3,
     ip_address = COALESCE($7, ip_address),
     user_agent = COALESCE($8, user_agent),
     updated_at = $4
-WHERE user_id = $1 AND id = $2
+WHERE user_id = $1
+  AND id = $2
+  AND refresh_token_hash = $3
+  AND revoked_at IS NULL
+  AND expires_at > $4
 "#;
 
 const REVOKE_USER_SESSION_SQL: &str = r#"
@@ -838,6 +933,94 @@ WHERE id = $1
         }
     }
 
+    /// Restore a group under a row lock so the snapshot comparison and write
+    /// cannot be separated by a concurrent administrator update.
+    pub async fn restore_user_group_if_matches(
+        &self,
+        expected: &StoredUserGroup,
+        restored: &StoredUserGroup,
+    ) -> Result<bool, DataLayerError> {
+        if expected.id != restored.id || expected.id.trim().is_empty() {
+            return Ok(false);
+        }
+
+        let mut tx = self.pool.begin().await.map_postgres_err()?;
+        let mut builder = QueryBuilder::<Postgres>::new(USER_GROUP_COLUMNS);
+        builder
+            .push(" WHERE id = ")
+            .push_bind(&expected.id)
+            .push(" FOR UPDATE");
+        let row = builder
+            .build()
+            .fetch_optional(&mut *tx)
+            .await
+            .map_postgres_err()?;
+        let Some(row) = row else {
+            tx.rollback().await.map_postgres_err()?;
+            return Ok(false);
+        };
+        let current = map_user_group_row(&row)?;
+        if &current != expected {
+            tx.rollback().await.map_postgres_err()?;
+            return Ok(false);
+        }
+
+        let result = sqlx::query(
+            r#"
+UPDATE user_groups
+SET name = $2,
+    normalized_name = $3,
+    description = $4,
+    priority = $5,
+    allowed_providers = $6::json,
+    allowed_providers_mode = $7,
+    allowed_api_formats = $8::json,
+    allowed_api_formats_mode = $9,
+    allowed_models = $10::json,
+    allowed_models_mode = $11,
+    rate_limit = $12,
+    rate_limit_mode = $13,
+    created_at = $14,
+    updated_at = $15
+WHERE id = $1
+"#,
+        )
+        .bind(&restored.id)
+        .bind(&restored.name)
+        .bind(&restored.normalized_name)
+        .bind(&restored.description)
+        .bind(restored.priority)
+        .bind(
+            restored
+                .allowed_providers
+                .clone()
+                .map(serde_json::Value::from),
+        )
+        .bind(&restored.allowed_providers_mode)
+        .bind(
+            restored
+                .allowed_api_formats
+                .clone()
+                .map(serde_json::Value::from),
+        )
+        .bind(&restored.allowed_api_formats_mode)
+        .bind(restored.allowed_models.clone().map(serde_json::Value::from))
+        .bind(&restored.allowed_models_mode)
+        .bind(restored.rate_limit)
+        .bind(&restored.rate_limit_mode)
+        .bind(restored.created_at)
+        .bind(restored.updated_at)
+        .execute(&mut *tx)
+        .await
+        .map_postgres_err()?;
+        if result.rows_affected() != 1 {
+            tx.rollback().await.map_postgres_err()?;
+            return Ok(false);
+        }
+        tx.commit().await.map_postgres_err()?;
+        Ok(true)
+    }
+
     pub async fn delete_user_group(&self, group_id: &str) -> Result<bool, DataLayerError> {
         let result = sqlx::query("DELETE FROM user_groups WHERE id = $1")
             .bind(group_id)
@@ -865,6 +1048,26 @@ WHERE id = $1
         user_ids: &[String],
     ) -> Result<Vec<StoredUserGroupMember>, DataLayerError> {
         let mut tx = self.pool.begin().await.map_postgres_err()?;
+        // Serialize membership replacement with the per-user CAS path by locking all affected
+        // users in deterministic order before deleting or inserting membership rows.
+        let mut locked_user_ids = normalized_ids(user_ids);
+        let existing_user_ids = sqlx::query_scalar::<_, String>(
+            "SELECT user_id FROM user_group_members WHERE group_id = $1 ORDER BY user_id",
+        )
+        .bind(group_id)
+        .fetch_all(&mut *tx)
+        .await
+        .map_postgres_err()?;
+        locked_user_ids.extend(existing_user_ids);
+        locked_user_ids.sort();
+        locked_user_ids.dedup();
+        if !locked_user_ids.is_empty() {
+            sqlx::query("SELECT id FROM users WHERE id = ANY($1::text[]) ORDER BY id FOR UPDATE")
+                .bind(&locked_user_ids)
+                .fetch_all(&mut *tx)
+                .await
+                .map_postgres_err()?;
+        }
         sqlx::query("DELETE FROM user_group_members WHERE group_id = $1")
             .bind(group_id)
             .execute(&mut *tx)
@@ -938,6 +1141,16 @@ WHERE user_group_members.user_id IN (
         group_ids: &[String],
     ) -> Result<Vec<StoredUserGroup>, DataLayerError> {
         let mut tx = self.pool.begin().await.map_postgres_err()?;
+        let user_exists: Option<String> =
+            sqlx::query_scalar("SELECT id FROM users WHERE id = $1 FOR UPDATE")
+                .bind(user_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_postgres_err()?;
+        if user_exists.is_none() {
+            tx.rollback().await.map_postgres_err()?;
+            return Ok(Vec::new());
+        }
         sqlx::query("DELETE FROM user_group_members WHERE user_id = $1")
             .bind(user_id)
             .execute(&mut *tx)
@@ -957,19 +1170,92 @@ WHERE user_group_members.user_id IN (
         self.list_user_groups_for_user(user_id).await
     }
 
+    pub async fn restore_user_groups_if_matches(
+        &self,
+        user_id: &str,
+        expected_group_ids: &[String],
+        restored_group_ids: &[String],
+    ) -> Result<bool, DataLayerError> {
+        let expected = normalized_ids(expected_group_ids);
+        let restored = normalized_ids(restored_group_ids);
+        let mut tx = self.pool.begin().await.map_postgres_err()?;
+        let user_exists: Option<String> =
+            sqlx::query_scalar("SELECT id FROM users WHERE id = $1 FOR UPDATE")
+                .bind(user_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_postgres_err()?;
+        if user_exists.is_none() {
+            tx.rollback().await.map_postgres_err()?;
+            return Ok(false);
+        }
+        let current = sqlx::query_scalar::<_, String>(
+            "SELECT group_id FROM user_group_members WHERE user_id = $1 ORDER BY group_id ASC FOR UPDATE",
+        )
+        .bind(user_id)
+        .fetch_all(&mut *tx)
+        .await
+        .map_postgres_err()?;
+        if current != expected {
+            tx.rollback().await.map_postgres_err()?;
+            return Ok(false);
+        }
+        if !restored.is_empty() {
+            let count: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM user_groups WHERE id = ANY($1::text[])")
+                    .bind(&restored)
+                    .fetch_one(&mut *tx)
+                    .await
+                    .map_postgres_err()?;
+            if count != restored.len() as i64 {
+                tx.rollback().await.map_postgres_err()?;
+                return Ok(false);
+            }
+        }
+        sqlx::query("DELETE FROM user_group_members WHERE user_id = $1")
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await
+            .map_postgres_err()?;
+        for group_id in restored {
+            sqlx::query(
+                "INSERT INTO user_group_members (group_id, user_id) VALUES ($1, $2) ON CONFLICT (group_id, user_id) DO NOTHING",
+            )
+            .bind(group_id)
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await
+            .map_postgres_err()?;
+        }
+        tx.commit().await.map_postgres_err()?;
+        Ok(true)
+    }
+
     pub async fn add_user_to_group(
         &self,
         group_id: &str,
         user_id: &str,
     ) -> Result<bool, DataLayerError> {
+        let mut tx = self.pool.begin().await.map_postgres_err()?;
+        let user_exists: Option<String> =
+            sqlx::query_scalar("SELECT id FROM users WHERE id = $1 FOR UPDATE")
+                .bind(user_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_postgres_err()?;
+        if user_exists.is_none() {
+            tx.rollback().await.map_postgres_err()?;
+            return Ok(false);
+        }
         let result = sqlx::query(
             "INSERT INTO user_group_members (group_id, user_id) VALUES ($1, $2) ON CONFLICT (group_id, user_id) DO NOTHING",
         )
         .bind(group_id)
         .bind(user_id)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_postgres_err()?;
+        tx.commit().await.map_postgres_err()?;
         Ok(result.rows_affected() > 0)
     }
 
@@ -1222,6 +1508,70 @@ WHERE user_group_members.user_id IN (
         row.as_ref().map(map_user_auth_row).transpose()
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub async fn resolve_enabled_oauth_linked_user(
+        &self,
+        provider_type: &str,
+        provider_user_id: &str,
+        provider_username: Option<&str>,
+        provider_email: Option<&str>,
+        extra_data: Option<serde_json::Value>,
+        verified_email: Option<&str>,
+        touched_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<ResolveOAuthLinkedUserOutcome, DataLayerError> {
+        let mut tx = self.pool.begin().await.map_postgres_err()?;
+        let provider_enabled: Option<bool> = sqlx::query_scalar(
+            "SELECT is_enabled FROM oauth_providers WHERE provider_type = $1 FOR UPDATE",
+        )
+        .bind(provider_type)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_postgres_err()?;
+        if provider_enabled != Some(true) {
+            tx.rollback().await.map_postgres_err()?;
+            return Ok(ResolveOAuthLinkedUserOutcome::ProviderUnavailable);
+        }
+        let row = sqlx::query(&format!(
+            "{FIND_OAUTH_LINKED_USER_SQL} FOR UPDATE OF users, user_oauth_links"
+        ))
+        .bind(provider_type)
+        .bind(provider_user_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_postgres_err()?;
+        let Some(row) = row else {
+            tx.rollback().await.map_postgres_err()?;
+            return Ok(ResolveOAuthLinkedUserOutcome::NotLinked);
+        };
+        let mut user = map_user_auth_row(&row)?;
+        sqlx::query(TOUCH_OAUTH_LINK_SQL)
+            .bind(provider_type)
+            .bind(provider_user_id)
+            .bind(provider_username)
+            .bind(provider_email)
+            .bind(extra_data)
+            .bind(touched_at)
+            .execute(&mut *tx)
+            .await
+            .map_postgres_err()?;
+        if let Some(verified_email) = verified_email {
+            let result = sqlx::query(
+                "UPDATE users SET email_verified = TRUE, updated_at = $3 WHERE id = $1 AND email_verified IS FALSE AND LOWER(TRIM(email)) = LOWER(TRIM($2))",
+            )
+            .bind(&user.id)
+            .bind(verified_email)
+            .bind(touched_at)
+            .execute(&mut *tx)
+            .await
+            .map_postgres_err()?;
+            if result.rows_affected() == 1 {
+                user.email_verified = true;
+            }
+        }
+        tx.commit().await.map_postgres_err()?;
+        Ok(ResolveOAuthLinkedUserOutcome::Linked(user))
+    }
+
     pub async fn touch_oauth_link(
         &self,
         provider_type: &str,
@@ -1247,6 +1597,7 @@ WHERE user_group_members.user_id IN (
     pub async fn create_oauth_auth_user(
         &self,
         email: Option<String>,
+        email_verified: bool,
         username: String,
         created_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<Option<StoredUserAuthRecord>, DataLayerError> {
@@ -1259,14 +1610,15 @@ INSERT INTO users (
   is_active, is_deleted, created_at, updated_at, last_login_at
 )
 VALUES (
-  $1, $2, TRUE, $3, NULL, 'user'::userrole, 'oauth'::authsource,
+  $1, $2, $3, $4, NULL, 'user'::userrole, 'oauth'::authsource,
   'inherit', 'inherit', 'inherit', 'inherit',
-  TRUE, FALSE, $4, $4, $4
+  TRUE, FALSE, $5, $5, $5
 )
 "#,
         )
         .bind(&user_id)
         .bind(email)
+        .bind(email_verified)
         .bind(username)
         .bind(created_at)
         .execute(&self.pool)
@@ -1315,7 +1667,7 @@ VALUES (
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub async fn upsert_user_oauth_link(
+    pub async fn bind_user_oauth_link(
         &self,
         user_id: &str,
         provider_type: &str,
@@ -1324,8 +1676,64 @@ VALUES (
         provider_email: Option<&str>,
         extra_data: Option<serde_json::Value>,
         linked_at: chrono::DateTime<chrono::Utc>,
-    ) -> Result<(), DataLayerError> {
-        sqlx::query(UPSERT_OAUTH_LINK_SQL)
+    ) -> Result<BindUserOAuthLinkOutcome, DataLayerError> {
+        let mut tx = self.pool.begin().await.map_postgres_err()?;
+        let provider_enabled = sqlx::query_scalar::<_, bool>(
+            "SELECT is_enabled FROM oauth_providers WHERE provider_type = $1 FOR UPDATE",
+        )
+        .bind(provider_type)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_postgres_err()?;
+        let Some(provider_enabled) = provider_enabled else {
+            tx.rollback().await.map_postgres_err()?;
+            return Ok(BindUserOAuthLinkOutcome::ProviderNotFound);
+        };
+        if !provider_enabled {
+            tx.rollback().await.map_postgres_err()?;
+            return Ok(BindUserOAuthLinkOutcome::ProviderDisabled);
+        }
+        let user_exists =
+            sqlx::query_scalar::<_, i32>("SELECT 1 FROM users WHERE id = $1 FOR UPDATE")
+                .bind(user_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_postgres_err()?
+                .is_some();
+        if !user_exists {
+            tx.rollback().await.map_postgres_err()?;
+            return Ok(BindUserOAuthLinkOutcome::UserNotFound);
+        }
+        if let Some(owner) = sqlx::query_scalar::<_, String>(
+            "SELECT user_id FROM user_oauth_links WHERE provider_type = $1 AND provider_user_id = $2 LIMIT 1",
+        )
+        .bind(provider_type)
+        .bind(provider_user_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_postgres_err()?
+        {
+            tx.rollback().await.map_postgres_err()?;
+            return Ok(if owner == user_id {
+                BindUserOAuthLinkOutcome::IdentityAlreadyBoundToUser
+            } else {
+                BindUserOAuthLinkOutcome::IdentityBoundToAnotherUser
+            });
+        }
+        if sqlx::query_scalar::<_, i32>(
+            "SELECT 1 FROM user_oauth_links WHERE user_id = $1 AND provider_type = $2 LIMIT 1",
+        )
+        .bind(user_id)
+        .bind(provider_type)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_postgres_err()?
+        .is_some()
+        {
+            tx.rollback().await.map_postgres_err()?;
+            return Ok(BindUserOAuthLinkOutcome::UserAlreadyLinkedProvider);
+        }
+        let inserted = sqlx::query(UPSERT_OAUTH_LINK_SQL)
             .bind(uuid::Uuid::new_v4().to_string())
             .bind(user_id)
             .bind(provider_type)
@@ -1334,24 +1742,143 @@ VALUES (
             .bind(provider_email)
             .bind(extra_data)
             .bind(linked_at)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_postgres_err()?;
-        Ok(())
+        let outcome = if inserted.rows_affected() == 1 {
+            BindUserOAuthLinkOutcome::Bound
+        } else if let Some(owner) = sqlx::query_scalar::<_, String>(
+            "SELECT user_id FROM user_oauth_links WHERE provider_type = $1 AND provider_user_id = $2 LIMIT 1",
+        )
+        .bind(provider_type)
+        .bind(provider_user_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_postgres_err()?
+        {
+            if owner == user_id {
+                BindUserOAuthLinkOutcome::IdentityAlreadyBoundToUser
+            } else {
+                BindUserOAuthLinkOutcome::IdentityBoundToAnotherUser
+            }
+        } else {
+            BindUserOAuthLinkOutcome::UserAlreadyLinkedProvider
+        };
+        tx.commit().await.map_postgres_err()?;
+        Ok(outcome)
+    }
+
+    pub async fn upgrade_oauth_email_verification_if_matches(
+        &self,
+        user_id: &str,
+        verified_email: &str,
+        verified_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, DataLayerError> {
+        let result = sqlx::query(
+            r#"
+UPDATE users
+SET email_verified = TRUE,
+    updated_at = $3
+WHERE id = $1
+  AND email_verified IS FALSE
+  AND LOWER(TRIM(email)) = LOWER(TRIM($2))
+"#,
+        )
+        .bind(user_id)
+        .bind(verified_email)
+        .bind(verified_at)
+        .execute(&self.pool)
+        .await
+        .map_postgres_err()?;
+        Ok(result.rows_affected() == 1)
     }
 
     pub async fn delete_user_oauth_link(
         &self,
         user_id: &str,
         provider_type: &str,
-    ) -> Result<bool, DataLayerError> {
+        local_password_login_allowed: bool,
+    ) -> Result<DeleteUserOAuthLinkOutcome, DataLayerError> {
+        let mut tx = self.pool.begin().await.map_postgres_err()?;
+        let provider_exists: Option<String> = sqlx::query_scalar(
+            "SELECT provider_type FROM oauth_providers WHERE provider_type = $1 FOR UPDATE",
+        )
+        .bind(provider_type)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_postgres_err()?;
+        if provider_exists.is_none() {
+            tx.rollback().await.map_postgres_err()?;
+            return Ok(DeleteUserOAuthLinkOutcome::NotFound);
+        }
+        let user = sqlx::query(
+            "SELECT auth_source::text AS auth_source, password_hash FROM users WHERE id = $1 FOR UPDATE",
+        )
+            .bind(user_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_postgres_err()?;
+        let Some(user) = user else {
+            tx.rollback().await.map_postgres_err()?;
+            return Ok(DeleteUserOAuthLinkOutcome::NotFound);
+        };
+        let auth_source = user
+            .try_get::<String, _>("auth_source")
+            .map_postgres_err()?;
+        let password_hash = user
+            .try_get::<Option<String>, _>("password_hash")
+            .map_postgres_err()?;
+        let provider_types = sqlx::query_scalar::<_, String>(
+            "SELECT provider_type FROM user_oauth_links WHERE user_id = $1 FOR UPDATE",
+        )
+        .bind(user_id)
+        .fetch_all(&mut *tx)
+        .await
+        .map_postgres_err()?;
+        if !provider_types.iter().any(|value| value == provider_type) {
+            tx.rollback().await.map_postgres_err()?;
+            return Ok(DeleteUserOAuthLinkOutcome::NotFound);
+        }
+        let enabled_provider_types = sqlx::query_scalar::<_, String>(
+            r#"
+SELECT user_oauth_links.provider_type
+FROM user_oauth_links
+JOIN oauth_providers
+  ON oauth_providers.provider_type = user_oauth_links.provider_type
+WHERE user_oauth_links.user_id = $1
+  AND oauth_providers.is_enabled IS TRUE
+FOR UPDATE OF user_oauth_links
+"#,
+        )
+        .bind(user_id)
+        .fetch_all(&mut *tx)
+        .await
+        .map_postgres_err()?;
+        let has_remaining_enabled_oauth_link = enabled_provider_types
+            .iter()
+            .any(|value| value != provider_type);
+        if !has_remaining_enabled_oauth_link {
+            if let Some(outcome) = last_oauth_unbind_denial(
+                &auth_source,
+                password_hash.as_deref(),
+                local_password_login_allowed,
+            ) {
+                tx.rollback().await.map_postgres_err()?;
+                return Ok(outcome);
+            }
+        }
         let result = sqlx::query(DELETE_USER_OAUTH_LINK_SQL)
             .bind(user_id)
             .bind(provider_type)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_postgres_err()?;
-        Ok(result.rows_affected() > 0)
+        if result.rows_affected() != 1 {
+            tx.rollback().await.map_postgres_err()?;
+            return Ok(DeleteUserOAuthLinkOutcome::NotFound);
+        }
+        tx.commit().await.map_postgres_err()?;
+        Ok(DeleteUserOAuthLinkOutcome::Deleted)
     }
 
     pub async fn get_or_create_ldap_auth_user(
@@ -1405,7 +1932,7 @@ RETURNING
   id, email, email_verified, username, password_hash, role::text AS role,
   auth_source::text AS auth_source, allowed_providers, allowed_providers_mode,
   allowed_api_formats, allowed_api_formats_mode, allowed_models, allowed_models_mode,
-  is_active, is_deleted, created_at, last_login_at
+  is_active, is_deleted, security_version, created_at, last_login_at
 "#,
             )
             .bind(&existing.id)
@@ -1457,7 +1984,7 @@ RETURNING
   id, email, email_verified, username, password_hash, role::text AS role,
   auth_source::text AS auth_source, allowed_providers, allowed_providers_mode,
   allowed_api_formats, allowed_api_formats_mode, allowed_models, allowed_models_mode,
-  is_active, is_deleted, created_at, last_login_at
+  is_active, is_deleted, security_version, created_at, last_login_at
 "#,
             )
             .bind(uuid::Uuid::new_v4().to_string())
@@ -1504,20 +2031,25 @@ RETURNING
     pub async fn update_local_auth_user_profile(
         &self,
         user_id: &str,
+        email_present: bool,
         email: Option<String>,
+        email_verified: Option<bool>,
         username: Option<String>,
     ) -> Result<Option<StoredUserAuthRecord>, DataLayerError> {
         let result = sqlx::query(
             r#"
 UPDATE users
-SET email = COALESCE($2, email),
-    username = COALESCE($3, username),
+SET email = CASE WHEN $2 THEN $3 ELSE email END,
+    email_verified = COALESCE($4, email_verified),
+    username = COALESCE($5, username),
     updated_at = NOW()
 WHERE id = $1
 "#,
         )
         .bind(user_id)
+        .bind(email_present)
         .bind(email)
+        .bind(email_verified)
         .bind(username)
         .execute(&self.pool)
         .await
@@ -1526,6 +2058,163 @@ WHERE id = $1
             return Ok(None);
         }
         self.find_user_auth_by_id(user_id).await
+    }
+
+    // This operation compares and restores four correlated snapshots in one
+    // transaction. Keep the explicit arguments visible at the call site so a
+    // future restore cannot accidentally omit one consistency boundary.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn restore_local_auth_user_state_if_matches(
+        &self,
+        expected_auth: &StoredUserAuthRecord,
+        restored_auth: &StoredUserAuthRecord,
+        expected_export: &StoredUserExportRow,
+        restored_export: &StoredUserExportRow,
+        expected_model_capability_settings: Option<&serde_json::Value>,
+        restored_model_capability_settings: Option<serde_json::Value>,
+        expected_feature_settings: Option<&serde_json::Value>,
+        restored_feature_settings: Option<serde_json::Value>,
+    ) -> Result<bool, DataLayerError> {
+        if expected_auth.id != restored_auth.id
+            || expected_export.id != expected_auth.id
+            || restored_export.id != restored_auth.id
+        {
+            return Ok(false);
+        }
+        let mut tx = self.pool.begin().await.map_postgres_err()?;
+        let active_admin_ids = sqlx::query_scalar::<_, String>(POSTGRES_LOCK_ACTIVE_ADMINS_SQL)
+            .fetch_all(&mut *tx)
+            .await
+            .map_postgres_err()?;
+        let auth_row = sqlx::query(&format!("{FIND_USER_AUTH_BY_ID_SQL} FOR UPDATE"))
+            .bind(&expected_auth.id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_postgres_err()?;
+        let export_row = sqlx::query(&format!("{FIND_EXPORT_USER_BY_ID_SQL} FOR UPDATE"))
+            .bind(&expected_auth.id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_postgres_err()?;
+        let (Some(auth_row), Some(export_row)) = (auth_row, export_row) else {
+            tx.rollback().await.map_postgres_err()?;
+            return Ok(false);
+        };
+        let current_auth = map_user_auth_row(&auth_row)?;
+        let current_export = map_user_export_row(&export_row)?;
+        if !current_auth.matches_restore_state(expected_auth)
+            || !current_export.matches_restore_state(expected_export)
+            || current_export.rate_limit != expected_export.rate_limit
+            || current_export.rate_limit_mode != expected_export.rate_limit_mode
+            || current_export.model_capability_settings.as_ref()
+                != expected_model_capability_settings
+            || current_export.feature_settings.as_ref() != expected_feature_settings
+        {
+            tx.rollback().await.map_postgres_err()?;
+            return Ok(false);
+        }
+        let removes_active_admin = current_auth.role.eq_ignore_ascii_case("admin")
+            && current_auth.is_active
+            && !current_auth.is_deleted
+            && (!restored_auth.role.eq_ignore_ascii_case("admin") || !restored_auth.is_active);
+        if removes_active_admin && active_admin_ids.len() <= 1 {
+            tx.rollback().await.map_postgres_err()?;
+            return Err(DataLayerError::InvalidInput(
+                LAST_ACTIVE_ADMIN_UPDATE_DENIED.to_string(),
+            ));
+        }
+        let security_state_changed = expected_auth.role != restored_auth.role
+            || expected_auth.is_active != restored_auth.is_active;
+        let allowed_providers = restored_auth
+            .allowed_providers
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|err| DataLayerError::UnexpectedValue(err.to_string()))?;
+        let allowed_api_formats = restored_auth
+            .allowed_api_formats
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|err| DataLayerError::UnexpectedValue(err.to_string()))?;
+        let allowed_models = restored_auth
+            .allowed_models
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|err| DataLayerError::UnexpectedValue(err.to_string()))?;
+        let result = sqlx::query(
+            r#"
+UPDATE users
+SET email = $2,
+    email_verified = $3,
+    username = $4,
+    role = $5::userrole,
+    allowed_providers = $6::json,
+    allowed_providers_mode = $7,
+    allowed_api_formats = $8::json,
+    allowed_api_formats_mode = $9,
+    allowed_models = $10::json,
+    allowed_models_mode = $11,
+    rate_limit = $12,
+    rate_limit_mode = $13,
+    model_capability_settings = $14::json,
+    feature_settings = $15::jsonb,
+    is_active = $16,
+    security_version = security_version + CASE WHEN $17 THEN 1 ELSE 0 END,
+    updated_at = NOW()
+WHERE id = $1
+"#,
+        )
+        .bind(&expected_auth.id)
+        .bind(&restored_auth.email)
+        .bind(restored_auth.email_verified)
+        .bind(&restored_auth.username)
+        .bind(&restored_auth.role)
+        .bind(allowed_providers)
+        .bind(&restored_auth.allowed_providers_mode)
+        .bind(allowed_api_formats)
+        .bind(&restored_auth.allowed_api_formats_mode)
+        .bind(allowed_models)
+        .bind(&restored_auth.allowed_models_mode)
+        .bind(restored_export.rate_limit)
+        .bind(&restored_export.rate_limit_mode)
+        .bind(restored_model_capability_settings.clone())
+        .bind(restored_feature_settings.clone())
+        .bind(restored_auth.is_active)
+        .bind(security_state_changed)
+        .execute(&mut *tx)
+        .await
+        .map_postgres_err()?;
+        if result.rows_affected() != 1 {
+            tx.rollback().await.map_postgres_err()?;
+            return Ok(false);
+        }
+        if security_state_changed {
+            sqlx::query(
+                "UPDATE user_sessions SET revoked_at = NOW(), revoke_reason = 'user_security_state_changed', updated_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL",
+            )
+            .bind(&expected_auth.id)
+            .execute(&mut *tx)
+            .await
+            .map_postgres_err()?;
+            sqlx::query(
+                "UPDATE api_keys SET is_active = FALSE, updated_at = NOW() WHERE user_id = $1 AND is_active IS TRUE",
+            )
+            .bind(&expected_auth.id)
+            .execute(&mut *tx)
+            .await
+            .map_postgres_err()?;
+            sqlx::query(
+                "UPDATE management_tokens SET is_active = FALSE, updated_at = NOW() WHERE user_id = $1 AND is_active IS TRUE",
+            )
+            .bind(&expected_auth.id)
+            .execute(&mut *tx)
+            .await
+            .map_postgres_err()?;
+        }
+        tx.commit().await.map_postgres_err()?;
+        Ok(true)
     }
 
     pub async fn update_local_auth_user_password_hash(
@@ -1538,6 +2227,7 @@ WHERE id = $1
             r#"
 UPDATE users
 SET password_hash = $2,
+    security_version = security_version + 1,
     updated_at = $3
 WHERE id = $1
 "#,
@@ -1552,6 +2242,142 @@ WHERE id = $1
             return Ok(None);
         }
         self.find_user_auth_by_id(user_id).await
+    }
+
+    pub async fn restore_local_auth_user_password_hash_if_matches(
+        &self,
+        user_id: &str,
+        expected_password_hash: Option<&str>,
+        password_hash: Option<String>,
+        updated_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, DataLayerError> {
+        let result = sqlx::query(
+            r#"
+UPDATE users
+SET password_hash = $2,
+    security_version = security_version + 1,
+    updated_at = $3
+WHERE id = $1
+  AND (($4::TEXT IS NULL AND password_hash IS NULL) OR password_hash = $4)
+"#,
+        )
+        .bind(user_id)
+        .bind(password_hash)
+        .bind(updated_at)
+        .bind(expected_password_hash)
+        .execute(&self.pool)
+        .await
+        .map_postgres_err()?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    pub async fn reset_local_auth_user_password_and_revoke_sessions(
+        &self,
+        user_id: &str,
+        password_hash: String,
+        changed_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, DataLayerError> {
+        let mut tx = self.pool.begin().await.map_postgres_err()?;
+        let updated = sqlx::query(
+            "UPDATE users SET password_hash = $2, security_version = security_version + 1, updated_at = $3 WHERE id = $1 AND is_deleted IS FALSE",
+        )
+        .bind(user_id)
+        .bind(password_hash)
+        .bind(changed_at)
+        .execute(&mut *tx)
+        .await
+        .map_postgres_err()?;
+        if updated.rows_affected() != 1 {
+            tx.rollback().await.map_postgres_err()?;
+            return Ok(false);
+        }
+        sqlx::query(
+            "UPDATE user_sessions SET revoked_at = $2, revoke_reason = 'admin_password_reset', updated_at = $2 WHERE user_id = $1 AND revoked_at IS NULL",
+        )
+        .bind(user_id)
+        .bind(changed_at)
+        .execute(&mut *tx)
+        .await
+        .map_postgres_err()?;
+        tx.commit().await.map_postgres_err()?;
+        Ok(true)
+    }
+
+    pub async fn change_local_auth_password_and_revoke_sessions(
+        &self,
+        user_id: &str,
+        current_session_id: &str,
+        expected_password_hash: Option<&str>,
+        next_password_hash: String,
+        changed_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, DataLayerError> {
+        let mut tx = self.pool.begin().await.map_postgres_err()?;
+        let row = sqlx::query(
+            r#"
+SELECT password_hash, is_active, is_deleted
+FROM users
+WHERE id = $1
+FOR UPDATE
+"#,
+        )
+        .bind(user_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_postgres_err()?;
+        let Some(row) = row else {
+            tx.rollback().await.map_postgres_err()?;
+            return Ok(false);
+        };
+        let stored_password_hash = row
+            .try_get::<Option<String>, _>("password_hash")
+            .map_postgres_err()?;
+        let is_active = row.try_get::<bool, _>("is_active").map_postgres_err()?;
+        let is_deleted = row.try_get::<bool, _>("is_deleted").map_postgres_err()?;
+        if stored_password_hash.as_deref() != expected_password_hash || !is_active || is_deleted {
+            tx.rollback().await.map_postgres_err()?;
+            return Ok(false);
+        }
+        let current_session_exists = sqlx::query_scalar::<_, bool>(
+            r#"
+SELECT EXISTS (
+  SELECT 1 FROM user_sessions
+  WHERE user_id = $1 AND id = $2 AND revoked_at IS NULL AND expires_at > $3
+)
+"#,
+        )
+        .bind(user_id)
+        .bind(current_session_id)
+        .bind(changed_at)
+        .fetch_one(&mut *tx)
+        .await
+        .map_postgres_err()?;
+        if !current_session_exists {
+            tx.rollback().await.map_postgres_err()?;
+            return Ok(false);
+        }
+        sqlx::query(
+            "UPDATE users SET password_hash = $2, security_version = security_version + 1, updated_at = $3 WHERE id = $1",
+        )
+            .bind(user_id)
+            .bind(next_password_hash)
+            .bind(changed_at)
+            .execute(&mut *tx)
+            .await
+            .map_postgres_err()?;
+        let revoked = sqlx::query(
+            "UPDATE user_sessions SET revoked_at = $2, revoke_reason = 'password_changed', updated_at = $2 WHERE user_id = $1 AND revoked_at IS NULL",
+        )
+        .bind(user_id)
+        .bind(changed_at)
+        .execute(&mut *tx)
+        .await
+        .map_postgres_err()?;
+        if revoked.rows_affected() == 0 {
+            tx.rollback().await.map_postgres_err()?;
+            return Ok(false);
+        }
+        tx.commit().await.map_postgres_err()?;
+        Ok(true)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1569,6 +2395,46 @@ WHERE id = $1
         rate_limit: Option<i32>,
         is_active: Option<bool>,
     ) -> Result<Option<StoredUserAuthRecord>, DataLayerError> {
+        let mut tx = self.pool.begin().await.map_postgres_err()?;
+        let active_admin_ids = sqlx::query_scalar::<_, String>(POSTGRES_LOCK_ACTIVE_ADMINS_SQL)
+            .fetch_all(&mut *tx)
+            .await
+            .map_postgres_err()?;
+        let current_security_state = sqlx::query(
+            "SELECT role::text AS role, is_active, is_deleted FROM users WHERE id = $1 FOR UPDATE",
+        )
+        .bind(user_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_postgres_err()?;
+        let Some(current_security_state) = current_security_state else {
+            tx.rollback().await.map_postgres_err()?;
+            return Ok(None);
+        };
+        let current_role = current_security_state
+            .try_get::<String, _>("role")
+            .map_postgres_err()?;
+        let current_active = current_security_state
+            .try_get::<bool, _>("is_active")
+            .map_postgres_err()?;
+        let current_deleted = current_security_state
+            .try_get::<bool, _>("is_deleted")
+            .map_postgres_err()?;
+        let next_role = role.as_deref().unwrap_or(current_role.as_str());
+        let next_active = is_active.unwrap_or(current_active);
+        if current_role.eq_ignore_ascii_case("admin")
+            && current_active
+            && !current_deleted
+            && (!next_role.eq_ignore_ascii_case("admin") || !next_active)
+            && active_admin_ids.len() <= 1
+        {
+            tx.rollback().await.map_postgres_err()?;
+            return Err(DataLayerError::InvalidInput(
+                LAST_ACTIVE_ADMIN_UPDATE_DENIED.to_string(),
+            ));
+        }
+        let security_state_changed =
+            !current_role.eq_ignore_ascii_case(next_role) || current_active != next_active;
         let allowed_providers_mode = if allowed_providers
             .as_ref()
             .is_some_and(|values| !values.is_empty())
@@ -1641,6 +2507,7 @@ SET role = CASE
         WHEN $16::BOOLEAN AND $17 IS NOT NULL THEN $17
         ELSE is_active
     END,
+    security_version = security_version + CASE WHEN $18::BOOLEAN THEN 1 ELSE 0 END,
     updated_at = NOW()
 WHERE id = $1
 "#,
@@ -1662,12 +2529,38 @@ WHERE id = $1
         .bind(rate_limit_mode)
         .bind(is_active.is_some())
         .bind(is_active)
-        .execute(&self.pool)
+        .bind(security_state_changed)
+        .execute(&mut *tx)
         .await
         .map_postgres_err()?;
         if result.rows_affected() == 0 {
+            tx.rollback().await.map_postgres_err()?;
             return Ok(None);
         }
+        if security_state_changed {
+            sqlx::query(
+                "UPDATE user_sessions SET revoked_at = NOW(), revoke_reason = 'user_security_state_changed', updated_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL",
+            )
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await
+            .map_postgres_err()?;
+            sqlx::query(
+                "UPDATE api_keys SET is_active = FALSE, updated_at = NOW() WHERE user_id = $1 AND is_active IS TRUE",
+            )
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await
+            .map_postgres_err()?;
+            sqlx::query(
+                "UPDATE management_tokens SET is_active = FALSE, updated_at = NOW() WHERE user_id = $1 AND is_active IS TRUE",
+            )
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await
+            .map_postgres_err()?;
+        }
+        tx.commit().await.map_postgres_err()?;
         self.find_user_auth_by_id(user_id).await
     }
 
@@ -1883,13 +2776,142 @@ VALUES (
         self.find_user_auth_by_id(&user_id).await
     }
 
-    pub async fn delete_local_auth_user(&self, user_id: &str) -> Result<bool, DataLayerError> {
-        let result = sqlx::query("DELETE FROM users WHERE id = $1")
-            .bind(user_id)
-            .execute(&self.pool)
+    async fn delete_local_auth_user_inner(
+        &self,
+        user_id: &str,
+        require_wallet_absent: bool,
+    ) -> Result<bool, DataLayerError> {
+        let mut tx = self.pool.begin().await.map_postgres_err()?;
+        let active_admin_ids = sqlx::query_scalar::<_, String>(POSTGRES_LOCK_ACTIVE_ADMINS_SQL)
+            .fetch_all(&mut *tx)
             .await
             .map_postgres_err()?;
+        let target_security_state = sqlx::query(
+            "SELECT role::text AS role, is_active, is_deleted FROM users WHERE id = $1 FOR UPDATE",
+        )
+        .bind(user_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_postgres_err()?;
+        let Some(target_security_state) = target_security_state else {
+            tx.rollback().await.map_postgres_err()?;
+            return Ok(false);
+        };
+        let target_role = target_security_state
+            .try_get::<String, _>("role")
+            .map_postgres_err()?;
+        let target_is_active = target_security_state
+            .try_get::<bool, _>("is_active")
+            .map_postgres_err()?;
+        let target_is_deleted = target_security_state
+            .try_get::<bool, _>("is_deleted")
+            .map_postgres_err()?;
+        if target_role.eq_ignore_ascii_case("admin")
+            && target_is_active
+            && !target_is_deleted
+            && active_admin_ids.len() <= 1
+        {
+            tx.rollback().await.map_postgres_err()?;
+            return Err(DataLayerError::InvalidInput(
+                LAST_ACTIVE_ADMIN_DELETE_DENIED.to_string(),
+            ));
+        }
+        if require_wallet_absent {
+            let wallet_exists: Option<i32> = sqlx::query_scalar(
+                r#"
+SELECT 1
+FROM wallets AS wallet
+WHERE wallet.user_id = $1
+   OR EXISTS (
+     SELECT 1
+     FROM api_keys AS api_key
+     WHERE api_key.id = wallet.api_key_id
+       AND api_key.user_id = $2
+   )
+LIMIT 1
+                "#,
+            )
+            .bind(user_id)
+            .bind(user_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_postgres_err()?;
+            if wallet_exists.is_some() {
+                tx.rollback().await.map_postgres_err()?;
+                return Ok(false);
+            }
+        }
+        for sql in POSTGRES_PREPARE_USER_FACTS_FOR_DELETION_SQL {
+            sqlx::query(sql)
+                .bind(user_id)
+                .execute(&mut *tx)
+                .await
+                .map_postgres_err()?;
+        }
+        for sql in POSTGRES_ANONYMIZE_USER_HISTORY_SQL {
+            sqlx::query(sql)
+                .bind(user_id)
+                .execute(&mut *tx)
+                .await
+                .map_postgres_err()?;
+        }
+        sqlx::query(POSTGRES_ANONYMIZE_USER_API_KEY_HISTORY_SQL)
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await
+            .map_postgres_err()?;
+        for sql in POSTGRES_DELETE_USER_DEPENDENTS_SQL {
+            if require_wallet_absent && *sql == POSTGRES_DELETE_USER_API_KEYS_SQL {
+                continue;
+            }
+            sqlx::query(sql)
+                .bind(user_id)
+                .execute(&mut *tx)
+                .await
+                .map_postgres_err()?;
+        }
+        let result = if require_wallet_absent {
+            sqlx::query(POSTGRES_DELETE_USER_IF_WALLET_ABSENT_SQL)
+                .bind(user_id)
+                .bind(user_id)
+                .bind(user_id)
+                .execute(&mut *tx)
+                .await
+                .map_postgres_err()?
+        } else {
+            sqlx::query("DELETE FROM users WHERE id = $1")
+                .bind(user_id)
+                .execute(&mut *tx)
+                .await
+                .map_postgres_err()?
+        };
+        if require_wallet_absent && result.rows_affected() == 0 {
+            // A wallet may have been inserted after the initial check.  Do not
+            // commit the history/credential mutations when the guarded delete
+            // loses that race.
+            tx.rollback().await.map_postgres_err()?;
+            return Ok(false);
+        }
+        if require_wallet_absent {
+            sqlx::query(POSTGRES_DELETE_USER_API_KEYS_SQL)
+                .bind(user_id)
+                .execute(&mut *tx)
+                .await
+                .map_postgres_err()?;
+        }
+        tx.commit().await.map_postgres_err()?;
         Ok(result.rows_affected() > 0)
+    }
+
+    pub async fn delete_local_auth_user(&self, user_id: &str) -> Result<bool, DataLayerError> {
+        self.delete_local_auth_user_inner(user_id, false).await
+    }
+
+    pub async fn delete_local_auth_user_if_wallet_absent(
+        &self,
+        user_id: &str,
+    ) -> Result<bool, DataLayerError> {
+        self.delete_local_auth_user_inner(user_id, true).await
     }
 
     pub async fn read_user_preferences(
@@ -1962,16 +2984,35 @@ VALUES (
             .or(session.updated_at)
             .or(session.last_seen_at)
             .unwrap_or_else(chrono::Utc::now);
+        let mut tx = self.pool.begin().await.map_postgres_err()?;
+        let user_is_eligible = sqlx::query_scalar::<_, String>(
+            r#"
+SELECT id FROM users
+WHERE id = $1 AND is_active IS TRUE AND is_deleted IS FALSE
+  AND security_version = $2
+FOR UPDATE
+"#,
+        )
+        .bind(&session.user_id)
+        .bind(session.security_version)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_postgres_err()?;
+        if user_is_eligible.is_none() {
+            tx.rollback().await.map_postgres_err()?;
+            return Ok(None);
+        }
         sqlx::query(REVOKE_ACTIVE_DEVICE_SESSIONS_SQL)
             .bind(&session.user_id)
             .bind(&session.client_device_id)
             .bind(now)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_postgres_err()?;
         let row = sqlx::query(CREATE_USER_SESSION_SQL)
             .bind(&session.id)
             .bind(&session.user_id)
+            .bind(session.security_version)
             .bind(&session.client_device_id)
             .bind(session.device_label.as_deref())
             .bind("unknown")
@@ -1982,9 +3023,74 @@ VALUES (
             .bind(session.expires_at.unwrap_or(now))
             .bind(session.created_at.unwrap_or(now))
             .bind(session.updated_at.unwrap_or(now))
-            .fetch_one(&self.pool)
+            .fetch_one(&mut *tx)
             .await
             .map_postgres_err()?;
+        let session = map_user_session_row(&row)?;
+        tx.commit().await.map_postgres_err()?;
+        Ok(Some(session))
+    }
+
+    pub async fn create_user_session_if_password_matches(
+        &self,
+        session: &StoredUserSessionRecord,
+        expected_password_hash: &str,
+    ) -> Result<Option<StoredUserSessionRecord>, DataLayerError> {
+        let now = session
+            .created_at
+            .or(session.updated_at)
+            .or(session.last_seen_at)
+            .unwrap_or_else(chrono::Utc::now);
+        let mut tx = self.pool.begin().await.map_postgres_err()?;
+        let matched = sqlx::query_scalar::<_, String>(
+            r#"
+SELECT password_hash FROM users
+WHERE id = $1 AND password_hash = $2 AND auth_source::text = 'local'
+  AND is_active IS TRUE AND is_deleted IS FALSE AND security_version = $3
+FOR UPDATE
+"#,
+        )
+        .bind(&session.user_id)
+        .bind(expected_password_hash)
+        .bind(session.security_version)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_postgres_err()?;
+        if matched.is_none() {
+            tx.rollback().await.map_postgres_err()?;
+            return Ok(None);
+        }
+        sqlx::query("UPDATE users SET last_login_at = $2 WHERE id = $1")
+            .bind(&session.user_id)
+            .bind(now)
+            .execute(&mut *tx)
+            .await
+            .map_postgres_err()?;
+        sqlx::query(REVOKE_ACTIVE_DEVICE_SESSIONS_SQL)
+            .bind(&session.user_id)
+            .bind(&session.client_device_id)
+            .bind(now)
+            .execute(&mut *tx)
+            .await
+            .map_postgres_err()?;
+        let row = sqlx::query(CREATE_USER_SESSION_SQL)
+            .bind(&session.id)
+            .bind(&session.user_id)
+            .bind(session.security_version)
+            .bind(&session.client_device_id)
+            .bind(session.device_label.as_deref())
+            .bind("unknown")
+            .bind(session.ip_address.as_deref())
+            .bind(session.user_agent.as_deref())
+            .bind(&session.refresh_token_hash)
+            .bind(session.last_seen_at.unwrap_or(now))
+            .bind(session.expires_at.unwrap_or(now))
+            .bind(session.created_at.unwrap_or(now))
+            .bind(session.updated_at.unwrap_or(now))
+            .fetch_one(&mut *tx)
+            .await
+            .map_postgres_err()?;
+        tx.commit().await.map_postgres_err()?;
         Ok(Some(map_user_session_row(&row)?))
     }
 
@@ -2031,7 +3137,7 @@ VALUES (
         &self,
         user_id: &str,
         session_id: &str,
-        previous_refresh_token_hash: &str,
+        expected_refresh_token_hash: &str,
         next_refresh_token_hash: &str,
         rotated_at: chrono::DateTime<chrono::Utc>,
         expires_at: chrono::DateTime<chrono::Utc>,
@@ -2041,7 +3147,7 @@ VALUES (
         let result = sqlx::query(ROTATE_USER_SESSION_REFRESH_SQL)
             .bind(user_id)
             .bind(session_id)
-            .bind(previous_refresh_token_hash)
+            .bind(expected_refresh_token_hash)
             .bind(rotated_at)
             .bind(next_refresh_token_hash)
             .bind(expires_at)
@@ -2090,11 +3196,14 @@ VALUES (
     pub async fn count_active_local_admin_users_with_valid_password(
         &self,
     ) -> Result<u64, DataLayerError> {
-        let total: i64 = sqlx::query_scalar(COUNT_ACTIVE_LOCAL_ADMIN_USERS_WITH_VALID_PASSWORD_SQL)
-            .fetch_one(&self.pool)
+        let hashes = sqlx::query_scalar::<_, String>(LIST_ACTIVE_LOCAL_ADMIN_PASSWORD_HASHES_SQL)
+            .fetch_all(&self.pool)
             .await
             .map_postgres_err()?;
-        Ok(total.max(0) as u64)
+        Ok(hashes
+            .iter()
+            .filter(|hash| is_valid_bcrypt_hash(hash))
+            .count() as u64)
     }
 }
 
@@ -2145,6 +3254,9 @@ fn map_user_session_row(
         row.try_get("created_at").map_postgres_err()?,
         row.try_get("updated_at").map_postgres_err()?,
     )
+    .and_then(|record| {
+        record.with_security_version(row.try_get("security_version").map_postgres_err()?)
+    })
 }
 
 fn normalize_optional_json_value(value: Option<serde_json::Value>) -> Option<serde_json::Value> {
@@ -2269,6 +3381,9 @@ fn map_user_auth_row(row: &sqlx::postgres::PgRow) -> Result<StoredUserAuthRecord
         row.try_get("created_at").map_postgres_err()?,
         row.try_get("last_login_at").map_postgres_err()?,
     )
+    .and_then(|record| {
+        record.with_security_version(row.try_get("security_version").map_postgres_err()?)
+    })
     .and_then(|record| {
         record.with_policy_modes(
             row.try_get("allowed_providers_mode").map_postgres_err()?,
@@ -2435,6 +3550,14 @@ impl UserReadRepository for SqlxUserReadRepository {
         self.update_user_group(group_id, record).await
     }
 
+    async fn restore_user_group_if_matches(
+        &self,
+        expected: &StoredUserGroup,
+        restored: &StoredUserGroup,
+    ) -> Result<bool, DataLayerError> {
+        self.restore_user_group_if_matches(expected, restored).await
+    }
+
     async fn delete_user_group(&self, group_id: &str) -> Result<bool, DataLayerError> {
         self.delete_user_group(group_id).await
     }
@@ -2474,6 +3597,16 @@ impl UserReadRepository for SqlxUserReadRepository {
         group_ids: &[String],
     ) -> Result<Vec<StoredUserGroup>, DataLayerError> {
         self.replace_user_groups_for_user(user_id, group_ids).await
+    }
+
+    async fn restore_user_groups_if_matches(
+        &self,
+        user_id: &str,
+        expected_group_ids: &[String],
+        restored_group_ids: &[String],
+    ) -> Result<bool, DataLayerError> {
+        self.restore_user_groups_if_matches(user_id, expected_group_ids, restored_group_ids)
+            .await
     }
 
     async fn add_user_to_group(
@@ -2542,6 +3675,29 @@ impl UserReadRepository for SqlxUserReadRepository {
             .await
     }
 
+    async fn resolve_enabled_oauth_linked_user(
+        &self,
+        provider_type: &str,
+        provider_user_id: &str,
+        provider_username: Option<&str>,
+        provider_email: Option<&str>,
+        extra_data: Option<serde_json::Value>,
+        verified_email: Option<&str>,
+        touched_at: chrono::DateTime<chrono::Utc>,
+        _provider_enabled_snapshot: bool,
+    ) -> Result<ResolveOAuthLinkedUserOutcome, DataLayerError> {
+        self.resolve_enabled_oauth_linked_user(
+            provider_type,
+            provider_user_id,
+            provider_username,
+            provider_email,
+            extra_data,
+            verified_email,
+            touched_at,
+        )
+        .await
+    }
+
     async fn touch_oauth_link(
         &self,
         provider_type: &str,
@@ -2565,10 +3721,11 @@ impl UserReadRepository for SqlxUserReadRepository {
     async fn create_oauth_auth_user(
         &self,
         email: Option<String>,
+        email_verified: bool,
         username: String,
         created_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<Option<StoredUserAuthRecord>, DataLayerError> {
-        self.create_oauth_auth_user(email, username, created_at)
+        self.create_oauth_auth_user(email, email_verified, username, created_at)
             .await
     }
 
@@ -2594,7 +3751,20 @@ impl UserReadRepository for SqlxUserReadRepository {
         self.count_user_oauth_links(user_id).await
     }
 
-    async fn upsert_user_oauth_link(
+    async fn has_oauth_links_for_provider(
+        &self,
+        provider_type: &str,
+    ) -> Result<bool, DataLayerError> {
+        let exists: Option<i32> =
+            sqlx::query_scalar("SELECT 1 FROM user_oauth_links WHERE provider_type = $1 LIMIT 1")
+                .bind(provider_type)
+                .fetch_optional(&self.pool)
+                .await
+                .map_postgres_err()?;
+        Ok(exists.is_some())
+    }
+
+    async fn bind_user_oauth_link_if_provider_enabled(
         &self,
         user_id: &str,
         provider_type: &str,
@@ -2603,8 +3773,116 @@ impl UserReadRepository for SqlxUserReadRepository {
         provider_email: Option<&str>,
         extra_data: Option<serde_json::Value>,
         linked_at: chrono::DateTime<chrono::Utc>,
-    ) -> Result<(), DataLayerError> {
-        self.upsert_user_oauth_link(
+        _provider_enabled_snapshot: bool,
+        session_expectation: Option<&BindUserOAuthLinkSessionExpectation>,
+    ) -> Result<BindUserOAuthLinkOutcome, DataLayerError> {
+        if let Some(expectation) = session_expectation {
+            let mut tx = self.pool.begin().await.map_postgres_err()?;
+            let provider_enabled = sqlx::query_scalar::<_, bool>(
+                "SELECT is_enabled FROM oauth_providers WHERE provider_type = $1 FOR UPDATE",
+            )
+            .bind(provider_type)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_postgres_err()?;
+            if provider_enabled != Some(true) {
+                tx.rollback().await.map_postgres_err()?;
+                return Ok(if provider_enabled.is_none() {
+                    BindUserOAuthLinkOutcome::ProviderNotFound
+                } else {
+                    BindUserOAuthLinkOutcome::ProviderDisabled
+                });
+            }
+            let session_is_current: Option<i32> = sqlx::query_scalar(
+                r#"
+SELECT 1
+FROM users
+JOIN user_sessions ON user_sessions.user_id = users.id
+WHERE users.id = $1
+  AND users.is_active IS TRUE
+  AND users.is_deleted IS FALSE
+  AND users.security_version = $2
+  AND user_sessions.id = $3
+  AND user_sessions.security_version = $2
+  AND user_sessions.client_device_id = $4
+  AND user_sessions.revoked_at IS NULL
+  AND user_sessions.expires_at > GREATEST($5, NOW())
+FOR UPDATE OF users, user_sessions
+"#,
+            )
+            .bind(user_id)
+            .bind(expectation.security_version)
+            .bind(&expectation.session_id)
+            .bind(&expectation.client_device_id)
+            .bind(expectation.checked_at)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_postgres_err()?;
+            if session_is_current.is_none() {
+                tx.rollback().await.map_postgres_err()?;
+                return Ok(BindUserOAuthLinkOutcome::SessionUnavailable);
+            }
+            if let Some(owner) = sqlx::query_scalar::<_, String>(
+                "SELECT user_id FROM user_oauth_links WHERE provider_type = $1 AND provider_user_id = $2 LIMIT 1 FOR UPDATE",
+            )
+            .bind(provider_type)
+            .bind(provider_user_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_postgres_err()? {
+                tx.rollback().await.map_postgres_err()?;
+                return Ok(if owner == user_id {
+                    BindUserOAuthLinkOutcome::IdentityAlreadyBoundToUser
+                } else {
+                    BindUserOAuthLinkOutcome::IdentityBoundToAnotherUser
+                });
+            }
+            if sqlx::query_scalar::<_, i32>(
+                "SELECT 1 FROM user_oauth_links WHERE user_id = $1 AND provider_type = $2 LIMIT 1 FOR UPDATE",
+            )
+            .bind(user_id)
+            .bind(provider_type)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_postgres_err()?
+            .is_some() {
+                tx.rollback().await.map_postgres_err()?;
+                return Ok(BindUserOAuthLinkOutcome::UserAlreadyLinkedProvider);
+            }
+            let inserted = sqlx::query(UPSERT_OAUTH_LINK_SQL)
+                .bind(uuid::Uuid::new_v4().to_string())
+                .bind(user_id)
+                .bind(provider_type)
+                .bind(provider_user_id)
+                .bind(provider_username)
+                .bind(provider_email)
+                .bind(extra_data)
+                .bind(linked_at)
+                .execute(&mut *tx)
+                .await
+                .map_postgres_err()?;
+            let outcome = if inserted.rows_affected() == 1 {
+                BindUserOAuthLinkOutcome::Bound
+            } else if let Some(owner) = sqlx::query_scalar::<_, String>(
+                "SELECT user_id FROM user_oauth_links WHERE provider_type = $1 AND provider_user_id = $2 LIMIT 1",
+            )
+            .bind(provider_type)
+            .bind(provider_user_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_postgres_err()? {
+                if owner == user_id {
+                    BindUserOAuthLinkOutcome::IdentityAlreadyBoundToUser
+                } else {
+                    BindUserOAuthLinkOutcome::IdentityBoundToAnotherUser
+                }
+            } else {
+                BindUserOAuthLinkOutcome::UserAlreadyLinkedProvider
+            };
+            tx.commit().await.map_postgres_err()?;
+            return Ok(outcome);
+        }
+        self.bind_user_oauth_link(
             user_id,
             provider_type,
             provider_user_id,
@@ -2616,12 +3894,25 @@ impl UserReadRepository for SqlxUserReadRepository {
         .await
     }
 
+    async fn upgrade_oauth_email_verification_if_matches(
+        &self,
+        user_id: &str,
+        verified_email: &str,
+        verified_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, DataLayerError> {
+        self.upgrade_oauth_email_verification_if_matches(user_id, verified_email, verified_at)
+            .await
+    }
+
     async fn delete_user_oauth_link(
         &self,
         user_id: &str,
         provider_type: &str,
-    ) -> Result<bool, DataLayerError> {
-        self.delete_user_oauth_link(user_id, provider_type).await
+        local_password_login_allowed: bool,
+        _enabled_provider_types_snapshot: &[String],
+    ) -> Result<DeleteUserOAuthLinkOutcome, DataLayerError> {
+        self.delete_user_oauth_link(user_id, provider_type, local_password_login_allowed)
+            .await
     }
 
     async fn get_or_create_ldap_auth_user(
@@ -2647,11 +3938,37 @@ impl UserReadRepository for SqlxUserReadRepository {
     async fn update_local_auth_user_profile(
         &self,
         user_id: &str,
+        email_present: bool,
         email: Option<String>,
+        email_verified: Option<bool>,
         username: Option<String>,
     ) -> Result<Option<StoredUserAuthRecord>, DataLayerError> {
-        self.update_local_auth_user_profile(user_id, email, username)
+        self.update_local_auth_user_profile(user_id, email_present, email, email_verified, username)
             .await
+    }
+
+    async fn restore_local_auth_user_state_if_matches(
+        &self,
+        expected_auth: &StoredUserAuthRecord,
+        restored_auth: &StoredUserAuthRecord,
+        expected_export: &StoredUserExportRow,
+        restored_export: &StoredUserExportRow,
+        expected_model_capability_settings: Option<&serde_json::Value>,
+        restored_model_capability_settings: Option<serde_json::Value>,
+        expected_feature_settings: Option<&serde_json::Value>,
+        restored_feature_settings: Option<serde_json::Value>,
+    ) -> Result<bool, DataLayerError> {
+        self.restore_local_auth_user_state_if_matches(
+            expected_auth,
+            restored_auth,
+            expected_export,
+            restored_export,
+            expected_model_capability_settings,
+            restored_model_capability_settings,
+            expected_feature_settings,
+            restored_feature_settings,
+        )
+        .await
     }
 
     async fn update_local_auth_user_password_hash(
@@ -2662,6 +3979,50 @@ impl UserReadRepository for SqlxUserReadRepository {
     ) -> Result<Option<StoredUserAuthRecord>, DataLayerError> {
         self.update_local_auth_user_password_hash(user_id, password_hash, updated_at)
             .await
+    }
+
+    async fn restore_local_auth_user_password_hash_if_matches(
+        &self,
+        user_id: &str,
+        expected_password_hash: Option<&str>,
+        password_hash: Option<String>,
+        updated_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, DataLayerError> {
+        self.restore_local_auth_user_password_hash_if_matches(
+            user_id,
+            expected_password_hash,
+            password_hash,
+            updated_at,
+        )
+        .await
+    }
+
+    async fn reset_local_auth_user_password_and_revoke_sessions(
+        &self,
+        user_id: &str,
+        password_hash: String,
+        changed_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, DataLayerError> {
+        self.reset_local_auth_user_password_and_revoke_sessions(user_id, password_hash, changed_at)
+            .await
+    }
+
+    async fn change_local_auth_password_and_revoke_sessions(
+        &self,
+        user_id: &str,
+        current_session_id: &str,
+        expected_password_hash: Option<&str>,
+        next_password_hash: String,
+        changed_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, DataLayerError> {
+        self.change_local_auth_password_and_revoke_sessions(
+            user_id,
+            current_session_id,
+            expected_password_hash,
+            next_password_hash,
+            changed_at,
+        )
+        .await
     }
 
     async fn update_local_auth_user_admin_fields(
@@ -2770,6 +4131,13 @@ impl UserReadRepository for SqlxUserReadRepository {
         self.delete_local_auth_user(user_id).await
     }
 
+    async fn delete_local_auth_user_if_wallet_absent(
+        &self,
+        user_id: &str,
+    ) -> Result<bool, DataLayerError> {
+        self.delete_local_auth_user_if_wallet_absent(user_id).await
+    }
+
     async fn read_user_preferences(
         &self,
         user_id: &str,
@@ -2806,6 +4174,15 @@ impl UserReadRepository for SqlxUserReadRepository {
         self.create_user_session(session).await
     }
 
+    async fn create_user_session_if_password_matches(
+        &self,
+        session: &StoredUserSessionRecord,
+        expected_password_hash: &str,
+    ) -> Result<Option<StoredUserSessionRecord>, DataLayerError> {
+        self.create_user_session_if_password_matches(session, expected_password_hash)
+            .await
+    }
+
     async fn touch_user_session(
         &self,
         user_id: &str,
@@ -2833,7 +4210,7 @@ impl UserReadRepository for SqlxUserReadRepository {
         &self,
         user_id: &str,
         session_id: &str,
-        previous_refresh_token_hash: &str,
+        expected_refresh_token_hash: &str,
         next_refresh_token_hash: &str,
         rotated_at: chrono::DateTime<chrono::Utc>,
         expires_at: chrono::DateTime<chrono::Utc>,
@@ -2843,7 +4220,7 @@ impl UserReadRepository for SqlxUserReadRepository {
         self.rotate_user_session_refresh_token(
             user_id,
             session_id,
-            previous_refresh_token_hash,
+            expected_refresh_token_hash,
             next_refresh_token_hash,
             rotated_at,
             expires_at,
@@ -2883,5 +4260,74 @@ impl UserReadRepository for SqlxUserReadRepository {
     ) -> Result<u64, DataLayerError> {
         self.count_active_local_admin_users_with_valid_password()
             .await
+    }
+}
+
+#[cfg(test)]
+mod admin_invariant_tests {
+    use super::{
+        POSTGRES_ANONYMIZE_USER_API_KEY_HISTORY_SQL, POSTGRES_ANONYMIZE_USER_HISTORY_SQL,
+        POSTGRES_DELETE_USER_DEPENDENTS_SQL, POSTGRES_LOCK_ACTIVE_ADMINS_SQL,
+    };
+
+    #[test]
+    fn active_admin_mutations_use_a_deterministic_postgres_row_lock() {
+        let normalized = POSTGRES_LOCK_ACTIVE_ADMINS_SQL
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(normalized.contains("role = 'admin'::userrole"));
+        assert!(normalized.contains("is_active IS TRUE"));
+        assert!(normalized.contains("is_deleted IS FALSE"));
+        assert!(normalized.contains("ORDER BY id FOR UPDATE"));
+        assert!(POSTGRES_DELETE_USER_DEPENDENTS_SQL
+            .iter()
+            .any(|sql| sql.starts_with("DELETE FROM management_tokens")));
+        assert!(POSTGRES_DELETE_USER_DEPENDENTS_SQL
+            .iter()
+            .any(|sql| sql.starts_with("DELETE FROM api_keys")));
+        assert!(POSTGRES_DELETE_USER_DEPENDENTS_SQL
+            .iter()
+            .any(|sql| sql.starts_with("DELETE FROM user_sessions")));
+        assert_history_anonymization_contract(POSTGRES_ANONYMIZE_USER_HISTORY_SQL);
+        assert!(POSTGRES_ANONYMIZE_USER_API_KEY_HISTORY_SQL
+            .starts_with("UPDATE stats_daily_api_key SET api_key_name = NULL"));
+        assert!(POSTGRES_ANONYMIZE_USER_API_KEY_HISTORY_SQL
+            .contains("SELECT id FROM api_keys WHERE user_id = $1"));
+    }
+
+    fn assert_history_anonymization_contract(statements: &[&str]) {
+        const TABLES: &[&str] = &[
+            "request_candidates",
+            "video_tasks",
+            "usage",
+            "stats_user_daily",
+            "stats_user_summary",
+            "stats_user_daily_model",
+            "stats_user_daily_provider",
+            "stats_user_daily_api_format",
+            "stats_user_daily_model_provider",
+            "stats_user_daily_cost_savings",
+            "stats_user_daily_cost_savings_provider",
+            "stats_user_daily_cost_savings_model",
+            "stats_user_daily_cost_savings_model_provider",
+        ];
+
+        assert_eq!(statements.len(), TABLES.len());
+        for table in TABLES {
+            let statement = statements
+                .iter()
+                .find(|sql| sql.starts_with(&format!("UPDATE {table} ")))
+                .unwrap_or_else(|| panic!("missing history anonymization for {table}"));
+            assert!(statement.contains("username = NULL"));
+            assert!(statement.ends_with("WHERE user_id = $1"));
+        }
+        for table in ["request_candidates", "video_tasks", "usage"] {
+            let statement = statements
+                .iter()
+                .find(|sql| sql.starts_with(&format!("UPDATE {table} ")))
+                .expect("identity snapshot table should be covered");
+            assert!(statement.contains("api_key_name = NULL"));
+        }
     }
 }

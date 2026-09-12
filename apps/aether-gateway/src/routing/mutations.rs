@@ -8,20 +8,23 @@ use serde_json::Value;
 
 use crate::GatewayError;
 
+const INVALID_ROUTING_MUTATION_MESSAGE: &str = "invalid routing mutation";
+
 pub(crate) fn apply_routing_mutation_plan(
     body: &mut Value,
     headers: &mut HeaderMap,
     plan: &MutationPlan,
 ) -> Result<(), GatewayError> {
-    apply_json_patch_operations(body, &plan.body_patch).map_err(|err| GatewayError::Client {
-        status: StatusCode::BAD_REQUEST,
-        message: err.to_string(),
-    })?;
-    apply_header_patch(headers, &plan.header_patch).map_err(|err| GatewayError::Client {
-        status: StatusCode::BAD_REQUEST,
-        message: err.to_string(),
-    })?;
+    apply_json_patch_operations(body, &plan.body_patch).map_err(|_| invalid_routing_mutation())?;
+    apply_header_patch(headers, &plan.header_patch).map_err(|_| invalid_routing_mutation())?;
     Ok(())
+}
+
+fn invalid_routing_mutation() -> GatewayError {
+    GatewayError::Client {
+        status: StatusCode::BAD_REQUEST,
+        message: INVALID_ROUTING_MUTATION_MESSAGE.to_string(),
+    }
 }
 
 fn apply_header_patch(
@@ -46,4 +49,65 @@ fn apply_header_patch(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use aether_routing_core::RoutingJsonPatchOperation;
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn body_mutation_errors_do_not_echo_json_pointer() {
+        let secret = "https://internal.example/?token=Bearer-secret";
+        let plan = MutationPlan {
+            body_patch: vec![RoutingJsonPatchOperation::Replace {
+                path: secret.to_string(),
+                value: json!("replacement"),
+            }],
+            ..MutationPlan::default()
+        };
+
+        let error = apply_routing_mutation_plan(
+            &mut json!({"model": "test"}),
+            &mut HeaderMap::new(),
+            &plan,
+        )
+        .expect_err("invalid pointer should fail");
+
+        assert!(matches!(
+            error,
+            GatewayError::Client {
+                status: StatusCode::BAD_REQUEST,
+                ref message,
+            } if message == INVALID_ROUTING_MUTATION_MESSAGE && !message.contains(secret)
+        ));
+    }
+
+    #[test]
+    fn header_mutation_errors_do_not_echo_header_name() {
+        let secret = "Authorization: Bearer secret";
+        let plan = MutationPlan {
+            header_patch: vec![RoutingHeaderPatch::Remove {
+                name: secret.to_string(),
+            }],
+            ..MutationPlan::default()
+        };
+
+        let error = apply_routing_mutation_plan(
+            &mut json!({"model": "test"}),
+            &mut HeaderMap::new(),
+            &plan,
+        )
+        .expect_err("invalid header should fail");
+
+        assert!(matches!(
+            error,
+            GatewayError::Client {
+                status: StatusCode::BAD_REQUEST,
+                ref message,
+            } if message == INVALID_ROUTING_MUTATION_MESSAGE && !message.contains(secret)
+        ));
+    }
 }

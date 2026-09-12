@@ -13,6 +13,9 @@ use crate::task_runtime::{spawn_fire_and_forget, TASK_KEY_USAGE_SYNC_REPORT};
 use crate::{AppState, GatewayError};
 
 mod context;
+pub(crate) use context::{
+    attach_internal_gateway_report_capability, resolve_bound_internal_gateway_report_context,
+};
 use context::{report_context_is_locally_actionable, resolve_locally_actionable_report_context};
 
 use aether_usage_runtime::{
@@ -307,6 +310,7 @@ mod tests {
     use std::collections::BTreeMap;
     use std::sync::Arc;
 
+    use aether_crypto::DEVELOPMENT_ENCRYPTION_KEY;
     use aether_data::repository::candidates::InMemoryRequestCandidateRepository;
     use aether_data::repository::gemini_file_mappings::{
         GeminiFileMappingReadRepository, InMemoryGeminiFileMappingRepository,
@@ -328,6 +332,7 @@ mod tests {
     use serde_json::json;
 
     use super::{
+        attach_internal_gateway_report_capability, resolve_bound_internal_gateway_report_context,
         resolve_locally_actionable_report_context, submit_stream_report, submit_sync_report,
         GatewayStreamReportRequest, GatewaySyncReportRequest,
     };
@@ -413,6 +418,42 @@ mod tests {
             )
     }
 
+    async fn mint_internal_report_capability(
+        state: &AppState,
+        trace_id: &str,
+        report_kind: &str,
+        context: serde_json::Value,
+    ) -> serde_json::Value {
+        mint_internal_report_capability_with_headers(
+            state,
+            trace_id,
+            report_kind,
+            &BTreeMap::new(),
+            context,
+        )
+        .await
+    }
+
+    async fn mint_internal_report_capability_with_headers(
+        state: &AppState,
+        trace_id: &str,
+        report_kind: &str,
+        provider_request_headers: &BTreeMap<String, String>,
+        context: serde_json::Value,
+    ) -> serde_json::Value {
+        let mut report_context = Some(context);
+        attach_internal_gateway_report_capability(
+            state,
+            trace_id,
+            Some(report_kind),
+            provider_request_headers,
+            &mut report_context,
+        )
+        .await
+        .expect("report capability should mint");
+        report_context.expect("report context should remain present")
+    }
+
     fn build_video_test_state(
         video_repository: Arc<InMemoryVideoTaskRepository>,
         request_candidate_repository: Arc<InMemoryRequestCandidateRepository>,
@@ -447,7 +488,8 @@ mod tests {
         AppState::new()
             .expect("gateway state should build")
             .with_data_state_for_tests(
-                GatewayDataState::with_provider_catalog_repository_for_tests(repository),
+                GatewayDataState::with_provider_catalog_repository_for_tests(repository)
+                    .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
             )
     }
 
@@ -465,6 +507,15 @@ mod tests {
     }
 
     fn sample_provider_catalog_key(key_id: &str, provider_id: &str) -> StoredProviderCatalogKey {
+        let credential_state = AppState::new()
+            .expect("credential state should build")
+            .with_data_state_for_tests(
+                GatewayDataState::disabled()
+                    .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+            );
+        let encrypted_api_key = credential_state
+            .seal_provider_catalog_key_api_key(provider_id, key_id, "sk-codex-test")
+            .expect("api key should encrypt");
         StoredProviderCatalogKey::new(
             key_id.to_string(),
             provider_id.to_string(),
@@ -476,7 +527,7 @@ mod tests {
         .expect("key should build")
         .with_transport_fields(
             Some(json!(["openai:responses"])),
-            "sk-codex-test".to_string(),
+            encrypted_api_key,
             None,
             None,
             None,
@@ -530,6 +581,7 @@ mod tests {
         repository: &InMemoryVideoTaskRepository,
         id: &str,
         short_id: Option<&str>,
+        external_task_id: &str,
         request_id: &str,
         user_id: &str,
         api_key_id: &str,
@@ -548,7 +600,7 @@ mod tests {
                 api_key_id: Some(api_key_id.to_string()),
                 username: Some("video-user".to_string()),
                 api_key_name: Some("video-key".to_string()),
-                external_task_id: Some("ext-video-task-reporting-123".to_string()),
+                external_task_id: Some(external_task_id.to_string()),
                 provider_id: Some(provider_id.to_string()),
                 endpoint_id: Some(endpoint_id.to_string()),
                 key_id: Some(key_id.to_string()),
@@ -596,6 +648,441 @@ mod tests {
             resolve_locally_actionable_report_context(&state, Some(&report_context)).await;
 
         assert!(resolved.is_none());
+    }
+
+    #[tokio::test]
+    async fn internal_report_capability_validates_once_without_candidate_persistence() {
+        let repository = Arc::new(InMemoryRequestCandidateRepository::default());
+        let state = build_test_state(repository);
+        let mut context = mint_internal_report_capability(
+            &state,
+            "trace-capability-valid-123",
+            "openai_chat_sync_success",
+            json!({
+                "request_id": "req-capability-valid-123",
+                "candidate_id": "cand-capability-valid-123",
+                "user_id": "user-capability-valid-123",
+                "provider_id": "provider-reporting-tests-123",
+                "key_id": "key-reporting-tests-123",
+            }),
+        )
+        .await;
+        context
+            .as_object_mut()
+            .expect("context should be an object")
+            .extend([
+                (
+                    "provider_response_headers".to_string(),
+                    json!({"x-ratelimit-limit": "100"}),
+                ),
+                ("upstream_response".to_string(), json!({"id": "resp-123"})),
+                ("error_flow".to_string(), json!({"stage": "upstream"})),
+                (
+                    "client_response_headers".to_string(),
+                    json!({"content-type": "application/json"}),
+                ),
+            ]);
+
+        let resolved = resolve_bound_internal_gateway_report_context(
+            &state,
+            "trace-capability-valid-123",
+            "openai_chat_sync_error",
+            Some(&context),
+        )
+        .await
+        .expect("capability lookup should succeed")
+        .expect("capability should validate");
+        assert!(resolved.get("_aether_internal_report_capability").is_none());
+        assert_eq!(resolved["upstream_response"]["id"], "resp-123");
+
+        let replay = resolve_bound_internal_gateway_report_context(
+            &state,
+            "trace-capability-valid-123",
+            "openai_chat_sync_success",
+            Some(&context),
+        )
+        .await
+        .expect("capability lookup should succeed");
+        assert!(replay.is_none(), "a consumed capability must not replay");
+    }
+
+    #[tokio::test]
+    async fn internal_report_capability_rejects_missing_unknown_trace_and_scope_mismatches() {
+        let repository = Arc::new(InMemoryRequestCandidateRepository::default());
+        let state = build_test_state(repository);
+        let protected = json!({
+            "request_id": "req-capability-reject-123",
+            "candidate_id": "cand-capability-reject-123",
+            "user_id": "user-capability-reject-123",
+            "provider_id": "provider-capability-reject-123",
+            "key_id": "key-capability-reject-123",
+        });
+        let minted = mint_internal_report_capability(
+            &state,
+            "trace-capability-reject-123",
+            "openai_chat_stream_success",
+            protected.clone(),
+        )
+        .await;
+
+        let unknown = {
+            let mut value = minted.clone();
+            value["_aether_internal_report_capability"] =
+                json!(uuid::Uuid::new_v4().simple().to_string());
+            value
+        };
+        for (trace_id, report_kind, context) in [
+            (
+                "trace-capability-reject-123",
+                "openai_chat_stream_success",
+                protected.clone(),
+            ),
+            (
+                "trace-capability-reject-123",
+                "openai_chat_stream_success",
+                unknown,
+            ),
+            (
+                "trace-capability-attacker-123",
+                "openai_chat_stream_success",
+                minted.clone(),
+            ),
+            (
+                "trace-capability-reject-123",
+                "gemini_files_store_mapping",
+                minted.clone(),
+            ),
+            (
+                "trace-capability-reject-123",
+                "openai_video_create_sync_finalize",
+                minted.clone(),
+            ),
+        ] {
+            let rejected = resolve_bound_internal_gateway_report_context(
+                &state,
+                trace_id,
+                report_kind,
+                Some(&context),
+            )
+            .await
+            .expect("capability lookup should succeed");
+            assert!(
+                rejected.is_none(),
+                "invalid capability use must be rejected"
+            );
+        }
+
+        let valid = resolve_bound_internal_gateway_report_context(
+            &state,
+            "trace-capability-reject-123",
+            "openai_chat_sync_finalize",
+            Some(&minted),
+        )
+        .await
+        .expect("capability lookup should succeed");
+        assert!(
+            valid.is_some(),
+            "invalid attempts must not consume the capability"
+        );
+    }
+
+    #[tokio::test]
+    async fn internal_report_capability_rejects_every_protected_identity_mutation() {
+        let repository = Arc::new(InMemoryRequestCandidateRepository::default());
+        let state = build_test_state(repository);
+        let minted = mint_internal_report_capability(
+            &state,
+            "trace-capability-fields-123",
+            "openai_video_create_sync_finalize",
+            json!({
+                "request_id": "req-capability-fields-123",
+                "candidate_id": "cand-capability-fields-123",
+                "user_id": "user-capability-fields-123",
+                "api_key_id": "api-key-capability-fields-123",
+                "provider_id": "provider-capability-fields-123",
+                "endpoint_id": "endpoint-capability-fields-123",
+                "key_id": "key-capability-fields-123",
+                "file_key_id": "file-key-capability-fields-123",
+                "task_id": "task-capability-fields-123",
+                "local_task_id": "local-task-capability-fields-123",
+                "local_short_id": "short-capability-fields-123",
+                "file_name": "files/capability-fields-123",
+                "client_api_format": "openai:video",
+                "upstream_url": "https://provider.example/v1/videos",
+                "has_envelope": false,
+                "needs_conversion": false,
+            }),
+        )
+        .await;
+
+        for field in [
+            "user_id",
+            "api_key_id",
+            "provider_id",
+            "endpoint_id",
+            "key_id",
+            "file_key_id",
+            "task_id",
+            "local_task_id",
+            "local_short_id",
+            "file_name",
+            "client_api_format",
+            "upstream_url",
+            "has_envelope",
+            "needs_conversion",
+        ] {
+            let mut forged = minted.clone();
+            forged[field] = json!(format!("attacker-{field}"));
+            let resolved = resolve_bound_internal_gateway_report_context(
+                &state,
+                "trace-capability-fields-123",
+                "openai_video_create_sync_finalize",
+                Some(&forged),
+            )
+            .await
+            .expect("capability lookup should succeed");
+            assert!(resolved.is_none(), "mutating {field} must be rejected");
+        }
+
+        for report_kind in [
+            "openai_video_delete_sync_finalize",
+            "openai_video_cancel_sync_finalize",
+            "gemini_video_create_sync_finalize",
+        ] {
+            let resolved = resolve_bound_internal_gateway_report_context(
+                &state,
+                "trace-capability-fields-123",
+                report_kind,
+                Some(&minted),
+            )
+            .await
+            .expect("capability lookup should succeed");
+            assert!(resolved.is_none(), "cross-operation use must be rejected");
+        }
+
+        let valid = resolve_bound_internal_gateway_report_context(
+            &state,
+            "trace-capability-fields-123",
+            "openai_video_create_sync_error",
+            Some(&minted),
+        )
+        .await
+        .expect("capability lookup should succeed");
+        assert!(valid.is_some());
+    }
+
+    #[tokio::test]
+    async fn internal_report_capability_allows_only_the_bound_kiro_web_search_transform() {
+        let repository = Arc::new(InMemoryRequestCandidateRepository::default());
+        let state = build_test_state(repository);
+        let minted = mint_internal_report_capability(
+            &state,
+            "trace-capability-kiro-search-123",
+            "openai_chat_stream_success",
+            json!({
+                "request_id": "req-capability-kiro-search-123",
+                "candidate_id": "cand-capability-kiro-search-123",
+                "user_id": "user-capability-kiro-search-123",
+                "provider_id": "provider-capability-kiro-search-123",
+                "key_id": "key-capability-kiro-search-123",
+                "upstream_url": "https://kiro.example/generateAssistantResponse",
+                "has_envelope": true,
+                "needs_conversion": true,
+                "envelope_name": aether_provider_transport::kiro::KIRO_ENVELOPE_NAME,
+            }),
+        )
+        .await;
+
+        let mut forged_target = minted.clone();
+        forged_target["upstream_url"] = json!("https://attacker.example/forged");
+        forged_target["has_envelope"] = json!(false);
+        forged_target["needs_conversion"] = json!(false);
+        forged_target["kiro_web_search_mcp"] = json!(true);
+        forged_target
+            .as_object_mut()
+            .expect("context should be an object")
+            .remove("envelope_name");
+        let rejected = resolve_bound_internal_gateway_report_context(
+            &state,
+            "trace-capability-kiro-search-123",
+            "openai_chat_stream_success",
+            Some(&forged_target),
+        )
+        .await
+        .expect("capability lookup should succeed");
+        assert!(rejected.is_none(), "the upstream target must remain bound");
+
+        let mut synthetic = minted;
+        synthetic["has_envelope"] = json!(false);
+        synthetic["needs_conversion"] = json!(false);
+        synthetic["kiro_web_search_mcp"] = json!(true);
+        synthetic
+            .as_object_mut()
+            .expect("context should be an object")
+            .remove("envelope_name");
+        let resolved = resolve_bound_internal_gateway_report_context(
+            &state,
+            "trace-capability-kiro-search-123",
+            "openai_chat_stream_success",
+            Some(&synthetic),
+        )
+        .await
+        .expect("capability lookup should succeed")
+        .expect("the pre-bound Kiro web-search transform should validate");
+        assert_eq!(resolved["kiro_web_search_mcp"], json!(true));
+        assert_eq!(
+            resolved["upstream_url"],
+            json!("https://kiro.example/generateAssistantResponse")
+        );
+    }
+
+    #[tokio::test]
+    async fn internal_report_capability_binds_final_provider_request_headers() {
+        let repository = Arc::new(InMemoryRequestCandidateRepository::default());
+        let state = build_test_state(repository);
+        let headers = BTreeMap::from([
+            (
+                "authorization".to_string(),
+                "Bearer final-token".to_string(),
+            ),
+            ("content-type".to_string(), "application/json".to_string()),
+        ]);
+        let minted = mint_internal_report_capability_with_headers(
+            &state,
+            "trace-capability-headers-123",
+            "openai_video_create_sync_success",
+            &headers,
+            json!({
+                "request_id": "req-capability-headers-123",
+                "provider_request_headers": {"authorization": "Bearer stale-token"},
+            }),
+        )
+        .await;
+        assert_eq!(minted["provider_request_headers"], json!(headers));
+
+        let mut forged = minted.clone();
+        forged["provider_request_headers"]["authorization"] = json!("Bearer attacker-token");
+        let rejected = resolve_bound_internal_gateway_report_context(
+            &state,
+            "trace-capability-headers-123",
+            "openai_video_create_sync_success",
+            Some(&forged),
+        )
+        .await
+        .expect("capability lookup should succeed");
+        assert!(
+            rejected.is_none(),
+            "final request headers must remain bound"
+        );
+
+        let resolved = resolve_bound_internal_gateway_report_context(
+            &state,
+            "trace-capability-headers-123",
+            "openai_video_create_sync_success",
+            Some(&minted),
+        )
+        .await
+        .expect("capability lookup should succeed")
+        .expect("the authoritative final headers should validate");
+        assert_eq!(resolved["provider_request_headers"], json!(headers));
+    }
+
+    #[tokio::test]
+    async fn internal_report_capability_validates_windsurf_native_observation_shape() {
+        let repository = Arc::new(InMemoryRequestCandidateRepository::default());
+        let state = build_test_state(repository);
+        let minted = mint_internal_report_capability(
+            &state,
+            "trace-capability-windsurf-123",
+            "openai_responses_stream_success",
+            json!({"request_id": "req-capability-windsurf-123"}),
+        )
+        .await;
+
+        for (native_runtime, port) in [
+            (json!(false), json!(42_137)),
+            (json!(true), json!(0)),
+            (json!(true), json!(65_536)),
+            (json!(true), json!("42137")),
+        ] {
+            let mut invalid = minted.clone();
+            invalid["windsurf_native_runtime"] = native_runtime;
+            invalid["windsurf_language_server_port"] = port;
+            let rejected = resolve_bound_internal_gateway_report_context(
+                &state,
+                "trace-capability-windsurf-123",
+                "openai_responses_stream_success",
+                Some(&invalid),
+            )
+            .await
+            .expect("capability lookup should succeed");
+            assert!(rejected.is_none(), "invalid Windsurf metadata must fail");
+        }
+
+        let mut valid = minted;
+        valid["windsurf_native_runtime"] = json!(true);
+        valid["windsurf_language_server_port"] = json!(42_137);
+        let resolved = resolve_bound_internal_gateway_report_context(
+            &state,
+            "trace-capability-windsurf-123",
+            "openai_responses_stream_success",
+            Some(&valid),
+        )
+        .await
+        .expect("capability lookup should succeed")
+        .expect("valid Windsurf native metadata should pass");
+        assert_eq!(resolved["windsurf_native_runtime"], json!(true));
+        assert_eq!(resolved["windsurf_language_server_port"], json!(42_137));
+    }
+
+    #[tokio::test]
+    async fn internal_report_capability_accepts_only_non_deferred_late_bound_reservations() {
+        let repository = Arc::new(InMemoryRequestCandidateRepository::default());
+        let state = build_test_state(repository);
+        let minted = mint_internal_report_capability(
+            &state,
+            "trace-capability-reservation-123",
+            "openai_chat_sync_success",
+            json!({
+                "request_id": "req-capability-reservation-123",
+                "candidate_id": "cand-capability-reservation-123",
+                "user_id": "user-capability-reservation-123",
+                "provider_id": "provider-capability-reservation-123",
+                "key_id": "key-capability-reservation-123",
+            }),
+        )
+        .await;
+
+        let mut deferred = minted.clone();
+        deferred["plan_usage_reservation_token"] = json!(uuid::Uuid::new_v4().to_string());
+        deferred["plan_usage_reservation_deferred"] = json!(true);
+        let rejected = resolve_bound_internal_gateway_report_context(
+            &state,
+            "trace-capability-reservation-123",
+            "openai_chat_sync_success",
+            Some(&deferred),
+        )
+        .await
+        .expect("capability lookup should succeed");
+        assert!(
+            rejected.is_none(),
+            "a peer must not defer terminal reservation reconciliation"
+        );
+
+        let reservation_token = uuid::Uuid::new_v4().to_string();
+        let mut terminal = minted;
+        terminal["plan_usage_reservation_token"] = json!(reservation_token);
+        terminal["plan_usage_reservation_deferred"] = json!(false);
+        let resolved = resolve_bound_internal_gateway_report_context(
+            &state,
+            "trace-capability-reservation-123",
+            "openai_chat_sync_success",
+            Some(&terminal),
+        )
+        .await
+        .expect("capability lookup should succeed")
+        .expect("a server-issued terminal reservation token should validate");
+        assert_eq!(resolved["plan_usage_reservation_deferred"], json!(false));
     }
 
     #[tokio::test]
@@ -823,8 +1310,11 @@ mod tests {
         );
         assert_eq!(
             stored[0].error_message.as_deref(),
-            Some("execution runtime stream ended before provider terminal event")
+            Some(super::STREAM_MISSING_TERMINAL_EVENT_MESSAGE)
         );
+        let mut public_candidate = stored[0].clone();
+        public_candidate.sanitize_sensitive_diagnostics();
+        assert!(public_candidate.error_message.is_none());
     }
 
     #[tokio::test]
@@ -1365,7 +1855,7 @@ mod tests {
                     "req-gemini-files-delete-123",
                 ),
             ]));
-        let gemini_file_mapping_repository = Arc::new(InMemoryGeminiFileMappingRepository::seed([
+        let mut mapping =
             aether_data::repository::gemini_file_mappings::StoredGeminiFileMapping::new(
                 "mapping-gemini-files-delete-123".to_string(),
                 "files/delete-me".to_string(),
@@ -1373,8 +1863,10 @@ mod tests {
                 1_700_000_000,
                 1_700_172_800,
             )
-            .expect("gemini file mapping should build"),
-        ]));
+            .expect("gemini file mapping should build");
+        mapping.user_id = Some("user-reporting-tests-123".to_string());
+        let gemini_file_mapping_repository =
+            Arc::new(InMemoryGeminiFileMappingRepository::seed([mapping]));
         let state = build_gemini_file_mapping_test_state(
             Arc::clone(&request_candidate_repository),
             Arc::clone(&gemini_file_mapping_repository),
@@ -1392,6 +1884,7 @@ mod tests {
                     "provider_id": "provider-reporting-tests-123",
                     "endpoint_id": "endpoint-reporting-tests-123",
                     "key_id": "key-reporting-tests-123",
+                    "user_id": "user-reporting-tests-123",
                     "file_name": "delete-me",
                 })),
                 status_code: 204,
@@ -1461,6 +1954,7 @@ mod tests {
             &video_repository,
             "task-openai-video-reporting-123",
             None,
+            "ext-video-task-reporting-123",
             "req-openai-video-reporting-123",
             "user-openai-video-reporting-123",
             "api-key-openai-video-reporting-123",
@@ -1522,6 +2016,7 @@ mod tests {
             &video_repository,
             "task-gemini-video-reporting-123",
             Some("short-gemini-video-reporting-123"),
+            "ext-video-task-reporting-123",
             "req-gemini-video-reporting-123",
             "user-gemini-video-reporting-123",
             "api-key-gemini-video-reporting-123",
@@ -1582,6 +2077,7 @@ mod tests {
             &video_repository,
             "task-openai-video-task-id-123",
             None,
+            "ext-video-task-reporting-123",
             "req-openai-video-task-id-123",
             "user-openai-video-task-id-123",
             "api-key-openai-video-task-id-123",
@@ -1642,6 +2138,7 @@ mod tests {
             &video_repository,
             "task-gemini-video-external-id-123",
             Some("short-gemini-video-external-id-123"),
+            "models/veo-3/operations/ext-gemini-video-123",
             "req-gemini-video-external-id-123",
             "user-gemini-video-external-id-123",
             "api-key-gemini-video-external-id-123",
@@ -1652,48 +2149,6 @@ mod tests {
             "gemini:video",
         )
         .await;
-        video_repository
-            .upsert(UpsertVideoTask {
-                id: "task-gemini-video-external-id-123".to_string(),
-                short_id: Some("short-gemini-video-external-id-123".to_string()),
-                request_id: "req-gemini-video-external-id-123".to_string(),
-                user_id: Some("user-gemini-video-external-id-123".to_string()),
-                api_key_id: Some("api-key-gemini-video-external-id-123".to_string()),
-                username: Some("video-user".to_string()),
-                api_key_name: Some("video-key".to_string()),
-                external_task_id: Some("models/veo-3/operations/ext-gemini-video-123".to_string()),
-                provider_id: Some("provider-gemini-video-external-id-123".to_string()),
-                endpoint_id: Some("endpoint-gemini-video-external-id-123".to_string()),
-                key_id: Some("key-gemini-video-external-id-123".to_string()),
-                client_api_format: Some("gemini:video".to_string()),
-                provider_api_format: Some("gemini:video".to_string()),
-                format_converted: false,
-                model: Some("video-model".to_string()),
-                prompt: Some("video prompt".to_string()),
-                original_request_body: Some(json!({"prompt": "video prompt"})),
-                duration_seconds: Some(4),
-                resolution: Some("720p".to_string()),
-                aspect_ratio: Some("16:9".to_string()),
-                size: Some("1280x720".to_string()),
-                status: VideoTaskStatus::Submitted,
-                progress_percent: 0,
-                progress_message: None,
-                retry_count: 0,
-                poll_interval_seconds: 10,
-                next_poll_at_unix_secs: Some(1_700_000_010),
-                poll_count: 0,
-                max_poll_count: 360,
-                created_at_unix_ms: 1_700_000_000,
-                submitted_at_unix_secs: Some(1_700_000_000),
-                completed_at_unix_secs: None,
-                updated_at_unix_secs: 1_700_000_000,
-                error_code: None,
-                error_message: None,
-                video_url: None,
-                request_metadata: None,
-            })
-            .await
-            .expect("video task should update external id");
         let request_candidate_repository = Arc::new(InMemoryRequestCandidateRepository::default());
         let state =
             build_video_test_state(video_repository, Arc::clone(&request_candidate_repository));
@@ -1736,5 +2191,68 @@ mod tests {
             stored[0].key_id.as_deref(),
             Some("key-gemini-video-external-id-123")
         );
+    }
+
+    #[tokio::test]
+    async fn report_context_task_id_collision_stays_bound_to_requested_user() {
+        let video_repository = Arc::new(InMemoryVideoTaskRepository::default());
+        seed_video_task(
+            &video_repository,
+            "shared-task-id",
+            Some("victim-short-id"),
+            "victim-external-id",
+            "req-video-victim",
+            "user-video-victim",
+            "api-key-video-victim",
+            "provider-video-victim",
+            "endpoint-video-victim",
+            "key-video-victim",
+            "gemini:video",
+            "gemini:video",
+        )
+        .await;
+        seed_video_task(
+            &video_repository,
+            "owner-local-id",
+            Some("owner-short-id"),
+            "shared-task-id",
+            "req-video-owner",
+            "user-video-owner",
+            "api-key-video-owner",
+            "provider-video-owner",
+            "endpoint-video-owner",
+            "key-video-owner",
+            "gemini:video",
+            "gemini:video",
+        )
+        .await;
+        let state = build_video_test_state(
+            video_repository,
+            Arc::new(InMemoryRequestCandidateRepository::default()),
+        );
+
+        let resolved = resolve_locally_actionable_report_context(
+            &state,
+            Some(&json!({
+                "task_id": "shared-task-id",
+                "user_id": "user-video-owner",
+            })),
+        )
+        .await
+        .expect("the owner's external task id should resolve");
+
+        assert_eq!(resolved["request_id"], "req-video-owner");
+        assert_eq!(resolved["provider_id"], "provider-video-owner");
+        assert_eq!(resolved["user_id"], "user-video-owner");
+
+        let foreign_local_id = resolve_locally_actionable_report_context(
+            &state,
+            Some(&json!({
+                "local_task_id": "shared-task-id",
+                "user_id": "user-video-owner",
+            })),
+        )
+        .await;
+        assert!(foreign_local_id.is_none());
     }
 }

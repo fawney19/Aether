@@ -8,6 +8,7 @@ use crate::handlers::admin::shared::{
     attach_admin_audit_response, query_param_value, unix_secs_to_rfc3339,
 };
 use crate::GatewayError;
+use aether_data::repository::wallet::stored_timestamp_unix_secs;
 use axum::{
     body::Body,
     http,
@@ -122,7 +123,7 @@ fn build_batch_payload(
         "description": batch.description,
         "created_by": batch.created_by,
         "expires_at": batch.expires_at_unix_secs.and_then(unix_secs_to_rfc3339),
-        "created_at": unix_secs_to_rfc3339(batch.created_at_unix_ms),
+        "created_at": unix_secs_to_rfc3339(stored_timestamp_unix_secs(batch.created_at_unix_ms)),
         "updated_at": unix_secs_to_rfc3339(batch.updated_at_unix_secs),
     })
 }
@@ -146,7 +147,7 @@ fn build_code_payload(
         "redeemed_at": code.redeemed_at_unix_secs.and_then(unix_secs_to_rfc3339),
         "disabled_by": code.disabled_by,
         "expires_at": code.expires_at_unix_secs.and_then(unix_secs_to_rfc3339),
-        "created_at": unix_secs_to_rfc3339(code.created_at_unix_ms),
+        "created_at": unix_secs_to_rfc3339(stored_timestamp_unix_secs(code.created_at_unix_ms)),
         "updated_at": unix_secs_to_rfc3339(code.updated_at_unix_secs),
     })
 }

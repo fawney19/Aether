@@ -4,14 +4,16 @@
 //! and sends response frames back through the writer channel.
 
 use std::io;
+use std::pin::Pin;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use aether_runtime::{AdmissionPermit, QueueSendError};
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use futures_util::stream;
 use futures_util::StreamExt;
 use http_body_util::BodyExt;
@@ -24,8 +26,8 @@ use crate::target_filter;
 use crate::upstream_client;
 
 use super::protocol::{
-    compress_payload, decompress_if_gzip, flags, raw_payload, Frame as TunnelFrame, MsgType,
-    RequestMeta, ResetStreamPayload, ResponseMeta,
+    compress_payload, decompress_if_gzip_with_limit, flags, raw_payload, Frame as TunnelFrame,
+    MsgType, RequestMeta, ResetStreamPayload, ResponseMeta,
 };
 use super::writer::FrameSender;
 
@@ -39,9 +41,18 @@ const FLOW_CONTROL_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 const SLOW_STREAM_LOG_THRESHOLD: Duration = Duration::from_secs(2);
 const SUCCESS_LOG_SAMPLE_MODULO: u32 = 256;
 const REQUEST_BODY_SPOOL_QUEUE_CAPACITY: usize = 64;
+/// Request bytes retained only to support same-origin 307/308 replay. This does
+/// not limit or buffer the first upstream request, which remains streaming.
+const REDIRECT_REPLAY_PER_REQUEST_BUDGET_BYTES: usize = 5 * 1024 * 1024;
+const REDIRECT_REPLAY_MAX_CHUNKS: usize = 1024;
+/// Bound replay retention across all active streams without reducing stream
+/// admission or rejecting the original request when the cache is exhausted.
+const REDIRECT_REPLAY_GLOBAL_BUDGET_BYTES: usize = 256 * 1024 * 1024;
+static REDIRECT_REPLAY_BUFFERED_BYTES: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Debug)]
 pub(crate) struct StreamSendWindow {
+    initial_window_bytes: u32,
     available: Mutex<u64>,
     notify: Notify,
 }
@@ -49,6 +60,7 @@ pub(crate) struct StreamSendWindow {
 impl StreamSendWindow {
     pub(crate) fn new(initial_window_bytes: u32) -> Self {
         Self {
+            initial_window_bytes: initial_window_bytes.max(1),
             available: Mutex::new(u64::from(initial_window_bytes.max(1))),
             notify: Notify::new(),
         }
@@ -72,6 +84,9 @@ impl StreamSendWindow {
         let requested = bytes as u64;
         let started_at = Instant::now();
         loop {
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             {
                 let mut available = self.available.lock().expect("stream window lock poisoned");
                 if *available >= requested {
@@ -83,10 +98,7 @@ impl StreamSendWindow {
             let Some(remaining) = timeout.checked_sub(started_at.elapsed()) else {
                 return Err(());
             };
-            if tokio::time::timeout(remaining, self.notify.notified())
-                .await
-                .is_err()
-            {
+            if tokio::time::timeout(remaining, notified).await.is_err() {
                 return Err(());
             }
         }
@@ -94,40 +106,102 @@ impl StreamSendWindow {
 }
 
 fn stream_reset_message(frame: &TunnelFrame) -> String {
-    if frame.msg_type == MsgType::ResetStream {
-        if let Ok(payload) = serde_json::from_slice::<ResetStreamPayload>(&frame.payload) {
-            return payload.reason;
-        }
+    // Reset/error payloads are supplied by the peer and can contain arbitrary
+    // user data (or a provider error copied by the gateway).  They are used as
+    // an `io::Error` below and may otherwise be echoed back in a later
+    // StreamError frame, so keep only a stable protocol-level category.
+    match frame.msg_type {
+        MsgType::ResetStream => "request reset by peer".to_string(),
+        MsgType::StreamError => "client cancelled request body".to_string(),
+        _ => "request body terminated".to_string(),
     }
-    String::from_utf8(frame.payload.to_vec())
-        .unwrap_or_else(|_| "client cancelled request body".to_string())
 }
 
-fn try_send_window_update(frame_tx: &FrameSender, stream_id: u32, bytes: usize) {
+/// Project an internal stream failure to a bounded, protocol-safe message.
+///
+/// Hyper, URL, DNS, TLS, and proxy errors can include complete request URLs,
+/// query credentials, private addresses, or implementation details.  Tunnel
+/// errors cross the authenticated tunnel and are eventually exposed by the
+/// gateway, so never put those error strings on the wire (or in logs).
+fn safe_stream_error_message(message: &str) -> &'static str {
+    let lower = message.trim().to_ascii_lowercase();
+    if lower == "tunnel overloaded" {
+        return "tunnel overloaded";
+    }
+    if lower == "tunnel admission unavailable" {
+        return "tunnel admission unavailable";
+    }
+    if lower.contains("client cancelled") {
+        return "client cancelled request body";
+    }
+    if lower.contains("response body timeout") {
+        return "upstream response body timeout";
+    }
+    if lower.contains("flow_control_timeout") {
+        return "response flow-control timeout";
+    }
+    if lower == "upstream timeout" || lower.contains("timed out") {
+        return "upstream timeout";
+    }
+    if lower.contains("invalid") && lower.contains("url") {
+        return "invalid upstream URL";
+    }
+    if lower.contains("unsupported") && lower.contains("scheme") {
+        return "unsupported upstream URL scheme";
+    }
+    if lower.contains("target blocked")
+        || lower.contains("private/reserved")
+        || lower.contains("port not allowed")
+        || lower.contains("dns resolution")
+        || lower.contains("no public")
+    {
+        return "upstream target blocked";
+    }
+    if lower.contains("gzip") || lower.contains("decompress") || lower.contains("request body") {
+        return "invalid request body";
+    }
+    if lower.contains("redirect") {
+        return "upstream redirect failed";
+    }
+    if lower.contains("connect") || lower.contains("tls") || lower.contains("proxy") {
+        return "upstream connect failed";
+    }
+    if lower.contains("body") && (lower.contains("read") || lower.contains("response")) {
+        return "upstream response body failed";
+    }
+    if lower.contains("request") {
+        return "upstream request failed";
+    }
+    "upstream request failed"
+}
+
+async fn send_window_update(frame_tx: &FrameSender, stream_id: u32, bytes: usize) -> bool {
     if bytes == 0 {
-        return;
+        return true;
     }
     let delta = bytes.min(u32::MAX as usize) as u32;
-    if frame_tx
-        .try_send(TunnelFrame::new(
-            stream_id,
-            MsgType::WindowUpdate,
-            0,
-            Bytes::from(
-                serde_json::to_vec(&aether_contracts::tunnel::WindowUpdatePayload {
-                    delta_bytes: delta,
-                })
-                .expect("window update payload should serialize"),
-            ),
-        ))
-        .is_err()
-    {
-        warn!(
-            stream_id,
-            delta_bytes = delta,
-            "writer channel full, WINDOW_UPDATE dropped"
-        );
+    if matches!(
+        tokio::time::timeout(
+            FLOW_CONTROL_WAIT_TIMEOUT,
+            frame_tx.send(TunnelFrame::new(
+                stream_id,
+                MsgType::WindowUpdate,
+                0,
+                Bytes::from(
+                    serde_json::to_vec(&aether_contracts::tunnel::WindowUpdatePayload {
+                        delta_bytes: delta,
+                    })
+                    .expect("window update payload should serialize"),
+                ),
+            ))
+        )
+        .await,
+        Ok(Ok(()))
+    ) {
+        return true;
     }
+    frame_tx.close();
+    false
 }
 
 /// Match reqwest's default redirect budget so direct execution and tunnel relay
@@ -162,14 +236,6 @@ const REDIRECT_DROP_BODY_HEADERS: &[&str] = &[
     "content-type",
     "transfer-encoding",
 ];
-const REDIRECT_SENSITIVE_HEADERS: &[&str] = &[
-    "authorization",
-    "cookie",
-    "cookie2",
-    "proxy-authorization",
-    "www-authenticate",
-];
-
 #[derive(Debug, Clone)]
 enum ReplayableRequestBody {
     None,
@@ -180,6 +246,23 @@ enum ReplayableRequestBody {
 struct PreparedRequestBody {
     first_request_body: Option<upstream_client::UpstreamRequestBody>,
     replay_body: ReplayableRequestBody,
+    spool_task: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Drop for PreparedRequestBody {
+    fn drop(&mut self) {
+        if let Some(task) = self.spool_task.take() {
+            task.abort();
+        }
+    }
+}
+
+struct ActiveStreamGuard(Arc<ServerContext>);
+
+impl Drop for ActiveStreamGuard {
+    fn drop(&mut self) {
+        self.0.active_connections.fetch_sub(1, Ordering::Release);
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -190,6 +273,8 @@ struct RequestTimeouts {
 
 #[derive(Debug)]
 struct RequestBodyReplayState {
+    budget_bytes: usize,
+    reserved_bytes: AtomicUsize,
     state: Mutex<RequestBodyReplayStatus>,
     ready: Notify,
 }
@@ -200,20 +285,77 @@ enum RequestBodyReplayStatus {
         chunks: Vec<Bytes>,
         buffered_len: usize,
     },
-    Ready(Bytes),
+    Ready {
+        chunks: Vec<Bytes>,
+        buffered_len: usize,
+    },
     Empty,
+    NonReplayable,
     Error(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ReplayBodyResolution {
     Empty,
-    Replayable(Bytes),
+    Replayable {
+        chunks: Vec<Bytes>,
+        buffered_len: usize,
+    },
+    NonReplayable,
+}
+
+struct ReplayRequestBody {
+    chunks: std::vec::IntoIter<Bytes>,
+    remaining: u64,
+}
+
+struct DecodedRequestBodyPayload {
+    decoded: Bytes,
+    _compressed_and_budget: Bytes,
+}
+
+impl AsRef<[u8]> for DecodedRequestBodyPayload {
+    fn as_ref(&self) -> &[u8] {
+        self.decoded.as_ref()
+    }
+}
+
+impl hyper::body::Body for ReplayRequestBody {
+    type Data = Bytes;
+    type Error = io::Error;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<BodyFrame<Self::Data>, Self::Error>>> {
+        let body = self.get_mut();
+        loop {
+            let Some(chunk) = body.chunks.next() else {
+                return Poll::Ready(None);
+            };
+            if chunk.is_empty() {
+                continue;
+            }
+            body.remaining = body.remaining.saturating_sub(chunk.len() as u64);
+            return Poll::Ready(Some(Ok(BodyFrame::data(chunk))));
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.remaining == 0
+    }
+
+    fn size_hint(&self) -> hyper::body::SizeHint {
+        hyper::body::SizeHint::with_exact(self.remaining)
+    }
 }
 
 #[derive(Debug)]
 enum SpoolBodyEvent {
-    Data(Bytes),
+    Data {
+        payload: Bytes,
+        credit_returned: bool,
+    },
     Error(String),
     End,
 }
@@ -343,6 +485,7 @@ fn log_stream_success(ctx: StreamLogContext<'_>, status: u16, duration: Duration
 }
 
 fn log_stream_failure(ctx: StreamLogContext<'_>, error: &str, duration: Duration) {
+    let error = safe_stream_error_message(error);
     match ctx.url {
         Some(url) => {
             warn!(
@@ -382,6 +525,29 @@ impl PreparedRequestBody {
             .take()
             .unwrap_or_else(empty_request_body)
     }
+
+    /// Prefer the bounded replay snapshot for the first request when redirect
+    /// replay is enabled. A replay body advertises an exact size to Hyper, so
+    /// HTTP/1 requests get a correct `Content-Length` instead of implicit
+    /// chunked framing. Requests that exceed the replay budget remain streamed.
+    async fn resolve_initial_replay_body(&mut self, deadline: Instant) -> Result<(), String> {
+        let ReplayableRequestBody::Pending(state) = &self.replay_body else {
+            return Ok(());
+        };
+        match state.wait_for_resolution(deadline).await? {
+            ReplayBodyResolution::Empty => {
+                self.first_request_body = Some(empty_request_body());
+            }
+            ReplayBodyResolution::Replayable {
+                chunks,
+                buffered_len,
+            } => {
+                self.first_request_body = Some(replay_request_body(chunks, buffered_len));
+            }
+            ReplayBodyResolution::NonReplayable => {}
+        }
+        Ok(())
+    }
 }
 
 async fn prepare_redirect_request_body(
@@ -396,7 +562,11 @@ async fn prepare_redirect_request_body(
             ReplayableRequestBody::Pending(state) => {
                 match state.wait_for_resolution(deadline).await? {
                     ReplayBodyResolution::Empty => Ok(Some(empty_request_body())),
-                    ReplayBodyResolution::Replayable(body) => Ok(Some(buffered_request_body(body))),
+                    ReplayBodyResolution::Replayable {
+                        chunks,
+                        buffered_len,
+                    } => Ok(Some(replay_request_body(chunks, buffered_len))),
+                    ReplayBodyResolution::NonReplayable => Ok(None),
                 }
             }
             ReplayableRequestBody::NonReplayable => Ok(None),
@@ -405,8 +575,10 @@ async fn prepare_redirect_request_body(
 }
 
 impl RequestBodyReplayState {
-    fn new() -> Self {
+    fn new(budget_bytes: usize) -> Self {
         Self {
+            budget_bytes,
+            reserved_bytes: AtomicUsize::new(0),
             state: Mutex::new(RequestBodyReplayStatus::Collecting {
                 chunks: Vec::new(),
                 buffered_len: 0,
@@ -415,15 +587,117 @@ impl RequestBodyReplayState {
         }
     }
 
-    fn push_chunk(&self, payload: Bytes) {
+    fn push_chunk(&self, payload: Bytes) -> bool {
+        let mut disable_replay = false;
+        let mut retained = false;
         let mut state = self.state.lock().expect("request body replay state lock");
         if let RequestBodyReplayStatus::Collecting {
             chunks,
             buffered_len,
         } = &mut *state
         {
-            *buffered_len = buffered_len.saturating_add(payload.len());
-            chunks.push(payload);
+            let Some(next_len) = buffered_len.checked_add(payload.len()) else {
+                chunks.clear();
+                *state = RequestBodyReplayStatus::NonReplayable;
+                drop(state);
+                self.release_reserved_bytes();
+                self.ready.notify_waiters();
+                return false;
+            };
+            let accounted_bytes = payload.len().checked_add(std::mem::size_of::<Bytes>());
+            if next_len > self.budget_bytes
+                || chunks.len() >= REDIRECT_REPLAY_MAX_CHUNKS
+                || accounted_bytes.is_none_or(|bytes| !self.try_reserve_bytes(bytes))
+            {
+                disable_replay = true;
+                chunks.clear();
+                *state = RequestBodyReplayStatus::NonReplayable;
+            } else {
+                *buffered_len = next_len;
+                chunks.push(payload);
+                retained = true;
+            }
+        }
+        drop(state);
+        if disable_replay {
+            self.release_reserved_bytes();
+            self.ready.notify_waiters();
+        }
+        retained
+    }
+
+    fn try_reserve_bytes(&self, bytes: usize) -> bool {
+        if bytes == 0 {
+            return true;
+        }
+        let mut current = REDIRECT_REPLAY_BUFFERED_BYTES.load(Ordering::Acquire);
+        loop {
+            let Some(next) = current.checked_add(bytes) else {
+                return false;
+            };
+            if next > REDIRECT_REPLAY_GLOBAL_BUDGET_BYTES {
+                return false;
+            }
+            match REDIRECT_REPLAY_BUFFERED_BYTES.compare_exchange_weak(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    self.reserved_bytes.fetch_add(bytes, Ordering::Release);
+                    return true;
+                }
+                Err(observed) => current = observed,
+            }
+        }
+    }
+
+    fn release_reserved_bytes(&self) {
+        let reserved = self.reserved_bytes.swap(0, Ordering::AcqRel);
+        if reserved > 0 {
+            REDIRECT_REPLAY_BUFFERED_BYTES.fetch_sub(reserved, Ordering::AcqRel);
+        }
+    }
+
+    fn discard(&self) {
+        {
+            let mut state = self.state.lock().expect("request body replay state lock");
+            match &*state {
+                RequestBodyReplayStatus::Collecting { .. }
+                | RequestBodyReplayStatus::Ready { .. }
+                | RequestBodyReplayStatus::Empty => {
+                    *state = RequestBodyReplayStatus::NonReplayable;
+                }
+                RequestBodyReplayStatus::NonReplayable | RequestBodyReplayStatus::Error(_) => {
+                    return;
+                }
+            }
+        }
+        self.release_reserved_bytes();
+        self.ready.notify_waiters();
+    }
+
+    /// Disable replay while retaining the queued body for the first streaming
+    /// request. This prevents the preflight waiter from deadlocking when the
+    /// bounded spool queue fills before the request starts.
+    fn disable_replay(&self) {
+        let changed = {
+            let mut state = self.state.lock().expect("request body replay state lock");
+            match &*state {
+                RequestBodyReplayStatus::Collecting { .. }
+                | RequestBodyReplayStatus::Ready { .. } => {
+                    *state = RequestBodyReplayStatus::NonReplayable;
+                    true
+                }
+                RequestBodyReplayStatus::Empty
+                | RequestBodyReplayStatus::NonReplayable
+                | RequestBodyReplayStatus::Error(_) => false,
+            }
+        };
+        if changed {
+            self.release_reserved_bytes();
+            self.ready.notify_waiters();
         }
     }
 
@@ -439,11 +713,10 @@ impl RequestBodyReplayState {
                     if buffered_len == 0 {
                         RequestBodyReplayStatus::Empty
                     } else {
-                        let mut buffered = BytesMut::with_capacity(buffered_len);
-                        for chunk in chunks {
-                            buffered.extend_from_slice(&chunk);
+                        RequestBodyReplayStatus::Ready {
+                            chunks,
+                            buffered_len,
                         }
-                        RequestBodyReplayStatus::Ready(buffered.freeze())
                     }
                 }
                 terminal => terminal,
@@ -461,19 +734,30 @@ impl RequestBodyReplayState {
             let mut state = self.state.lock().expect("request body replay state lock");
             *state = RequestBodyReplayStatus::Error(message);
         }
+        self.release_reserved_bytes();
         self.ready.notify_waiters();
     }
 
     async fn wait_for_resolution(&self, deadline: Instant) -> Result<ReplayBodyResolution, String> {
         loop {
+            let notified = self.ready.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             let resolution = {
                 let state = self.state.lock().expect("request body replay state lock");
                 match &*state {
                     RequestBodyReplayStatus::Collecting { .. } => None,
-                    RequestBodyReplayStatus::Ready(body) => {
-                        Some(Ok(ReplayBodyResolution::Replayable(body.clone())))
-                    }
+                    RequestBodyReplayStatus::Ready {
+                        chunks,
+                        buffered_len,
+                    } => Some(Ok(ReplayBodyResolution::Replayable {
+                        chunks: chunks.clone(),
+                        buffered_len: *buffered_len,
+                    })),
                     RequestBodyReplayStatus::Empty => Some(Ok(ReplayBodyResolution::Empty)),
+                    RequestBodyReplayStatus::NonReplayable => {
+                        Some(Ok(ReplayBodyResolution::NonReplayable))
+                    }
                     RequestBodyReplayStatus::Error(message) => Some(Err(message.clone())),
                 }
             };
@@ -484,15 +768,80 @@ impl RequestBodyReplayState {
             let Some(remaining) = remaining_timeout(deadline) else {
                 return Err("upstream timeout".to_string());
             };
-            tokio::time::timeout(remaining, self.ready.notified())
+            tokio::time::timeout(remaining, &mut notified)
                 .await
                 .map_err(|_| "upstream timeout".to_string())?;
         }
     }
 }
 
+impl Drop for RequestBodyReplayState {
+    fn drop(&mut self) {
+        self.release_reserved_bytes();
+    }
+}
+
 fn follow_redirects_enabled(meta: &RequestMeta) -> bool {
     meta.follow_redirects == Some(true)
+}
+
+/// Validate URL syntax at the tunnel trust boundary before any request body
+/// is consumed or a connection is attempted.
+///
+/// The gateway performs the same checks when it builds `RequestMeta`, but the
+/// tunnel must not rely on a remote peer having constructed metadata through a
+/// particular code path.  In particular, URL userinfo and fragments are not
+/// valid upstream request components: userinfo can alter authority parsing and
+/// fragments must never cross an HTTP request boundary.
+fn validate_tunnel_upstream_url(
+    url: &url::Url,
+    allow_private_targets: bool,
+) -> Result<(), &'static str> {
+    if url.host_str().is_none() {
+        return Err("invalid upstream URL");
+    }
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err("unsupported upstream URL scheme");
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("invalid upstream URL");
+    }
+    if url.fragment().is_some() {
+        return Err("invalid upstream URL");
+    }
+
+    // Domain names are checked again against the resolved DNS answers by
+    // `target_filter::validate_target`.  Reject literal private/reserved
+    // addresses here as well when the tunnel's private-target policy is
+    // disabled, so a metadata URL cannot bypass that policy through a
+    // different parser or connector. Explicitly enabled private-target
+    // deployments keep their existing behavior (including loopback HTTP
+    // endpoints).
+    if !allow_private_targets {
+        let literal_ip = match url.host() {
+            Some(url::Host::Ipv4(address)) => Some(std::net::IpAddr::V4(address)),
+            Some(url::Host::Ipv6(address)) => Some(std::net::IpAddr::V6(address)),
+            _ => None,
+        };
+        if literal_ip.is_some_and(aether_http::is_private_or_reserved_ip) {
+            return Err("upstream target blocked");
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_tunnel_redirect_url(url: &url::Url) -> Result<(), &'static str> {
+    if url.host_str().is_none() {
+        return Err("invalid upstream URL");
+    }
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err("unsupported upstream URL scheme");
+    }
+    if !url.username().is_empty() || url.password().is_some() || url.fragment().is_some() {
+        return Err("invalid upstream URL");
+    }
+    Ok(())
 }
 
 fn request_likely_has_body(
@@ -521,17 +870,63 @@ fn request_likely_has_body(
 fn sanitize_upstream_headers(
     headers: &std::collections::HashMap<String, String>,
 ) -> Vec<(String, String)> {
+    let connection_declared = aether_http::connection_declared_header_names(
+        headers
+            .iter()
+            .filter(|(name, _)| name.eq_ignore_ascii_case(hyper::header::CONNECTION.as_str()))
+            .map(|(_, value)| value.as_str()),
+    );
     headers
         .iter()
         .filter_map(|(key, value)| {
             let normalized = key.to_ascii_lowercase();
-            if BLOCKED_HEADERS.contains(&normalized.as_str()) {
+            if BLOCKED_HEADERS.contains(&normalized.as_str())
+                || connection_declared.contains(&normalized)
+            {
                 None
             } else {
                 Some((key.clone(), value.clone()))
             }
         })
         .collect()
+}
+
+/// Return a single, syntactically valid request length that can safely be
+/// applied to the streamed body.  The original header is otherwise removed
+/// because tunnel compression/decoding may change the bytes seen upstream.
+/// Conflicting case variants and `Transfer-Encoding` are deliberately treated
+/// as unknown framing rather than forwarded as an ambiguous pair.
+fn validated_request_content_length(
+    headers: &std::collections::HashMap<String, String>,
+) -> Option<u64> {
+    if headers
+        .keys()
+        .any(|name| name.eq_ignore_ascii_case("transfer-encoding"))
+    {
+        return None;
+    }
+
+    let values = headers
+        .iter()
+        .filter(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+        .map(|(_, value)| value.as_str())
+        .collect::<Vec<_>>();
+    if values.is_empty() {
+        return None;
+    }
+
+    let parsed = values
+        .iter()
+        .map(|value| {
+            let value = value.trim_matches(|character| matches!(character, ' ' | '\t'));
+            if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+                return None;
+            }
+            value.parse::<u64>().ok()
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let first = *parsed.first()?;
+    parsed.iter().all(|value| *value == first).then_some(first)
 }
 
 fn apply_upstream_headers(headers: &mut hyper::HeaderMap, values: &[(String, String)]) {
@@ -549,13 +944,40 @@ fn empty_request_body() -> upstream_client::UpstreamRequestBody {
     upstream_client::stream_request_body(stream::empty::<Result<BodyFrame<Bytes>, io::Error>>())
 }
 
-fn buffered_request_body(body: Bytes) -> upstream_client::UpstreamRequestBody {
-    upstream_client::full_request_body(body)
+fn replay_request_body(
+    chunks: Vec<Bytes>,
+    buffered_len: usize,
+) -> upstream_client::UpstreamRequestBody {
+    ReplayRequestBody {
+        chunks: chunks.into_iter(),
+        remaining: buffered_len as u64,
+    }
+    .boxed_unsync()
 }
 
-// Drain tunnel body frames on a detached task so the shared dispatcher is no
-// longer coupled to upstream body polling. When requested, redirect replay
-// retains a complete in-memory copy without a cumulative payload limit.
+pub(super) fn decode_request_body_frame(frame: TunnelFrame) -> Result<Bytes, std::io::Error> {
+    if frame.is_gzip() {
+        let decoded = decompress_if_gzip_with_limit(
+            &frame,
+            aether_contracts::tunnel::MAX_TUNNEL_DECOMPRESSED_PAYLOAD_BYTES,
+        )?;
+        return Ok(Bytes::from_owner(DecodedRequestBodyPayload {
+            decoded,
+            _compressed_and_budget: frame.payload,
+        }));
+    }
+    if frame.payload.len() > aether_contracts::tunnel::MAX_TUNNEL_DECOMPRESSED_PAYLOAD_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "decoded tunnel payload exceeds {} bytes",
+                aether_contracts::tunnel::MAX_TUNNEL_DECOMPRESSED_PAYLOAD_BYTES
+            ),
+        ));
+    }
+    Ok(frame.payload)
+}
+
 fn prepare_request_body(
     stream_id: u32,
     body_rx: mpsc::Receiver<TunnelFrame>,
@@ -565,25 +987,30 @@ fn prepare_request_body(
     frame_tx: FrameSender,
 ) -> PreparedRequestBody {
     let (spool_tx, spool_rx) = mpsc::channel(REQUEST_BODY_SPOOL_QUEUE_CAPACITY);
-    let replay_state = capture_for_redirects.then(|| Arc::new(RequestBodyReplayState::new()));
+    let replay_state = capture_for_redirects.then(|| {
+        Arc::new(RequestBodyReplayState::new(
+            REDIRECT_REPLAY_PER_REQUEST_BUDGET_BYTES,
+        ))
+    });
     let replay_body = match replay_state.as_ref() {
         Some(state) => ReplayableRequestBody::Pending(Arc::clone(state)),
         None => ReplayableRequestBody::NonReplayable,
     };
 
-    tokio::spawn(spool_request_body(
+    let spool_task = tokio::spawn(spool_request_body(
         stream_id,
         body_rx,
         spool_tx,
         replay_state,
         body_size,
         deadline,
-        frame_tx,
+        frame_tx.clone(),
     ));
 
     PreparedRequestBody {
-        first_request_body: Some(build_spooled_request_body(spool_rx)),
+        first_request_body: Some(build_spooled_request_body(spool_rx, stream_id, frame_tx)),
         replay_body,
+        spool_task: Some(spool_task),
     }
 }
 
@@ -599,56 +1026,8 @@ fn prepare_bodyless_request_body(
         } else {
             ReplayableRequestBody::NonReplayable
         },
+        spool_task: None,
     }
-}
-
-async fn collect_request_body_for_replay(
-    stream_id: u32,
-    mut body_rx: mpsc::Receiver<TunnelFrame>,
-    body_size: Arc<AtomicUsize>,
-    deadline: Instant,
-    frame_tx: &FrameSender,
-) -> Result<Bytes, String> {
-    let mut body = BytesMut::new();
-
-    loop {
-        let frame = recv_body_frame_with_deadline(&mut body_rx, deadline).await?;
-        let Some(frame) = frame else {
-            return Ok(body.freeze());
-        };
-
-        match frame.msg_type {
-            MsgType::RequestBody => {
-                let end_stream = frame.is_end_stream();
-                let payload = decompress_if_gzip(&frame)
-                    .map_err(|error| format!("gzip decompress failed: {error}"))?;
-
-                if !payload.is_empty() {
-                    body_size.fetch_add(payload.len(), Ordering::Relaxed);
-                    try_send_window_update(frame_tx, stream_id, payload.len());
-                    body.extend_from_slice(&payload);
-                }
-
-                if end_stream {
-                    return Ok(body.freeze());
-                }
-            }
-            MsgType::StreamError | MsgType::ResetStream => {
-                return Err(stream_reset_message(&frame));
-            }
-            MsgType::StreamEnd => return Ok(body.freeze()),
-            _ => continue,
-        }
-    }
-}
-
-fn replay_body_from_buffered(body: Bytes) -> ReplayableRequestBody {
-    let state = Arc::new(RequestBodyReplayState::new());
-    if !body.is_empty() {
-        state.push_chunk(body);
-    }
-    state.finish();
-    ReplayableRequestBody::Pending(state)
 }
 
 async fn recv_body_frame_with_deadline(
@@ -692,44 +1071,73 @@ async fn spool_request_body(
                 if let Some(state) = &replay_state {
                     state.fail(message.clone());
                 }
-                let _ = send_spool_event(&mut spool_tx, SpoolBodyEvent::Error(message)).await;
+                let _ = send_spool_event(
+                    &mut spool_tx,
+                    SpoolBodyEvent::Error(message),
+                    replay_state.as_ref(),
+                )
+                .await;
                 return;
             }
         };
 
         let Some(frame) = frame else {
+            let message = "tunnel request body closed before stream end".to_string();
             if let Some(state) = &replay_state {
-                state.finish();
+                state.fail(message.clone());
             }
-            let _ = send_spool_event(&mut spool_tx, SpoolBodyEvent::End).await;
+            let _ = send_spool_event(
+                &mut spool_tx,
+                SpoolBodyEvent::Error(message),
+                replay_state.as_ref(),
+            )
+            .await;
             return;
         };
 
         match frame.msg_type {
             MsgType::RequestBody => {
                 let end_stream = frame.is_end_stream();
-                let payload = match decompress_if_gzip(&frame) {
+                let payload = match decode_request_body_frame(frame) {
                     Ok(payload) => payload,
                     Err(error) => {
                         let message = format!("gzip decompress failed: {error}");
                         if let Some(state) = &replay_state {
                             state.fail(message.clone());
                         }
-                        let _ =
-                            send_spool_event(&mut spool_tx, SpoolBodyEvent::Error(message)).await;
+                        let _ = send_spool_event(
+                            &mut spool_tx,
+                            SpoolBodyEvent::Error(message),
+                            replay_state.as_ref(),
+                        )
+                        .await;
                         return;
                     }
                 };
 
                 if !payload.is_empty() {
                     body_size.fetch_add(payload.len(), Ordering::Relaxed);
-                    try_send_window_update(&frame_tx, stream_id, payload.len());
-                    if let Some(state) = &replay_state {
-                        state.push_chunk(payload.clone());
+                    let credit_returned = replay_state
+                        .as_ref()
+                        .is_some_and(|state| state.push_chunk(payload.clone()));
+                    if credit_returned
+                        && !send_window_update(&frame_tx, stream_id, payload.len()).await
+                    {
+                        if let Some(state) = &replay_state {
+                            state.fail("tunnel flow-control update failed".to_string());
+                        }
+                        return;
                     }
-                    if send_spool_event(&mut spool_tx, SpoolBodyEvent::Data(payload))
-                        .await
-                        .is_err()
+                    if send_spool_event(
+                        &mut spool_tx,
+                        SpoolBodyEvent::Data {
+                            payload,
+                            credit_returned,
+                        },
+                        replay_state.as_ref(),
+                    )
+                    .await
+                    .is_err()
                     {
                         if let Some(state) = &replay_state {
                             state.fail("request body replay channel closed".to_string());
@@ -742,7 +1150,9 @@ async fn spool_request_body(
                     if let Some(state) = &replay_state {
                         state.finish();
                     }
-                    let _ = send_spool_event(&mut spool_tx, SpoolBodyEvent::End).await;
+                    let _ =
+                        send_spool_event(&mut spool_tx, SpoolBodyEvent::End, replay_state.as_ref())
+                            .await;
                     return;
                 }
             }
@@ -751,14 +1161,20 @@ async fn spool_request_body(
                 if let Some(state) = &replay_state {
                     state.fail(message.clone());
                 }
-                let _ = send_spool_event(&mut spool_tx, SpoolBodyEvent::Error(message)).await;
+                let _ = send_spool_event(
+                    &mut spool_tx,
+                    SpoolBodyEvent::Error(message),
+                    replay_state.as_ref(),
+                )
+                .await;
                 return;
             }
             MsgType::StreamEnd => {
                 if let Some(state) = &replay_state {
                     state.finish();
                 }
-                let _ = send_spool_event(&mut spool_tx, SpoolBodyEvent::End).await;
+                let _ = send_spool_event(&mut spool_tx, SpoolBodyEvent::End, replay_state.as_ref())
+                    .await;
                 return;
             }
             _ => continue,
@@ -769,8 +1185,18 @@ async fn spool_request_body(
 async fn send_spool_event(
     spool_tx: &mut mpsc::Sender<SpoolBodyEvent>,
     event: SpoolBodyEvent,
+    replay_state: Option<&Arc<RequestBodyReplayState>>,
 ) -> Result<(), ()> {
-    spool_tx.send(event).await.map_err(|_| ())
+    match spool_tx.try_send(event) {
+        Ok(()) => Ok(()),
+        Err(mpsc::error::TrySendError::Closed(_)) => Err(()),
+        Err(mpsc::error::TrySendError::Full(event)) => {
+            if let Some(state) = replay_state {
+                state.disable_replay();
+            }
+            spool_tx.send(event).await.map_err(|_| ())
+        }
+    }
 }
 
 fn remove_headers_case_insensitive(headers: &mut Vec<(String, String)>, blocked: &[&str]) {
@@ -780,16 +1206,13 @@ fn remove_headers_case_insensitive(headers: &mut Vec<(String, String)>, blocked:
     });
 }
 
-fn strip_sensitive_headers_for_redirect(
-    headers: &mut Vec<(String, String)>,
-    next: &url::Url,
-    previous: &url::Url,
-) {
-    let cross_host = next.host_str() != previous.host_str()
-        || next.port_or_known_default() != previous.port_or_known_default();
-    if cross_host {
-        remove_headers_case_insensitive(headers, REDIRECT_SENSITIVE_HEADERS);
-    }
+fn redirect_urls_have_same_origin(left: &url::Url, right: &url::Url) -> bool {
+    left.scheme().eq_ignore_ascii_case(right.scheme())
+        && left
+            .host_str()
+            .zip(right.host_str())
+            .is_some_and(|(left, right)| left.eq_ignore_ascii_case(right))
+        && left.port_or_known_default() == right.port_or_known_default()
 }
 
 fn resolve_redirect<B>(
@@ -830,22 +1253,61 @@ fn resolve_redirect<B>(
     let Ok(next_url) = current_url.join(location) else {
         return RedirectDecision::Stop;
     };
-    match next_url.scheme() {
-        "http" | "https" => {}
-        _ => return RedirectDecision::Stop,
+    // A same-origin redirect can still smuggle credentials or a fragment into
+    // the next request. Validate the resolved URL before considering it for
+    // replay; the target filter performs the address policy check when it is
+    // actually connected.
+    if validate_tunnel_redirect_url(&next_url).is_err() {
+        return RedirectDecision::Stop;
     }
 
     if redirects_followed >= MAX_REDIRECTS {
         return RedirectDecision::Error("too many redirects");
     }
+    if !redirect_urls_have_same_origin(current_url, &next_url) {
+        return RedirectDecision::Stop;
+    }
 
-    strip_sensitive_headers_for_redirect(&mut next_headers, &next_url, current_url);
     RedirectDecision::Follow {
         method: next_method,
         url: next_url,
         headers: next_headers,
         body_mode,
     }
+}
+
+async fn resolve_upstream_target(
+    current_url: &url::Url,
+    allowed_ports: &std::collections::HashSet<u16>,
+    allow_private_targets: bool,
+    proxy_remote_dns: bool,
+    dns_cache: &target_filter::DnsCache,
+) -> Result<upstream_client::ValidatedUpstreamTarget, String> {
+    validate_tunnel_upstream_url(current_url, allow_private_targets).map_err(str::to_string)?;
+    let host = current_url
+        .host_str()
+        .ok_or_else(|| "missing host in URL".to_string())?;
+    let port = current_url
+        .port_or_known_default()
+        .ok_or_else(|| "missing port in URL".to_string())?;
+    let addresses = if proxy_remote_dns {
+        match target_filter::validate_target_literal(
+            host,
+            port,
+            allowed_ports,
+            allow_private_targets,
+        )
+        .map_err(|_| "upstream target blocked".to_string())?
+        {
+            Some(address) => vec![address],
+            None => return upstream_client::ValidatedUpstreamTarget::proxy_resolved(current_url),
+        }
+    } else {
+        target_filter::validate_target(host, port, allowed_ports, allow_private_targets, dns_cache)
+            .await
+            .map_err(|_| "upstream target blocked".to_string())?
+    };
+    upstream_client::ValidatedUpstreamTarget::new(current_url, addresses)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -860,27 +1322,28 @@ async fn execute_upstream_request(
     timeout: Duration,
     http1_only: bool,
 ) -> Result<UpstreamResponseContext, String> {
-    let host = current_url
-        .host_str()
-        .ok_or_else(|| "missing host in URL".to_string())?;
-    let port = current_url.port_or_known_default().unwrap_or(443);
-
     let dns_start = Instant::now();
-    {
+    let validated_target = {
         let allowed_ports = Arc::clone(&server.dynamic.load().allowed_ports);
-        if let Err(error) = target_filter::validate_target(
-            host,
-            port,
+        match resolve_upstream_target(
+            current_url,
             &allowed_ports,
             state.config.allow_private_targets,
+            state.config.upstream_proxy_remote_dns,
             &state.dns_cache,
         )
         .await
         {
-            server.metrics.dns_failures.fetch_add(1, Ordering::Release);
-            return Err(format!("target blocked: {error}"));
+            Ok(target) => target,
+            Err(_error) => {
+                server.metrics.dns_failures.fetch_add(1, Ordering::Release);
+                // Keep the detailed filter error out of the tunnel response;
+                // the request URL origin is already present in the structured
+                // failure log context.
+                return Err("upstream target blocked".to_string());
+            }
         }
-    }
+    };
     let dns_ms = dns_start.elapsed().as_millis() as u64;
 
     let client_key = upstream_client::upstream_client_pool_key(
@@ -889,6 +1352,7 @@ async fn execute_upstream_request(
         meta.key_id.as_deref(),
         meta.transport_profile.as_ref(),
         http1_only,
+        validated_target,
     );
     let client = state.upstream_client_pool.get_or_build(client_key)?;
 
@@ -896,19 +1360,8 @@ async fn execute_upstream_request(
         .method(method)
         .uri(current_url.as_str())
         .body(request_body)
-        .map_err(|error| format!("invalid upstream request: {error}"))?;
+        .map_err(|_| "invalid upstream request".to_string())?;
     apply_upstream_headers(request.headers_mut(), headers);
-    if current_url.scheme() == "http" {
-        if let Some(value) = upstream_client::http_proxy_authorization_header(
-            state.config.upstream_proxy_url.as_deref(),
-        ) {
-            let value = hyper::header::HeaderValue::from_str(&value)
-                .map_err(|error| format!("invalid upstream proxy auth header: {error}"))?;
-            request
-                .headers_mut()
-                .insert(hyper::header::PROXY_AUTHORIZATION, value);
-        }
-    }
 
     let connection_start = Instant::now();
     let mut captured_connection = upstream_client::capture_connection(&mut request);
@@ -928,9 +1381,9 @@ async fn execute_upstream_request(
                 .failed_requests
                 .fetch_add(1, Ordering::Release);
             let message = if error.is_connect() {
-                format!("upstream connect error: {error}")
+                "upstream connect failed".to_string()
             } else {
-                format!("upstream error: {error}")
+                "upstream request failed".to_string()
             };
             return Err(message);
         }
@@ -1021,8 +1474,21 @@ where
 {
     let status = response.status().as_u16();
     let ttfb_ms = total_elapsed.as_millis() as u64;
+    let connection_declared = aether_http::connection_declared_header_names(
+        response
+            .headers()
+            .get_all(hyper::header::CONNECTION)
+            .iter()
+            .filter_map(|value| value.to_str().ok()),
+    );
     let mut resp_headers: Vec<(String, String)> = Vec::with_capacity(response.headers().len() + 1);
     for (key, value) in response.headers() {
+        let normalized = key.as_str().to_ascii_lowercase();
+        if BLOCKED_HEADERS.contains(&normalized.as_str())
+            || connection_declared.contains(&normalized)
+        {
+            continue;
+        }
         if let Ok(value) = value.to_str() {
             resp_headers.push((key.as_str().to_string(), value.to_string()));
         }
@@ -1080,6 +1546,7 @@ where
     }
 
     let mut stream = response.into_body().into_data_stream();
+    let chunk_size = MAX_CHUNK_SIZE.min(response_window.initial_window_bytes as usize);
     loop {
         let chunk_result = if let Some(deadline) = response_body_deadline {
             let Some(remaining) = remaining_timeout(deadline) else {
@@ -1132,7 +1599,7 @@ where
 
         match chunk_result {
             Ok(chunk) => {
-                if chunk.len() <= MAX_CHUNK_SIZE {
+                if chunk.len() <= chunk_size {
                     let (payload, extra_flags) = raw_payload(chunk);
                     if !acquire_response_credit(response_window, frame_tx, stream_id, payload.len())
                         .await
@@ -1162,7 +1629,7 @@ where
                 } else {
                     let mut offset = 0;
                     while offset < chunk.len() {
-                        let end = (offset + MAX_CHUNK_SIZE).min(chunk.len());
+                        let end = (offset + chunk_size).min(chunk.len());
                         let slice = chunk.slice(offset..end);
                         let (payload, extra_flags) = raw_payload(slice);
                         if !acquire_response_credit(
@@ -1206,8 +1673,9 @@ where
             }
             Err(error) => {
                 server.metrics.stream_errors.fetch_add(1, Ordering::Release);
-                warn!(stream_id, error = %error, "upstream body read error");
-                let error_message = format!("upstream body read error: {error}");
+                let error_kind = safe_stream_error_message(&error.to_string());
+                warn!(stream_id, error_kind, "upstream body read error");
+                let error_message = error_kind;
                 log_stream_failure(
                     stream_log_context(
                         server,
@@ -1217,10 +1685,10 @@ where
                         redirect_count,
                         request_body_size.load(Ordering::Relaxed),
                     ),
-                    &error_message,
+                    error_message,
                     total_elapsed,
                 );
-                send_error(frame_tx, stream_id, &format!("body read error: {error}")).await;
+                send_error(frame_tx, stream_id, error_message).await;
                 return Some(total_elapsed);
             }
         }
@@ -1277,12 +1745,22 @@ where
 fn upstream_client_pool_key_for_request(
     meta: &RequestMeta,
 ) -> upstream_client::UpstreamClientPoolKey {
+    let target_url = url::Url::parse(&meta.url).expect("test request URL should parse");
+    let port = target_url
+        .port_or_known_default()
+        .expect("test request URL should have a port");
+    let validated_target = upstream_client::ValidatedUpstreamTarget::new(
+        &target_url,
+        vec![std::net::SocketAddr::from(([203, 0, 113, 1], port))],
+    )
+    .expect("test target should validate");
     upstream_client::upstream_client_pool_key(
         meta.provider_id.as_deref(),
         meta.endpoint_id.as_deref(),
         meta.key_id.as_deref(),
         meta.transport_profile.as_ref(),
         meta.http1_only,
+        validated_target,
     )
 }
 
@@ -1325,6 +1803,7 @@ pub async fn handle_stream(
     };
 
     server.active_connections.fetch_add(1, Ordering::Release);
+    let _active_stream = ActiveStreamGuard(Arc::clone(&server));
 
     let stream_io = StreamIo {
         body_rx,
@@ -1335,7 +1814,6 @@ pub async fn handle_stream(
 
     let connect_elapsed = handle_stream_inner(&state, &server, stream_id, meta, stream_io).await;
 
-    server.active_connections.fetch_sub(1, Ordering::Release);
     if let Some(d) = connect_elapsed {
         server.metrics.record_request(d);
     }
@@ -1362,6 +1840,18 @@ async fn send_frame(tx: &FrameSender, frame: TunnelFrame) -> bool {
                     timeout_ms = FLOW_CONTROL_WAIT_TIMEOUT.as_millis() as u64,
                     "writer channel stalled for body frame, abandoning stream"
                 );
+                let reset = TunnelFrame::new(
+                    stream_id,
+                    MsgType::ResetStream,
+                    0,
+                    Bytes::from_static(b"{\"reason\":\"tunnel writer stalled\"}"),
+                );
+                if !matches!(
+                    tokio::time::timeout(CONTROL_FRAME_SEND_TIMEOUT, tx.send(reset)).await,
+                    Ok(Ok(()))
+                ) {
+                    tx.close();
+                }
                 false
             }
             Ok(Err(QueueSendError::Full(_))) => {
@@ -1371,7 +1861,10 @@ async fn send_frame(tx: &FrameSender, frame: TunnelFrame) -> bool {
     } else {
         match tokio::time::timeout(CONTROL_FRAME_SEND_TIMEOUT, tx.send(frame)).await {
             Ok(Ok(())) => true,
-            Ok(Err(_)) => false,
+            Ok(Err(_)) => {
+                tx.close();
+                false
+            }
             Err(_) => {
                 warn!(
                     stream_id,
@@ -1379,6 +1872,7 @@ async fn send_frame(tx: &FrameSender, frame: TunnelFrame) -> bool {
                     flags = flags,
                     "control frame send timeout (writer congested), abandoning stream"
                 );
+                tx.close();
                 false
             }
         }
@@ -1412,30 +1906,27 @@ async fn handle_stream_inner(
     let mut current_method: hyper::Method = parse_request_method(&meta.method);
     let mut current_url = match url::Url::parse(&meta.url) {
         Ok(u) => u,
-        Err(e) => {
+        Err(_) => {
             log_stream_failure(
                 stream_log_context(server, stream_id, &current_method, None, 0, 0),
-                &format!("invalid URL: {e}"),
+                "invalid upstream URL",
                 Duration::ZERO,
             );
-            send_error(frame_tx, stream_id, &format!("invalid URL: {e}")).await;
+            send_error(frame_tx, stream_id, "invalid upstream URL").await;
             return None;
         }
     };
 
-    // Only allow http/https schemes (block file://, data://, etc.)
-    match current_url.scheme() {
-        "http" | "https" => {}
-        other => {
-            let error_message = format!("unsupported URL scheme: {other}");
-            log_stream_failure(
-                stream_log_context(server, stream_id, &current_method, Some(&current_url), 0, 0),
-                &error_message,
-                Duration::ZERO,
-            );
-            send_error(frame_tx, stream_id, &error_message).await;
-            return None;
-        }
+    if let Err(error_message) =
+        validate_tunnel_upstream_url(&current_url, state.config.allow_private_targets)
+    {
+        log_stream_failure(
+            stream_log_context(server, stream_id, &current_method, Some(&current_url), 0, 0),
+            error_message,
+            Duration::ZERO,
+        );
+        send_error(frame_tx, stream_id, error_message).await;
+        return None;
     }
 
     let overall_start = Instant::now();
@@ -1445,57 +1936,30 @@ async fn handle_stream_inner(
         .response_body_timeout
         .map(|timeout| overall_start + timeout);
     let follow_redirects = follow_redirects_enabled(&meta);
+    let request_has_body = request_likely_has_body(&current_method, &meta.headers);
     let mut current_headers = sanitize_upstream_headers(&meta.headers);
+    if request_has_body {
+        if let Some(content_length) = validated_request_content_length(&meta.headers) {
+            current_headers.push((
+                hyper::header::CONTENT_LENGTH.as_str().to_string(),
+                content_length.to_string(),
+            ));
+        }
+    }
     let first_byte_timeout = request_timeouts.first_byte_timeout;
     let request_body_size = Arc::new(AtomicUsize::new(0));
-    let request_has_body = request_likely_has_body(&current_method, &meta.headers);
-    let can_buffer_redirect_body = request_has_body && follow_redirects;
-    let request_body_mode = if can_buffer_redirect_body {
-        "buffered_fixed"
-    } else if request_has_body {
+    let request_body_mode = if request_has_body {
         "streaming"
     } else {
         "empty"
     };
-    let mut prepared_body = if can_buffer_redirect_body {
-        let buffered_body = match collect_request_body_for_replay(
-            stream_id,
-            body_rx,
-            Arc::clone(&request_body_size),
-            first_byte_deadline,
-            frame_tx,
-        )
-        .await
-        {
-            Ok(body) => body,
-            Err(message) => {
-                log_stream_failure(
-                    stream_log_context(
-                        server,
-                        stream_id,
-                        &current_method,
-                        Some(&current_url),
-                        0,
-                        request_body_size.load(Ordering::Relaxed),
-                    ),
-                    &message,
-                    overall_start.elapsed(),
-                );
-                send_error(frame_tx, stream_id, &message).await;
-                return None;
-            }
-        };
-        PreparedRequestBody {
-            first_request_body: Some(buffered_request_body(buffered_body.clone())),
-            replay_body: replay_body_from_buffered(buffered_body),
-        }
-    } else if request_has_body {
+    let mut prepared_body = if request_has_body {
         prepare_request_body(
             stream_id,
             body_rx,
             Arc::clone(&request_body_size),
             first_byte_deadline,
-            false,
+            follow_redirects,
             frame_tx.clone(),
         )
     } else {
@@ -1506,8 +1970,36 @@ async fn handle_stream_inner(
     let mut redirects_followed = 0usize;
     let mut next_request_body = None::<upstream_client::UpstreamRequestBody>;
 
+    if follow_redirects {
+        if let Err(message) = prepared_body
+            .resolve_initial_replay_body(first_byte_deadline)
+            .await
+        {
+            if let ReplayableRequestBody::Pending(state) = &prepared_body.replay_body {
+                state.discard();
+            }
+            log_stream_failure(
+                stream_log_context(
+                    server,
+                    stream_id,
+                    &current_method,
+                    Some(&current_url),
+                    0,
+                    request_body_size.load(Ordering::Relaxed),
+                ),
+                &message,
+                overall_start.elapsed(),
+            );
+            send_error(frame_tx, stream_id, &message).await;
+            return None;
+        }
+    }
+
     loop {
         let Some(remaining) = remaining_timeout(first_byte_deadline) else {
+            if let ReplayableRequestBody::Pending(state) = &prepared_body.replay_body {
+                state.discard();
+            }
             log_stream_failure(
                 stream_log_context(
                     server,
@@ -1542,6 +2034,9 @@ async fn handle_stream_inner(
         {
             Ok(context) => context,
             Err(message) => {
+                if let ReplayableRequestBody::Pending(state) = &prepared_body.replay_body {
+                    state.discard();
+                }
                 log_stream_failure(
                     stream_log_context(
                         server,
@@ -1570,6 +2065,9 @@ async fn handle_stream_inner(
                 redirects_followed,
             ) {
                 RedirectDecision::Stop => {
+                    if let ReplayableRequestBody::Pending(state) = &prepared_body.replay_body {
+                        state.discard();
+                    }
                     drop(admission_permit.take());
                     return relay_upstream_response(
                         server,
@@ -1603,6 +2101,14 @@ async fn handle_stream_inner(
                 .await
                 {
                     Ok(Some(body)) => {
+                        if body_mode == RedirectBodyMode::Empty {
+                            if let ReplayableRequestBody::Pending(state) =
+                                &prepared_body.replay_body
+                            {
+                                state.discard();
+                            }
+                            prepared_body.replay_body = ReplayableRequestBody::None;
+                        }
                         redirects_followed += 1;
                         current_method = method;
                         current_url = url;
@@ -1611,6 +2117,9 @@ async fn handle_stream_inner(
                         continue;
                     }
                     Ok(None) => {
+                        if let ReplayableRequestBody::Pending(state) = &prepared_body.replay_body {
+                            state.discard();
+                        }
                         drop(admission_permit.take());
                         return relay_upstream_response(
                             server,
@@ -1632,6 +2141,9 @@ async fn handle_stream_inner(
                         .await;
                     }
                     Err(message) => {
+                        if let ReplayableRequestBody::Pending(state) = &prepared_body.replay_body {
+                            state.discard();
+                        }
                         log_stream_failure(
                             stream_log_context(
                                 server,
@@ -1649,7 +2161,11 @@ async fn handle_stream_inner(
                     }
                 },
                 RedirectDecision::Error(message) => {
-                    let error_message = format!("upstream redirect error: {message}");
+                    if let ReplayableRequestBody::Pending(state) = &prepared_body.replay_body {
+                        state.discard();
+                    }
+                    let error_message =
+                        safe_stream_error_message(&format!("upstream redirect error: {message}"));
                     log_stream_failure(
                         stream_log_context(
                             server,
@@ -1659,15 +2175,18 @@ async fn handle_stream_inner(
                             redirects_followed,
                             request_body_size.load(Ordering::Relaxed),
                         ),
-                        &error_message,
+                        error_message,
                         overall_start.elapsed(),
                     );
-                    send_error(frame_tx, stream_id, &error_message).await;
+                    send_error(frame_tx, stream_id, error_message).await;
                     return None;
                 }
             }
         }
 
+        if let ReplayableRequestBody::Pending(state) = &prepared_body.replay_body {
+            state.discard();
+        }
         drop(admission_permit.take());
         return relay_upstream_response(
             server,
@@ -1691,22 +2210,23 @@ async fn handle_stream_inner(
 }
 
 async fn send_error(tx: &FrameSender, stream_id: u32, msg: &str) {
-    // Error frames use best-effort delivery — don't block if writer is congested
+    let safe_message = safe_stream_error_message(msg);
     let _ = send_frame(
         tx,
         TunnelFrame::new(
             stream_id,
             MsgType::StreamError,
             0,
-            Bytes::from(msg.to_string()),
+            Bytes::from_static(safe_message.as_bytes()),
         ),
     )
     .await;
 }
 
 async fn send_reset_stream(tx: &FrameSender, stream_id: u32, reason: &str) {
+    let safe_reason = safe_stream_error_message(reason);
     let payload = serde_json::to_vec(&ResetStreamPayload {
-        reason: reason.to_string(),
+        reason: safe_reason.to_string(),
     })
     .expect("reset stream payload should serialize");
     let _ = send_frame(
@@ -1726,22 +2246,42 @@ fn build_streaming_request_body(
 
 fn build_spooled_request_body(
     spool_rx: mpsc::Receiver<SpoolBodyEvent>,
+    stream_id: u32,
+    frame_tx: FrameSender,
 ) -> upstream_client::UpstreamRequestBody {
-    let body_stream = stream::unfold((spool_rx, false), |(mut spool_rx, finished)| async move {
-        if finished {
-            return None;
-        }
+    let body_stream = stream::unfold(
+        (spool_rx, frame_tx, false),
+        move |(mut spool_rx, frame_tx, finished)| async move {
+            if finished {
+                return None;
+            }
 
-        match spool_rx.recv().await {
-            Some(SpoolBodyEvent::Data(payload)) => {
-                Some((Ok(BodyFrame::data(payload)), (spool_rx, false)))
+            match spool_rx.recv().await {
+                Some(SpoolBodyEvent::Data {
+                    payload,
+                    credit_returned,
+                }) => {
+                    if !credit_returned
+                        && !send_window_update(&frame_tx, stream_id, payload.len()).await
+                    {
+                        return Some((
+                            Err(io::Error::other("tunnel flow-control update failed")),
+                            (spool_rx, frame_tx, true),
+                        ));
+                    }
+                    Some((Ok(BodyFrame::data(payload)), (spool_rx, frame_tx, false)))
+                }
+                Some(SpoolBodyEvent::Error(message)) => {
+                    Some((Err(io::Error::other(message)), (spool_rx, frame_tx, true)))
+                }
+                Some(SpoolBodyEvent::End) => None,
+                None => Some((
+                    Err(io::Error::other("tunnel request body ended unexpectedly")),
+                    (spool_rx, frame_tx, true),
+                )),
             }
-            Some(SpoolBodyEvent::Error(message)) => {
-                Some((Err(io::Error::other(message)), (spool_rx, true)))
-            }
-            Some(SpoolBodyEvent::End) | None => None,
-        }
-    });
+        },
+    );
 
     upstream_client::stream_request_body(body_stream)
 }
@@ -1774,7 +2314,7 @@ fn build_prefixed_request_body(
                 match frame.msg_type {
                     MsgType::RequestBody => {
                         let end_stream = frame.is_end_stream();
-                        let payload = match decompress_if_gzip(&frame) {
+                        let payload = match decode_request_body_frame(frame) {
                             Ok(payload) => payload,
                             Err(error) => {
                                 let err =
@@ -1812,6 +2352,188 @@ fn build_prefixed_request_body(
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn remote_dns_target_resolution_skips_local_dns_and_keeps_literal_acl() {
+        let cache = target_filter::DnsCache::new(Duration::from_secs(60), 16);
+        let ports = [80, 443].into_iter().collect();
+        let url = url::Url::parse("https://remote-dns-test.invalid/path").unwrap();
+        let target = resolve_upstream_target(&url, &ports, false, true, &cache)
+            .await
+            .expect("trusted proxy should receive an unresolved hostname");
+        assert!(target.uses_proxy_dns());
+        assert!(cache.get("remote-dns-test.invalid", 443).await.is_none());
+
+        for address in ["https://8.8.8.8/", "https://[2606:4700:4700::1111]/"] {
+            let target = resolve_upstream_target(
+                &url::Url::parse(address).unwrap(),
+                &ports,
+                false,
+                true,
+                &cache,
+            )
+            .await
+            .unwrap();
+            assert!(!target.uses_proxy_dns(), "IP literals must remain pinned");
+        }
+
+        for address in [
+            "https://127.0.0.1/",
+            "https://10.0.0.1/",
+            "https://198.18.0.1/",
+            "https://[::1]/",
+            "https://[::ffff:127.0.0.1]/",
+            "https://localhost/",
+            "https://LOCALHOST./",
+            "https://remote-dns-test.invalid:25/",
+            "https://user:secret@remote-dns-test.invalid/",
+            "https://remote-dns-test.invalid/#fragment",
+            "ftp://remote-dns-test.invalid/",
+        ] {
+            assert!(
+                resolve_upstream_target(
+                    &url::Url::parse(address).unwrap(),
+                    &ports,
+                    false,
+                    true,
+                    &cache,
+                )
+                .await
+                .is_err(),
+                "target should remain blocked: {address}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn strict_dns_targets_stay_pinned_and_separate_from_remote_dns_targets() {
+        let cache = target_filter::DnsCache::new(Duration::from_secs(60), 16);
+        let ports = [443].into_iter().collect();
+        let url = url::Url::parse("https://remote-dns-test.invalid/").unwrap();
+        cache
+            .insert(
+                "remote-dns-test.invalid",
+                443,
+                Arc::new(vec!["8.8.8.8:443".parse().unwrap()]),
+            )
+            .await;
+        let strict = resolve_upstream_target(&url, &ports, false, false, &cache)
+            .await
+            .unwrap();
+        let remote = resolve_upstream_target(&url, &ports, false, true, &cache)
+            .await
+            .unwrap();
+        assert!(!strict.uses_proxy_dns());
+        assert!(remote.uses_proxy_dns());
+        assert_ne!(strict, remote);
+
+        let private_url = url::Url::parse("http://[::1]/").unwrap();
+        let private_ports = [80].into_iter().collect();
+        let explicitly_allowed =
+            resolve_upstream_target(&private_url, &private_ports, true, true, &cache)
+                .await
+                .unwrap();
+        assert!(!explicitly_allowed.uses_proxy_dns());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn window_updates_wait_for_capacity_instead_of_disappearing() {
+        let (high_tx, mut high_rx) = aether_runtime::bounded_queue(1);
+        let (normal_tx, _normal_rx) = aether_runtime::bounded_queue(1);
+        let sender = FrameSender::from_test_queues(high_tx, normal_tx);
+        sender
+            .try_send(TunnelFrame::control(MsgType::Ping, Bytes::new()))
+            .unwrap();
+        let task = tokio::spawn(async move { send_window_update(&sender, 7, 1024).await });
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert!(!task.is_finished());
+        high_rx.recv().await.unwrap();
+        assert!(task.await.unwrap());
+        let update = high_rx.recv().await.unwrap();
+        assert_eq!(update.msg_type, MsgType::WindowUpdate);
+        let payload: aether_contracts::tunnel::WindowUpdatePayload =
+            serde_json::from_slice(&update.payload).unwrap();
+        assert_eq!(payload.delta_bytes, 1024);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stalled_body_delivery_emits_a_reset() {
+        let (high_tx, mut high_rx) = aether_runtime::bounded_queue(4);
+        let (normal_tx, _normal_rx) = aether_runtime::bounded_queue(1);
+        let sender = FrameSender::from_test_queues(high_tx, normal_tx);
+        sender
+            .try_send(TunnelFrame::new(
+                7,
+                MsgType::ResponseBody,
+                0,
+                Bytes::from_static(b"first"),
+            ))
+            .unwrap();
+        assert!(
+            !send_frame(
+                &sender,
+                TunnelFrame::new(7, MsgType::ResponseBody, 0, Bytes::from_static(b"second"))
+            )
+            .await
+        );
+        let reset = high_rx.recv().await.unwrap();
+        assert_eq!(reset.msg_type, MsgType::ResetStream);
+        assert_eq!(reset.stream_id, 7);
+    }
+
+    #[tokio::test]
+    async fn request_credit_follows_consumption_without_redirect_replay() {
+        let (body_tx, body_rx) = mpsc::channel(4);
+        let (high_tx, mut high_rx) = aether_runtime::bounded_queue(4);
+        let (normal_tx, _normal_rx) = aether_runtime::bounded_queue(4);
+        let sender = FrameSender::from_test_queues(high_tx, normal_tx);
+        let mut prepared = prepare_request_body(
+            7,
+            body_rx,
+            Arc::new(AtomicUsize::new(0)),
+            Instant::now() + Duration::from_secs(10),
+            false,
+            sender,
+        );
+        body_tx
+            .send(TunnelFrame::new(
+                7,
+                MsgType::RequestBody,
+                flags::END_STREAM,
+                Bytes::from_static(b"body"),
+            ))
+            .await
+            .unwrap();
+        tokio::task::yield_now().await;
+        assert!(high_rx.try_recv().is_err());
+        let mut body = prepared.take_first_request_body();
+        assert!(body.frame().await.unwrap().is_ok());
+        assert_eq!(
+            high_rx.recv().await.unwrap().msg_type,
+            MsgType::WindowUpdate
+        );
+        assert!(body.frame().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn dropping_prepared_body_cancels_its_spooler() {
+        let (body_tx, body_rx) = mpsc::channel(4);
+        let (high_tx, _high_rx) = aether_runtime::bounded_queue(4);
+        let (normal_tx, _normal_rx) = aether_runtime::bounded_queue(4);
+        let sender = FrameSender::from_test_queues(high_tx, normal_tx);
+        let prepared = prepare_request_body(
+            7,
+            body_rx,
+            Arc::new(AtomicUsize::new(0)),
+            Instant::now() + Duration::from_secs(3600),
+            false,
+            sender,
+        );
+        drop(prepared);
+        tokio::time::timeout(Duration::from_secs(1), body_tx.closed())
+            .await
+            .unwrap();
+    }
+
     use std::collections::HashMap;
     use std::net::SocketAddr;
     use std::pin::Pin;
@@ -1828,6 +2550,7 @@ mod tests {
     use axum::http::{header, HeaderMap, Response, StatusCode};
     use axum::routing::{get, post};
     use axum::Router;
+    use bytes::BytesMut;
     use futures_util::Sink;
     use tokio::task::JoinHandle;
     use tokio_tungstenite::tungstenite::{Error as WebSocketError, Message};
@@ -1841,7 +2564,7 @@ mod tests {
     use crate::tunnel::client::build_tls_config;
 
     fn completed_replay_body(body: Bytes) -> ReplayableRequestBody {
-        let state = Arc::new(RequestBodyReplayState::new());
+        let state = Arc::new(RequestBodyReplayState::new(body.len().max(1)));
         if !body.is_empty() {
             state.push_chunk(body);
         }
@@ -1941,7 +2664,7 @@ mod tests {
         let (tx, rx) = mpsc::channel(4);
         let (frame_tx, sent, writer_handle) = spawn_test_writer();
         let body_size = Arc::new(AtomicUsize::new(0));
-        let prepared = prepare_request_body(
+        let mut prepared = prepare_request_body(
             1,
             rx,
             Arc::clone(&body_size),
@@ -1951,6 +2674,7 @@ mod tests {
         );
         let mut body = prepared
             .first_request_body
+            .take()
             .expect("first request body should be present");
 
         tx.send(TunnelFrame::new(
@@ -1991,7 +2715,7 @@ mod tests {
         assert_eq!(second, Bytes::from_static(b"world"));
         assert!(body.frame().await.is_none());
 
-        let mut replay = prepare_redirect_request_body(
+        let replay = prepare_redirect_request_body(
             prepared.replay_body.clone(),
             RedirectBodyMode::Replay,
             Instant::now() + Duration::from_secs(1),
@@ -1999,16 +2723,12 @@ mod tests {
         .await
         .expect("redirect replay should resolve")
         .expect("body should be replayable");
-        let frame = replay
-            .frame()
+        let replay = replay
+            .collect()
             .await
-            .expect("replayed frame should exist")
-            .expect("replayed frame should be ok");
-        assert_eq!(
-            frame.into_data().expect("data frame"),
-            Bytes::from_static(b"hello world")
-        );
-        assert!(replay.frame().await.is_none());
+            .expect("replayed body should be readable")
+            .to_bytes();
+        assert_eq!(replay, Bytes::from_static(b"hello world"));
         assert_eq!(body_size.load(Ordering::Relaxed), 11);
         let window_update_bytes = collect_emitted_frames(frame_tx, sent, writer_handle)
             .await
@@ -2025,6 +2745,24 @@ mod tests {
         assert_eq!(window_update_bytes, 11);
     }
 
+    #[tokio::test]
+    async fn replay_state_disables_and_releases_cache_after_per_request_budget() {
+        let state = RequestBodyReplayState::new(5);
+        state.push_chunk(Bytes::from_static(b"123"));
+        assert!(state.reserved_bytes.load(Ordering::Acquire) > 0);
+
+        state.push_chunk(Bytes::from_static(b"456"));
+
+        assert_eq!(state.reserved_bytes.load(Ordering::Acquire), 0);
+        assert_eq!(
+            state
+                .wait_for_resolution(Instant::now() + Duration::from_secs(1))
+                .await
+                .expect("over-budget replay should resolve without failing the request"),
+            ReplayBodyResolution::NonReplayable
+        );
+    }
+
     #[test]
     fn selects_http1_only_client_when_request_metadata_requires_it() {
         let default_meta = sample_request_meta();
@@ -2039,6 +2777,87 @@ mod tests {
             upstream_client_pool_key_for_request(&http1_meta).http_mode,
             "http1_only"
         );
+    }
+
+    #[test]
+    fn stream_error_projection_never_returns_upstream_details() {
+        let secret_error = concat!(
+            "upstream connect error: error sending request for url (",
+            "https://user:password@example.test/v1/models?api_key=query-secret",
+            ")"
+        );
+        assert_eq!(
+            safe_stream_error_message(secret_error),
+            "upstream connect failed"
+        );
+        assert_eq!(
+            safe_stream_error_message(
+                "upstream body read error: authorization Bearer secret-token at 10.0.0.4"
+            ),
+            "upstream response body failed"
+        );
+        assert_eq!(
+            safe_stream_error_message("invalid URL: https://user:pass@example.test/?token=secret"),
+            "invalid upstream URL"
+        );
+    }
+
+    #[test]
+    fn tunnel_upstream_url_validation_rejects_ambiguous_url_components() {
+        for raw in [
+            "https://user:password@example.test/v1",
+            "https://user@example.test/v1",
+            "https://example.test/v1#fragment",
+            "file:///etc/passwd",
+        ] {
+            let url = url::Url::parse(raw).expect("fixture URL should parse");
+            assert!(
+                validate_tunnel_upstream_url(&url, true).is_err(),
+                "URL should be rejected at the tunnel boundary: {raw}"
+            );
+        }
+
+        assert!(validate_tunnel_upstream_url(
+            &url::Url::parse("https://example.test/v1?api_key=query-secret")
+                .expect("query URL should parse"),
+            true,
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn tunnel_upstream_url_validation_applies_literal_target_policy() {
+        let private = url::Url::parse("https://10.0.0.8/private").expect("private URL");
+        assert!(validate_tunnel_upstream_url(&private, false).is_err());
+        assert!(validate_tunnel_upstream_url(&private, true).is_ok());
+
+        // Loopback remains available to explicitly enabled local deployments;
+        // disabling private targets rejects it before connection setup.
+        let loopback = url::Url::parse("http://127.0.0.1:8080/local").expect("loopback URL");
+        assert!(validate_tunnel_upstream_url(&loopback, false).is_err());
+        assert!(validate_tunnel_upstream_url(&loopback, true).is_ok());
+    }
+
+    #[test]
+    fn peer_reset_payload_is_not_echoed_into_request_errors() {
+        let frame = TunnelFrame::new(
+            1,
+            MsgType::StreamError,
+            0,
+            Bytes::from_static(b"Authorization: Bearer secret-token"),
+        );
+        assert_eq!(
+            stream_reset_message(&frame),
+            "client cancelled request body"
+        );
+
+        let reset = TunnelFrame::new(
+            1,
+            MsgType::ResetStream,
+            0,
+            Bytes::from_static(b"https://user:pass@example.test/?token=secret"),
+        );
+        assert_eq!(stream_reset_message(&reset), "request reset by peer");
     }
 
     #[test]
@@ -2155,7 +2974,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_redirect_strips_sensitive_headers_for_cross_host_redirect() {
+    fn resolve_redirect_stops_cross_origin_redirects() {
         let current_url = url::Url::parse("https://redirect-a.test/start").expect("url");
         let response = Response::builder()
             .status(StatusCode::FOUND)
@@ -2169,26 +2988,186 @@ mod tests {
             &hyper::Method::GET,
             &[
                 ("authorization".into(), "Bearer secret".into()),
+                ("api-key".into(), "api-key-secret".into()),
                 ("cookie".into(), "sid=123".into()),
+                ("x-api-key".into(), "x-api-key-secret".into()),
+                ("x-goog-api-key".into(), "google-secret".into()),
                 ("x-custom".into(), "keep".into()),
             ],
             &ReplayableRequestBody::None,
             0,
         );
 
-        match decision {
-            RedirectDecision::Follow { headers, .. } => {
-                assert!(!headers
-                    .iter()
-                    .any(|(name, _)| name.eq_ignore_ascii_case("authorization")));
-                assert!(!headers
-                    .iter()
-                    .any(|(name, _)| name.eq_ignore_ascii_case("cookie")));
-                assert!(headers
-                    .iter()
-                    .any(|(name, value)| name.eq_ignore_ascii_case("x-custom") && value == "keep"));
-            }
-            other => panic!("unexpected redirect decision: {other:?}"),
+        assert_eq!(decision, RedirectDecision::Stop);
+    }
+
+    #[test]
+    fn resolve_redirect_stops_https_to_http_downgrade() {
+        let current_url = url::Url::parse("https://redirect.test/start").expect("url");
+        let response = Response::builder()
+            .status(StatusCode::FOUND)
+            .header(header::LOCATION, "http://redirect.test/final")
+            .body(())
+            .expect("response");
+
+        let decision = resolve_redirect(
+            &response,
+            &current_url,
+            &hyper::Method::GET,
+            &[("authorization".into(), "Bearer secret".into())],
+            &ReplayableRequestBody::None,
+            0,
+        );
+
+        assert_eq!(decision, RedirectDecision::Stop);
+    }
+
+    #[test]
+    fn resolve_redirect_does_not_follow_userinfo_or_fragment_urls() {
+        let current_url = url::Url::parse("https://redirect.test/start").expect("url");
+        for location in ["https://user:password@redirect.test/final", "/final#secret"] {
+            let response = Response::builder()
+                .status(StatusCode::FOUND)
+                .header(header::LOCATION, location)
+                .body(())
+                .expect("response");
+
+            let decision = resolve_redirect(
+                &response,
+                &current_url,
+                &hyper::Method::GET,
+                &[],
+                &ReplayableRequestBody::None,
+                0,
+            );
+            assert_eq!(decision, RedirectDecision::Stop, "location: {location}");
+        }
+    }
+
+    #[test]
+    fn resolve_redirect_never_replays_post_body_cross_origin() {
+        let current_url = url::Url::parse("https://oauth.example/token").expect("url");
+        let response = Response::builder()
+            .status(StatusCode::TEMPORARY_REDIRECT)
+            .header(header::LOCATION, "https://attacker.example/capture")
+            .body(())
+            .expect("response");
+
+        let decision = resolve_redirect(
+            &response,
+            &current_url,
+            &hyper::Method::POST,
+            &[(
+                "content-type".into(),
+                "application/x-www-form-urlencoded".into(),
+            )],
+            &completed_replay_body(Bytes::from_static(
+                b"refresh_token=secret&client_secret=secret",
+            )),
+            0,
+        );
+
+        assert_eq!(decision, RedirectDecision::Stop);
+    }
+
+    #[test]
+    fn connection_declared_response_headers_are_not_relayed() {
+        let response = Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONNECTION, "x-hop-private, x-accel-redirect")
+            .header("x-hop-private", "secret")
+            .header("x-accel-redirect", "/internal")
+            .header("x-visible", "ok")
+            .body(())
+            .expect("response");
+        let declared = aether_http::connection_declared_header_names(
+            response
+                .headers()
+                .get_all(header::CONNECTION)
+                .iter()
+                .filter_map(|value| value.to_str().ok()),
+        );
+
+        assert!(declared.contains("x-hop-private"));
+        assert!(declared.contains("x-accel-redirect"));
+        assert!(!declared.contains("x-visible"));
+    }
+
+    #[test]
+    fn connection_declared_request_headers_are_not_sent_upstream() {
+        let headers = std::collections::HashMap::from([
+            ("Connection".to_string(), "x-hop-private".to_string()),
+            ("X-Hop-Private".to_string(), "secret".to_string()),
+            ("X-Visible".to_string(), "ok".to_string()),
+        ]);
+
+        let sanitized = sanitize_upstream_headers(&headers);
+
+        assert!(!sanitized
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("connection")));
+        assert!(!sanitized
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("x-hop-private")));
+        assert!(sanitized
+            .iter()
+            .any(|(name, value)| name.eq_ignore_ascii_case("x-visible") && value == "ok"));
+    }
+
+    #[test]
+    fn validates_single_content_length_value() {
+        let headers = HashMap::from([("content-length".to_string(), "42".to_string())]);
+
+        assert_eq!(validated_request_content_length(&headers), Some(42));
+    }
+
+    #[test]
+    fn accepts_identical_case_variant_content_lengths() {
+        let headers = HashMap::from([
+            ("Content-Length".to_string(), " 42 ".to_string()),
+            ("content-length".to_string(), "42".to_string()),
+        ]);
+
+        assert_eq!(validated_request_content_length(&headers), Some(42));
+    }
+
+    #[test]
+    fn rejects_conflicting_case_variant_content_lengths() {
+        let headers = HashMap::from([
+            ("Content-Length".to_string(), "42".to_string()),
+            ("CONTENT-LENGTH".to_string(), "43".to_string()),
+        ]);
+
+        assert_eq!(validated_request_content_length(&headers), None);
+    }
+
+    #[test]
+    fn rejects_content_length_when_transfer_encoding_is_present() {
+        let headers = HashMap::from([
+            ("Content-Length".to_string(), "42".to_string()),
+            ("Transfer-Encoding".to_string(), "chunked".to_string()),
+        ]);
+
+        assert_eq!(validated_request_content_length(&headers), None);
+    }
+
+    #[test]
+    fn rejects_empty_or_invalid_content_length_values() {
+        for value in [
+            "",
+            " ",
+            "+42",
+            "-1",
+            "42, 42",
+            "not-a-length",
+            "18446744073709551616",
+        ] {
+            let headers = HashMap::from([("content-length".to_string(), value.to_string())]);
+            assert_eq!(
+                validated_request_content_length(&headers),
+                None,
+                "unexpectedly accepted Content-Length value {value:?}"
+            );
         }
     }
 
@@ -2508,6 +3487,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cross_origin_redirect_is_preserved_without_a_second_connection() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let addr = listener.local_addr().expect("addr");
+        let app = Router::new().route(
+            "/start",
+            get(move || async move {
+                Response::builder()
+                    .status(StatusCode::FOUND)
+                    .header(
+                        header::LOCATION,
+                        format!("http://127.0.0.1:{}/private", addr.port()),
+                    )
+                    .body(Body::empty())
+                    .expect("redirect response")
+            }),
+        );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("test server should run");
+        });
+
+        let host = "redirect-to-private.test";
+        let state = sample_state_for_port(addr.port());
+        cache_test_host(&state, host, addr).await;
+        let server_ctx = sample_server(&state);
+        let (frame_tx, sent, writer_handle) = spawn_test_writer();
+        let (_body_tx, body_rx) = mpsc::channel(1);
+        let mut meta = sample_request_meta();
+        meta.url = format!("http://{host}:{}/start", addr.port());
+        meta.follow_redirects = Some(true);
+
+        handle_stream(
+            Arc::clone(&state),
+            server_ctx,
+            19,
+            meta,
+            body_rx,
+            frame_tx.clone(),
+            test_response_window(),
+        )
+        .await;
+        let result = collect_stream_result(frame_tx, sent, writer_handle).await;
+        server.abort();
+
+        assert!(result.error.is_none());
+        let response = result.response.expect("redirect response metadata");
+        assert_eq!(response.status, 302);
+        assert_eq!(
+            response
+                .headers
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("location"))
+                .map(|(_, value)| value.as_str()),
+            Some(format!("http://127.0.0.1:{}/private", addr.port()).as_str())
+        );
+    }
+
+    #[tokio::test]
     async fn preserves_redirect_response_when_follow_redirects_disabled() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -2571,7 +3611,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn follows_307_redirect_for_fragmented_body_larger_than_legacy_replay_budget() {
+    async fn preserves_307_after_replay_budget_without_truncating_first_request() {
         const BODY_LEN: usize = 5 * 1024 * 1024 + 1;
         const REQUEST_FRAME_BYTES: usize = 32 * 1024;
 
@@ -2610,10 +3650,9 @@ mod tests {
                 .expect("test server should run");
         });
 
-        let host = "redirect-unlimited.test";
+        let host = "redirect-over-budget.test";
         let mut config = sample_config();
         config.allowed_ports.push(addr.port());
-        config.legacy_redirect_replay_budget_bytes_ignored = Some("1".to_string());
         let state = sample_state_with_config(config);
         cache_test_host(&state, host, addr).await;
         let server_ctx = sample_server(&state);
@@ -2665,8 +3704,16 @@ mod tests {
             result.error
         );
         let response = result.response.expect("response metadata");
-        assert_eq!(response.status, 200);
-        assert_eq!(result.body, Bytes::from_static(b"redirected"));
+        assert_eq!(response.status, 307);
+        assert_eq!(
+            response
+                .headers
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("location"))
+                .map(|(_, value)| value.as_str()),
+            Some("/final")
+        );
+        assert!(result.body.is_empty());
     }
 
     #[tokio::test]
@@ -2828,6 +3875,7 @@ mod tests {
             tunnel_encryption_key: config.tunnel_encryption_key.clone(),
             node_name: config.node_name.clone(),
             node_id: Arc::new(std::sync::RwLock::new("node-1".to_string())),
+            tunnel_generation: "test-generation-1".to_string(),
             aether_client: Arc::new(AetherClient::new(
                 &config,
                 &config.aether_url,
@@ -2881,6 +3929,7 @@ mod tests {
             upstream_tcp_keepalive_secs: 60,
             upstream_tcp_nodelay: true,
             upstream_proxy_url: None,
+            upstream_proxy_remote_dns: false,
             legacy_redirect_replay_budget_bytes_ignored: None,
             emit_proxy_timing_header: true,
             log_level: "info".to_string(),
@@ -3004,13 +4053,21 @@ mod tests {
         for frame in collect_emitted_frames(frame_tx, sent, writer_handle).await {
             match frame.msg_type {
                 MsgType::ResponseHeaders => {
-                    let payload = decompress_if_gzip(&frame).expect("headers payload");
+                    let payload = decompress_if_gzip_with_limit(
+                        &frame,
+                        aether_contracts::tunnel::MAX_TUNNEL_RELAY_META_LEN,
+                    )
+                    .expect("headers payload");
                     response = Some(
                         serde_json::from_slice(&payload).expect("response metadata should decode"),
                     );
                 }
                 MsgType::ResponseBody => {
-                    let payload = decompress_if_gzip(&frame).expect("body payload");
+                    let payload = decompress_if_gzip_with_limit(
+                        &frame,
+                        aether_contracts::tunnel::MAX_TUNNEL_DECOMPRESSED_PAYLOAD_BYTES,
+                    )
+                    .expect("body payload");
                     body.extend_from_slice(&payload);
                 }
                 MsgType::StreamError => {

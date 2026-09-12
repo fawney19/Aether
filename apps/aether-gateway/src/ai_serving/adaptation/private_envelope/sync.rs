@@ -1,3 +1,4 @@
+use aether_usage_runtime::decode_internal_report_body_base64;
 use base64::Engine as _;
 use serde_json::Value;
 
@@ -43,9 +44,8 @@ pub(crate) fn maybe_normalize_provider_private_sync_report_payload(
     }
 
     if let Some(body_base64) = payload.body_base64.as_deref() {
-        let body_bytes = base64::engine::general_purpose::STANDARD
-            .decode(body_base64)
-            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        let body_bytes =
+            decode_internal_report_body_base64(body_base64).map_err(GatewayError::Internal)?;
         let Some(normalized_bytes) =
             normalize_provider_private_stream_bytes(report_context, &body_bytes)?
         else {

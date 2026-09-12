@@ -4,9 +4,12 @@ use serde_json::{json, Value};
 use sha2::Sha256;
 
 use super::{
-    build_auth_error_response, build_auth_json_response,
-    handle_payment_callback_input_with_wallet_repository,
-    payment_shared::payment_callback_payload_hash, AppState, GatewayPublicRequestContext,
+    build_auth_error_response, handle_payment_callback_input_with_wallet_repository,
+    payment_shared::{
+        payment_callback_namespaced_key, payment_callback_payload_hash,
+        payment_callback_success_response,
+    },
+    AppState, GatewayPublicRequestContext,
 };
 
 const STRIPE_SIGNATURE_HEADER: &str = "stripe-signature";
@@ -21,12 +24,12 @@ fn decrypt_gateway_secrets(
     let Some(encrypted) = record.merchant_key_encrypted.as_deref() else {
         return Err("Stripe webhook_secret 未配置".to_string());
     };
-    let Some(plaintext) = crate::handlers::shared::decrypt_catalog_secret_with_fallbacks(
-        state.encryption_key(),
-        encrypted,
-    ) else {
-        return Err("Stripe 密钥解密失败".to_string());
-    };
+    let binding = crate::handlers::shared::PaymentGatewaySecretBinding::from_record(record)
+        .map_err(|_| "Stripe 密钥绑定无效".to_string())?;
+    let plaintext =
+        crate::handlers::shared::open_payment_gateway_secret(state, &binding, encrypted)
+            .map_err(|_| "Stripe 密钥解密失败".to_string())?
+            .plaintext;
     serde_json::from_str::<Value>(&plaintext)
         .ok()
         .and_then(|value| value.as_object().cloned())
@@ -46,13 +49,10 @@ async fn stripe_webhook_secret(state: &AppState) -> Result<String, String> {
     let Some(record) = state
         .find_payment_gateway_config("stripe")
         .await
-        .map_err(|err| format!("Stripe 配置读取失败: {err:?}"))?
+        .map_err(|_| "Stripe 配置读取失败".to_string())?
     else {
         return Err("Stripe 未配置".to_string());
     };
-    if !record.enabled {
-        return Err("Stripe 未启用".to_string());
-    }
     let secrets = decrypt_gateway_secrets(state, &record)?;
     gateway_secret_string(&secrets, "webhook_secret")
         .ok_or_else(|| "Stripe webhook_secret 未配置".to_string())
@@ -105,7 +105,7 @@ fn stripe_signature_matches_at(
     if signatures.is_empty() {
         return Ok(false);
     }
-    if (now_unix_secs - timestamp).abs() > STRIPE_SIGNATURE_TOLERANCE_SECONDS {
+    if now_unix_secs.abs_diff(timestamp) > STRIPE_SIGNATURE_TOLERANCE_SECONDS as u64 {
         return Ok(false);
     }
 
@@ -114,7 +114,7 @@ fn stripe_signature_matches_at(
             continue;
         };
         let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
-            .map_err(|err| format!("Stripe webhook HMAC 初始化失败: {err}"))?;
+            .map_err(|_| "Stripe webhook HMAC 初始化失败".to_string())?;
         mac.update(timestamp.to_string().as_bytes());
         mac.update(b".");
         mac.update(body);
@@ -123,18 +123,6 @@ fn stripe_signature_matches_at(
         }
     }
     Ok(false)
-}
-
-fn stripe_amount_multiplier(currency: &str) -> f64 {
-    match currency.trim().to_ascii_lowercase().as_str() {
-        "bif" | "clp" | "djf" | "gnf" | "jpy" | "kmf" | "krw" | "mga" | "pyg" | "rwf" | "ugx"
-        | "vnd" | "vuv" | "xaf" | "xof" | "xpf" => 1.0,
-        _ => 100.0,
-    }
-}
-
-fn stripe_amount_to_major(amount_minor: i64, currency: &str) -> f64 {
-    amount_minor as f64 / stripe_amount_multiplier(currency)
 }
 
 fn stripe_string_field<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
@@ -157,6 +145,27 @@ fn stripe_payment_intent_channel(intent: &Value) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+fn stripe_callback_projection(
+    event: &Value,
+    intent_id: &str,
+    order_no: &str,
+    pay_amount: f64,
+    currency: &str,
+    payment_channel: Option<&str>,
+) -> Value {
+    json!({
+        "gateway": "stripe",
+        "event_id": stripe_string_field(event, "id"),
+        "gateway_order_id": intent_id,
+        "order_no": order_no,
+        "amount": pay_amount,
+        "currency": currency,
+        "payment_channel": payment_channel,
+        "status": "success",
+        "signature_valid": true,
+    })
+}
+
 async fn build_stripe_callback_input(
     state: &AppState,
     event: Value,
@@ -173,6 +182,9 @@ async fn build_stripe_callback_input(
         .get("data")
         .and_then(|value| value.get("object"))
         .ok_or_else(|| "Stripe 事件缺少 PaymentIntent".to_string())?;
+    if stripe_string_field(intent, "status") != Some("succeeded") {
+        return Err("Stripe PaymentIntent 不是成功状态".to_string());
+    }
     let intent_id = stripe_string_field(intent, "id")
         .ok_or_else(|| "Stripe PaymentIntent 缺少 id".to_string())?
         .to_string();
@@ -187,43 +199,51 @@ async fn build_stripe_callback_input(
     let Some(order_no) = order_no else {
         return Err("Stripe PaymentIntent 缺少 metadata.order_no".to_string());
     };
-    let currency = stripe_string_field(intent, "currency")
-        .unwrap_or("usd")
-        .to_ascii_uppercase();
+    let currency = crate::handlers::shared::normalize_payment_currency(
+        stripe_string_field(intent, "currency")
+            .ok_or_else(|| "Stripe PaymentIntent 缺少 currency".to_string())?,
+        "Stripe PaymentIntent currency",
+    )
+    .map_err(|_| "Stripe PaymentIntent 币种无效".to_string())?;
     let amount_minor = intent
         .get("amount_received")
         .or_else(|| intent.get("amount"))
         .and_then(Value::as_i64)
         .filter(|value| *value > 0)
         .ok_or_else(|| "Stripe PaymentIntent 金额无效".to_string())?;
-    let pay_amount = stripe_amount_to_major(amount_minor, &currency);
+    let pay_amount = crate::handlers::shared::stripe_amount_to_major(amount_minor, &currency);
 
-    let record = state
-        .find_payment_gateway_config("stripe")
-        .await
-        .map_err(|err| format!("Stripe 配置读取失败: {err:?}"))?
-        .ok_or_else(|| "Stripe 未配置".to_string())?;
-    let exchange_rate = record.usd_exchange_rate;
-    let amount_usd = if exchange_rate > 0.0 {
-        pay_amount / exchange_rate
-    } else {
-        pay_amount
-    };
+    let order = crate::handlers::shared::find_payment_callback_order(state, &order_no).await?;
+    let (amount_usd, exchange_rate) = crate::handlers::shared::payment_callback_settlement_values(
+        order.as_ref(),
+        pay_amount,
+        None,
+    )?;
+    let payment_channel = stripe_payment_intent_channel(intent)
+        .ok_or_else(|| "Stripe PaymentIntent 缺少 payment_method_types".to_string())?;
     let payload_hash = payment_callback_payload_hash(&event)?;
+    let payload = stripe_callback_projection(
+        &event,
+        &intent_id,
+        &order_no,
+        pay_amount,
+        &currency,
+        Some(&payment_channel),
+    );
     Ok(Some(
         aether_data::repository::wallet::ProcessPaymentCallbackInput {
             payment_method: "stripe".to_string(),
             payment_provider: Some("stripe".to_string()),
-            payment_channel: stripe_payment_intent_channel(intent),
-            callback_key: event_id,
+            payment_channel: Some(payment_channel),
+            callback_key: payment_callback_namespaced_key("stripe", &event_id),
             order_no: Some(order_no),
             gateway_order_id: Some(intent_id),
             amount_usd,
             pay_amount: Some(pay_amount),
             pay_currency: Some(currency),
-            exchange_rate: Some(exchange_rate),
+            exchange_rate,
             payload_hash,
-            payload: event,
+            payload,
             signature_valid: true,
         },
     ))
@@ -283,13 +303,7 @@ pub(super) async fn handle_stripe_webhook(
     };
     let input = match build_stripe_callback_input(state, event).await {
         Ok(Some(value)) => value,
-        Ok(None) => {
-            return build_auth_json_response(
-                http::StatusCode::OK,
-                json!({ "ok": true, "ignored": true, "payment_method": "stripe" }),
-                None,
-            )
-        }
+        Ok(None) => return payment_callback_success_response(),
         Err(detail) => {
             return build_auth_error_response(http::StatusCode::BAD_REQUEST, detail, false)
         }
@@ -300,8 +314,10 @@ pub(super) async fn handle_stripe_webhook(
 
 #[cfg(test)]
 mod tests {
-    use super::{stripe_amount_to_major, stripe_signature_matches_at};
+    use super::{stripe_callback_projection, stripe_signature_matches_at};
+    use crate::handlers::shared::stripe_amount_to_major;
     use hmac::{Hmac, Mac};
+    use serde_json::json;
     use sha2::Sha256;
 
     #[test]
@@ -329,11 +345,53 @@ mod tests {
             !stripe_signature_matches_at("wrong", &header, body, timestamp)
                 .expect("signature check should run")
         );
+        assert!(!stripe_signature_matches_at(
+            secret,
+            "t=-9223372036854775808,v1=00",
+            body,
+            i64::MAX,
+        )
+        .expect("extreme timestamp should be rejected without overflow"));
     }
 
     #[test]
-    fn stripe_amount_handles_zero_decimal_currencies() {
+    fn stripe_callback_amount_handles_zero_and_two_decimal_currencies() {
         assert_eq!(stripe_amount_to_major(1234, "usd"), 12.34);
         assert_eq!(stripe_amount_to_major(1234, "jpy"), 1234.0);
+    }
+
+    #[test]
+    fn stripe_callback_projection_does_not_persist_raw_customer_or_secret_fields() {
+        let event = json!({
+            "id": "evt_1",
+            "account": "acct_connected",
+            "data": {
+                "object": {
+                    "client_secret": "pi_1_secret_replayable",
+                    "receipt_email": "payer@example.com",
+                    "shipping": {"address": {"line1": "private address"}}
+                }
+            }
+        });
+
+        let projection =
+            stripe_callback_projection(&event, "pi_1", "po_1", 12.34, "USD", Some("card"));
+        assert_eq!(projection["event_id"], "evt_1");
+        assert_eq!(projection["gateway_order_id"], "pi_1");
+        assert_eq!(projection["order_no"], "po_1");
+        assert_eq!(projection["payment_channel"], "card");
+
+        let encoded = projection.to_string();
+        for forbidden in [
+            "client_secret",
+            "replayable",
+            "receipt_email",
+            "payer@example.com",
+            "shipping",
+            "private address",
+            "acct_connected",
+        ] {
+            assert!(!encoded.contains(forbidden), "persisted {forbidden}");
+        }
     }
 }

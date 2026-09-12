@@ -223,3 +223,69 @@ async fn gateway_tests_admin_ldap_connection_locally_with_trusted_admin_principa
     gateway_handle.abort();
     upstream_handle.abort();
 }
+
+#[tokio::test]
+async fn gateway_rejects_ldap_filter_and_attribute_injection_on_admin_update() {
+    let auth_module_repository = Arc::new(InMemoryAuthModuleReadRepository::seed(
+        Vec::<StoredOAuthProviderModuleConfig>::new(),
+        Some(sample_ldap_module_config()),
+    ));
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(GatewayDataState::with_auth_module_repository_for_tests(
+                auth_module_repository,
+            )),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+    let client = reqwest::Client::new();
+
+    for (search_filter, username_attr, expected_detail) in [
+        (
+            "(uid={username})(objectClass=*)",
+            "uid",
+            "搜索过滤器格式无效",
+        ),
+        (
+            "(uid={username})",
+            "uid)(|(objectClass=*)",
+            "用户名属性必须是有效的 LDAP 属性名称",
+        ),
+    ] {
+        let response = client
+            .put(format!("{gateway_url}/api/admin/ldap/config"))
+            .header(GATEWAY_HEADER, "rust-phase3b")
+            .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+            .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+            .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+            .json(&json!({
+                "server_url": "mockldap://ldap.internal.example.com",
+                "bind_dn": "cn=svc,dc=example,dc=com",
+                "bind_password": "secret123",
+                "base_dn": "ou=people,dc=example,dc=com",
+                "user_search_filter": search_filter,
+                "username_attr": username_attr,
+                "email_attr": "mail",
+                "display_name_attr": "cn",
+                "is_enabled": true,
+                "is_exclusive": false,
+                "use_starttls": false,
+                "connect_timeout": 20
+            }))
+            .send()
+            .await
+            .expect("invalid LDAP update should complete locally");
+
+        let status = response.status();
+        let payload: serde_json::Value = response.json().await.expect("json body should parse");
+        assert_eq!(status, StatusCode::BAD_REQUEST, "payload={payload}");
+        assert!(
+            payload["detail"]
+                .as_str()
+                .is_some_and(|detail| detail.contains(expected_detail)),
+            "payload={payload}"
+        );
+    }
+
+    gateway_handle.abort();
+}

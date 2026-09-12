@@ -232,6 +232,7 @@ function updateLeafField(field: keyof EditableConditionLeaf, rawValue: string): 
     next.source = rawValue as ConditionSource
   } else if (field === 'path' || field === 'value') {
     next[field] = rawValue
+    if (field === 'value') next.retainValue = false
   }
 
   emit('update:modelValue', next)

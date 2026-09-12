@@ -53,8 +53,13 @@ fn build_command() -> clap::Command {
         .subcommand_negates_reqs(true)
 }
 
+fn main() -> anyhow::Result<()> {
+    let _log_shutdown = aether_runtime::LogShutdownGuard::new();
+    run()
+}
+
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn run() -> anyhow::Result<()> {
     rustls::crypto::ring::default_provider()
         .install_default()
         .map_err(|_| anyhow::anyhow!("Failed to install rustls CryptoProvider"))?;
@@ -226,7 +231,7 @@ mod tests {
         let (config, tunnel_security) = parse_config_and_security(&[
             "aether-tunnel",
             "--aether-url",
-            "http://example.com",
+            "http://127.0.0.1:8084",
             "--management-token",
             "ae_test",
             "--node-name",
@@ -252,7 +257,7 @@ mod tests {
         let (config, tunnel_security) = parse_config_and_security(&[
             "aether-tunnel",
             "--aether-url",
-            "http://example.com",
+            "http://127.0.0.1:8084",
             "--management-token",
             "ae_test",
             "--node-name",

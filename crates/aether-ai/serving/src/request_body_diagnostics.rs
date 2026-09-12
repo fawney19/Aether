@@ -224,6 +224,7 @@ fn diagnostic_from_format_error(
         format_error_path(error),
         format_error_message(error, client_api_format, provider_api_format),
     )
+    .details(error.diagnostic())
 }
 
 fn format_error_path(error: &FormatError) -> String {
@@ -982,6 +983,23 @@ mod tests {
             "request_conversion"
         );
         assert_eq!(diagnostic["failure_diagnostic"]["path"], "$.n");
+        assert_eq!(diagnostic["failure_diagnostic"]["stage"], "request");
+        assert_eq!(
+            diagnostic["failure_diagnostic"]["details"]["code"],
+            "lossy_conversion_blocked"
+        );
+        assert_eq!(
+            diagnostic["failure_diagnostic"]["details"]["path_source"],
+            "structured"
+        );
+        assert_eq!(
+            diagnostic["failure_diagnostic"]["source_format"],
+            "openai:chat"
+        );
+        assert_eq!(
+            diagnostic["failure_diagnostic"]["target_format"],
+            "openai:responses"
+        );
         assert_eq!(diagnostic["request_conversion_error"]["path"], "$.n");
         assert!(diagnostic["failure_diagnostic"]["message"]
             .as_str()

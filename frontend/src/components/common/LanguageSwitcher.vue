@@ -2,7 +2,7 @@
   <DropdownMenu>
     <DropdownMenuTrigger as-child>
       <button
-        class="flex h-9 w-9 items-center justify-center rounded-lg text-muted-foreground transition hover:bg-muted/50 hover:text-foreground"
+        class="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition hover:bg-muted/50 hover:text-foreground"
         :aria-label="t('common.language')"
         :title="t('common.language')"
         type="button"
@@ -18,12 +18,13 @@
         v-for="option in options"
         :key="option.value"
         class="justify-between gap-3"
+        :lang="option.value"
         @select="setLocale(option.value)"
       >
         <span>{{ option.label }}</span>
         <Check
           v-if="locale === option.value"
-          class="h-4 w-4 text-primary"
+          class="h-4 w-4 shrink-0 text-primary"
         />
       </DropdownMenuItem>
     </DropdownMenuContent>

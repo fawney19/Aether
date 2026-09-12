@@ -13,6 +13,7 @@ export interface RoutingGroupRecord {
   description?: string | null
   enabled: boolean
   is_system_default: boolean
+  sort_order: number
   config_json: RoutingGroupConfig
   version: number
   created_at: number
@@ -61,6 +62,7 @@ export interface RoutingGroupCreateRequest {
   description?: string | null
   enabled?: boolean
   is_system_default?: boolean
+  sort_order?: number
   config_json?: RoutingGroupConfig
 }
 
@@ -69,6 +71,7 @@ export interface RoutingGroupUpdateRequest {
   description?: string | null
   enabled?: boolean
   is_system_default?: boolean
+  sort_order?: number
   config_json?: RoutingGroupConfig
   version?: number
   published_at?: number | null

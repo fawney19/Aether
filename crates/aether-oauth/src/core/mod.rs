@@ -4,7 +4,7 @@ mod pkce;
 mod registry;
 mod token;
 
-pub use error::OAuthError;
+pub use error::{redacted_oauth_error_body_excerpt, OAuthError};
 pub use flow::{
     OAuthAuthorizeRequest, OAuthAuthorizeResponse, OAuthCallback, OAuthDeviceAuthorization,
     OAuthProviderMetadata,

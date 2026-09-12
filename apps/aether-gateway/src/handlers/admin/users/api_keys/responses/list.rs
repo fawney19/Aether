@@ -56,7 +56,7 @@ pub(crate) async fn build_admin_list_user_api_keys_response(
             json!({
                 "id": record.api_key_id,
                 "name": record.name,
-                "key_display": masked_user_api_key_display(state, record.key_encrypted.as_deref()),
+                "key_display": masked_user_api_key_display(state, &record),
                 "is_active": record.is_active,
                 "is_locked": is_locked,
                 "total_requests": record.total_requests,

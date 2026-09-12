@@ -15,6 +15,17 @@ describe('request cache invalidation', () => {
     cache.clear()
   })
 
+  it('releases a synchronously rejected request so a retry can fetch again', async () => {
+    const fetcher = vi.fn<() => Promise<string>>()
+      .mockImplementationOnce(() => { throw new Error('synchronous failure') })
+      .mockResolvedValueOnce('recovered')
+
+    await expect(cachedRequest('retry', fetcher, 30_000)).rejects.toThrow('synchronous failure')
+    expect(cache.getInFlight('retry')).toBeNull()
+    await expect(cachedRequest('retry', fetcher, 30_000)).resolves.toBe('recovered')
+    expect(fetcher).toHaveBeenCalledTimes(2)
+  })
+
   it('does not let an invalidated request overwrite a newer in-flight request', async () => {
     const oldResponse = deferred<string>()
     const newResponse = deferred<string>()

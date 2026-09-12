@@ -1,6 +1,0 @@
-001_identity.sql
-002_provider_catalog.sql
-003_auth_config.sql
-004_proxy_nodes.sql
-005_wallet_billing.sql
-006_usage.sql

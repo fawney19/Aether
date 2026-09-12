@@ -40,7 +40,7 @@ pub(crate) enum UpstreamProxyScheme {
     Socks5h,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) struct UpstreamProxyConfig {
     raw: String,
     scheme: UpstreamProxyScheme,
@@ -48,6 +48,20 @@ pub(crate) struct UpstreamProxyConfig {
     port: u16,
     username: Option<String>,
     password: Option<String>,
+}
+
+impl std::fmt::Debug for UpstreamProxyConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("UpstreamProxyConfig")
+            .field("url", &self.redacted_url())
+            .field("scheme", &self.scheme)
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("username", &self.username.as_ref().map(|_| "[REDACTED]"))
+            .field("password", &self.password.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
 }
 
 impl UpstreamProxyConfig {
@@ -75,6 +89,18 @@ impl UpstreamProxyConfig {
             .filter(|value| !value.is_empty())
             .ok_or_else(|| "upstream proxy URL must include a host".to_string())?
             .to_string();
+        // A proxy URL identifies the proxy origin.  Path/query/fragment
+        // components are not part of HTTP CONNECT or SOCKS negotiation and
+        // silently ignoring them can make the configured endpoint differ
+        // from what operators see in configuration and logs.
+        if !matches!(parsed.path(), "" | "/")
+            || parsed.query().is_some()
+            || parsed.fragment().is_some()
+        {
+            return Err(
+                "upstream proxy URL must be an origin without path, query, or fragment".to_string(),
+            );
+        }
         let port = parsed.port().unwrap_or(match scheme {
             UpstreamProxyScheme::Http => 80,
             UpstreamProxyScheme::Socks5 | UpstreamProxyScheme::Socks5h => 1080,
@@ -114,6 +140,13 @@ impl UpstreamProxyConfig {
 
     pub(crate) fn uses_remote_dns(&self) -> bool {
         self.scheme == UpstreamProxyScheme::Socks5h
+    }
+
+    pub(crate) fn supports_remote_target_dns(&self) -> bool {
+        matches!(
+            self.scheme,
+            UpstreamProxyScheme::Http | UpstreamProxyScheme::Socks5h
+        )
     }
 
     pub(crate) fn basic_auth_header(&self) -> Option<String> {
@@ -181,6 +214,38 @@ pub(crate) async fn connect_target_via_proxy(
     Ok(tcp)
 }
 
+pub(crate) async fn connect_validated_target_via_proxy(
+    proxy: &UpstreamProxyConfig,
+    target_addr: SocketAddr,
+    options: ProxyConnectOptions,
+) -> io::Result<TcpStream> {
+    let mut tcp = connect_proxy_tcp(
+        proxy,
+        options.connect_timeout,
+        options.tcp_nodelay,
+        options.tcp_keepalive,
+        options.ip_family,
+    )
+    .await?;
+
+    match proxy.scheme() {
+        UpstreamProxyScheme::Http => {
+            http_connect(&mut tcp, &target_addr.to_string(), proxy).await?;
+        }
+        UpstreamProxyScheme::Socks5 | UpstreamProxyScheme::Socks5h => {
+            socks5_connect(
+                &mut tcp,
+                proxy,
+                &target_addr.ip().to_string(),
+                target_addr.port(),
+            )
+            .await?;
+        }
+    }
+
+    Ok(tcp)
+}
+
 pub(crate) async fn connect_proxy_tcp(
     proxy: &UpstreamProxyConfig,
     connect_timeout: Duration,
@@ -188,16 +253,19 @@ pub(crate) async fn connect_proxy_tcp(
     tcp_keepalive: Option<Duration>,
     ip_family: IpFamily,
 ) -> io::Result<TcpStream> {
-    let resolved = tokio::time::timeout(
-        connect_timeout,
-        tokio::net::lookup_host((proxy.host(), proxy.port())),
-    )
-    .await
-    .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "proxy DNS timeout"))?
-    .map_err(|err| io::Error::other(format!("proxy DNS failed: {err}")))?;
+    let resolved =
+        aether_http::lookup_host_with_limits(proxy.host(), proxy.port(), connect_timeout)
+            .await
+            .map_err(|err| {
+                if err.kind() == io::ErrorKind::TimedOut {
+                    io::Error::new(io::ErrorKind::TimedOut, "proxy DNS timeout")
+                } else {
+                    io::Error::other(format!("proxy DNS failed: {err}"))
+                }
+            })?;
 
     let mut last_error = None;
-    for addr in resolved.filter(|addr| ip_family.allows(*addr)) {
+    for addr in resolved.into_iter().filter(|addr| ip_family.allows(*addr)) {
         match tokio::time::timeout(connect_timeout, TcpStream::connect(addr)).await {
             Ok(Ok(stream)) => {
                 configure_tcp_stream(&stream, tcp_nodelay, tcp_keepalive)?;
@@ -384,7 +452,7 @@ pub(crate) async fn socks5_target_address(
     remote_dns: bool,
 ) -> io::Result<Vec<u8>> {
     let mut request = vec![0x05, 0x01, 0x00];
-    if let Ok(ip) = target_host.parse::<IpAddr>() {
+    if let Some(ip) = aether_http::parse_ip_literal_host(target_host) {
         push_socks5_ip_address(&mut request, ip);
     } else if remote_dns {
         let host = target_host.as_bytes();
@@ -395,12 +463,16 @@ pub(crate) async fn socks5_target_address(
         request.push(host.len() as u8);
         request.extend_from_slice(host);
     } else {
-        let mut resolved = tokio::net::lookup_host((target_host, target_port))
-            .await
-            .map_err(|err| io::Error::other(format!("SOCKS5 target DNS failed: {err}")))?;
-        let addr = resolved
-            .next()
-            .ok_or_else(|| io::Error::other("SOCKS5 target DNS returned no addresses"))?;
+        let addr = aether_http::lookup_host_with_limits(
+            target_host,
+            target_port,
+            aether_http::DEFAULT_DNS_LOOKUP_TIMEOUT,
+        )
+        .await
+        .map_err(|err| io::Error::other(format!("SOCKS5 target DNS failed: {err}")))?
+        .into_iter()
+        .next()
+        .ok_or_else(|| io::Error::other("SOCKS5 target DNS returned no addresses"))?;
         push_socks5_socket_address(&mut request, addr);
     }
     request.extend_from_slice(&target_port.to_be_bytes());
@@ -459,6 +531,19 @@ fn non_empty_url_part(value: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn socks_proxy_encodes_bracketed_ipv6_as_an_ip_for_both_dns_modes() {
+        for remote_dns in [false, true] {
+            let expected = socks5_target_address("::1", 443, remote_dns).await.unwrap();
+            let actual = socks5_target_address("[::1]", 443, remote_dns)
+                .await
+                .unwrap();
+            assert_eq!(actual, expected);
+            assert_eq!(&actual[..4], &[5, 1, 0, 4]);
+            assert_eq!(&actual[20..], &443u16.to_be_bytes());
+        }
+    }
+
     #[test]
     fn parses_http_proxy_with_default_port() {
         let proxy = UpstreamProxyConfig::parse("http://proxy.example").expect("proxy should parse");
@@ -481,6 +566,13 @@ mod tests {
             proxy.basic_auth_header().as_deref(),
             Some("Basic dXNlcjpwYXNz")
         );
+
+        let debug = format!("{proxy:?}");
+        assert!(!debug.contains("user:pass"));
+        assert!(!debug.contains("Some(\"user\")"));
+        assert!(!debug.contains("Some(\"pass\")"));
+        assert!(!debug.contains("dXNlcjpwYXNz"));
+        assert!(debug.contains("[REDACTED]"));
     }
 
     #[test]
@@ -489,5 +581,25 @@ mod tests {
             .expect_err("https proxy scheme should be rejected");
 
         assert!(error.contains("unsupported upstream proxy scheme"));
+    }
+
+    #[test]
+    fn rejects_proxy_urls_with_non_origin_components() {
+        for value in [
+            "http://proxy.example/path",
+            "http://proxy.example?token=secret",
+            "socks5://proxy.example#fragment",
+        ] {
+            let error = UpstreamProxyConfig::parse(value)
+                .expect_err("proxy URL with non-origin components should be rejected");
+            assert!(
+                error.contains("without path, query, or fragment"),
+                "unexpected error for {value}: {error}"
+            );
+        }
+
+        for value in ["http://proxy.example", "http://proxy.example/"] {
+            UpstreamProxyConfig::parse(value).expect("root proxy origin should be accepted");
+        }
     }
 }

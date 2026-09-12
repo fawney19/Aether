@@ -13,6 +13,19 @@ use aether_data::repository::announcements::{
 use crate::handlers::shared::{query_param_optional_bool, query_param_value};
 use crate::GatewayError;
 
+pub(super) fn announcement_is_public_at(
+    announcement: &StoredAnnouncement,
+    now_unix_secs: u64,
+) -> bool {
+    announcement.is_active
+        && announcement
+            .start_time_unix_secs
+            .is_none_or(|value| value <= now_unix_secs)
+        && announcement
+            .end_time_unix_secs
+            .is_none_or(|value| value >= now_unix_secs)
+}
+
 pub(super) fn parse_public_announcements_query(
     query: Option<&str>,
     default_active_only: bool,
@@ -128,9 +141,10 @@ pub(super) fn announcements_not_found_response() -> Response<Body> {
 }
 
 pub(super) fn announcements_internal_error_response(detail: impl Into<String>) -> Response<Body> {
+    let _ = detail.into();
     (
         http::StatusCode::INTERNAL_SERVER_ERROR,
-        Json(json!({ "detail": detail.into() })),
+        Json(json!({ "detail": "Service temporarily unavailable" })),
     )
         .into_response()
 }

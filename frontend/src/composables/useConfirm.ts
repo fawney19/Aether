@@ -1,4 +1,4 @@
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import { getI18nLocale } from '@/i18n'
 import { translateLegacyText } from '@/i18n/messages'
 
@@ -40,10 +40,10 @@ export function useConfirm() {
     return new Promise((resolve) => {
       state.value = {
         isOpen: true,
-        title: localizeConfirmText(options.title || '确认操作'),
-        message: localizeConfirmText(options.message),
-        confirmText: localizeConfirmText(options.confirmText || '确认'),
-        cancelText: localizeConfirmText(options.cancelText || '取消'),
+        title: options.title || '确认操作',
+        message: options.message,
+        confirmText: options.confirmText || '确认',
+        cancelText: options.cancelText || '取消',
         variant: options.variant || 'question',
         resolve
       }
@@ -107,7 +107,13 @@ export function useConfirm() {
   }
 
   return {
-    state,
+    state: computed(() => ({
+      ...state.value,
+      title: localizeConfirmText(state.value.title || '确认操作'),
+      message: localizeConfirmText(state.value.message),
+      confirmText: localizeConfirmText(state.value.confirmText || '确认'),
+      cancelText: localizeConfirmText(state.value.cancelText || '取消'),
+    })),
     confirm,
     confirmDanger,
     confirmWarning,

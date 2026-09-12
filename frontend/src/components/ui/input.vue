@@ -59,6 +59,7 @@
 </template>
 
 <script setup lang="ts">
+import type { ClassValue } from 'clsx'
 import { computed, useAttrs, ref } from 'vue'
 import { Eye, EyeOff } from 'lucide-vue-next'
 import { cn } from '@/lib/utils'
@@ -70,8 +71,8 @@ const emit = defineEmits<{
 }>()
 
 interface Props {
-  modelValue?: string | number
-  class?: string
+  modelValue?: string | number | null
+  class?: ClassValue
   autocomplete?: string
   /**
    * 输入框尺寸

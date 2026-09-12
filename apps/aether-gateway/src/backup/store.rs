@@ -2,23 +2,45 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use futures_util::TryStreamExt;
 use object_store::aws::AmazonS3Builder;
 use object_store::path::Path;
-use object_store::{ClientOptions, ObjectStore};
+use object_store::{ClientOptions, ObjectStore, ObjectStoreExt, PutMode, PutOptions};
 use reqwest::header::HeaderValue;
 use tokio::sync::RwLock;
 
 use super::config::S3BackupConfig;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BackupObjectCreateResult {
+    Created,
+    AlreadyExists,
+}
+
 #[async_trait::async_trait]
 pub(crate) trait BackupObjectStore: Send + Sync {
     async fn put_object(&self, key: &str, bytes: Bytes) -> Result<(), BackupStoreError>;
 
-    async fn list_keys(&self, prefix: &str) -> Result<Vec<String>, BackupStoreError>;
+    async fn put_object_if_absent(
+        &self,
+        key: &str,
+        bytes: Bytes,
+    ) -> Result<BackupObjectCreateResult, BackupStoreError>;
+
+    async fn get_object_limited(
+        &self,
+        key: &str,
+        max_bytes: usize,
+    ) -> Result<Bytes, BackupStoreError>;
 
     async fn delete_object(&self, key: &str) -> Result<(), BackupStoreError>;
+
+    async fn list_keys_limited(
+        &self,
+        prefix: &str,
+        max_objects: usize,
+    ) -> Result<Vec<String>, BackupStoreError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,21 +82,72 @@ impl BackupObjectStore for FakeBackupObjectStore {
         Ok(())
     }
 
-    async fn list_keys(&self, prefix: &str) -> Result<Vec<String>, BackupStoreError> {
+    async fn put_object_if_absent(
+        &self,
+        key: &str,
+        bytes: Bytes,
+    ) -> Result<BackupObjectCreateResult, BackupStoreError> {
+        let mut objects = self.objects.write().await;
+        if objects.contains_key(key) {
+            Ok(BackupObjectCreateResult::AlreadyExists)
+        } else {
+            objects.insert(key.to_string(), bytes);
+            Ok(BackupObjectCreateResult::Created)
+        }
+    }
+
+    async fn get_object_limited(
+        &self,
+        key: &str,
+        max_bytes: usize,
+    ) -> Result<Bytes, BackupStoreError> {
+        let bytes = self
+            .objects
+            .read()
+            .await
+            .get(key)
+            .cloned()
+            .ok_or_else(|| BackupStoreError::new(format!("backup object `{key}` not found")))?;
+        if bytes.len() > max_bytes {
+            return Err(BackupStoreError::new(format!(
+                "backup object `{key}` exceeds the configured {max_bytes} byte read limit"
+            )));
+        }
+        Ok(bytes)
+    }
+
+    async fn delete_object(&self, key: &str) -> Result<(), BackupStoreError> {
+        self.objects.write().await.remove(key);
+        Ok(())
+    }
+
+    async fn list_keys_limited(
+        &self,
+        prefix: &str,
+        max_objects: usize,
+    ) -> Result<Vec<String>, BackupStoreError> {
         let prefix = directory_list_prefix(prefix);
-        Ok(self
+        let keys: Vec<_> = self
             .objects
             .read()
             .await
             .keys()
             .filter(|key| key.starts_with(&prefix))
             .cloned()
-            .collect())
+            .collect();
+        if keys.len() > max_objects {
+            return Err(BackupStoreError::new(format!(
+                "backup object listing exceeds the configured {max_objects} object limit"
+            )));
+        }
+        Ok(keys)
     }
+}
 
-    async fn delete_object(&self, key: &str) -> Result<(), BackupStoreError> {
-        self.objects.write().await.remove(key);
-        Ok(())
+#[cfg(test)]
+impl FakeBackupObjectStore {
+    pub(crate) async fn object_bytes(&self, key: &str) -> Option<Bytes> {
+        self.objects.read().await.get(key).cloned()
     }
 }
 
@@ -125,17 +198,68 @@ impl BackupObjectStore for ObjectStoreS3BackupStore {
             .map_err(|error| BackupStoreError::object_store("put", key, error))
     }
 
-    async fn list_keys(&self, prefix: &str) -> Result<Vec<String>, BackupStoreError> {
-        let prefix_path = list_prefix_path(prefix);
-        let mut keys = self
+    async fn put_object_if_absent(
+        &self,
+        key: &str,
+        bytes: Bytes,
+    ) -> Result<BackupObjectCreateResult, BackupStoreError> {
+        let options = PutOptions {
+            mode: PutMode::Create,
+            ..PutOptions::default()
+        };
+        match self
             .store
-            .list(prefix_path.as_ref())
-            .map_ok(|meta| meta.location.to_string())
-            .try_collect::<Vec<_>>()
+            .put_opts(&Path::from(key), bytes.into(), options)
             .await
-            .map_err(|error| BackupStoreError::object_store("list", prefix, error))?;
-        keys.sort();
-        Ok(keys)
+        {
+            Ok(_) => Ok(BackupObjectCreateResult::Created),
+            Err(object_store::Error::AlreadyExists { .. }) => {
+                Ok(BackupObjectCreateResult::AlreadyExists)
+            }
+            Err(error) => Err(BackupStoreError::object_store(
+                "conditional put",
+                key,
+                error,
+            )),
+        }
+    }
+
+    async fn get_object_limited(
+        &self,
+        key: &str,
+        max_bytes: usize,
+    ) -> Result<Bytes, BackupStoreError> {
+        let result = self
+            .store
+            .get(&Path::from(key))
+            .await
+            .map_err(|error| BackupStoreError::object_store("get", key, error))?;
+        if result.meta.size > u64::try_from(max_bytes).unwrap_or(u64::MAX) {
+            return Err(BackupStoreError::new(format!(
+                "backup object `{key}` exceeds the configured {max_bytes} byte read limit"
+            )));
+        }
+        let object_size = result.meta.size;
+        let mut stream = result.into_stream();
+        let mut bytes = BytesMut::with_capacity(
+            usize::try_from(object_size)
+                .unwrap_or(max_bytes)
+                .min(max_bytes)
+                .min(8 * 1024 * 1024),
+        );
+        while let Some(chunk) = stream
+            .try_next()
+            .await
+            .map_err(|error| BackupStoreError::object_store("read", key, error))?
+        {
+            if bytes.len().saturating_add(chunk.len()) > max_bytes {
+                return Err(BackupStoreError::new(format!(
+                    "backup object `{key}` exceeds the configured {max_bytes} byte read limit"
+                )));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        Ok(bytes.freeze())
     }
 
     async fn delete_object(&self, key: &str) -> Result<(), BackupStoreError> {
@@ -143,6 +267,30 @@ impl BackupObjectStore for ObjectStoreS3BackupStore {
             .delete(&Path::from(key))
             .await
             .map_err(|error| BackupStoreError::object_store("delete", key, error))
+    }
+
+    async fn list_keys_limited(
+        &self,
+        prefix: &str,
+        max_objects: usize,
+    ) -> Result<Vec<String>, BackupStoreError> {
+        let prefix_path = list_prefix_path(prefix);
+        let mut objects = self.store.list(prefix_path.as_ref());
+        let mut keys = Vec::new();
+        while let Some(meta) = objects
+            .try_next()
+            .await
+            .map_err(|error| BackupStoreError::object_store("list", prefix, error))?
+        {
+            if keys.len() >= max_objects {
+                return Err(BackupStoreError::new(format!(
+                    "backup object listing exceeds the configured {max_objects} object limit"
+                )));
+            }
+            keys.push(meta.location.to_string());
+        }
+        keys.sort();
+        Ok(keys)
     }
 }
 
@@ -166,10 +314,12 @@ fn list_prefix_path(prefix: &str) -> Option<Path> {
 
 #[cfg(test)]
 mod tests {
-    use super::{list_prefix_path, BackupObjectStore, FakeBackupObjectStore};
+    use super::{
+        list_prefix_path, BackupObjectCreateResult, BackupObjectStore, FakeBackupObjectStore,
+    };
 
     #[tokio::test]
-    async fn fake_backup_object_store_puts_lists_and_deletes() {
+    async fn fake_backup_object_store_puts_and_lists() {
         let store = FakeBackupObjectStore::default();
         store
             .put_object(
@@ -186,17 +336,59 @@ mod tests {
             .await
             .unwrap();
 
-        let keys = store.list_keys("prod/").await.unwrap();
-        assert_eq!(keys.len(), 2);
-
-        store
-            .delete_object("prod/aether-data-backup-20260524-010000.json.zst")
-            .await
-            .unwrap();
-        let keys = store.list_keys("prod/").await.unwrap();
+        let keys = store.list_keys_limited("prod/", 2).await.unwrap();
         assert_eq!(
             keys,
-            vec!["prod/aether-data-backup-20260524-020000.json.zst"]
+            vec![
+                "prod/aether-data-backup-20260524-010000.json.zst",
+                "prod/aether-data-backup-20260524-020000.json.zst",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn fake_backup_object_store_enforces_read_and_listing_limits() {
+        let store = FakeBackupObjectStore::default();
+        store
+            .put_object("prod/one", bytes::Bytes::from_static(b"1234"))
+            .await
+            .unwrap();
+        store
+            .put_object("prod/two", bytes::Bytes::from_static(b"5678"))
+            .await
+            .unwrap();
+
+        assert!(store.get_object_limited("prod/one", 3).await.is_err());
+        assert_eq!(
+            store.get_object_limited("prod/one", 4).await.unwrap(),
+            bytes::Bytes::from_static(b"1234")
+        );
+        assert!(store.list_keys_limited("prod/", 1).await.is_err());
+        assert_eq!(store.list_keys_limited("prod/", 2).await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn fake_backup_object_store_conditional_put_never_overwrites() {
+        let store = FakeBackupObjectStore::default();
+        let key = "prod/aether-data-backup-20260524-010000.json.zst.aes256gcm";
+
+        assert_eq!(
+            store
+                .put_object_if_absent(key, bytes::Bytes::from_static(b"first"))
+                .await
+                .unwrap(),
+            BackupObjectCreateResult::Created
+        );
+        assert_eq!(
+            store
+                .put_object_if_absent(key, bytes::Bytes::from_static(b"second"))
+                .await
+                .unwrap(),
+            BackupObjectCreateResult::AlreadyExists
+        );
+        assert_eq!(
+            store.object_bytes(key).await.as_deref(),
+            Some(b"first".as_slice())
         );
     }
 
@@ -218,7 +410,7 @@ mod tests {
             .await
             .unwrap();
 
-        let keys = store.list_keys("prod").await.unwrap();
+        let keys = store.list_keys_limited("prod", 10).await.unwrap();
 
         assert_eq!(
             keys,

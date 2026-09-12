@@ -37,20 +37,24 @@ impl AppState {
         &self,
         active_only: bool,
     ) -> Result<Vec<provider_catalog::StoredProviderCatalogProvider>, GatewayError> {
-        self.data
+        let providers = self
+            .data
             .list_provider_catalog_providers(active_only)
             .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        self.open_provider_catalog_providers(providers).await
     }
 
     pub(crate) async fn list_provider_catalog_endpoints_by_provider_ids(
         &self,
         provider_ids: &[String],
     ) -> Result<Vec<provider_catalog::StoredProviderCatalogEndpoint>, GatewayError> {
-        self.data
+        let endpoints = self
+            .data
             .list_provider_catalog_endpoints_by_provider_ids(provider_ids)
             .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        self.open_provider_catalog_endpoints(endpoints).await
     }
 
     pub(crate) async fn list_public_global_models(
@@ -128,12 +132,37 @@ impl AppState {
             .map_err(|err| GatewayError::Internal(err.to_string()))
     }
 
+    pub(crate) async fn update_management_token_for_user(
+        &self,
+        record: &aether_data::repository::management_tokens::UpdateManagementTokenRecord,
+        user_id: &str,
+    ) -> Result<
+        LocalMutationOutcome<aether_data::repository::management_tokens::StoredManagementToken>,
+        GatewayError,
+    > {
+        self.data
+            .update_management_token_for_user(record, user_id)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
     pub(crate) async fn delete_management_token(
         &self,
         token_id: &str,
     ) -> Result<bool, GatewayError> {
         self.data
             .delete_management_token(token_id)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
+    pub(crate) async fn delete_management_token_for_user(
+        &self,
+        token_id: &str,
+        user_id: &str,
+    ) -> Result<bool, GatewayError> {
+        self.data
+            .delete_management_token_for_user(token_id, user_id)
             .await
             .map_err(|err| GatewayError::Internal(err.to_string()))
     }
@@ -166,6 +195,41 @@ impl AppState {
             .map_err(|err| GatewayError::Internal(err.to_string()))
     }
 
+    pub(crate) async fn set_management_token_active_for_user(
+        &self,
+        token_id: &str,
+        user_id: &str,
+        is_active: bool,
+    ) -> Result<
+        Option<aether_data::repository::management_tokens::StoredManagementToken>,
+        GatewayError,
+    > {
+        self.data
+            .set_management_token_active_for_user(token_id, user_id, is_active)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
+    pub(crate) async fn activate_management_token_if_matches(
+        &self,
+        mutation: &aether_data::repository::management_tokens::ActivateManagementTokenIfMatches,
+    ) -> Result<bool, GatewayError> {
+        self.data
+            .activate_management_token_if_matches(mutation)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
+    pub(crate) async fn delete_inactive_management_token_if_matches(
+        &self,
+        mutation: &aether_data::repository::management_tokens::ActivateManagementTokenIfMatches,
+    ) -> Result<bool, GatewayError> {
+        self.data
+            .delete_inactive_management_token_if_matches(mutation)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
     pub(crate) async fn regenerate_management_token_secret(
         &self,
         mutation: &aether_data::repository::management_tokens::RegenerateManagementTokenSecret,
@@ -175,6 +239,20 @@ impl AppState {
     > {
         self.data
             .regenerate_management_token_secret(mutation)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
+    pub(crate) async fn regenerate_management_token_secret_for_user(
+        &self,
+        mutation: &aether_data::repository::management_tokens::RegenerateManagementTokenSecret,
+        user_id: &str,
+    ) -> Result<
+        LocalMutationOutcome<aether_data::repository::management_tokens::StoredManagementToken>,
+        GatewayError,
+    > {
+        self.data
+            .regenerate_management_token_secret_for_user(mutation, user_id)
             .await
             .map_err(|err| GatewayError::Internal(err.to_string()))
     }
@@ -443,10 +521,12 @@ impl AppState {
         &self,
         provider_ids: &[String],
     ) -> Result<Vec<provider_catalog::StoredProviderCatalogKey>, GatewayError> {
-        self.data
+        let keys = self
+            .data
             .list_provider_catalog_keys_by_provider_ids(provider_ids)
             .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        self.open_provider_catalog_keys(keys).await
     }
 
     pub(crate) async fn list_provider_catalog_key_summaries_by_provider_ids(
@@ -474,30 +554,37 @@ impl AppState {
         &self,
         key_ids: &[String],
     ) -> Result<Vec<provider_catalog::StoredProviderCatalogKey>, GatewayError> {
-        self.data
+        let keys = self
+            .data
             .list_provider_catalog_keys_by_ids(key_ids)
             .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        self.open_provider_catalog_keys(keys).await
     }
 
     pub(crate) async fn list_provider_catalog_keys_by_ids_strong(
         &self,
         key_ids: &[String],
     ) -> Result<Vec<provider_catalog::StoredProviderCatalogKey>, GatewayError> {
-        self.data
+        let keys = self
+            .data
             .list_provider_catalog_keys_by_ids_strong(key_ids)
             .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        self.open_provider_catalog_keys(keys).await
     }
 
     pub(crate) async fn list_provider_catalog_key_page(
         &self,
         query: &provider_catalog::ProviderCatalogKeyListQuery,
     ) -> Result<provider_catalog::StoredProviderCatalogKeyPage, GatewayError> {
-        self.data
+        let mut page = self
+            .data
             .list_provider_catalog_key_page(query)
             .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        page.items = self.open_provider_catalog_keys(page.items).await?;
+        Ok(page)
     }
 
     pub(crate) async fn list_provider_catalog_key_stats_by_provider_ids(
@@ -514,15 +601,19 @@ impl AppState {
         &self,
         key: &provider_catalog::StoredProviderCatalogKey,
     ) -> Result<Option<provider_catalog::StoredProviderCatalogKey>, GatewayError> {
+        let protected = self.protect_provider_catalog_key(key)?;
         let created = self
             .data
-            .create_provider_catalog_key(key)
+            .create_provider_catalog_key(&protected)
             .await
             .map_err(|err| GatewayError::Internal(err.to_string()))?;
         if created.is_some() {
             self.invalidate_provider_routing_caches();
         }
-        Ok(created)
+        match created {
+            Some(key) => self.open_provider_catalog_key(key).await.map(Some),
+            None => Ok(None),
+        }
     }
 
     pub(crate) async fn create_provider_catalog_provider(
@@ -530,27 +621,56 @@ impl AppState {
         provider: &provider_catalog::StoredProviderCatalogProvider,
         shift_existing_priorities_from: Option<i32>,
     ) -> Result<Option<provider_catalog::StoredProviderCatalogProvider>, GatewayError> {
+        let protected = self.protect_provider_catalog_provider(provider)?;
         let created = self
             .data
-            .create_provider_catalog_provider(provider, shift_existing_priorities_from)
+            .create_provider_catalog_provider(&protected, shift_existing_priorities_from)
             .await
             .map_err(|err| GatewayError::Internal(err.to_string()))?;
         if created.is_some() {
             self.invalidate_provider_routing_caches();
         }
-        Ok(created)
+        match created {
+            Some(provider) => self
+                .open_provider_catalog_provider(provider)
+                .await
+                .map(Some),
+            None => Ok(None),
+        }
     }
 
     pub(crate) async fn update_provider_catalog_provider(
         &self,
         provider: &provider_catalog::StoredProviderCatalogProvider,
     ) -> Result<Option<provider_catalog::StoredProviderCatalogProvider>, GatewayError> {
+        let protected = self.protect_provider_catalog_provider(provider)?;
         let updated = self
             .data
-            .update_provider_catalog_provider(provider)
+            .update_provider_catalog_provider(&protected)
             .await
             .map_err(|err| GatewayError::Internal(err.to_string()))?;
         if updated.is_some() {
+            self.invalidate_provider_routing_caches();
+        }
+        match updated {
+            Some(provider) => self
+                .open_provider_catalog_provider(provider)
+                .await
+                .map(Some),
+            None => Ok(None),
+        }
+    }
+
+    pub(crate) async fn compare_and_swap_provider_catalog_provider_config(
+        &self,
+        update: &provider_catalog::ProviderCatalogProviderConfigCasUpdate,
+    ) -> Result<bool, GatewayError> {
+        let updated = self
+            .data
+            .compare_and_swap_provider_catalog_provider_config(update)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        if updated {
             self.invalidate_provider_routing_caches();
         }
         Ok(updated)
@@ -616,30 +736,44 @@ impl AppState {
         &self,
         endpoint: &provider_catalog::StoredProviderCatalogEndpoint,
     ) -> Result<Option<provider_catalog::StoredProviderCatalogEndpoint>, GatewayError> {
+        let protected = self.protect_provider_catalog_endpoint(endpoint)?;
         let created = self
             .data
-            .create_provider_catalog_endpoint(endpoint)
+            .create_provider_catalog_endpoint(&protected)
             .await
             .map_err(|err| GatewayError::Internal(err.to_string()))?;
         if created.is_some() {
             self.invalidate_provider_routing_caches();
         }
-        Ok(created)
+        match created {
+            Some(endpoint) => self
+                .open_provider_catalog_endpoint(endpoint)
+                .await
+                .map(Some),
+            None => Ok(None),
+        }
     }
 
     pub(crate) async fn update_provider_catalog_endpoint(
         &self,
         endpoint: &provider_catalog::StoredProviderCatalogEndpoint,
     ) -> Result<Option<provider_catalog::StoredProviderCatalogEndpoint>, GatewayError> {
+        let protected = self.protect_provider_catalog_endpoint(endpoint)?;
         let updated = self
             .data
-            .update_provider_catalog_endpoint(endpoint)
+            .update_provider_catalog_endpoint(&protected)
             .await
             .map_err(|err| GatewayError::Internal(err.to_string()))?;
         if updated.is_some() {
             self.invalidate_provider_routing_caches();
         }
-        Ok(updated)
+        match updated {
+            Some(endpoint) => self
+                .open_provider_catalog_endpoint(endpoint)
+                .await
+                .map(Some),
+            None => Ok(None),
+        }
     }
 
     pub(crate) async fn delete_provider_catalog_endpoint(
@@ -661,24 +795,30 @@ impl AppState {
         &self,
         key: &provider_catalog::StoredProviderCatalogKey,
     ) -> Result<Option<provider_catalog::StoredProviderCatalogKey>, GatewayError> {
+        let protected = self.protect_provider_catalog_key(key)?;
         let updated = self
             .data
-            .update_provider_catalog_key(key)
+            .update_provider_catalog_key(&protected)
             .await
             .map_err(|err| GatewayError::Internal(err.to_string()))?;
         if updated.is_some() {
             self.invalidate_provider_routing_caches();
         }
-        Ok(updated)
+        match updated {
+            Some(key) => self.open_provider_catalog_key(key).await.map(Some),
+            None => Ok(None),
+        }
     }
 
     pub(crate) async fn compare_and_update_provider_catalog_key_admin_state(
         &self,
         update: &provider_catalog::ProviderCatalogKeyAdminCasUpdate,
     ) -> Result<bool, GatewayError> {
+        let mut protected = update.clone();
+        protected.key = self.protect_provider_catalog_key(&update.key)?;
         let updated = self
             .data
-            .compare_and_update_provider_catalog_key_admin_state(update)
+            .compare_and_update_provider_catalog_key_admin_state(&protected)
             .await
             .map_err(|err| GatewayError::Internal(err.to_string()))?;
         // A conflict means another instance changed credentials. Invalidate on
@@ -691,15 +831,22 @@ impl AppState {
         &self,
         keys: &[provider_catalog::StoredProviderCatalogKey],
     ) -> Result<Option<Vec<provider_catalog::StoredProviderCatalogKey>>, GatewayError> {
+        let protected = keys
+            .iter()
+            .map(|key| self.protect_provider_catalog_key(key))
+            .collect::<Result<Vec<_>, _>>()?;
         let updated = self
             .data
-            .update_provider_catalog_keys(keys)
+            .update_provider_catalog_keys(&protected)
             .await
             .map_err(|err| GatewayError::Internal(err.to_string()))?;
         if updated.as_ref().is_some_and(|keys| !keys.is_empty()) {
             self.invalidate_provider_routing_caches();
         }
-        Ok(updated)
+        match updated {
+            Some(keys) => self.open_provider_catalog_keys(keys).await.map(Some),
+            None => Ok(None),
+        }
     }
 
     pub(crate) async fn compare_and_update_provider_catalog_key_adaptive_state(
@@ -1041,30 +1188,36 @@ impl AppState {
         &self,
         provider_ids: &[String],
     ) -> Result<Vec<provider_catalog::StoredProviderCatalogProvider>, GatewayError> {
-        self.data
+        let providers = self
+            .data
             .list_provider_catalog_providers_by_ids(provider_ids)
             .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        self.open_provider_catalog_providers(providers).await
     }
 
     pub(crate) async fn read_provider_catalog_endpoints_by_ids(
         &self,
         endpoint_ids: &[String],
     ) -> Result<Vec<provider_catalog::StoredProviderCatalogEndpoint>, GatewayError> {
-        self.data
+        let endpoints = self
+            .data
             .list_provider_catalog_endpoints_by_ids(endpoint_ids)
             .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        self.open_provider_catalog_endpoints(endpoints).await
     }
 
     pub(crate) async fn read_provider_catalog_keys_by_ids(
         &self,
         key_ids: &[String],
     ) -> Result<Vec<provider_catalog::StoredProviderCatalogKey>, GatewayError> {
-        self.data
+        let keys = self
+            .data
             .list_provider_catalog_keys_by_ids(key_ids)
             .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        self.open_provider_catalog_keys(keys).await
     }
 
     pub(crate) async fn update_provider_catalog_key_format_health(

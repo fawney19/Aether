@@ -23,20 +23,27 @@ use axum::routing::{any, delete, get, post, put};
 use axum::{extract::Request, Router};
 use http::StatusCode;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 
 use super::super::{
     build_router_with_state, issue_test_admin_access_token, sample_admin_global_model,
-    sample_admin_provider_model, sample_endpoint, sample_key, sample_ldap_module_config,
-    sample_oauth_provider_config, sample_provider, sample_proxy_node,
+    sample_admin_provider_model, sample_bound_key, sample_endpoint, sample_key,
+    sample_ldap_module_config, sample_oauth_provider_config, sample_provider, sample_proxy_node,
     sample_recent_key_rpm_candidate, start_server, AppState,
 };
+use crate::admin_api::AdminAppState;
 use crate::constants::{
     GATEWAY_HEADER, TRUSTED_ADMIN_SESSION_ID_HEADER, TRUSTED_ADMIN_USER_ID_HEADER,
     TRUSTED_ADMIN_USER_ROLE_HEADER,
 };
 use crate::data::GatewayDataState;
+use crate::handlers::admin::SystemExportMode;
 
 static SYSTEM_UPDATE_TEST_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+fn sha256_hex(value: &str) -> String {
+    format!("{:x}", Sha256::digest(value.as_bytes()))
+}
 
 #[tokio::test]
 async fn gateway_handles_admin_system_version_locally_with_trusted_admin_principal() {
@@ -231,7 +238,7 @@ async fn gateway_prepares_admin_system_update_locally() {
         .await
         .expect("request should succeed");
 
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.status(), StatusCode::PRECONDITION_REQUIRED);
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
     assert!(payload["detail"].is_string());
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
@@ -270,7 +277,7 @@ async fn gateway_rejects_admin_system_apply_update_without_prepared_version() {
         .await
         .expect("request should succeed");
 
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(response.status(), StatusCode::PRECONDITION_REQUIRED);
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
     assert!(payload["detail"].is_string());
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
@@ -391,7 +398,7 @@ async fn gateway_rejects_admin_system_apply_update_with_nonexistent_version() {
         .await
         .expect("request should succeed");
 
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(response.status(), StatusCode::PRECONDITION_REQUIRED);
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
     assert!(payload["detail"].is_string());
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
@@ -747,9 +754,14 @@ async fn gateway_handles_admin_system_config_export_locally_with_trusted_admin_p
                 "gpt-5",
             )]),
     );
+    let mut ldap_config = sample_ldap_module_config();
+    ldap_config.bind_password_encrypted = Some(
+        encrypt_python_fernet_plaintext(DEVELOPMENT_ENCRYPTION_KEY, "ldap-bind-secret")
+            .expect("LDAP password should encrypt"),
+    );
     let auth_module_repository = Arc::new(InMemoryAuthModuleReadRepository::seed(
         Vec::<StoredOAuthProviderModuleConfig>::new(),
-        Some(sample_ldap_module_config()),
+        Some(ldap_config),
     ));
     let oauth_provider_repository = Arc::new(InMemoryOAuthProviderRepository::seed(vec![
         sample_oauth_provider_config("linuxdo"),
@@ -767,27 +779,109 @@ async fn gateway_handles_admin_system_config_export_locally_with_trusted_admin_p
     let data_state = GatewayDataState::disabled()
         .attach_provider_catalog_repository_for_tests(provider_catalog_repository)
         .with_global_model_repository_for_tests(global_model_repository)
-        .attach_auth_module_reader_for_tests(auth_module_repository)
+        .attach_auth_module_repository_for_tests(auth_module_repository)
         .attach_oauth_provider_repository_for_tests(oauth_provider_repository)
         .attach_proxy_node_repository_for_tests(proxy_node_repository)
         .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY)
         .with_system_config_values_for_tests(vec![
-            (
-                "smtp_password".to_string(),
-                json!(
-                    encrypt_python_fernet_plaintext(DEVELOPMENT_ENCRYPTION_KEY, "smtp-secret",)
-                        .expect("smtp secret should encrypt")
-                ),
-            ),
+            ("smtp_password".to_string(), json!("smtp-secret")),
+            ("smtp_host".to_string(), json!("smtp.example.test")),
+            ("turnstile_secret_key".to_string(), serde_json::Value::Null),
+            ("smtp_user".to_string(), json!("smtp-user")),
             ("site_name".to_string(), json!("Aether Test")),
         ]);
 
-    let (upstream_url, upstream_handle) = start_server(upstream).await;
-    let gateway = build_router_with_state(
-        AppState::new()
-            .expect("gateway should build")
-            .with_data_state_for_tests(data_state),
+    let state = AppState::new()
+        .expect("gateway should build")
+        .with_data_state_for_tests(data_state);
+    let recovery_payload = AdminAppState::new(&state)
+        .build_admin_system_config_export_payload(SystemExportMode::RecoveryBackup)
+        .await
+        .expect("recovery config export should build");
+    assert!(recovery_payload.get("credential_state").is_none());
+    assert_eq!(
+        recovery_payload["providers"][0]["config"]["provider_ops"]["connector"]["credentials"]
+            ["refresh_token"],
+        "provider-refresh-token"
     );
+    assert_eq!(
+        recovery_payload["providers"][0]["api_keys"][0]["api_key"],
+        "live-api-key"
+    );
+    assert_eq!(
+        recovery_payload["providers"][0]["api_keys"][0]["auth_config"],
+        r#"{"refresh_token":"oauth-refresh"}"#
+    );
+    assert_eq!(
+        recovery_payload["providers"][0]["api_keys"][0]["is_active"],
+        true
+    );
+    assert_eq!(
+        recovery_payload["ldap_config"]["bind_password"],
+        "ldap-bind-secret"
+    );
+    assert_eq!(recovery_payload["ldap_config"]["is_enabled"], true);
+    assert_eq!(
+        recovery_payload["oauth_providers"][0]["client_secret"],
+        "secret-value"
+    );
+    assert_eq!(recovery_payload["oauth_providers"][0]["is_enabled"], true);
+    assert_eq!(
+        recovery_payload["proxy_nodes"][0]["proxy_username"],
+        "proxy-user"
+    );
+    assert_eq!(
+        recovery_payload["proxy_nodes"][0]["proxy_password"],
+        "proxy-pass"
+    );
+    let recovery_system_configs = recovery_payload["system_configs"]
+        .as_array()
+        .expect("recovery system configs should be an array");
+    assert_eq!(
+        recovery_system_configs
+            .iter()
+            .find(|entry| entry["key"] == "smtp_user")
+            .expect("SMTP user should be recoverable")["value"],
+        "smtp-user"
+    );
+    assert_eq!(
+        recovery_system_configs
+            .iter()
+            .find(|entry| entry["key"] == "smtp_password")
+            .expect("SMTP password should be recoverable")["value"],
+        "smtp-secret"
+    );
+    assert_eq!(
+        recovery_system_configs
+            .iter()
+            .find(|entry| entry["key"] == "turnstile_secret_key")
+            .expect("unset Turnstile secret should remain recoverable")["value"],
+        serde_json::Value::Null
+    );
+
+    let rollback_checkpoint = AdminAppState::new(&state)
+        .build_admin_system_config_export_payload(SystemExportMode::RollbackCheckpoint)
+        .await
+        .expect("rollback config checkpoint should build");
+    assert_eq!(
+        rollback_checkpoint["providers"][0]["api_keys"][0]["is_active"],
+        true
+    );
+    assert_eq!(
+        rollback_checkpoint["providers"][0]["api_keys"][0]["credential_state"],
+        "not_exported"
+    );
+    assert!(rollback_checkpoint["providers"][0]["api_keys"][0]
+        .get("api_key")
+        .is_none());
+    assert_eq!(rollback_checkpoint["ldap_config"]["is_enabled"], true);
+    assert_eq!(
+        rollback_checkpoint["oauth_providers"][0]["is_enabled"],
+        true
+    );
+
+    let (upstream_url, upstream_handle) = start_server(upstream).await;
+    let gateway = build_router_with_state(state);
     let (gateway_url, gateway_handle) = start_server(gateway).await;
 
     let response = reqwest::Client::new()
@@ -801,25 +895,35 @@ async fn gateway_handles_admin_system_config_export_locally_with_trusted_admin_p
         .expect("request should succeed");
 
     assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get(http::header::CACHE_CONTROL)
+            .and_then(|value| value.to_str().ok()),
+        Some("no-store")
+    );
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
     assert_eq!(payload["version"], "2.3");
     assert!(payload["exported_at"].as_str().is_some());
     assert_eq!(payload["global_models"][0]["name"], "gpt-5");
     assert_eq!(payload["global_models"][0]["usage_count"], json!(7));
     assert_eq!(payload["providers"][0]["name"], "openai");
+    assert_eq!(payload["credential_state"], "not_exported");
     assert_eq!(
-        payload["providers"][0]["config"]["provider_ops"]["connector"]["credentials"]
-            ["refresh_token"],
-        "provider-refresh-token"
+        payload["providers"][0]["config"]["provider_ops"]["connector"]["credentials"],
+        "***"
     );
+    assert!(payload["providers"][0]["api_keys"][0]
+        .get("api_key")
+        .is_none());
+    assert!(payload["providers"][0]["api_keys"][0]
+        .get("auth_config")
+        .is_none());
     assert_eq!(
-        payload["providers"][0]["api_keys"][0]["api_key"],
-        "live-api-key"
+        payload["providers"][0]["api_keys"][0]["credential_state"],
+        "not_exported"
     );
-    assert_eq!(
-        payload["providers"][0]["api_keys"][0]["auth_config"],
-        r#"{"refresh_token":"oauth-refresh"}"#
-    );
+    assert_eq!(payload["providers"][0]["api_keys"][0]["is_active"], false);
     assert_eq!(
         payload["providers"][0]["api_keys"][0]["supported_endpoints"],
         json!(["openai:chat"])
@@ -828,27 +932,75 @@ async fn gateway_handles_admin_system_config_export_locally_with_trusted_admin_p
         payload["providers"][0]["models"][0]["global_model_name"],
         "gpt-5"
     );
-    assert_eq!(payload["ldap_config"]["bind_password"], "");
-    assert_eq!(
-        payload["oauth_providers"][0]["client_secret"],
-        "secret-value"
-    );
+    assert!(payload["ldap_config"].get("bind_password").is_none());
+    assert_eq!(payload["ldap_config"]["is_enabled"], false);
+    assert!(payload["oauth_providers"][0].get("client_secret").is_none());
+    assert_eq!(payload["oauth_providers"][0]["is_enabled"], false);
     assert_eq!(
         payload["proxy_nodes"][0]["proxy_url"],
         "http://proxy.local:8080"
     );
+    assert!(payload["proxy_nodes"][0].get("proxy_username").is_none());
+    assert!(payload["proxy_nodes"][0].get("proxy_password").is_none());
     let smtp_password = payload["system_configs"]
         .as_array()
         .expect("system configs should be array")
         .iter()
         .find(|entry| entry["key"] == "smtp_password")
-        .cloned()
-        .expect("smtp_password should exist");
-    assert_eq!(smtp_password["value"], "smtp-secret");
+        .cloned();
+    assert!(smtp_password.is_none());
+    let serialized = payload.to_string();
+    for secret in [
+        "provider-refresh-token",
+        "live-api-key",
+        "oauth-refresh",
+        "secret-value",
+        "proxy-user",
+        "proxy-pass",
+        "smtp-user",
+        "smtp-secret",
+    ] {
+        assert!(!serialized.contains(secret), "leaked secret: {secret}");
+    }
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();
     upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_rejects_sensitive_system_exports_for_audit_admin() {
+    let gateway = build_router_with_state(AppState::new().expect("gateway should build"));
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    for path in [
+        "/api/admin/system/config/export",
+        "/api/admin/system/users/export",
+        "/api/admin/system/data/export",
+    ] {
+        let response = reqwest::Client::new()
+            .get(format!("{gateway_url}{path}"))
+            .header(GATEWAY_HEADER, "rust-phase3b")
+            .header(TRUSTED_ADMIN_USER_ID_HEADER, "audit-admin-123")
+            .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "audit_admin")
+            .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-audit-123")
+            .send()
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "path: {path}");
+        let payload: serde_json::Value = response.json().await.expect("json body should parse");
+        assert_eq!(
+            payload["detail"], "management token permission denied",
+            "path: {path}"
+        );
+        assert_eq!(
+            payload["required_permission"], "admin:system:admin",
+            "path: {path}"
+        );
+    }
+
+    gateway_handle.abort();
 }
 
 #[tokio::test]
@@ -943,7 +1095,7 @@ async fn gateway_handles_admin_system_users_export_locally_with_trusted_admin_pr
             StoredAuthApiKeyExportRecord::new(
                 "user-1".to_string(),
                 "key-user-1".to_string(),
-                "hash-user-1".to_string(),
+                sha256_hex("ak-user-live-1"),
                 Some(
                     encrypt_python_fernet_plaintext(DEVELOPMENT_ENCRYPTION_KEY, "ak-user-live-1")
                         .expect("user api key should encrypt"),
@@ -967,7 +1119,7 @@ async fn gateway_handles_admin_system_users_export_locally_with_trusted_admin_pr
             StoredAuthApiKeyExportRecord::new(
                 "admin-owner".to_string(),
                 "key-standalone-1".to_string(),
-                "hash-standalone-1".to_string(),
+                sha256_hex("ak-standalone-live-1"),
                 Some(
                     encrypt_python_fernet_plaintext(
                         DEVELOPMENT_ENCRYPTION_KEY,
@@ -1027,18 +1179,60 @@ async fn gateway_handles_admin_system_users_export_locally_with_trusted_admin_pr
         )
         .expect("standalone wallet should build"),
     ]));
-    let data_state =
-        GatewayDataState::with_auth_and_wallet_for_tests(auth_repository, wallet_repository)
-            .with_user_reader(user_repository)
-            .with_provider_catalog_reader(provider_catalog_repository)
-            .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY);
+    let data_state = GatewayDataState::with_auth_and_wallet_for_tests(
+        auth_repository.clone(),
+        wallet_repository,
+    )
+    .attach_auth_api_key_repository_for_tests(auth_repository)
+    .with_user_reader(user_repository)
+    .attach_provider_catalog_repository_for_tests(provider_catalog_repository)
+    .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY);
+
+    let state = AppState::new()
+        .expect("gateway should build")
+        .with_data_state_for_tests(data_state);
+    let recovery_payload = AdminAppState::new(&state)
+        .build_admin_system_users_export_payload(SystemExportMode::RecoveryBackup)
+        .await
+        .expect("recovery users export should build");
+    let migrated_keys = state
+        .list_auth_api_key_export_records_by_ids(&[
+            "key-user-1".to_string(),
+            "key-standalone-1".to_string(),
+        ])
+        .await
+        .expect("migrated API keys should reload");
+    assert_eq!(migrated_keys.len(), 2);
+    assert!(migrated_keys.iter().all(|key| key
+        .key_encrypted
+        .as_deref()
+        .is_some_and(|value| value.starts_with("aether-auth-api-key-secret-v2:"))));
+    assert_eq!(recovery_payload["version"], "1.5");
+    assert_eq!(recovery_payload["users"][0]["password_hash"], "argon2-hash");
+    assert_eq!(
+        recovery_payload["users"][0]["api_keys"][0]["key_hash"],
+        sha256_hex("ak-user-live-1")
+    );
+    assert_eq!(
+        recovery_payload["users"][0]["api_keys"][0]["key"],
+        "ak-user-live-1"
+    );
+    assert_eq!(
+        recovery_payload["users"][0]["api_keys"][0]["is_active"],
+        true
+    );
+    assert_eq!(
+        recovery_payload["standalone_keys"][0]["key_hash"],
+        sha256_hex("ak-standalone-live-1")
+    );
+    assert_eq!(
+        recovery_payload["standalone_keys"][0]["key"],
+        "ak-standalone-live-1"
+    );
+    assert_eq!(recovery_payload["standalone_keys"][0]["is_active"], true);
 
     let (upstream_url, upstream_handle) = start_server(upstream).await;
-    let gateway = build_router_with_state(
-        AppState::new()
-            .expect("gateway should build")
-            .with_data_state_for_tests(data_state),
-    );
+    let gateway = build_router_with_state(state);
     let (gateway_url, gateway_handle) = start_server(gateway).await;
 
     let response = reqwest::Client::new()
@@ -1052,8 +1246,15 @@ async fn gateway_handles_admin_system_users_export_locally_with_trusted_admin_pr
         .expect("request should succeed");
 
     assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get(http::header::CACHE_CONTROL)
+            .and_then(|value| value.to_str().ok()),
+        Some("no-store")
+    );
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
-    assert_eq!(payload["version"], "1.6");
+    assert_eq!(payload["version"], "1.7");
     assert!(payload["exported_at"].as_str().is_some());
     assert_eq!(payload["user_groups"][0]["name"], "Restricted GPT");
     assert!(payload["user_groups"][0].get("priority").is_none());
@@ -1081,6 +1282,8 @@ async fn gateway_handles_admin_system_users_export_locally_with_trusted_admin_pr
         json!(["gpt-5"])
     );
     assert_eq!(payload["users"][0]["email"], "alice@example.com");
+    assert!(payload["users"][0].get("password_hash").is_none());
+    assert!(!payload.to_string().contains("argon2-hash"));
     assert_eq!(
         payload["users"][0]["allowed_models_mode"],
         json!("specific")
@@ -1104,11 +1307,29 @@ async fn gateway_handles_admin_system_users_export_locally_with_trusted_admin_pr
         json!(10.0)
     );
     assert_eq!(payload["users"][0]["unlimited"], json!(false));
-    assert_eq!(payload["users"][0]["api_keys"][0]["key"], "ak-user-live-1");
     assert_eq!(
-        payload["users"][0]["api_keys"][0]["key_hash"],
-        "hash-user-1"
+        payload["users"][0]["api_keys"][0]["credential_state"],
+        "not_exported"
     );
+    assert_eq!(payload["users"][0]["api_keys"][0]["is_active"], false);
+    for credential_field in ["key", "key_hash", "key_encrypted"] {
+        assert!(payload["users"][0]["api_keys"][0]
+            .get(credential_field)
+            .is_none());
+        assert!(payload["standalone_keys"][0]
+            .get(credential_field)
+            .is_none());
+    }
+    let serialized = payload.to_string();
+    for secret in ["ak-user-live-1", "ak-standalone-live-1"] {
+        assert!(!serialized.contains(secret));
+    }
+    for secret_hash in [
+        sha256_hex("ak-user-live-1"),
+        sha256_hex("ak-standalone-live-1"),
+    ] {
+        assert!(!serialized.contains(&secret_hash));
+    }
     assert_eq!(
         payload["users"][0]["api_keys"][0]["is_standalone"],
         json!(false)
@@ -1122,9 +1343,10 @@ async fn gateway_handles_admin_system_users_export_locally_with_trusted_admin_pr
         json!(420)
     );
     assert_eq!(
-        payload["standalone_keys"][0]["key"],
-        json!("ak-standalone-live-1")
+        payload["standalone_keys"][0]["credential_state"],
+        "not_exported"
     );
+    assert_eq!(payload["standalone_keys"][0]["is_active"], false);
     assert_eq!(
         payload["standalone_keys"][0]["api_key_id"],
         json!("key-standalone-1")
@@ -1994,7 +2216,46 @@ async fn gateway_validates_chat_pii_redaction_system_config_locally_with_trusted
 }
 
 #[tokio::test]
-async fn gateway_handles_admin_system_provider_priority_mode_locally_with_bearer_admin_session() {
+async fn gateway_handles_admin_system_config_locally_with_bearer_admin_session() {
+    let upstream_hits = Arc::new(Mutex::new(0usize));
+    let upstream_hits_clone = Arc::clone(&upstream_hits);
+    let upstream = Router::new().route(
+        "/api/admin/system/configs/site_name",
+        any(move |_request: Request| {
+            let upstream_hits_inner = Arc::clone(&upstream_hits_clone);
+            async move {
+                *upstream_hits_inner.lock().expect("mutex should lock") += 1;
+                (StatusCode::OK, Body::from("unexpected upstream hit"))
+            }
+        }),
+    );
+
+    let (_upstream_url, upstream_handle) = start_server(upstream).await;
+    let state = AppState::new().expect("gateway should build");
+    let access_token = issue_test_admin_access_token(&state, "device-admin-config").await;
+    let gateway = build_router_with_state(state);
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .get(format!("{gateway_url}/api/admin/system/configs/site_name"))
+        .header("authorization", format!("Bearer {access_token}"))
+        .header("x-client-device-id", "device-admin-config")
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["key"], "site_name");
+    assert_eq!(payload["value"], "Aether");
+    assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
+
+    gateway_handle.abort();
+    upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_rejects_removed_admin_system_provider_priority_mode_with_bearer_admin_session() {
     let upstream_hits = Arc::new(Mutex::new(0usize));
     let upstream_hits_clone = Arc::clone(&upstream_hits);
     let upstream = Router::new().route(
@@ -2008,7 +2269,7 @@ async fn gateway_handles_admin_system_provider_priority_mode_locally_with_bearer
         }),
     );
 
-    let (upstream_url, upstream_handle) = start_server(upstream).await;
+    let (_upstream_url, upstream_handle) = start_server(upstream).await;
     let state = AppState::new().expect("gateway should build");
     let access_token = issue_test_admin_access_token(&state, "device-admin-config").await;
     let gateway = build_router_with_state(state);
@@ -2024,10 +2285,7 @@ async fn gateway_handles_admin_system_provider_priority_mode_locally_with_bearer
         .await
         .expect("request should succeed");
 
-    assert_eq!(response.status(), StatusCode::OK);
-    let payload: serde_json::Value = response.json().await.expect("json body should parse");
-    assert_eq!(payload["key"], "provider_priority_mode");
-    assert_eq!(payload["value"], "provider");
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();
@@ -2049,8 +2307,12 @@ async fn gateway_sets_admin_system_config_locally_with_trusted_admin_principal()
         }),
     );
 
-    let data_state =
-        GatewayDataState::disabled().with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY);
+    let data_state = GatewayDataState::disabled()
+        .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY)
+        .with_system_config_values_for_tests(vec![
+            ("smtp_host".to_string(), json!("smtp.example.com")),
+            ("smtp_user".to_string(), json!("smtp-user")),
+        ]);
     let (upstream_url, upstream_handle) = start_server(upstream).await;
     let gateway = build_router_with_state(
         AppState::new()
@@ -2192,7 +2454,7 @@ async fn gateway_handles_admin_key_rpm_locally_with_trusted_admin_principal() {
             "https://api.openai.example",
         )],
         vec![
-            sample_key("key-openai", "provider-openai", "openai:chat", "sk-test")
+            sample_bound_key("key-openai", "provider-openai", "openai:chat", "sk-test")
                 .with_rate_limit_fields(Some(60), None, None, None, None, None, None, None, None),
         ],
     ));
@@ -2279,7 +2541,7 @@ async fn gateway_resets_admin_key_rpm_locally_with_trusted_admin_principal() {
             "https://api.openai.example",
         )],
         vec![
-            sample_key("key-openai", "provider-openai", "openai:chat", "sk-test")
+            sample_bound_key("key-openai", "provider-openai", "openai:chat", "sk-test")
                 .with_rate_limit_fields(Some(60), None, None, None, None, None, None, None, None),
         ],
     ));

@@ -4,13 +4,17 @@ use super::{
     Mutex, Request, Response, Router, StatusCode, CONTROL_EXECUTED_HEADER,
     CONTROL_EXECUTE_FALLBACK_HEADER, EXECUTION_PATH_HEADER, TRACE_ID_HEADER,
 };
-use aether_crypto::{encrypt_python_fernet_plaintext, DEVELOPMENT_ENCRYPTION_KEY};
+use aether_crypto::DEVELOPMENT_ENCRYPTION_KEY;
 use aether_data::repository::auth::{
     InMemoryAuthApiKeySnapshotRepository, StoredAuthApiKeySnapshot,
 };
 use aether_data::repository::candidate_selection::InMemoryMinimalCandidateSelectionReadRepository;
 use aether_data::repository::candidates::InMemoryRequestCandidateRepository;
+use aether_data::repository::gemini_file_mappings::{
+    InMemoryGeminiFileMappingRepository, StoredGeminiFileMapping,
+};
 use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
+use aether_data::repository::proxy_nodes::{InMemoryProxyNodeRepository, StoredProxyNode};
 use aether_data_contracts::repository::candidate_selection::{
     StoredMinimalCandidateSelectionRow, StoredProviderModelMapping,
 };
@@ -169,6 +173,12 @@ fn sample_files_provider_catalog_endpoint() -> StoredProviderCatalogEndpoint {
 }
 
 fn sample_files_provider_catalog_key() -> StoredProviderCatalogKey {
+    let bootstrap = AppState::new()
+        .expect("bootstrap state should build")
+        .with_data_state_for_tests(
+            crate::data::GatewayDataState::disabled()
+                .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+        );
     StoredProviderCatalogKey::new(
         "key-gemini-files-local-1".to_string(),
         "provider-gemini-files-local-1".to_string(),
@@ -180,7 +190,12 @@ fn sample_files_provider_catalog_key() -> StoredProviderCatalogKey {
     .expect("key should build")
     .with_transport_fields(
         Some(serde_json::json!(["gemini:files"])),
-        encrypt_python_fernet_plaintext(DEVELOPMENT_ENCRYPTION_KEY, "sk-upstream-gemini-files")
+        bootstrap
+            .seal_provider_catalog_key_api_key(
+                "provider-gemini-files-local-1",
+                "key-gemini-files-local-1",
+                "sk-upstream-gemini-files",
+            )
             .expect("api key should encrypt"),
         None,
         Some(serde_json::json!({"gemini_files": true})),
@@ -191,6 +206,52 @@ fn sample_files_provider_catalog_key() -> StoredProviderCatalogKey {
         None,
     )
     .expect("key transport should build")
+}
+
+pub(super) fn sample_files_proxy_node_repository<I, S>(
+    node_ids: I,
+) -> Arc<InMemoryProxyNodeRepository>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let nodes = node_ids.into_iter().map(|node_id| {
+        let node_id = node_id.as_ref();
+        StoredProxyNode::new(
+            node_id.to_string(),
+            format!("files-test-{node_id}"),
+            "127.0.0.1".to_string(),
+            1,
+            true,
+            "online".to_string(),
+            30,
+            0,
+            0,
+            0,
+            0,
+            0,
+            false,
+            false,
+            1,
+        )
+        .expect("files test proxy node should build")
+        .with_manual_proxy_fields(Some("http://127.0.0.1:1".to_string()), None, None)
+        .with_tunnel_generation(format!("files-test-generation-{node_id}"))
+    });
+    Arc::new(InMemoryProxyNodeRepository::seed(nodes))
+}
+
+fn sample_owned_file_mapping(file_name: &str, user_id: &str) -> StoredGeminiFileMapping {
+    let mut mapping = StoredGeminiFileMapping::new(
+        format!("mapping-{user_id}-{file_name}"),
+        file_name.to_string(),
+        "key-gemini-files-local-1".to_string(),
+        1_700_000_000_000,
+        4_102_444_800,
+    )
+    .expect("file mapping should build");
+    mapping.user_id = Some(user_id.to_string());
+    mapping
 }
 
 #[test]
@@ -254,13 +315,9 @@ async fn gateway_locally_denies_gemini_files_download_control_sync_even_with_opt
         .await
         .expect("request should succeed");
 
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
     let payload: serde_json::Value = response.json().await.expect("body should parse");
-    assert_eq!(payload["error"]["type"], "http_error");
-    assert_eq!(
-        payload["error"]["message"],
-        "当前 Gemini Files 请求无法在本地执行：没有匹配到可用的执行路径"
-    );
+    assert_eq!(payload["detail"], "File not found");
     assert_eq!(*execute_hits.lock().expect("mutex should lock"), 0);
     assert_eq!(*public_hits.lock().expect("mutex should lock"), 0);
 
@@ -338,13 +395,9 @@ async fn gateway_locally_denies_gemini_files_download_control_sync_without_opt_i
         .await
         .expect("request should succeed");
 
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
     let payload: serde_json::Value = response.json().await.expect("body should parse");
-    assert_eq!(payload["error"]["type"], "http_error");
-    assert_eq!(
-        payload["error"]["message"],
-        "当前 Gemini Files 请求无法在本地执行：没有匹配到可用的执行路径"
-    );
+    assert_eq!(payload["detail"], "File not found");
     assert_eq!(*execute_hits.lock().expect("mutex should lock"), 0);
     assert_eq!(*public_hits.lock().expect("mutex should lock"), 0);
     assert_eq!(
@@ -417,13 +470,9 @@ async fn gateway_skips_gemini_files_download_control_sync_without_opt_in_header_
         .await
         .expect("request should succeed");
 
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
     let payload: serde_json::Value = response.json().await.expect("body should parse");
-    assert_eq!(payload["error"]["type"], "http_error");
-    assert_eq!(
-        payload["error"]["message"],
-        "当前 Gemini Files 请求无法在本地执行：没有匹配到可用的执行路径"
-    );
+    assert_eq!(payload["detail"], "File not found");
     assert_eq!(*execute_hits.lock().expect("mutex should lock"), 0);
     assert_eq!(*public_hits.lock().expect("mutex should lock"), 0);
 
@@ -432,14 +481,15 @@ async fn gateway_skips_gemini_files_download_control_sync_without_opt_in_header_
 }
 
 #[test]
-fn gateway_executes_gemini_files_get_via_local_decision_gate_with_local_planning_only() {
+fn gateway_rejects_gemini_files_get_key_mismatch_without_fallback_and_allows_creation_key() {
     run_files_test(
-        "gateway_executes_gemini_files_get_via_local_decision_gate_with_local_planning_only",
-        gateway_executes_gemini_files_get_via_local_decision_gate_with_local_planning_only_impl,
+        "gateway_rejects_gemini_files_get_key_mismatch_without_fallback_and_allows_creation_key",
+        gateway_rejects_gemini_files_get_key_mismatch_without_fallback_and_allows_creation_key_impl,
     );
 }
 
-async fn gateway_executes_gemini_files_get_via_local_decision_gate_with_local_planning_only_impl() {
+async fn gateway_rejects_gemini_files_get_key_mismatch_without_fallback_and_allows_creation_key_impl(
+) {
     #[derive(Debug, Clone)]
     struct SeenExecutionRuntimeSyncRequest {
         method: String,
@@ -567,15 +617,29 @@ async fn gateway_executes_gemini_files_get_via_local_decision_gate_with_local_pl
         }),
     );
 
-    let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
-        Some(hash_api_key("client-files-local-key")),
-        sample_auth_snapshot("key-files-local-123", "user-files-local-123"),
-    )]));
+    let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![
+        (
+            Some(hash_api_key("client-files-local-key")),
+            sample_auth_snapshot("key-files-local-123", "user-files-local-123"),
+        ),
+        (
+            Some(hash_api_key("client-files-local-rotated-key")),
+            sample_auth_snapshot("key-files-local-rotated-123", "user-files-local-123"),
+        ),
+    ]));
     let candidate_selection_repository =
         Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
             sample_files_candidate_row(),
         ]));
     let request_candidate_repository = Arc::new(InMemoryRequestCandidateRepository::default());
+    let mut mismatched_key_mapping =
+        sample_owned_file_mapping("files/key-mismatch", "user-files-local-123");
+    mismatched_key_mapping.key_id = "key-gemini-files-other".to_string();
+    let gemini_file_mapping_repository = Arc::new(InMemoryGeminiFileMappingRepository::seed([
+        sample_owned_file_mapping("files/abc-123", "user-files-local-123"),
+        sample_owned_file_mapping("files/foreign", "user-files-foreign-123"),
+        mismatched_key_mapping,
+    ]));
     let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
         vec![sample_files_provider_catalog_provider()],
         vec![sample_files_provider_catalog_endpoint()],
@@ -587,20 +651,76 @@ async fn gateway_executes_gemini_files_get_via_local_decision_gate_with_local_pl
     let gateway_state =
         build_state_with_execution_runtime_override(execution_runtime_url.clone())
         .with_data_state_for_tests(
-            crate::data::GatewayDataState::with_auth_candidate_selection_provider_catalog_and_request_candidate_repository_for_tests(
+            crate::data::GatewayDataState::with_auth_candidate_selection_provider_catalog_request_candidate_and_gemini_file_mapping_repositories_for_tests(
                 auth_repository,
                 candidate_selection_repository,
                 provider_catalog_repository,
                 Arc::clone(&request_candidate_repository),
+                gemini_file_mapping_repository,
                 DEVELOPMENT_ENCRYPTION_KEY,
             ),
         );
     let gateway = build_router_with_state(gateway_state);
     let (gateway_url, gateway_handle) = start_server(gateway).await;
 
-    let response = reqwest::Client::new()
+    let mismatch_response = reqwest::Client::new()
         .get(format!(
-            "{gateway_url}/v1beta/files/files/abc-123?view=FULL&key=client-files-local-key"
+            "{gateway_url}/v1beta/files/key-mismatch?key=client-files-local-key"
+        ))
+        .header("x-goog-api-key", "client-header-key")
+        .header(TRACE_ID_HEADER, "trace-gemini-files-key-mismatch-local-123")
+        .send()
+        .await
+        .expect("key mismatch request should complete");
+
+    assert_eq!(mismatch_response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(
+        seen_execution_runtime
+            .lock()
+            .expect("mutex should lock")
+            .is_none(),
+        "a candidate using a different creation key must not execute"
+    );
+    assert_eq!(*public_hits.lock().expect("mutex should lock"), 0);
+
+    let client = reqwest::Client::new();
+    for (method, path) in [
+        ("GET", "/v1beta/files/foreign"),
+        ("DELETE", "/v1beta/files/foreign"),
+        ("GET", "/v1beta/files/foreign:download?alt=media"),
+    ] {
+        let request = match method {
+            "DELETE" => client.delete(format!("{gateway_url}{path}?key=client-files-local-key")),
+            _ if path.contains('?') => {
+                client.get(format!("{gateway_url}{path}&key=client-files-local-key"))
+            }
+            _ => client.get(format!("{gateway_url}{path}?key=client-files-local-key")),
+        };
+        let foreign_response = request
+            .header("x-goog-api-key", "client-header-key")
+            .send()
+            .await
+            .expect("foreign file request should complete");
+        assert_eq!(foreign_response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            foreign_response
+                .json::<serde_json::Value>()
+                .await
+                .expect("foreign response should be JSON"),
+            json!({"detail": "File not found"})
+        );
+    }
+    assert!(
+        seen_execution_runtime
+            .lock()
+            .expect("mutex should lock")
+            .is_none(),
+        "cross-user file requests must not reach execution runtime"
+    );
+
+    let response = client
+        .get(format!(
+            "{gateway_url}/v1beta/files/files/abc-123?view=FULL&key=client-files-local-rotated-key"
         ))
         .header("x-goog-api-key", "client-header-key")
         .header(TRACE_ID_HEADER, "trace-gemini-files-local-123")

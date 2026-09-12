@@ -1,6 +1,5 @@
 use crate::dialect::{
-    column_default, column_nullable, default_sql_bool_keywords, postgres_type,
-    referential_action_sql,
+    column_default, column_nullable, default_sql, postgres_type, referential_action_sql,
 };
 use crate::LogicalSchema;
 
@@ -30,7 +29,7 @@ pub fn emit_named_schema(schema: &LogicalSchema, table_names: &[String]) -> Stri
             out.push_str(&postgres_type(column));
             if let Some(default) = column_default(column, column.driver.postgres.as_ref()) {
                 out.push_str(" DEFAULT ");
-                out.push_str(&default_sql_bool_keywords(default));
+                out.push_str(&default_sql(default));
             }
             if !column_nullable(column, column.driver.postgres.as_ref()) {
                 out.push_str(" NOT NULL");

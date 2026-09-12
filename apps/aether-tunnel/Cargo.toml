@@ -1,6 +1,6 @@
 [package]
 name = "aether-tunnel"
-version = "0.3.16"
+version = "0.3.17"
 edition = "2021"
 description = "Tunnel agent for Aether"
 
@@ -13,6 +13,7 @@ aether-runtime-state.workspace = true
 axum.workspace = true
 tokio = { version = "1", features = ["full"] }
 reqwest.workspace = true
+semver.workspace = true
 hyper = { version = "1", features = ["client", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "http2", "tokio"] }
 http-body-util = "0.1"
@@ -32,7 +33,7 @@ anyhow = "1"
 arc-swap = "1"
 toml = "0.8"
 rustls = { version = "0.23", features = ["ring"] }
-ratatui = "0.30"
+ratatui = "0.30.2"
 crossterm = "0.28"
 url = "2"
 sysinfo = "0.32"
@@ -45,4 +46,5 @@ webpki-roots = "0.26"
 uuid.workspace = true
 
 [dev-dependencies]
-aether-gateway.workspace = true
+aether-gateway = { workspace = true, features = ["testkit"] }
+tokio = { version = "1", features = ["test-util"] }

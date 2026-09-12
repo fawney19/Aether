@@ -8,17 +8,40 @@ pub enum WireType {
     Fixed32 = 5,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum FieldValue {
     Varint(u64),
     Bytes(Vec<u8>),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+impl fmt::Debug for FieldValue {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Varint(value) => formatter.debug_tuple("Varint").field(value).finish(),
+            Self::Bytes(bytes) => formatter
+                .debug_struct("Bytes")
+                .field("len", &bytes.len())
+                .finish(),
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
 pub struct Field {
     pub number: u32,
     pub wire_type: WireType,
     pub value: FieldValue,
+}
+
+impl fmt::Debug for Field {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Field")
+            .field("number", &self.number)
+            .field("wire_type", &self.wire_type)
+            .field("value", &self.value)
+            .finish()
+    }
 }
 
 impl Field {
@@ -138,7 +161,7 @@ pub fn parse_fields(buf: &[u8]) -> Result<Vec<Field>, ProtoError> {
             other => {
                 return Err(ProtoError::new(format!(
                     "unknown wire type {other} at offset {pos}"
-                )))
+                )));
             }
         };
         let value = match wire_type {

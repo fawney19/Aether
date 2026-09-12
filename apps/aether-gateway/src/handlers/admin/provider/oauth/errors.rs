@@ -41,7 +41,6 @@ pub(crate) fn normalize_provider_oauth_refresh_error_message(
 ) -> String {
     let mut message = None::<String>;
     let mut error_code = None::<String>;
-    let mut error_type = None::<String>;
 
     if let Some(body_excerpt) = body_excerpt {
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(body_excerpt) {
@@ -58,12 +57,6 @@ pub(crate) fn normalize_provider_oauth_refresh_error_message(
                         .map(ToOwned::to_owned);
                     error_code = error_object
                         .get("code")
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::trim)
-                        .filter(|value| !value.is_empty())
-                        .map(|value| value.to_ascii_lowercase());
-                    error_type = error_object
-                        .get("type")
                         .and_then(serde_json::Value::as_str)
                         .map(str::trim)
                         .filter(|value| !value.is_empty())
@@ -86,14 +79,6 @@ pub(crate) fn normalize_provider_oauth_refresh_error_message(
                         .filter(|value| !value.is_empty())
                         .map(|value| value.to_ascii_lowercase());
                 }
-                if error_type.is_none() {
-                    error_type = object
-                        .get("type")
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::trim)
-                        .filter(|value| !value.is_empty())
-                        .map(|value| value.to_ascii_lowercase());
-                }
             }
         }
     }
@@ -108,7 +93,6 @@ pub(crate) fn normalize_provider_oauth_refresh_error_message(
         .unwrap_or_default();
     let lowered = message.to_ascii_lowercase();
     let error_code = error_code.unwrap_or_default();
-    let error_type = error_type.unwrap_or_default();
 
     if error_code == "refresh_token_reused"
         || lowered.contains("already been used to generate a new access token")
@@ -126,15 +110,9 @@ pub(crate) fn normalize_provider_oauth_refresh_error_message(
     {
         return "refresh_token 无效、已过期或已撤销，请重新登录授权".to_string();
     }
-    if error_type == "invalid_request_error" && !message.is_empty() {
-        return message;
-    }
-    if !message.is_empty() {
-        return message;
-    }
     status_code
         .map(|status_code| format!("HTTP {status_code}"))
-        .unwrap_or_else(|| "未知错误".to_string())
+        .unwrap_or_else(|| "Token 刷新失败".to_string())
 }
 
 pub(crate) fn merge_provider_oauth_refresh_failure_reason(
@@ -180,6 +158,17 @@ mod tests {
             normalize_provider_oauth_refresh_error_message(Some(401), Some(body)),
             "refresh_token 无效、已过期或已撤销，请重新登录授权"
         );
+    }
+
+    #[test]
+    fn refresh_error_does_not_reflect_unknown_upstream_text_or_credentials() {
+        let body = r#"{"error":{"message":"authorization=Bearer upstream-secret https://user:pass@example.test?q=secret","type":"invalid_request_error","code":"unexpected"}}"#;
+
+        let normalized = normalize_provider_oauth_refresh_error_message(Some(502), Some(body));
+        assert_eq!(normalized, "HTTP 502");
+        for secret in ["upstream-secret", "user:pass", "q=secret"] {
+            assert!(!normalized.contains(secret), "leaked {secret}");
+        }
     }
 
     #[test]

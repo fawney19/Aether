@@ -13,8 +13,8 @@ pub(crate) use self::test_support::wallet_test_recharge_store;
 #[cfg(test)]
 use self::test_support::{
     record_wallet_test_recharge, record_wallet_test_refund, wallet_test_recharge_order_by_id,
-    wallet_test_recharge_orders_for_user, wallet_test_refund_by_id,
-    wallet_test_refund_by_idempotency, wallet_test_refunds_for_wallet,
+    wallet_test_recharge_order_by_order_no, wallet_test_recharge_orders_for_user,
+    wallet_test_refund_by_id, wallet_test_refund_by_idempotency, wallet_test_refunds_for_wallet,
     wallet_test_reserved_refund_amount,
 };
 #[path = "wallet/flow.rs"]
@@ -39,7 +39,12 @@ use self::reads::{
     parse_wallet_limit, parse_wallet_offset, wallet_fixed_offset,
     wallet_transaction_payload_from_record,
 };
-pub(crate) use self::recharge::{direct_gateway_channels, sanitize_wallet_gateway_response};
+pub(crate) use self::recharge::{
+    direct_gateway_channels, prepare_billing_gateway_response_for_storage,
+    prepare_wallet_gateway_response_for_storage, resolve_direct_gateway_channel,
+    sanitize_wallet_gateway_response, wallet_payment_instructions_from_checkout,
+    wallet_payment_instructions_from_stored,
+};
 use self::recharge::{
     handle_wallet_create_recharge, handle_wallet_recharge_detail, handle_wallet_recharge_list,
     handle_wallet_recharge_options, wallet_recharge_detail_path_matches,
@@ -72,12 +77,12 @@ const WALLET_SAFE_GATEWAY_RESPONSE_KEYS: &[&str] = &[
     "code_url",
     "h5_url",
     "jsapi",
-    "client_secret",
     "publishable_key",
     "intent_id",
     "payment_method_types",
     "provider_label",
     "subject",
+    "instructions",
     "callback_url",
     "return_url",
     "integration_status",
@@ -121,6 +126,7 @@ pub(super) async fn maybe_build_local_wallet_response(
     state: &AppState,
     request_context: &GatewayPublicRequestContext,
     headers: &http::HeaderMap,
+    client_ip: std::net::IpAddr,
     request_body: Option<&axum::body::Bytes>,
 ) -> Option<Response<Body>> {
     let decision = request_context.control_decision.as_ref()?;
@@ -184,7 +190,8 @@ pub(super) async fn maybe_build_local_wallet_response(
         && request_context.request_path == "/api/wallet/recharge"
     {
         return Some(
-            handle_wallet_create_recharge(state, request_context, headers, request_body).await,
+            handle_wallet_create_recharge(state, request_context, headers, client_ip, request_body)
+                .await,
         );
     }
 
@@ -220,7 +227,6 @@ mod tests {
     use super::{
         build_wallet_recharge_storage_unavailable_response,
         build_wallet_refund_storage_unavailable_response,
-        WALLET_RECHARGE_STORAGE_UNAVAILABLE_DETAIL, WALLET_REFUND_STORAGE_UNAVAILABLE_DETAIL,
     };
     use axum::body::to_bytes;
     use axum::http;
@@ -236,10 +242,7 @@ mod tests {
             .expect("body should read");
         let payload: serde_json::Value =
             serde_json::from_slice(&body).expect("json body should parse");
-        assert_eq!(
-            payload,
-            json!({ "detail": WALLET_RECHARGE_STORAGE_UNAVAILABLE_DETAIL })
-        );
+        assert_eq!(payload, json!({ "detail": "服务暂不可用，请稍后重试" }));
     }
 
     #[tokio::test]
@@ -252,9 +255,6 @@ mod tests {
             .expect("body should read");
         let payload: serde_json::Value =
             serde_json::from_slice(&body).expect("json body should parse");
-        assert_eq!(
-            payload,
-            json!({ "detail": WALLET_REFUND_STORAGE_UNAVAILABLE_DETAIL })
-        );
+        assert_eq!(payload, json!({ "detail": "服务暂不可用，请稍后重试" }));
     }
 }

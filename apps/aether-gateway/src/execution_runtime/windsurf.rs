@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
-use std::io::{Error as IoError, Read, Seek, SeekFrom};
+use std::io::{self, Error as IoError, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -36,12 +36,13 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use super::ndjson::encode_stream_frame_ndjson;
-use super::transport::{with_non_stream_total_timeout, ExecutionRuntimeTransportError};
+use super::transport::{
+    with_non_stream_total_timeout, ExecutionRuntimeTransportError, UpstreamResponseBodyPhase,
+};
 use crate::AppState;
 
 const LS_SERVICE: &str = "/exa.language_server_pb.LanguageServerService";
 const DEFAULT_LS_PORT: u16 = 42100;
-const DEFAULT_CSRF_TOKEN: &str = "windsurf-api-csrf-fixed-token";
 const DEFAULT_CODEIUM_API_URL: &str = "https://server.self-serve.windsurf.com";
 const DEFAULT_REGISTER_USER_URL: &str = "https://api.codeium.com/register_user/";
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
@@ -55,6 +56,8 @@ const WINDOWS_LS_READY_TIMEOUT: Duration = Duration::from_secs(90);
 const GRPC_SHORT_TIMEOUT: Duration = Duration::from_secs(5);
 const GRPC_STATUS_TIMEOUT: Duration = Duration::from_secs(10);
 const GRPC_REQUEST_TIMEOUT: Duration = Duration::from_secs(45);
+const WINDSURF_GRPC_RESPONSE_BODY_LIMIT_BYTES: usize = 64 * 1024 * 1024;
+const WINDSURF_STREAM_FRAME_CHANNEL_CAPACITY: usize = 64;
 const SEND_CASCADE_MAX_RETRIES: usize = 3;
 const WARMUP_TRANSPORT_MAX_RESTARTS: usize = 2;
 const WORKSPACE_PATH_HINT: &str = "Workspace path hidden; \"<workspace>\" is a redaction marker, NOT a path. Use tool calls to inspect real files or execute commands.";
@@ -65,7 +68,7 @@ pub(crate) struct WindsurfNativeStream {
     pub(crate) report_context: Option<Value>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 struct WindsurfRequestInput {
     api_key: String,
     model: String,
@@ -75,6 +78,28 @@ struct WindsurfRequestInput {
     tool_preamble: Option<String>,
     tool_dialect: ToolDialect,
     native_bridge: Option<WindsurfNativeBridgeInput>,
+}
+
+impl std::fmt::Debug for WindsurfRequestInput {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("WindsurfRequestInput")
+            .field("api_key", &"[REDACTED]")
+            .field("model", &self.model)
+            .field("message", &"[REDACTED]")
+            .field("image_count", &self.images.len())
+            .field("tool_count", &self.tools.len())
+            .field(
+                "tool_preamble",
+                &self.tool_preamble.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("tool_dialect", &self.tool_dialect)
+            .field(
+                "native_bridge",
+                &self.native_bridge.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -148,24 +173,50 @@ enum WindsurfPollEvent {
     Heartbeat,
 }
 
-#[derive(Debug)]
 struct LsProcessEntry {
     port: u16,
     csrf_token: String,
     session_id: String,
     workspace_path: PathBuf,
     proxy_url: Option<String>,
-    stderr_log_path: Option<PathBuf>,
+    stderr_capture_enabled: bool,
     _child: Child,
 }
 
-#[derive(Debug, Clone)]
+impl std::fmt::Debug for LsProcessEntry {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("LsProcessEntry")
+            .field("port", &self.port)
+            .field("csrf_token", &"[REDACTED]")
+            .field("session_id", &"[REDACTED]")
+            .field("workspace_path", &"[REDACTED]")
+            .field("proxy_url", &self.proxy_url.as_ref().map(|_| "[REDACTED]"))
+            .field("stderr_capture_enabled", &self.stderr_capture_enabled)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Clone)]
 struct LsHandle {
     pool_key: String,
     port: u16,
     csrf_token: String,
     session_id: String,
     workspace_path: PathBuf,
+}
+
+impl std::fmt::Debug for LsHandle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("LsHandle")
+            .field("pool_key", &self.pool_key)
+            .field("port", &self.port)
+            .field("csrf_token", &"[REDACTED]")
+            .field("session_id", &"[REDACTED]")
+            .field("workspace_path", &"[REDACTED]")
+            .finish()
+    }
 }
 
 #[derive(Clone)]
@@ -220,16 +271,17 @@ pub(crate) async fn maybe_execute_windsurf_sync(
         let key_upstream_metadata = read_windsurf_key_upstream_metadata(state, plan).await;
         let prepared = prepare_windsurf_cascade(plan, input, key_upstream_metadata).await?;
         let started_at = Instant::now();
-        let mut deltas = Vec::new();
+        let mut content = String::new();
+        let buffered_body_limit = crate::headers::max_internal_buffered_body_bytes();
         let poll_result = poll_windsurf_cascade_with_transport_recovery(&prepared, |event| {
             if let WindsurfPollEvent::TextDelta(delta) = event {
-                deltas.push(sanitize_windsurf_text(&delta));
+                let delta = sanitize_windsurf_text(&delta);
+                append_windsurf_delta_with_limit(&mut content, &delta, buffered_body_limit)?;
             }
             Ok(())
         })
         .await?;
         let elapsed_ms = started_at.elapsed().as_millis() as u64;
-        let content = deltas.concat();
         let parsed_tool_calls = parse_and_filter_windsurf_tool_calls(&content, &prepared.input);
         let mut tool_calls = poll_result.native_tool_calls;
         tool_calls.extend(parsed_tool_calls.tool_calls);
@@ -289,10 +341,9 @@ async fn prepare_windsurf_cascade(
 ) -> Result<PreparedCascade, ExecutionRuntimeTransportError> {
     let model = resolve_windsurf_execution_model(&input.model, key_upstream_metadata.as_ref())
         .ok_or_else(|| {
-            ExecutionRuntimeTransportError::UpstreamRequest(format!(
-                "unsupported Windsurf model {}",
-                input.model
-            ))
+            ExecutionRuntimeTransportError::UpstreamRequest(
+                "unsupported Windsurf model".to_string(),
+            )
         })?;
     let mut ls = ensure_windsurf_language_server(plan).await?;
     ls = warmup_windsurf_cascade_with_transport_recovery(plan, ls, &input.api_key).await?;
@@ -304,7 +355,7 @@ async fn prepare_windsurf_cascade(
                 event_name = "windsurf_panel_state_missing_on_start",
                 log_type = "ops",
                 request_id = %plan.request_id,
-                error = %err,
+                error_category = "panel_state_missing",
                 "gateway rewarming Windsurf language server after missing panel state on StartCascade"
             );
             ls = force_rewarm_windsurf_cascade(plan, &ls, &input.api_key).await?;
@@ -360,7 +411,11 @@ async fn prepare_windsurf_cascade(
             &ls.session_id,
             &send_options,
         )
-        .map_err(|err| ExecutionRuntimeTransportError::UpstreamRequest(err.to_string()))?;
+        .map_err(|_| {
+            ExecutionRuntimeTransportError::UpstreamRequest(
+                "failed to build Windsurf cascade message".to_string(),
+            )
+        })?;
         match windsurf_grpc_unary(
             ls.port,
             &ls.csrf_token,
@@ -374,17 +429,16 @@ async fn prepare_windsurf_cascade(
             Err(err) if is_windsurf_send_retryable_error(&err) => {
                 send_retry += 1;
                 if send_retry > SEND_CASCADE_MAX_RETRIES {
-                    return Err(ExecutionRuntimeTransportError::UpstreamRequest(format!(
-                        "Windsurf SendUserCascadeMessage retry limit exceeded after {} rewarm attempts: {err}",
-                        SEND_CASCADE_MAX_RETRIES
-                    )));
+                    return Err(ExecutionRuntimeTransportError::UpstreamRequest(
+                        "Windsurf SendUserCascadeMessage retry limit exceeded".to_string(),
+                    ));
                 }
                 warn!(
                     event_name = "windsurf_send_retryable_error",
                     log_type = "ops",
                     request_id = %plan.request_id,
                     retry = send_retry,
-                    error = %err,
+                    error_category = "retryable_send_failure",
                     "gateway rewarming Windsurf cascade after retryable SendUserCascadeMessage error"
                 );
                 ls = force_rewarm_windsurf_cascade(plan, &ls, &input.api_key).await?;
@@ -425,14 +479,14 @@ async fn read_windsurf_key_upstream_metadata(
             .into_iter()
             .find(|key| key.id == plan.key_id && key.provider_id == plan.provider_id)
             .and_then(|key| key.upstream_metadata),
-        Err(err) => {
+        Err(_) => {
             warn!(
                 event_name = "windsurf_key_upstream_metadata_unavailable",
                 log_type = "ops",
                 request_id = %plan.request_id,
                 provider_id = %plan.provider_id,
                 key_id = %plan.key_id,
-                error = ?err,
+                error_category = "provider_catalog_read_failed",
                 "gateway could not read Windsurf key upstream metadata; falling back to static model catalog"
             );
             None
@@ -532,9 +586,12 @@ fn build_windsurf_stream_frame_stream(
             },
         });
 
-        let (tx, mut rx) = mpsc::unbounded_channel::<Result<Bytes, IoError>>();
+        let (tx, mut rx) = mpsc::channel::<Result<Bytes, IoError>>(
+            WINDSURF_STREAM_FRAME_CHANNEL_CAPACITY,
+        );
         tokio::spawn(async move {
-            let mut deltas = Vec::new();
+            let mut content = String::new();
+            let buffered_body_limit = crate::headers::max_internal_buffered_body_bytes();
             let mut streamed_native_call_ids = HashSet::new();
             let mut next_tool_index = 0usize;
             let buffer_for_tool_calls = should_parse_windsurf_tool_calls(&prepared.input);
@@ -542,7 +599,11 @@ fn build_windsurf_stream_frame_stream(
                 match event {
                     WindsurfPollEvent::TextDelta(delta) => {
                         let delta = sanitize_windsurf_text(&delta);
-                        deltas.push(delta.clone());
+                        append_windsurf_delta_with_limit(
+                            &mut content,
+                            &delta,
+                            buffered_body_limit,
+                        )?;
                         if !buffer_for_tool_calls {
                             send_stream_frame(&tx, sse_data_frame(&prepared.request_id, &prepared.model, &delta))?;
                         }
@@ -570,7 +631,6 @@ fn build_windsurf_stream_frame_stream(
 
             match poll_result {
                 Ok(poll_result) => {
-                    let content = deltas.concat();
                     let parsed_tool_calls = parse_and_filter_windsurf_tool_calls(&content, &prepared.input);
                     let mut tool_calls = poll_result
                         .native_tool_calls
@@ -590,30 +650,46 @@ fn build_windsurf_stream_frame_stream(
                             next_tool_index,
                             &tool_calls,
                         ) {
-                            let _ = tx.send(encode_stream_frame_ndjson(&frame));
+                            if tx.send(encode_stream_frame_ndjson(&frame)).await.is_err() {
+                                return;
+                            }
                         }
-                        let _ = tx.send(encode_stream_frame_ndjson(&sse_finish_frame_with_reason(
+                        if tx.send(encode_stream_frame_ndjson(&sse_finish_frame_with_reason(
                             &prepared.request_id,
                             &prepared.model,
                             "tool_calls",
-                        )));
+                        ))).await.is_err() {
+                            return;
+                        }
                     } else {
                         if buffer_for_tool_calls && !content.is_empty() {
-                            let _ = tx.send(encode_stream_frame_ndjson(&sse_data_frame(
+                            if tx.send(encode_stream_frame_ndjson(&sse_data_frame(
                                 &prepared.request_id,
                                 &prepared.model,
                                 &content,
-                            )));
+                            ))).await.is_err() {
+                                return;
+                            }
                         }
-                        let _ = tx.send(encode_stream_frame_ndjson(&sse_finish_frame_with_reason(
+                        if tx.send(encode_stream_frame_ndjson(&sse_finish_frame_with_reason(
                             &prepared.request_id,
                             &prepared.model,
                             finish_reason,
-                        )));
+                        ))).await.is_err() {
+                            return;
+                        }
                     }
-                    let _ = tx.send(encode_stream_frame_ndjson(&raw_sse_data_frame(b"data: [DONE]\n\n")));
+                    if tx
+                        .send(encode_stream_frame_ndjson(&raw_sse_data_frame(
+                            b"data: [DONE]\n\n",
+                        )))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
                     let elapsed_ms = started_at.elapsed().as_millis() as u64;
-                    let _ = tx.send(encode_stream_frame_ndjson(&StreamFrame {
+                    if tx.send(encode_stream_frame_ndjson(&StreamFrame {
                         frame_type: StreamFrameType::Telemetry,
                         payload: StreamFramePayload::Telemetry {
                             telemetry: ExecutionTelemetry {
@@ -622,25 +698,29 @@ fn build_windsurf_stream_frame_stream(
                                 upstream_bytes: Some(content.len() as u64),
                             },
                         },
-                    }));
+                    })).await.is_err() {
+                        return;
+                    }
                     let _ = tx.send(encode_stream_frame_ndjson(&StreamFrame::eof_with_summary(
                         windsurf_terminal_summary(
                             poll_result.usage,
                             Some(prepared.model.as_str()),
                             Some(finish_reason),
                         ),
-                    )));
+                    ))).await;
                 }
                 Err(err) => {
                     let execution_error =
                         windsurf_execution_error_from_transport_error(&err, ExecutionPhase::StreamRead);
-                    let _ = tx.send(encode_stream_frame_ndjson(&StreamFrame {
+                    if tx.send(encode_stream_frame_ndjson(&StreamFrame {
                         frame_type: StreamFrameType::Error,
                         payload: StreamFramePayload::Error {
                             error: execution_error,
                         },
-                    }));
-                    let _ = tx.send(encode_stream_frame_ndjson(&StreamFrame::eof()));
+                    })).await.is_err() {
+                        return;
+                    }
+                    let _ = tx.send(encode_stream_frame_ndjson(&StreamFrame::eof())).await;
                 }
             }
         });
@@ -651,26 +731,60 @@ fn build_windsurf_stream_frame_stream(
     }
 }
 
+fn append_windsurf_delta_with_limit(
+    content: &mut String,
+    delta: &str,
+    limit_bytes: usize,
+) -> Result<(), ExecutionRuntimeTransportError> {
+    if delta.len() > limit_bytes.saturating_sub(content.len()) {
+        return Err(ExecutionRuntimeTransportError::UpstreamResponseTooLarge {
+            phase: UpstreamResponseBodyPhase::Decoded,
+            limit_bytes,
+        });
+    }
+    content.push_str(delta);
+    Ok(())
+}
+
 fn send_stream_frame(
-    tx: &mpsc::UnboundedSender<Result<Bytes, IoError>>,
+    tx: &mpsc::Sender<Result<Bytes, IoError>>,
     frame: StreamFrame,
 ) -> Result<(), ExecutionRuntimeTransportError> {
-    tx.send(encode_stream_frame_ndjson(&frame)).map_err(|_| {
-        ExecutionRuntimeTransportError::UpstreamRequest(
-            "Windsurf stream cancelled by downstream client".to_string(),
-        )
-    })
+    tx.try_send(encode_stream_frame_ndjson(&frame))
+        .map_err(|err| {
+            let detail = match err {
+                mpsc::error::TrySendError::Full(_) => "Windsurf stream buffer is full",
+                mpsc::error::TrySendError::Closed(_) => {
+                    "Windsurf stream cancelled by downstream client"
+                }
+            };
+            ExecutionRuntimeTransportError::UpstreamRequest(detail.to_string())
+        })
 }
 
 fn windsurf_execution_error_from_transport_error(
     err: &ExecutionRuntimeTransportError,
     phase: ExecutionPhase,
 ) -> ExecutionError {
-    let message = err.to_string();
-    let lower = message.to_ascii_lowercase();
+    let lower = err.to_string().to_ascii_lowercase();
+    let message = windsurf_public_error_message(err, &lower);
     if lower.contains("stream cancelled by downstream client") {
         return ExecutionError {
             kind: ExecutionErrorKind::Cancelled,
+            phase,
+            message,
+            upstream_status: None,
+            retryable: false,
+            failover_recommended: false,
+        };
+    }
+    if matches!(
+        err,
+        ExecutionRuntimeTransportError::UpstreamResponseTooLarge { .. }
+    ) || lower.contains("stream buffer is full")
+    {
+        return ExecutionError {
+            kind: ExecutionErrorKind::ProtocolError,
             phase,
             message,
             upstream_status: None,
@@ -711,6 +825,76 @@ fn windsurf_execution_error_from_transport_error(
         retryable: true,
         failover_recommended: true,
     }
+}
+
+fn windsurf_public_error_message(err: &ExecutionRuntimeTransportError, normalized: &str) -> String {
+    if normalized.contains("stream cancelled by downstream client") {
+        return "Windsurf request was cancelled".to_string();
+    }
+    if matches!(
+        err,
+        ExecutionRuntimeTransportError::UpstreamResponseTooLarge { .. }
+    ) || normalized.contains("stream buffer is full")
+    {
+        return "Windsurf response exceeded local runtime limits".to_string();
+    }
+    if normalized.contains("reached message rate limit")
+        || normalized.contains("resource_exhausted")
+        || normalized.contains("rate limit")
+        || normalized.contains("rate_limit")
+    {
+        return "Windsurf upstream rate limit reached".to_string();
+    }
+    if normalized.contains("unsupported windsurf model") {
+        return "Unsupported Windsurf model".to_string();
+    }
+    if normalized.contains("proxy") {
+        return "Windsurf proxy request failed".to_string();
+    }
+    if ["tls", "ssl", "certificate", "handshake"]
+        .iter()
+        .any(|needle| normalized.contains(needle))
+    {
+        return "Windsurf TLS request failed".to_string();
+    }
+    if ["timed out", "timeout", "deadline exceeded"]
+        .iter()
+        .any(|needle| normalized.contains(needle))
+    {
+        return "Windsurf request timed out".to_string();
+    }
+    "Windsurf request failed".to_string()
+}
+
+fn windsurf_trajectory_error(detail: &str) -> ExecutionRuntimeTransportError {
+    let normalized = detail.trim().to_ascii_lowercase();
+    let message = if normalized.contains("reached message rate limit")
+        || normalized.contains("resource_exhausted")
+        || normalized.contains("rate limit")
+        || normalized.contains("rate_limit")
+    {
+        "Windsurf trajectory reported a rate limit"
+    } else if normalized.contains("panel state")
+        && (normalized.contains("not found") || normalized.contains("not_found"))
+    {
+        "Windsurf panel state not found"
+    } else if normalized.contains("untrusted workspace")
+        || (normalized.contains("workspace")
+            && normalized.contains("not")
+            && normalized.contains("trusted"))
+    {
+        "Windsurf workspace is not trusted"
+    } else if (normalized.contains("cascade") || normalized.contains("trajectory"))
+        && (normalized.contains("not found")
+            || normalized.contains("not_found")
+            || normalized.contains("expired")
+            || normalized.contains("unknown"))
+    {
+        "Windsurf cascade not found or expired"
+    } else {
+        "Windsurf trajectory reported an upstream error"
+    };
+    ExecutionRuntimeTransportError::UpstreamRequest(message.to_string())
 }
 
 fn classify_windsurf_transport_execution_error(
@@ -794,7 +978,7 @@ where
         request_id = %prepared.request_id,
         cascade_id = %prepared.cascade_id,
         port = prepared.ls.port,
-        error = %first_err,
+        error_category = "poll_transport_failure",
         "gateway restarting Windsurf language server after pre-output polling transport failure"
     );
     invalidate_windsurf_language_server_handle(
@@ -846,17 +1030,15 @@ where
             GRPC_REQUEST_TIMEOUT,
         )
         .await?;
-        let steps = parse_trajectory_steps(&steps_response).map_err(|err| {
-            ExecutionRuntimeTransportError::UpstreamRequest(format!(
-                "failed to parse Windsurf trajectory steps: {err}"
-            ))
+        let steps = parse_trajectory_steps(&steps_response).map_err(|_| {
+            ExecutionRuntimeTransportError::UpstreamRequest(
+                "failed to parse Windsurf trajectory steps".to_string(),
+            )
         })?;
 
         for step in &steps {
             if step.step_type == 17 && !step.error_text.trim().is_empty() {
-                return Err(ExecutionRuntimeTransportError::UpstreamRequest(
-                    step.error_text.trim().to_string(),
-                ));
+                return Err(windsurf_trajectory_error(&step.error_text));
             }
         }
         for (index, step) in steps.iter().enumerate() {
@@ -925,10 +1107,10 @@ where
                     GRPC_REQUEST_TIMEOUT,
                 )
                 .await?;
-                let final_steps = parse_trajectory_steps(&final_steps_response).map_err(|err| {
-                    ExecutionRuntimeTransportError::UpstreamRequest(format!(
-                        "failed to parse final Windsurf trajectory steps: {err}"
-                    ))
+                let final_steps = parse_trajectory_steps(&final_steps_response).map_err(|_| {
+                    ExecutionRuntimeTransportError::UpstreamRequest(
+                        "failed to parse final Windsurf trajectory steps".to_string(),
+                    )
                 })?;
                 for (index, step) in final_steps.iter().enumerate() {
                     if let Some(usage) = step.usage {
@@ -995,13 +1177,13 @@ async fn fetch_windsurf_generator_usage(prepared: &PreparedCascade) -> Option<Ca
     .await
     {
         Ok(response) => response,
-        Err(err) => {
+        Err(_) => {
             debug!(
                 event_name = "windsurf_generator_metadata_fetch_failed",
                 log_type = "debug",
                 request_id = %prepared.request_id,
                 cascade_id = %prepared.cascade_id,
-                error = %err,
+                error_category = "generator_metadata_fetch_failed",
                 "gateway could not fetch Windsurf generator token usage"
             );
             return None;
@@ -1010,13 +1192,13 @@ async fn fetch_windsurf_generator_usage(prepared: &PreparedCascade) -> Option<Ca
 
     match parse_generator_metadata(&response) {
         Ok(usage) => usage,
-        Err(err) => {
+        Err(_) => {
             debug!(
                 event_name = "windsurf_generator_metadata_parse_failed",
                 log_type = "debug",
                 request_id = %prepared.request_id,
                 cascade_id = %prepared.cascade_id,
-                error = %err,
+                error_category = "generator_metadata_parse_failed",
                 "gateway could not parse Windsurf generator token usage"
             );
             None
@@ -1194,7 +1376,7 @@ async fn ensure_windsurf_language_server(
             .and_then(windsurf_language_server_stale_reason)
         {
             if let Some(entry) = guard.remove(&key) {
-                terminate_windsurf_language_server_entry(&key, entry, &reason);
+                terminate_windsurf_language_server_entry(&key, entry, reason);
             }
         }
         if let Some(entry) = guard.get(&key) {
@@ -1203,29 +1385,39 @@ async fn ensure_windsurf_language_server(
     }
 
     let binary_path = resolve_language_server_binary_path()?;
-    repair_executable_mode(&binary_path);
     let port = find_free_language_server_port()?;
-    let data_dir = language_server_data_dir(&key);
-    let workspace_path = language_server_workspace_path(plan);
-    fs::create_dir_all(data_dir.join("db")).map_err(|err| {
-        ExecutionRuntimeTransportError::UpstreamRequest(format!(
-            "failed to create Windsurf LS data dir {}: {err}",
-            data_dir.display()
-        ))
+    let data_dir = absolute_runtime_path(language_server_data_dir(&key)).map_err(|_| {
+        ExecutionRuntimeTransportError::UpstreamRequest(
+            "failed to resolve Windsurf language server data directory".to_string(),
+        )
     })?;
-    ensure_workspace_dir(&workspace_path);
-    let (stderr, stderr_log_path) = language_server_stderr(&data_dir);
+    let database_dir = data_dir.join("db");
+    ensure_private_directory(&data_dir)
+        .and_then(|_| ensure_private_directory(&database_dir))
+        .map_err(|_| {
+            ExecutionRuntimeTransportError::UpstreamRequest(
+                "failed to secure Windsurf language server data directory".to_string(),
+            )
+        })?;
+    let workspace_path = data_dir.join("workspace");
+    ensure_workspace_dir(&workspace_path).map_err(|_| {
+        ExecutionRuntimeTransportError::UpstreamRequest(
+            "failed to secure Windsurf placeholder workspace".to_string(),
+        )
+    })?;
+    let (stderr, stderr_capture_enabled) = language_server_stderr(&data_dir);
 
     let proxy_url = language_server_proxy_url(plan);
+    let csrf_token = new_windsurf_csrf_token();
     let mut command = Command::new(&binary_path);
     command
         .arg(format!("--api_server_url={}", codeium_api_url()))
         .arg("--run_child")
         .arg(format!("--server_port={port}"))
-        .arg(format!("--csrf_token={DEFAULT_CSRF_TOKEN}"))
+        .arg(format!("--csrf_token={csrf_token}"))
         .arg(format!("--register_user_url={DEFAULT_REGISTER_USER_URL}"))
         .arg(format!("--codeium_dir={}", data_dir.display()))
-        .arg(format!("--database_dir={}", data_dir.join("db").display()))
+        .arg(format!("--database_dir={}", database_dir.display()))
         .arg("--detect_proxy=false");
 
     if !cfg!(target_os = "windows") {
@@ -1238,39 +1430,34 @@ async fn ensure_windsurf_language_server(
         .stdout(Stdio::null())
         .stderr(stderr);
 
-    let mut child = command.spawn().map_err(|err| {
-        ExecutionRuntimeTransportError::UpstreamRequest(format!(
-            "failed to start Windsurf language server {}: {err}",
-            binary_path.display()
-        ))
+    let mut child = command.spawn().map_err(|_| {
+        ExecutionRuntimeTransportError::UpstreamRequest(
+            "failed to start Windsurf language server".to_string(),
+        )
     })?;
 
-    if let Err(err) = wait_language_server_ready(port, &mut child, stderr_log_path.as_deref()).await
-    {
+    if let Err(err) = wait_language_server_ready(port, &mut child).await {
         let _ = child.kill();
         return Err(err);
     }
 
-    let stderr_log_display = stderr_log_path
-        .as_ref()
-        .map(|path| path.display().to_string());
     info!(
         event_name = "windsurf_language_server_ready",
         log_type = "ops",
         port,
         pool_key = %key,
         proxy_configured = proxy_url.is_some(),
-        stderr_log_path = stderr_log_display.as_deref(),
+        stderr_capture_enabled,
         "gateway native Windsurf language server ready"
     );
 
     let entry = LsProcessEntry {
         port,
-        csrf_token: DEFAULT_CSRF_TOKEN.to_string(),
+        csrf_token,
         session_id: Uuid::new_v4().to_string(),
         workspace_path,
         proxy_url,
-        stderr_log_path,
+        stderr_capture_enabled,
         _child: child,
     };
     let mut guard = pool.lock().map_err(|_| {
@@ -1283,7 +1470,7 @@ async fn ensure_windsurf_language_server(
         .and_then(windsurf_language_server_stale_reason)
     {
         if let Some(existing) = guard.remove(&key) {
-            terminate_windsurf_language_server_entry(&key, existing, &reason);
+            terminate_windsurf_language_server_entry(&key, existing, reason);
         }
     }
     if let Some(existing) = guard.get(&key) {
@@ -1299,6 +1486,14 @@ async fn ensure_windsurf_language_server(
         )
     })?;
     Ok(ls_handle_from_entry(&key, entry))
+}
+
+fn new_windsurf_csrf_token() -> String {
+    format!(
+        "aether-{}{}",
+        Uuid::new_v4().simple(),
+        Uuid::new_v4().simple()
+    )
 }
 
 async fn warmup_windsurf_cascade(
@@ -1361,7 +1556,7 @@ async fn warmup_windsurf_cascade_with_transport_recovery(
                     port = ls.port,
                     attempt = attempt + 1,
                     max_restarts = WARMUP_TRANSPORT_MAX_RESTARTS,
-                    error = %err,
+                    error_category = "warmup_transport_failure",
                     "gateway restarting Windsurf language server after warmup transport failure"
                 );
                 invalidate_windsurf_language_server_handle(&ls, "warmup transport failure")?;
@@ -1389,7 +1584,7 @@ async fn force_rewarm_windsurf_cascade(
                 event_name = "windsurf_rewarm_transport_restart",
                 log_type = "ops",
                 port = refreshed.port,
-                error = %err,
+                error_category = "rewarm_transport_failure",
                 "gateway restarting Windsurf language server after rewarm transport failure"
             );
             invalidate_windsurf_language_server_handle(&refreshed, "rewarm transport failure")?;
@@ -1438,7 +1633,7 @@ async fn windsurf_warmup_unary(
                     event_name = "windsurf_workspace_trust_update_failed",
                     log_type = "ops",
                     port,
-                    error = %err,
+                    error_category = "workspace_trust_update_failed",
                     "gateway Windsurf workspace trust update failed; continuing to match WindsurfAPI warmup behavior"
                 );
             } else {
@@ -1447,7 +1642,7 @@ async fn windsurf_warmup_unary(
                     log_type = "ops",
                     port,
                     stage,
-                    error = %err,
+                    error_category = "cascade_warmup_stage_failed",
                     "gateway Windsurf cascade warmup stage failed; continuing to match WindsurfAPI warmup behavior"
                 );
             }
@@ -1515,12 +1710,12 @@ async fn sync_windsurf_user_status_with_panel(ls: &LsHandle, api_key: &str) {
     .await
     {
         Ok(response) => response,
-        Err(err) => {
+        Err(_) => {
             warn!(
                 event_name = "windsurf_user_status_sync_failed",
                 log_type = "ops",
                 port = ls.port,
-                error = %err,
+                error_category = "user_status_sync_failed",
                 "gateway failed to fetch Windsurf user status for panel sync"
             );
             return;
@@ -1535,7 +1730,7 @@ async fn sync_windsurf_user_status_with_panel(ls: &LsHandle, api_key: &str) {
         );
         return;
     };
-    if let Err(err) = windsurf_grpc_unary(
+    if windsurf_grpc_unary(
         ls.port,
         &ls.csrf_token,
         "UpdatePanelStateWithUserStatus",
@@ -1547,12 +1742,13 @@ async fn sync_windsurf_user_status_with_panel(ls: &LsHandle, api_key: &str) {
         GRPC_SHORT_TIMEOUT,
     )
     .await
+    .is_err()
     {
         warn!(
             event_name = "windsurf_panel_user_status_update_failed",
             log_type = "ops",
             port = ls.port,
-            error = %err,
+            error_category = "panel_user_status_update_failed",
             "gateway failed to update Windsurf panel state with user status"
         );
     }
@@ -1568,6 +1764,8 @@ async fn windsurf_grpc_unary(
     let url = format!("http://127.0.0.1:{port}{LS_SERVICE}/{method}");
     let client = reqwest::Client::builder()
         .http1_only()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
         .timeout(timeout)
         .build()
         .map_err(ExecutionRuntimeTransportError::ClientBuild)?;
@@ -1587,19 +1785,44 @@ async fn windsurf_grpc_unary(
             ))
         })?;
     let status = response.status();
-    let body = response.bytes().await.map_err(|err| {
-        ExecutionRuntimeTransportError::UpstreamRequest(format!(
-            "Windsurf Connect {method} response read failed: {}",
-            super::transport::format_upstream_request_error(&err)
-        ))
-    })?;
+    let body = collect_windsurf_grpc_response_body(response, method).await?;
     if !status.is_success() {
-        return Err(ExecutionRuntimeTransportError::UpstreamRequest(format!(
-            "Windsurf Connect {method} returned HTTP {status}: {}",
-            String::from_utf8_lossy(&body)
-        )));
+        return Err(windsurf_connect_http_error(method, status.as_u16()));
     }
-    Ok(body.to_vec())
+    Ok(body)
+}
+
+async fn collect_windsurf_grpc_response_body(
+    response: reqwest::Response,
+    method: &str,
+) -> Result<Vec<u8>, ExecutionRuntimeTransportError> {
+    if response.content_length().is_some_and(|length| {
+        length > u64::try_from(WINDSURF_GRPC_RESPONSE_BODY_LIMIT_BYTES).unwrap_or(u64::MAX)
+    }) {
+        return Err(ExecutionRuntimeTransportError::UpstreamResponseTooLarge {
+            phase: UpstreamResponseBodyPhase::Wire,
+            limit_bytes: WINDSURF_GRPC_RESPONSE_BODY_LIMIT_BYTES,
+        });
+    }
+
+    let mut body = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|err| {
+            ExecutionRuntimeTransportError::UpstreamRequest(format!(
+                "Windsurf Connect {method} response read failed: {}",
+                super::transport::format_upstream_request_error(&err)
+            ))
+        })?;
+        if chunk.len() > WINDSURF_GRPC_RESPONSE_BODY_LIMIT_BYTES.saturating_sub(body.len()) {
+            return Err(ExecutionRuntimeTransportError::UpstreamResponseTooLarge {
+                phase: UpstreamResponseBodyPhase::Wire,
+                limit_bytes: WINDSURF_GRPC_RESPONSE_BODY_LIMIT_BYTES,
+            });
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }
 
 fn detect_windsurf_request(
@@ -3757,21 +3980,21 @@ fn ls_handle_from_entry(pool_key: &str, entry: &LsProcessEntry) -> LsHandle {
     }
 }
 
-fn windsurf_language_server_stale_reason(entry: &mut LsProcessEntry) -> Option<String> {
+fn windsurf_language_server_stale_reason(entry: &mut LsProcessEntry) -> Option<&'static str> {
     match entry._child.try_wait() {
-        Ok(Some(status)) => {
-            return Some(format!("process exited with status {status}"));
+        Ok(Some(_)) => {
+            return Some("process_exited");
         }
         Ok(None) => {}
-        Err(err) => {
-            return Some(format!("failed to inspect process status: {err}"));
+        Err(_) => {
+            return Some("process_status_unavailable");
         }
     }
 
     if language_server_port_accepts(entry.port) {
         None
     } else {
-        Some(format!("port {} is not accepting connections", entry.port))
+        Some("port_unavailable")
     }
 }
 
@@ -3808,18 +4031,14 @@ fn terminate_windsurf_language_server_entry(
 ) {
     let _ = entry._child.kill();
     let _ = entry._child.wait();
-    let stderr_log_display = entry
-        .stderr_log_path
-        .as_ref()
-        .map(|path| path.display().to_string());
     warn!(
         event_name = "windsurf_language_server_removed",
         log_type = "ops",
         pool_key,
         port = entry.port,
         proxy_configured = entry.proxy_url.is_some(),
-        stderr_log_path = stderr_log_display.as_deref(),
-        reason,
+        stderr_capture_enabled = entry.stderr_capture_enabled,
+        reason_category = reason,
         "gateway removed Windsurf language server from pool"
     );
 }
@@ -3849,25 +4068,11 @@ fn language_server_proxy_url(plan: &ExecutionPlan) -> Option<String> {
 fn resolve_language_server_binary_path() -> Result<PathBuf, ExecutionRuntimeTransportError> {
     for key in ["WINDSURF_LS_BINARY_PATH", "LS_BINARY_PATH"] {
         if let Some(path) = std::env::var_os(key).filter(|value| !value.is_empty()) {
-            let path = PathBuf::from(path);
-            if path.exists() {
-                return Ok(path);
-            }
-            return Err(ExecutionRuntimeTransportError::UpstreamRequest(format!(
-                "{key} points to missing Windsurf language server binary: {}",
-                path.display()
-            )));
+            return validate_language_server_binary_path(Path::new(&path));
         }
     }
     let default = default_language_server_binary_path();
-    if default.exists() {
-        Ok(default)
-    } else {
-        Err(ExecutionRuntimeTransportError::UpstreamRequest(format!(
-            "Windsurf language server binary not found at {}",
-            default.display()
-        )))
-    }
+    validate_language_server_binary_path(&default)
 }
 
 fn default_language_server_binary_path() -> PathBuf {
@@ -3892,44 +4097,75 @@ fn default_language_server_binary_path() -> PathBuf {
     }
 }
 
-fn language_server_stderr(data_dir: &Path) -> (Stdio, Option<PathBuf>) {
+fn language_server_stderr(data_dir: &Path) -> (Stdio, bool) {
     let path = data_dir.join("language-server.stderr.log");
-    match fs::OpenOptions::new().create(true).append(true).open(&path) {
-        Ok(file) => (Stdio::from(file), Some(path)),
-        Err(err) => {
+    match open_private_append_file(&path) {
+        Ok(file) => (Stdio::from(file), true),
+        Err(_) => {
             warn!(
                 event_name = "windsurf_language_server_stderr_open_failed",
                 log_type = "ops",
-                path = %path.display(),
-                error = %err,
+                error_category = "stderr_log_open_failed",
                 "gateway could not open Windsurf language server stderr log"
             );
-            (Stdio::null(), None)
+            (Stdio::null(), false)
         }
     }
 }
 
-fn repair_executable_mode(path: &Path) {
+fn validate_language_server_binary_path(
+    path: &Path,
+) -> Result<PathBuf, ExecutionRuntimeTransportError> {
+    let invalid = || {
+        ExecutionRuntimeTransportError::UpstreamRequest(
+            "Windsurf language server binary path is missing or unsafe".to_string(),
+        )
+    };
+
+    let requested_metadata = fs::symlink_metadata(path).map_err(|_| invalid())?;
+    if requested_metadata.file_type().is_symlink() {
+        return Err(invalid());
+    }
+
+    let canonical = fs::canonicalize(path).map_err(|_| invalid())?;
+    let metadata = fs::symlink_metadata(&canonical).map_err(|_| invalid())?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err(invalid());
+    }
+
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        if let Ok(metadata) = fs::metadata(path) {
-            let mode = metadata.permissions().mode();
-            if mode & 0o111 == 0 {
-                let mut permissions = metadata.permissions();
-                permissions.set_mode(mode | 0o111);
-                if let Err(err) = fs::set_permissions(path, permissions) {
-                    warn!(
-                        event_name = "windsurf_language_server_chmod_failed",
-                        log_type = "ops",
-                        path = %path.display(),
-                        error = %err,
-                        "gateway failed to repair Windsurf language server executable bit"
-                    );
-                }
+        use std::os::unix::fs::MetadataExt;
+
+        let effective_uid = unsafe { libc::geteuid() };
+        let trusted_owner = |uid| uid == 0 || (effective_uid != 0 && uid == effective_uid);
+        if requested_metadata.dev() != metadata.dev()
+            || requested_metadata.ino() != metadata.ino()
+            || metadata.nlink() != 1
+            || !trusted_owner(metadata.uid())
+            || metadata.mode() & 0o022 != 0
+            || metadata.mode() & 0o6000 != 0
+            || metadata.mode() & 0o111 == 0
+        {
+            return Err(invalid());
+        }
+
+        let Some(parent) = canonical.parent() else {
+            return Err(invalid());
+        };
+        for directory in parent.ancestors() {
+            let directory_metadata = fs::symlink_metadata(directory).map_err(|_| invalid())?;
+            if !directory_metadata.is_dir()
+                || directory_metadata.file_type().is_symlink()
+                || !trusted_owner(directory_metadata.uid())
+                || directory_metadata.mode() & 0o022 != 0
+            {
+                return Err(invalid());
             }
         }
     }
+
+    Ok(canonical)
 }
 
 fn find_free_language_server_port() -> Result<u16, ExecutionRuntimeTransportError> {
@@ -3950,7 +4186,6 @@ fn port_is_free(port: u16) -> bool {
 async fn wait_language_server_ready(
     port: u16,
     child: &mut Child,
-    stderr_log_path: Option<&Path>,
 ) -> Result<(), ExecutionRuntimeTransportError> {
     let timeout = if cfg!(target_os = "windows") {
         WINDOWS_LS_READY_TIMEOUT
@@ -3960,13 +4195,8 @@ async fn wait_language_server_ready(
     let started = Instant::now();
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     while started.elapsed() < timeout {
-        if let Ok(Some(status)) = child.try_wait() {
-            let stderr_tail = stderr_log_path
-                .and_then(|path| read_log_tail(path, 8 * 1024))
-                .unwrap_or_else(|| "<stderr log unavailable>".to_string());
-            return Err(ExecutionRuntimeTransportError::UpstreamRequest(format!(
-                "Windsurf language server exited before port {port} became ready with status {status}; stderr tail: {stderr_tail}"
-            )));
+        if let Ok(Some(_)) = child.try_wait() {
+            return Err(windsurf_language_server_exited_before_ready_error());
         }
         if TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok() {
             debug!(
@@ -3979,28 +4209,25 @@ async fn wait_language_server_ready(
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
-    let child_status = child.try_wait().ok().flatten();
-    let stderr_tail = stderr_log_path
-        .and_then(|path| read_log_tail(path, 8 * 1024))
-        .unwrap_or_else(|| "<stderr log unavailable>".to_string());
-    Err(ExecutionRuntimeTransportError::UpstreamRequest(format!(
-        "Windsurf language server port {port} was not ready after {}ms{}; stderr tail: {stderr_tail}",
-        timeout.as_millis(),
-        child_status
-            .map(|status| format!(" (child status: {status})"))
-            .unwrap_or_default()
-    )))
+    Err(windsurf_language_server_ready_timeout_error())
 }
 
-fn read_log_tail(path: &Path, max_bytes: usize) -> Option<String> {
-    let mut file = fs::File::open(path).ok()?;
-    let len = file.metadata().ok()?.len() as i64;
-    let max_bytes = max_bytes.max(1) as i64;
-    let start = len.saturating_sub(max_bytes);
-    file.seek(SeekFrom::Start(start as u64)).ok()?;
-    let mut buf = Vec::with_capacity((len - start) as usize);
-    file.read_to_end(&mut buf).ok()?;
-    Some(String::from_utf8_lossy(&buf).to_string())
+fn windsurf_connect_http_error(method: &str, status_code: u16) -> ExecutionRuntimeTransportError {
+    ExecutionRuntimeTransportError::UpstreamRequest(format!(
+        "Windsurf Connect {method} returned HTTP {status_code}"
+    ))
+}
+
+fn windsurf_language_server_exited_before_ready_error() -> ExecutionRuntimeTransportError {
+    ExecutionRuntimeTransportError::UpstreamRequest(
+        "Windsurf language server exited before becoming ready".to_string(),
+    )
+}
+
+fn windsurf_language_server_ready_timeout_error() -> ExecutionRuntimeTransportError {
+    ExecutionRuntimeTransportError::UpstreamRequest(
+        "Windsurf language server was not ready before timeout".to_string(),
+    )
 }
 
 fn language_server_data_dir(key: &str) -> PathBuf {
@@ -4016,32 +4243,164 @@ fn language_server_data_dir(key: &str) -> PathBuf {
         .join(key)
 }
 
-fn language_server_workspace_path(plan: &ExecutionPlan) -> PathBuf {
-    std::env::temp_dir()
-        .join("aether-windsurf")
-        .join(format!("workspace-{}", hash_hex(&plan.key_id, 16)))
+fn absolute_runtime_path(path: PathBuf) -> io::Result<PathBuf> {
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        Ok(std::env::current_dir()?.join(path))
+    }
 }
 
-fn ensure_workspace_dir(path: &Path) {
-    if let Err(err) = fs::create_dir_all(path) {
-        warn!(
-            event_name = "windsurf_workspace_create_failed",
-            log_type = "ops",
-            path = %path.display(),
-            error = %err,
-            "gateway failed to create Windsurf placeholder workspace"
-        );
-        return;
+fn ensure_private_directory(path: &Path) -> io::Result<()> {
+    validate_runtime_path_components(path)?;
+    fs::create_dir_all(path)?;
+    validate_runtime_path_components(path)?;
+
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "private runtime path is not a regular directory",
+        ));
     }
-    let _ = fs::write(
-        path.join("package.json"),
-        "{\n  \"name\": \"aether-windsurf-workspace-stub\",\n  \"private\": true,\n  \"version\": \"0.0.0\"\n}\n",
-    );
-    let _ = fs::write(
-        path.join("README.md"),
-        "# Aether Windsurf workspace placeholder\n\nThis directory is only registered so the Windsurf language server has a trusted workspace.\n",
-    );
-    let _ = fs::write(path.join(".gitignore"), "# placeholder\n");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let effective_uid = unsafe { libc::geteuid() };
+        if metadata.uid() != effective_uid {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "private runtime directory is owned by another user",
+            ));
+        }
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+fn validate_runtime_path_components(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        let absolute = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir()?.join(path)
+        };
+        let effective_uid = unsafe { libc::geteuid() };
+        for component in absolute.ancestors().collect::<Vec<_>>().into_iter().rev() {
+            let metadata = match fs::symlink_metadata(component) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
+            };
+            if metadata.file_type().is_symlink() {
+                if component == absolute || (metadata.uid() != 0 && metadata.uid() != effective_uid)
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "private runtime path contains an untrusted symbolic link",
+                    ));
+                }
+                validate_runtime_path_components(&fs::canonicalize(component)?)?;
+                continue;
+            }
+            if !metadata.is_dir() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "private runtime path contains a non-directory component",
+                ));
+            }
+            let mode = metadata.mode();
+            if (metadata.uid() != 0 && metadata.uid() != effective_uid)
+                || (mode & 0o022 != 0 && mode & 0o1000 == 0)
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "private runtime path contains an unsafe writable directory",
+                ));
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    if let Ok(metadata) = fs::symlink_metadata(path) {
+        if metadata.file_type().is_symlink() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "private runtime path must not be a symbolic link",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn open_private_file(path: &Path, append: bool) -> io::Result<fs::File> {
+    if let Ok(metadata) = fs::symlink_metadata(path) {
+        if metadata.file_type().is_symlink() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "private runtime file must not be a symbolic link",
+            ));
+        }
+    }
+
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create(true).append(append);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options
+            .mode(0o600)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+    }
+    let file = options.open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "private runtime file is not a regular file",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        if metadata.uid() != unsafe { libc::geteuid() } || metadata.nlink() != 1 {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "private runtime file has unsafe ownership or hard links",
+            ));
+        }
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(file)
+}
+
+fn open_private_append_file(path: &Path) -> io::Result<fs::File> {
+    open_private_file(path, true)
+}
+
+fn write_private_file(path: &Path, content: &[u8]) -> io::Result<()> {
+    let mut file = open_private_file(path, false)?;
+    file.set_len(0)?;
+    file.write_all(content)?;
+    file.sync_all()
+}
+
+fn ensure_workspace_dir(path: &Path) -> io::Result<()> {
+    ensure_private_directory(path)?;
+    write_private_file(
+        &path.join("package.json"),
+        b"{\n  \"name\": \"aether-windsurf-workspace-stub\",\n  \"private\": true,\n  \"version\": \"0.0.0\"\n}\n",
+    )?;
+    write_private_file(
+        &path.join("README.md"),
+        b"# Aether Windsurf workspace placeholder\n\nThis directory is only registered so the Windsurf language server has a trusted workspace.\n",
+    )?;
+    write_private_file(&path.join(".gitignore"), b"# placeholder\n")
 }
 
 fn language_server_env(proxy_url: Option<&str>) -> BTreeMap<String, String> {
@@ -4183,9 +4542,196 @@ mod tests {
     use super::ExecutionRuntimeTransportError;
     use super::{
         build_openai_chat_sse_body, detect_windsurf_request, emit_windsurf_step_text_deltas,
-        is_windsurf_cascade_transport_error, is_windsurf_send_retryable_error, WindsurfToolCall,
-        WindsurfToolDefinition,
+        is_windsurf_cascade_transport_error, is_windsurf_send_retryable_error,
+        new_windsurf_csrf_token, windsurf_connect_http_error,
+        windsurf_language_server_exited_before_ready_error,
+        windsurf_language_server_ready_timeout_error, WindsurfToolCall, WindsurfToolDefinition,
     };
+
+    #[test]
+    fn windsurf_language_server_csrf_tokens_are_per_process_secrets() {
+        let first = new_windsurf_csrf_token();
+        let second = new_windsurf_csrf_token();
+
+        assert!(first.starts_with("aether-"));
+        assert_eq!(first.len(), "aether-".len() + 64);
+        assert_ne!(first, second);
+        assert_ne!(first, "windsurf-api-csrf-fixed-token");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn windsurf_language_server_binary_must_be_trusted_and_already_executable() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let root = std::env::current_dir()
+            .expect("current directory")
+            .join(format!(
+                ".aether-windsurf-binary-test-{}",
+                uuid::Uuid::new_v4()
+            ));
+        std::fs::create_dir(&root).expect("test directory should be created");
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
+            .expect("test directory mode should be private");
+
+        let binary = root.join("language-server");
+        std::fs::write(&binary, b"test binary").expect("binary fixture should be written");
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700))
+            .expect("binary fixture should be executable");
+        assert_eq!(
+            super::validate_language_server_binary_path(&binary)
+                .expect("trusted executable should validate"),
+            std::fs::canonicalize(&binary).expect("binary fixture should canonicalize")
+        );
+
+        let linked = root.join("language-server-link");
+        symlink(&binary, &linked).expect("binary symlink should be created");
+        assert!(super::validate_language_server_binary_path(&linked).is_err());
+
+        let hard_linked = root.join("language-server-hard-link");
+        std::fs::hard_link(&binary, &hard_linked).expect("binary hard link should be created");
+        assert!(super::validate_language_server_binary_path(&binary).is_err());
+        assert!(super::validate_language_server_binary_path(&hard_linked).is_err());
+        std::fs::remove_file(&hard_linked).expect("binary hard link should be removed");
+
+        assert!(super::validate_language_server_binary_path(&root).is_err());
+
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o720))
+            .expect("binary fixture should become group writable");
+        assert!(super::validate_language_server_binary_path(&binary).is_err());
+
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o600))
+            .expect("binary fixture should become non-executable");
+        assert!(super::validate_language_server_binary_path(&binary).is_err());
+        assert_eq!(
+            std::fs::metadata(&binary)
+                .expect("binary fixture metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600,
+            "validation must not grant execute permission"
+        );
+
+        let unsafe_parent = root.join("group-writable");
+        std::fs::create_dir(&unsafe_parent).expect("unsafe parent fixture should be created");
+        std::fs::set_permissions(&unsafe_parent, std::fs::Permissions::from_mode(0o770))
+            .expect("unsafe parent should be group writable");
+        let nested_binary = unsafe_parent.join("language-server");
+        std::fs::write(&nested_binary, b"test binary")
+            .expect("nested binary fixture should be written");
+        std::fs::set_permissions(&nested_binary, std::fs::Permissions::from_mode(0o700))
+            .expect("nested binary fixture should be executable");
+        assert!(super::validate_language_server_binary_path(&nested_binary).is_err());
+
+        std::fs::remove_dir_all(root).expect("test directory should be removed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn windsurf_runtime_files_are_private_and_reject_links() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let root = std::env::temp_dir().join(format!(
+            "aether-windsurf-private-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        super::ensure_private_directory(&root).expect("private root should be created");
+        let workspace = root.join("workspace");
+        super::ensure_workspace_dir(&workspace).expect("private workspace should be created");
+
+        assert_eq!(
+            std::fs::metadata(&root)
+                .expect("private root metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(workspace.join("package.json"))
+                .expect("private workspace file metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+
+        let log_path = root.join("language-server.stderr.log");
+        drop(super::open_private_append_file(&log_path).expect("private log should open"));
+        assert_eq!(
+            std::fs::metadata(&log_path)
+                .expect("private log metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+
+        let target = root.join("target.log");
+        super::write_private_file(&target, b"target").expect("target fixture should be written");
+        let link = root.join("linked.log");
+        symlink(&target, &link).expect("symlink fixture should be created");
+        assert!(super::open_private_append_file(&link).is_err());
+
+        let hard_link = root.join("hard-linked.log");
+        std::fs::hard_link(&target, &hard_link).expect("hard-link fixture should be created");
+        assert!(super::open_private_append_file(&target).is_err());
+
+        std::fs::remove_dir_all(root).expect("private runtime fixture should be removed");
+    }
+
+    #[test]
+    fn windsurf_delta_buffer_rejects_overflow_without_mutation() {
+        let mut content = "1234".to_string();
+
+        let error = super::append_windsurf_delta_with_limit(&mut content, "56", 5)
+            .expect_err("decoded content above the limit must fail");
+
+        assert_eq!(content, "1234");
+        assert!(matches!(
+            error,
+            ExecutionRuntimeTransportError::UpstreamResponseTooLarge { limit_bytes: 5, .. }
+        ));
+    }
+
+    #[test]
+    fn windsurf_auxiliary_errors_omit_response_and_local_diagnostics() {
+        let sensitive_detail = "Bearer secret-windsurf-error-body stderr tail /private/path";
+        let connect_message = windsurf_connect_http_error("GetUserStatus", 502).to_string();
+
+        assert!(connect_message.contains("Windsurf Connect GetUserStatus returned HTTP 502"));
+        assert!(!connect_message.contains(sensitive_detail));
+
+        let exited_message = windsurf_language_server_exited_before_ready_error().to_string();
+        let timeout_message = windsurf_language_server_ready_timeout_error().to_string();
+        assert_eq!(
+            exited_message,
+            "failed to execute upstream request: Windsurf language server exited before becoming ready"
+        );
+        assert_eq!(
+            timeout_message,
+            "failed to execute upstream request: Windsurf language server was not ready before timeout"
+        );
+        assert!(!exited_message.contains(sensitive_detail));
+        assert!(!timeout_message.contains(sensitive_detail));
+
+        let raw_error = ExecutionRuntimeTransportError::UpstreamRequest(format!(
+            "request failed: {sensitive_detail}"
+        ));
+        let public_error = super::windsurf_execution_error_from_transport_error(
+            &raw_error,
+            ExecutionPhase::StreamRead,
+        );
+        let trajectory_error =
+            super::windsurf_trajectory_error(&format!("rate limit: {sensitive_detail}"));
+        assert_eq!(public_error.message, "Windsurf request failed");
+        assert!(trajectory_error.to_string().contains("rate limit"));
+        assert!(!public_error.message.contains("secret-windsurf-error-body"));
+        assert!(!trajectory_error
+            .to_string()
+            .contains("secret-windsurf-error-body"));
+    }
 
     fn windsurf_plan() -> ExecutionPlan {
         ExecutionPlan {
@@ -4682,6 +5228,10 @@ mod tests {
             tool_dialect: super::ToolDialect::OpenAiJsonXml,
             native_bridge: None,
         };
+
+        let input_debug = format!("{input:?}");
+        assert!(input_debug.contains("[REDACTED]"));
+        assert!(!input_debug.contains("windsurf-api-key"));
 
         let parsed = super::parse_and_filter_windsurf_tool_calls(
             r#"I will use WebSearch(query="today tech", domain="example.com")."#,

@@ -151,12 +151,15 @@ pub(crate) fn ip_rules_allow(rules: Option<&[String]>, remote_ip: IpAddr) -> boo
     for raw in rules {
         let rule = raw.trim();
         if rule.is_empty() {
-            continue;
+            return false;
         }
         let (deny, pattern) = match rule.strip_prefix('!') {
             Some(pattern) => (true, pattern.trim()),
             None => (false, rule),
         };
+        if pattern.is_empty() || !valid_ip_rule_pattern(pattern) {
+            return false;
+        }
         let matched = ip_rule_pattern_matches(pattern, remote_ip);
         if deny && matched {
             return false;
@@ -181,11 +184,14 @@ pub(crate) fn json_ip_rules_allow(value: Option<&Value>, remote_ip: IpAddr) -> b
         return true;
     };
     if value.is_null() {
-        return true;
+        return false;
     }
     let Some(items) = value.as_array() else {
         return false;
     };
+    if items.is_empty() {
+        return false;
+    }
     let mut rules = Vec::with_capacity(items.len());
     for item in items {
         let Some(rule) = item.as_str() else {
@@ -506,9 +512,23 @@ mod tests {
     #[test]
     fn json_ip_rules_allow_rejects_invalid_stored_shape() {
         assert!(!json_ip_rules_allow(
+            Some(&serde_json::Value::Null),
+            v4(10, 0, 0, 1)
+        ));
+        assert!(!json_ip_rules_allow(Some(&json!([])), v4(10, 0, 0, 1)));
+        assert!(!json_ip_rules_allow(
             Some(&json!({"bad": true})),
             v4(10, 0, 0, 1)
         ));
         assert!(!json_ip_rules_allow(Some(&json!([123])), v4(10, 0, 0, 1)));
+        assert!(!json_ip_rules_allow(
+            Some(&json!(["!not-an-ip"])),
+            v4(10, 0, 0, 1)
+        ));
+        assert!(!json_ip_rules_allow(
+            Some(&json!(["203.0.113.0/999"])),
+            v4(203, 0, 113, 1)
+        ));
+        assert!(!json_ip_rules_allow(Some(&json!([""])), v4(10, 0, 0, 1)));
     }
 }

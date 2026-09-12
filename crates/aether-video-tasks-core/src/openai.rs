@@ -6,13 +6,13 @@ use aether_data_contracts::repository::video_tasks::{
 };
 use serde_json::{json, Map, Value};
 
+use crate::types::sanitize_video_task_error_code;
 use crate::{
     build_video_follow_up_report_context, current_unix_timestamp_secs, map_openai_task_status,
     parse_video_content_variant, request_body_string, request_body_u32, resolve_follow_up_auth,
     LocalVideoTaskContentAction, LocalVideoTaskFollowUpPlan, LocalVideoTaskReadResponse,
-    LocalVideoTaskSnapshot, LocalVideoTaskStatus, OpenAiVideoTaskSeed,
-    VideoFollowUpReportContextInput, DEFAULT_VIDEO_TASK_MAX_POLL_COUNT,
-    DEFAULT_VIDEO_TASK_POLL_INTERVAL_SECONDS,
+    LocalVideoTaskStatus, OpenAiVideoTaskSeed, VideoFollowUpReportContextInput,
+    DEFAULT_VIDEO_TASK_MAX_POLL_COUNT, DEFAULT_VIDEO_TASK_POLL_INTERVAL_SECONDS,
 };
 
 fn openai_video_resource_url(api_root: &str, suffix: &str) -> String {
@@ -71,10 +71,9 @@ fn build_openai_stored_task_body(task: StoredVideoTask, status: VideoTaskStatus)
         VideoTaskStatus::Failed | VideoTaskStatus::Expired | VideoTaskStatus::Cancelled
     ) {
         body["error"] = json!({
-            "code": task.error_code.unwrap_or_else(|| "unknown".to_string()),
-            "message": task
-                .error_message
-                .unwrap_or_else(|| "Video generation failed".to_string()),
+            "code": sanitize_video_task_error_code(task.error_code)
+                .unwrap_or_else(|| "unknown".to_string()),
+            "message": "Video generation failed",
         });
     }
 
@@ -119,14 +118,13 @@ impl OpenAiVideoTaskSeed {
         self.completed_at_unix_secs = provider_body.get("completed_at").and_then(Value::as_u64);
         self.expires_at_unix_secs = provider_body.get("expires_at").and_then(Value::as_u64);
         let error = provider_body.get("error").and_then(Value::as_object);
-        self.error_code = error
-            .and_then(|value| value.get("code"))
-            .and_then(Value::as_str)
-            .map(str::to_string);
-        self.error_message = error
-            .and_then(|value| value.get("message"))
-            .and_then(Value::as_str)
-            .map(str::to_string);
+        self.error_code = sanitize_video_task_error_code(
+            error
+                .and_then(|value| value.get("code"))
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        );
+        self.error_message = None;
         self.video_url = provider_body
             .get("video_url")
             .or_else(|| provider_body.get("url"))
@@ -157,14 +155,7 @@ impl OpenAiVideoTaskSeed {
             LocalVideoTaskStatus::Failed | LocalVideoTaskStatus::Expired => {
                 return Some(LocalVideoTaskContentAction::Immediate {
                     status_code: 422,
-                    body_json: json!({
-                        "detail": format!(
-                            "Video generation failed: {}",
-                            self.error_message
-                                .clone()
-                                .unwrap_or_else(|| "Unknown error".to_string())
-                        )
-                    }),
+                    body_json: json!({"detail": "Video generation failed"}),
                 });
             }
             LocalVideoTaskStatus::Cancelled => {
@@ -281,11 +272,9 @@ impl OpenAiVideoTaskSeed {
             || self.status == LocalVideoTaskStatus::Expired
         {
             body["error"] = json!({
-                "code": self.error_code.clone().unwrap_or_else(|| "unknown".to_string()),
-                "message": self
-                    .error_message
-                    .clone()
-                    .unwrap_or_else(|| "Video generation failed".to_string()),
+                "code": sanitize_video_task_error_code(self.error_code.clone())
+                    .unwrap_or_else(|| "unknown".to_string()),
+                "message": "Video generation failed",
             });
         }
 
@@ -582,7 +571,7 @@ impl OpenAiVideoTaskSeed {
             ),
             _ => None,
         };
-        UpsertVideoTask {
+        let mut record = UpsertVideoTask {
             id: self.local_task_id.clone(),
             short_id: None,
             request_id: self.persistence.request_id.clone(),
@@ -599,7 +588,7 @@ impl OpenAiVideoTaskSeed {
             format_converted: self.persistence.format_converted,
             model: self.model.clone().or_else(|| Some(String::new())),
             prompt: self.prompt.clone().or_else(|| Some(String::new())),
-            original_request_body: Some(self.persistence.original_request_body.clone()),
+            original_request_body: None,
             duration_seconds: request_body_u32(&self.persistence.original_request_body, "seconds"),
             resolution: request_body_string(&self.persistence.original_request_body, "resolution"),
             aspect_ratio: request_body_string(
@@ -620,19 +609,26 @@ impl OpenAiVideoTaskSeed {
             completed_at_unix_secs: self.completed_at_unix_secs,
             updated_at_unix_secs: self.completed_at_unix_secs.unwrap_or(now_unix_secs),
             error_code: self.error_code.clone(),
-            error_message: self.error_message.clone(),
+            error_message: None,
             video_url: self.video_url.clone(),
-            request_metadata: Some(json!({
-                "rust_owner": "async_task",
-                "rust_local_snapshot": LocalVideoTaskSnapshot::OpenAi(self.clone()),
-            })),
-        }
+            request_metadata: None,
+        };
+        record.sanitize_for_persistence();
+        record
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use aether_data_contracts::repository::video_tasks::{StoredVideoTask, VideoTaskStatus};
+    use serde_json::json;
+
+    use crate::{
+        LocalVideoTaskContentAction, LocalVideoTaskPersistence, LocalVideoTaskSnapshot,
+        LocalVideoTaskStatus, LocalVideoTaskTransport, OpenAiVideoTaskSeed,
+    };
 
     use super::map_openai_stored_task_to_read_response;
 
@@ -687,10 +683,101 @@ mod tests {
         assert_eq!(response.body_json["id"], "task-openai-123");
         assert_eq!(response.body_json["status"], "failed");
         assert_eq!(response.body_json["completed_at"], 1712345688u64);
-        assert_eq!(response.body_json["error"]["code"], "upstream_failed");
+        assert_eq!(response.body_json["error"]["code"], "provider_error");
+        assert_eq!(
+            response.body_json["error"]["message"],
+            "Video generation failed"
+        );
         assert_eq!(
             response.body_json["video_url"],
             "https://cdn.example.com/video.mp4"
+        );
+    }
+
+    #[test]
+    fn builds_minimal_openai_persistence_record_without_sensitive_snapshot() {
+        let seed = OpenAiVideoTaskSeed {
+            local_task_id: "task-openai-sensitive".to_string(),
+            upstream_task_id: "upstream-openai-sensitive".to_string(),
+            created_at_unix_ms: 1_712_345_678,
+            user_id: Some("user-1".to_string()),
+            api_key_id: Some("api-key-1".to_string()),
+            model: Some("sora-2".to_string()),
+            prompt: Some("business prompt".to_string()),
+            size: Some("1280x720".to_string()),
+            seconds: Some("4".to_string()),
+            remixed_from_video_id: None,
+            status: LocalVideoTaskStatus::Failed,
+            progress_percent: 100,
+            completed_at_unix_secs: Some(1_712_345_700),
+            expires_at_unix_secs: None,
+            error_code: Some("provider-secret-diagnostic".to_string()),
+            error_message: Some("Bearer sk-sensitive-provider-error".to_string()),
+            video_url: Some("https://cdn.example/video.mp4?token=sensitive".to_string()),
+            persistence: LocalVideoTaskPersistence {
+                request_id: "request-openai-sensitive".to_string(),
+                username: Some("alice".to_string()),
+                api_key_name: Some("primary".to_string()),
+                client_api_format: "openai:video".to_string(),
+                provider_api_format: "openai:video".to_string(),
+                original_request_body: json!({
+                    "prompt": "business prompt",
+                    "seconds": "4",
+                    "provider_token": "sk-sensitive"
+                }),
+                format_converted: false,
+            },
+            transport: LocalVideoTaskTransport {
+                upstream_base_url: "https://api.example/v1".to_string(),
+                provider_name: Some("openai".to_string()),
+                provider_id: "provider-1".to_string(),
+                endpoint_id: "endpoint-1".to_string(),
+                key_id: "provider-key-1".to_string(),
+                headers: BTreeMap::from([(
+                    "authorization".to_string(),
+                    "Bearer sk-sensitive".to_string(),
+                )]),
+                content_type: Some("application/json".to_string()),
+                model_name: Some("sora-2".to_string()),
+                proxy: None,
+                transport_profile: None,
+                timeouts: None,
+            },
+        };
+
+        let record = seed.to_upsert_record();
+
+        assert_eq!(record.error_code.as_deref(), Some("provider_error"));
+        assert!(record.original_request_body.is_none());
+        assert!(record.progress_message.is_none());
+        assert!(record.error_message.is_none());
+        assert_eq!(record.video_url, seed.video_url);
+        assert_eq!(record.prompt, seed.prompt);
+        assert!(record.request_metadata.is_none());
+        assert_eq!(record.duration_seconds, Some(4));
+        assert_eq!(record.size.as_deref(), Some("1280x720"));
+
+        let mut stored = record.into_stored();
+        stored.status = VideoTaskStatus::Completed;
+        let snapshot =
+            LocalVideoTaskSnapshot::from_stored_task_with_transport(&stored, seed.transport)
+                .expect("stored task should reconstruct with current transport");
+        let LocalVideoTaskSnapshot::OpenAi(restored) = snapshot else {
+            panic!("expected OpenAI snapshot");
+        };
+        assert_eq!(restored.prompt, stored.prompt);
+        assert_eq!(restored.to_upsert_record().video_url, stored.video_url);
+        let Some(LocalVideoTaskContentAction::StreamPlan(plan)) =
+            restored.build_content_stream_action(None, "trace-download")
+        else {
+            panic!("completed stored task should stream content");
+        };
+        assert_eq!(Some(plan.url.as_str()), stored.video_url.as_deref());
+        assert!(plan.headers.is_empty());
+        let response = map_openai_stored_task_to_read_response(stored.clone());
+        assert_eq!(
+            response.body_json["video_url"].as_str(),
+            stored.video_url.as_deref()
         );
     }
 }

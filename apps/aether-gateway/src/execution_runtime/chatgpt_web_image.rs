@@ -1,16 +1,17 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Error as IoError;
+use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
 use aether_admin::provider::quota::{
     parse_chatgpt_web_conversation_init_response, quota_refresh_success_invalid_state,
 };
+use aether_admin::provider::redaction::admin_provider_metadata_bucket_safe_json;
 use aether_contracts::{
     ExecutionPlan, ExecutionResult, ExecutionStreamTerminalSummary, ExecutionTelemetry,
     ExecutionTimeouts, ProxySnapshot, RequestBody, ResolvedTransportProfile, ResponseBody,
-    StreamFrame, StreamFramePayload, StreamFrameType,
-    EXECUTION_REQUEST_ACCEPT_INVALID_CERTS_HEADER, EXECUTION_REQUEST_FOLLOW_REDIRECTS_HEADER,
-    TRANSPORT_BACKEND_BROWSER_WREQ, TRANSPORT_HTTP_MODE_AUTO, TRANSPORT_POOL_SCOPE_KEY,
+    StreamFrame, StreamFramePayload, StreamFrameType, TRANSPORT_BACKEND_BROWSER_WREQ,
+    TRANSPORT_HTTP_MODE_AUTO, TRANSPORT_POOL_SCOPE_KEY,
 };
 use aether_data_contracts::repository::provider_catalog::ProviderCatalogKeyRuntimeMetadataUpdate;
 use aether_provider_pool::{
@@ -30,7 +31,10 @@ use crate::ai_serving::api::StreamingStandardTerminalObserver;
 use crate::clock::current_unix_secs;
 use crate::execution_runtime::ndjson::encode_stream_frame_ndjson;
 use crate::execution_runtime::transport::{
-    with_non_stream_total_timeout, DirectSyncExecutionRuntime, ExecutionRuntimeTransportError,
+    decode_base64_body_with_limit, format_upstream_request_error, json_value_fits_serialized_limit,
+    maximum_base64_len_for_decoded_limit, safe_transport_error_message,
+    serialize_json_body_with_limit, with_non_stream_total_timeout, DirectSyncExecutionRuntime,
+    ExecutionRuntimeTransportError,
 };
 use crate::handlers::shared::{
     sync_provider_key_oauth_status_snapshot, sync_provider_key_quota_status_snapshot,
@@ -53,6 +57,33 @@ const GPT_IMAGE2_TOKEN_MAX_PIXELS: u64 = 8_294_400;
 const GPT_IMAGE2_TOKEN_MAX_EDGE: u64 = 3_840;
 const GPT_IMAGE2_TOKEN_MAX_ASPECT_RATIO: u64 = 3;
 const GPT_IMAGE2_PARTIAL_IMAGE_OUTPUT_TOKENS: u64 = 100;
+const CHATGPT_WEB_IMAGE_DOWNLOAD_MAX_REDIRECTS: usize = 10;
+// A generated SSE response contains the image's base64 text plus JSON/event
+// framing.  Keep its decoded envelope bounded independently from the raw image
+// limit, while retaining support for a raw image up to the default 64 MiB cap.
+const CHATGPT_WEB_IMAGE_SSE_WRAPPER_OVERHEAD_BYTES: usize = 256 * 1024;
+const CHATGPT_WEB_IMAGE_SSE_HARD_MAX_BYTES: usize = 128 * 1024 * 1024;
+const CHATGPT_WEB_IMAGE_STREAM_CHUNK_BYTES: usize = 1024 * 1024;
+const CHATGPT_WEB_IMAGE_PUBLIC_CONNECT_TIMEOUT_MS: u64 = 10_000;
+const CHATGPT_WEB_IMAGE_PUBLIC_READ_TIMEOUT_MS: u64 = 30_000;
+const CHATGPT_WEB_IMAGE_PUBLIC_TOTAL_TIMEOUT_MS: u64 = 300_000;
+const CHATGPT_WEB_OPAQUE_ID_MAX_BYTES: usize = 256;
+const CHATGPT_WEB_IMAGE_MAX_UPLOAD_URL_BYTES: usize = 64 * 1024;
+const CHATGPT_WEB_IMAGE_UPLOAD_RESPONSE_LIMIT_BYTES: usize = 64 * 1024;
+const CHATGPT_WEB_IMAGE_MAX_PROMPT_BYTES: usize = 32 * 1024;
+const CHATGPT_WEB_IMAGE_MAX_MODEL_BYTES: usize = 256;
+const CHATGPT_WEB_IMAGE_MAX_OPTION_BYTES: usize = 128;
+const CHATGPT_WEB_IMAGE_MAX_EXTERNAL_URL_BYTES: usize = 64 * 1024;
+const CHATGPT_WEB_IMAGE_MAX_INPUT_IMAGES: usize = 16;
+const CHATGPT_WEB_IMAGE_MAX_DIMENSION: u32 = 16_384;
+// Values in a provider SSE/poll response are merged across the initial
+// response and up to 24 follow-up polls.  Keep the retained candidate set
+// bounded independently of the per-response body limit so a peer cannot make
+// the gateway grow memory over the lifetime of one request.
+const CHATGPT_WEB_IMAGE_SUMMARY_MAX_ITEMS: usize = 256;
+const CHATGPT_WEB_IMAGE_SUMMARY_MAX_DIRECT_URLS: usize = 16;
+const CHATGPT_WEB_IMAGE_SUMMARY_MAX_ID_BYTES: usize = 1024 * 1024;
+const CHATGPT_WEB_IMAGE_SUMMARY_MAX_TEXT_BYTES: usize = 64 * 1024;
 
 pub(crate) struct ChatGptWebImageStream {
     pub(crate) frame_stream: BoxStream<'static, Result<Bytes, IoError>>,
@@ -94,12 +125,119 @@ struct WebImageSseSummary {
     last_text: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum WebImageSummaryCollection {
+    FileId,
+    SedimentId,
+    DirectUrl,
+}
+
+impl WebImageSseSummary {
+    fn retained_item_count(&self) -> usize {
+        self.file_ids
+            .len()
+            .saturating_add(self.sediment_ids.len())
+            .saturating_add(self.direct_urls.len())
+    }
+
+    fn retained_value_bytes(&self) -> usize {
+        saturating_string_bytes(&self.file_ids)
+            .saturating_add(saturating_string_bytes(&self.sediment_ids))
+            .saturating_add(saturating_string_bytes(&self.direct_urls))
+    }
+
+    fn add_values<I>(&mut self, collection: WebImageSummaryCollection, incoming: I)
+    where
+        I: IntoIterator<Item = String>,
+    {
+        for value in incoming {
+            self.add_value(collection, value);
+        }
+    }
+
+    fn add_value(&mut self, collection: WebImageSummaryCollection, value: String) {
+        if value.is_empty() {
+            return;
+        }
+        let (max_items, collection_budget) = match collection {
+            WebImageSummaryCollection::FileId | WebImageSummaryCollection::SedimentId => (
+                CHATGPT_WEB_IMAGE_SUMMARY_MAX_ITEMS,
+                CHATGPT_WEB_IMAGE_SUMMARY_MAX_ID_BYTES,
+            ),
+            WebImageSummaryCollection::DirectUrl if is_data_image_reference(&value) => {
+                (4, chatgpt_web_image_sse_envelope_limit_bytes())
+            }
+            WebImageSummaryCollection::DirectUrl => (
+                CHATGPT_WEB_IMAGE_SUMMARY_MAX_DIRECT_URLS,
+                CHATGPT_WEB_IMAGE_MAX_EXTERNAL_URL_BYTES,
+            ),
+        };
+        // Reject an over-sized value before it can become part of the retained
+        // set.  The caller may have had to materialize it to parse a JSON
+        // field, but this prevents repeated poll responses from accumulating
+        // it and bounds the final synthetic SSE envelope.
+        if value.len() > collection_budget
+            || self.retained_item_count() >= CHATGPT_WEB_IMAGE_SUMMARY_MAX_ITEMS
+        {
+            return;
+        }
+        let values = match collection {
+            WebImageSummaryCollection::FileId => &self.file_ids,
+            WebImageSummaryCollection::SedimentId => &self.sediment_ids,
+            WebImageSummaryCollection::DirectUrl => &self.direct_urls,
+        };
+        if values.len() >= max_items || values.iter().any(|existing| existing == &value) {
+            return;
+        }
+        let collection_bytes = match collection {
+            WebImageSummaryCollection::FileId => saturating_string_bytes(&self.file_ids),
+            WebImageSummaryCollection::SedimentId => saturating_string_bytes(&self.sediment_ids),
+            WebImageSummaryCollection::DirectUrl => saturating_string_bytes(&self.direct_urls),
+        };
+        let total_budget = chatgpt_web_image_sse_envelope_limit_bytes()
+            .saturating_add(CHATGPT_WEB_IMAGE_SUMMARY_MAX_ID_BYTES);
+        if value.len() > collection_budget.saturating_sub(collection_bytes)
+            || value.len() > total_budget.saturating_sub(self.retained_value_bytes())
+        {
+            return;
+        }
+        match collection {
+            WebImageSummaryCollection::FileId => self.file_ids.push(value),
+            WebImageSummaryCollection::SedimentId => self.sediment_ids.push(value),
+            WebImageSummaryCollection::DirectUrl => self.direct_urls.push(value),
+        }
+    }
+}
+
+fn saturating_string_bytes(values: &[String]) -> usize {
+    values
+        .iter()
+        .fold(0usize, |total, value| total.saturating_add(value.len()))
+}
+
+fn is_data_image_reference(value: &str) -> bool {
+    value
+        .get(..11)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("data:image/"))
+}
+
 #[derive(Debug, Clone)]
 struct DownloadedImage {
     b64_json: String,
     mime: String,
     width: Option<u32>,
     height: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WebImageDownloadTrust {
+    UntrustedInput,
+    ProviderOutput,
+}
+
+struct WebImageHttpPayload {
+    data: Vec<u8>,
+    content_type: Option<String>,
 }
 
 pub(crate) async fn maybe_execute_chatgpt_web_image_sync(
@@ -151,7 +289,7 @@ pub(crate) async fn maybe_execute_chatgpt_web_image_stream(
         Err(error) => return Err(error),
     };
     Ok(Some(ChatGptWebImageStream {
-        frame_stream: execution_result_frame_stream(plan, &result, report_context),
+        frame_stream: execution_result_frame_stream(plan, &result, report_context)?,
         report_context: report_context.cloned(),
     }))
 }
@@ -203,7 +341,7 @@ async fn execute_chatgpt_web_image(
         log_type = "debug",
         request_id = %plan.request_id,
         candidate_id = ?plan.candidate_id,
-        base_url = %base_url,
+        upstream_origin = %crate::handlers::shared::security_log_url_origin(&base_url),
         operation = %request.operation,
         image_count = request.images.len(),
         size = %request.size,
@@ -315,7 +453,7 @@ async fn execute_chatgpt_web_image(
         )
     };
 
-    Ok(bytes_execution_result(
+    bytes_execution_result(
         plan,
         200,
         BTreeMap::from([
@@ -324,7 +462,7 @@ async fn execute_chatgpt_web_image(
         ]),
         body.into_bytes(),
         started_at,
-    ))
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -343,36 +481,103 @@ struct ChatGptWebImageRequest {
 
 impl ChatGptWebImageRequest {
     fn from_body(body: &Value) -> Result<Self, ExecutionRuntimeTransportError> {
-        let text = |key: &str| {
-            body.get(key)
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(ToOwned::to_owned)
-        };
-        let images = body
-            .get("images")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(ToOwned::to_owned)
-            .collect::<Vec<_>>();
+        let model =
+            bounded_chatgpt_web_text_field(body, "model", CHATGPT_WEB_IMAGE_MAX_MODEL_BYTES)?
+                .unwrap_or_else(|| "gpt-image-2".to_string());
+        let web_model =
+            bounded_chatgpt_web_text_field(body, "web_model", CHATGPT_WEB_IMAGE_MAX_MODEL_BYTES)?
+                .unwrap_or_else(|| "gpt-5-5-thinking".to_string());
+        let prompt =
+            bounded_chatgpt_web_text_field(body, "prompt", CHATGPT_WEB_IMAGE_MAX_PROMPT_BYTES)?
+                .unwrap_or_else(|| "Generate a high quality image.".to_string());
+        let size =
+            bounded_chatgpt_web_text_field(body, "size", CHATGPT_WEB_IMAGE_MAX_OPTION_BYTES)?
+                .unwrap_or_else(|| "1024x1024".to_string());
+        let ratio =
+            bounded_chatgpt_web_text_field(body, "ratio", CHATGPT_WEB_IMAGE_MAX_OPTION_BYTES)?
+                .unwrap_or_else(|| "1:1".to_string());
+        let output_format = bounded_chatgpt_web_text_field(
+            body,
+            "output_format",
+            CHATGPT_WEB_IMAGE_MAX_OPTION_BYTES,
+        )?
+        .unwrap_or_else(|| "png".to_string());
+        let quality =
+            bounded_chatgpt_web_text_field(body, "quality", CHATGPT_WEB_IMAGE_MAX_OPTION_BYTES)?;
+
+        let mut images = Vec::new();
+        if let Some(values) = body.get("images").and_then(Value::as_array) {
+            if values.len() > CHATGPT_WEB_IMAGE_MAX_INPUT_IMAGES {
+                return Err(chatgpt_web_image_request_field_too_large("images"));
+            }
+            for value in values {
+                let Some(value) = value.as_str() else {
+                    continue;
+                };
+                let value = value.trim();
+                if value.is_empty() {
+                    continue;
+                }
+                let max_bytes = if value
+                    .get(..5)
+                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case("data:"))
+                {
+                    maximum_base64_len_for_decoded_limit(
+                        chatgpt_web_image_raw_payload_limit_bytes(),
+                    )
+                    .saturating_add(128)
+                } else {
+                    CHATGPT_WEB_IMAGE_MAX_EXTERNAL_URL_BYTES
+                };
+                if value.len() > max_bytes {
+                    return Err(chatgpt_web_image_request_field_too_large("image reference"));
+                }
+                images.push(value.to_string());
+            }
+        }
+        let partial_images = json_u64(body.get("partial_images")).unwrap_or(0);
+        if partial_images > 3 {
+            return Err(ExecutionRuntimeTransportError::UpstreamRequest(
+                "ChatGPT-Web image partial_images must be between 0 and 3".to_string(),
+            ));
+        }
         Ok(Self {
             operation: chatgpt_web_image_operation(body.get("operation")),
-            model: text("model").unwrap_or_else(|| "gpt-image-2".to_string()),
-            web_model: text("web_model").unwrap_or_else(|| "gpt-5-5-thinking".to_string()),
-            prompt: text("prompt").unwrap_or_else(|| "Generate a high quality image.".to_string()),
-            size: text("size").unwrap_or_else(|| "1024x1024".to_string()),
-            ratio: text("ratio").unwrap_or_else(|| "1:1".to_string()),
-            output_format: text("output_format").unwrap_or_else(|| "png".to_string()),
-            quality: text("quality"),
-            partial_images: json_u64(body.get("partial_images")).unwrap_or(0),
+            model,
+            web_model,
+            prompt,
+            size,
+            ratio,
+            output_format,
+            quality,
+            partial_images,
             images,
         })
     }
+}
+
+fn bounded_chatgpt_web_text_field(
+    body: &Value,
+    key: &str,
+    max_bytes: usize,
+) -> Result<Option<String>, ExecutionRuntimeTransportError> {
+    let Some(value) = body.get(key).and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if value.len() > max_bytes {
+        return Err(chatgpt_web_image_request_field_too_large(key));
+    }
+    Ok(Some(value.to_string()))
+}
+
+fn chatgpt_web_image_request_field_too_large(field: &str) -> ExecutionRuntimeTransportError {
+    ExecutionRuntimeTransportError::UpstreamRequest(format!(
+        "ChatGPT-Web image request {field} exceeds the supported size"
+    ))
 }
 
 impl WebFingerprint {
@@ -594,6 +799,7 @@ async fn web_poll_conversation(
     conversation_id: &str,
     uploads: &[WebUploadMeta],
 ) -> Result<WebImageSseSummary, ExecutionRuntimeTransportError> {
+    let conversation_id = validated_web_opaque_id(conversation_id, "conversation ID")?;
     let path = format!("/backend-api/conversation/{conversation_id}");
     let mut headers = web_base_headers(fp, token, path.as_str());
     headers.insert("accept".to_string(), "application/json".to_string());
@@ -628,7 +834,17 @@ async fn resolve_and_download_images(
     add_unique_values(&mut urls, resolved);
     let mut downloaded = Vec::new();
     for url in urls {
-        match web_download_image(state, plan, base_url, fp, token, url.as_str()).await {
+        match web_download_image(
+            state,
+            plan,
+            base_url,
+            fp,
+            token,
+            url.as_str(),
+            WebImageDownloadTrust::ProviderOutput,
+        )
+        .await
+        {
             Ok(image) => {
                 downloaded.push(image);
                 break;
@@ -639,7 +855,7 @@ async fn resolve_and_download_images(
                     log_type = "debug",
                     request_id = %plan.request_id,
                     candidate_id = ?plan.candidate_id,
-                    error = %err,
+                    error = %safe_transport_error_message(&err),
                     "gateway failed to download one ChatGPT-Web image URL"
                 );
             }
@@ -658,12 +874,18 @@ async fn web_resolve_image_urls(
 ) -> Result<Vec<String>, ExecutionRuntimeTransportError> {
     let mut urls = Vec::new();
     let uploaded_ids = uploaded_file_ids(uploads);
-    for file_id in &summary.file_ids {
+    let conversation_id = summary
+        .conversation_id
+        .as_deref()
+        .map(|value| validated_web_opaque_id(value, "conversation ID"))
+        .transpose()?;
+    for raw_file_id in &summary.file_ids {
+        let file_id = validated_web_file_id(raw_file_id)?;
         if uploaded_ids.contains(file_id) || file_id == "file_upload" {
             continue;
         }
         let mut path = format!("/backend-api/files/download/{file_id}");
-        if let Some(conversation_id) = summary.conversation_id.as_deref() {
+        if let Some(conversation_id) = conversation_id {
             path.push_str("?conversation_id=");
             path.push_str(conversation_id);
             path.push_str("&inline=false");
@@ -672,8 +894,9 @@ async fn web_resolve_image_urls(
             add_unique_values(&mut urls, [url]);
         }
     }
-    if let Some(conversation_id) = summary.conversation_id.as_deref() {
-        for sediment_id in &summary.sediment_ids {
+    if let Some(conversation_id) = conversation_id {
+        for raw_sediment_id in &summary.sediment_ids {
+            let sediment_id = validated_web_opaque_id(raw_sediment_id, "sediment ID")?;
             if uploaded_ids.contains(sediment_id) {
                 continue;
             }
@@ -715,8 +938,27 @@ async fn web_download_url(
         .or_else(|| body.get("url"))
         .and_then(Value::as_str)
         .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned))
+        .and_then(|value| {
+            if value.is_empty() || value.len() > CHATGPT_WEB_IMAGE_MAX_EXTERNAL_URL_BYTES {
+                return None;
+            }
+            let base = url::Url::parse(base_url).ok()?;
+            let absolute = url::Url::parse(value).is_ok();
+            let url = if absolute {
+                url::Url::parse(value).ok()?
+            } else {
+                base.join(value).ok()?
+            };
+            validate_web_image_http_url(&url).ok()?;
+            // Relative download paths are expected from the authenticated
+            // ChatGPT API.  Do not let a provider response turn one into an
+            // arbitrary cross-origin target through URL joining.
+            if !absolute && !web_download_url_is_same_origin(&base, &url) {
+                return None;
+            }
+            let serialized = url.to_string();
+            (serialized.len() <= CHATGPT_WEB_IMAGE_MAX_EXTERNAL_URL_BYTES).then_some(serialized)
+        }))
 }
 
 async fn web_download_image(
@@ -726,47 +968,22 @@ async fn web_download_image(
     fp: &WebFingerprint,
     token: &str,
     raw_url: &str,
+    trust: WebImageDownloadTrust,
 ) -> Result<DownloadedImage, ExecutionRuntimeTransportError> {
     if let Some(data) = parse_data_url(raw_url) {
         return Ok(data);
     }
-    let download_url = if raw_url.starts_with('/') {
-        format!("{base_url}{raw_url}")
-    } else {
-        raw_url.to_string()
+    let payload = match trust {
+        WebImageDownloadTrust::UntrustedInput => {
+            let url = parse_absolute_web_image_url(raw_url)?;
+            download_public_web_image(url, plan.timeouts.as_ref(), false).await?
+        }
+        WebImageDownloadTrust::ProviderOutput => {
+            download_provider_web_image(plan, base_url, fp, token, raw_url).await?
+        }
     };
-    let mut headers = BTreeMap::from([(
-        EXECUTION_REQUEST_FOLLOW_REDIRECTS_HEADER.to_string(),
-        "true".to_string(),
-    )]);
-    if should_use_web_download_headers(base_url, download_url.as_str()) {
-        let path = url::Url::parse(download_url.as_str())
-            .ok()
-            .map(|url| url.path().to_string())
-            .filter(|path| !path.is_empty())
-            .unwrap_or_else(|| "/".to_string());
-        headers.extend(web_base_headers(fp, token, path.as_str()));
-        headers.insert(
-            "accept".to_string(),
-            "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8".to_string(),
-        );
-    }
-    let result = execute_subrequest(plan, "GET", download_url, headers, None, false).await?;
-    ensure_success(&result, "ChatGPT-Web image download")?;
-    let data = execution_result_bytes(&result)?;
-    if data.is_empty() {
-        return Err(ExecutionRuntimeTransportError::UpstreamRequest(
-            "ChatGPT-Web image download returned empty body".to_string(),
-        ));
-    }
-    let mime = result
-        .headers
-        .get("content-type")
-        .and_then(|value| value.split(';').next())
-        .map(str::trim)
-        .filter(|value| value.starts_with("image/"))
-        .unwrap_or("image/png")
-        .to_string();
+    let data = payload.data;
+    let mime = validate_web_image_payload(&data, payload.content_type.as_deref())?.to_string();
     let (width, height) = image_dimensions(&data);
     Ok(DownloadedImage {
         b64_json: base64::engine::general_purpose::STANDARD.encode(data),
@@ -774,6 +991,548 @@ async fn web_download_image(
         width,
         height,
     })
+}
+
+fn parse_absolute_web_image_url(raw_url: &str) -> Result<url::Url, ExecutionRuntimeTransportError> {
+    let url = url::Url::parse(raw_url.trim()).map_err(|err| {
+        ExecutionRuntimeTransportError::UpstreamRequest(format!(
+            "ChatGPT-Web image URL is invalid: {err}"
+        ))
+    })?;
+    validate_web_image_http_url(&url)?;
+    Ok(url)
+}
+
+fn validate_web_image_http_url(url: &url::Url) -> Result<(), ExecutionRuntimeTransportError> {
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        return Err(ExecutionRuntimeTransportError::UpstreamRequest(
+            "ChatGPT-Web image URL must be an absolute http or https URL".to_string(),
+        ));
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(ExecutionRuntimeTransportError::UpstreamRequest(
+            "ChatGPT-Web image URL must not contain credentials".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Return the canonical MIME type for a supported, non-active image payload.
+///
+/// Content-Type is metadata supplied by an untrusted upstream and must not be
+/// used as the sole type check: an HTML/SVG response can be labelled as
+/// `image/png`.  Require a real PNG/JPEG/WebP signature and, when a concrete
+/// content type is supplied, require it to agree with the signature.
+fn validate_web_image_payload(
+    data: &[u8],
+    content_type: Option<&str>,
+) -> Result<&'static str, ExecutionRuntimeTransportError> {
+    if data.is_empty() {
+        return Err(ExecutionRuntimeTransportError::UpstreamRequest(
+            "ChatGPT-Web image download returned empty body".to_string(),
+        ));
+    }
+    let detected = detected_web_image_mime(data).ok_or_else(|| {
+        ExecutionRuntimeTransportError::UpstreamRequest(
+            "ChatGPT-Web image download returned an unsupported image payload".to_string(),
+        )
+    })?;
+    let declared = declared_web_image_mime(content_type)?;
+    if let Some(declared) = declared {
+        if declared != detected {
+            return Err(ExecutionRuntimeTransportError::UpstreamRequest(
+                "ChatGPT-Web image content type does not match its payload".to_string(),
+            ));
+        }
+    }
+    Ok(detected)
+}
+
+/// Parse a response Content-Type into one of the formats we can safely pass
+/// through the OpenAI image response surface.  Generic octet-stream is
+/// allowed only because the payload signature is checked independently.
+fn declared_web_image_mime(
+    content_type: Option<&str>,
+) -> Result<Option<&'static str>, ExecutionRuntimeTransportError> {
+    let Some(content_type) = content_type else {
+        return Ok(None);
+    };
+    let token = content_type
+        .split(';')
+        .next()
+        .map(str::trim)
+        .unwrap_or_default();
+    if token.is_empty()
+        || token
+            .bytes()
+            .any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control() || byte == b',')
+    {
+        return Err(ExecutionRuntimeTransportError::UpstreamRequest(
+            "ChatGPT-Web image response has an invalid content type".to_string(),
+        ));
+    }
+    if token.eq_ignore_ascii_case("application/octet-stream")
+        || token.eq_ignore_ascii_case("binary/octet-stream")
+    {
+        return Ok(None);
+    }
+    let mime =
+        if token.eq_ignore_ascii_case("image/png") || token.eq_ignore_ascii_case("image/x-png") {
+            Some("image/png")
+        } else if token.eq_ignore_ascii_case("image/jpeg")
+            || token.eq_ignore_ascii_case("image/jpg")
+            || token.eq_ignore_ascii_case("image/pjpeg")
+        {
+            Some("image/jpeg")
+        } else if token.eq_ignore_ascii_case("image/webp") {
+            Some("image/webp")
+        } else {
+            // This intentionally rejects image/svg+xml, image/avif, generic
+            // image/*, text/html, and all other active/unsupported types.
+            None
+        };
+    mime.ok_or_else(|| {
+        ExecutionRuntimeTransportError::UpstreamRequest(
+            "ChatGPT-Web image response has an unsupported content type".to_string(),
+        )
+    })
+    .map(Some)
+}
+
+fn detected_web_image_mime(data: &[u8]) -> Option<&'static str> {
+    // Require the PNG signature and an IHDR chunk before treating the body as
+    // PNG.  This also gives image_dimensions a safe minimum length.
+    if data.len() >= 24 && data.starts_with(b"\x89PNG\r\n\x1a\n") && &data[12..16] == b"IHDR" {
+        return Some("image/png");
+    }
+    // JPEG's SOI marker must be followed by a marker prefix.  This rejects a
+    // bare/truncated `ff d8` body while leaving full structural validation to
+    // the image decoder downstream.
+    if data.len() >= 3 && data.starts_with(&[0xff, 0xd8, 0xff]) {
+        return Some("image/jpeg");
+    }
+    // WebP is a RIFF container with a WEBP form type.
+    if data.len() >= 12 && &data[..4] == b"RIFF" && &data[8..12] == b"WEBP" {
+        return Some("image/webp");
+    }
+    None
+}
+
+async fn download_provider_web_image(
+    plan: &ExecutionPlan,
+    base_url: &str,
+    fp: &WebFingerprint,
+    token: &str,
+    raw_url: &str,
+) -> Result<WebImageHttpPayload, ExecutionRuntimeTransportError> {
+    let base = parse_absolute_web_image_url(base_url)?;
+    let mut current = base.join(raw_url.trim()).map_err(|err| {
+        ExecutionRuntimeTransportError::UpstreamRequest(format!(
+            "ChatGPT-Web image URL is invalid: {err}"
+        ))
+    })?;
+    validate_web_image_http_url(&current)?;
+    let mut redirects = 0usize;
+
+    loop {
+        if !web_download_url_is_same_origin(&base, &current) {
+            // Provider-generated storage URLs may be resolved to RFC 2544
+            // synthetic addresses by a local DNS interception tool.  The
+            // public downloader still decides whether the exact storage
+            // origin is eligible; this flag is never enabled for untrusted
+            // request input.
+            return download_public_web_image(current, plan.timeouts.as_ref(), true).await;
+        }
+        let path = match current.query() {
+            Some(query) => format!("{}?{query}", current.path()),
+            None => current.path().to_string(),
+        };
+        let mut headers = BTreeMap::new();
+        if is_authenticated_web_download_url(&base, &current) {
+            headers.extend(web_base_headers(fp, token, path.as_str()));
+        }
+        headers.insert(
+            "accept".to_string(),
+            "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8".to_string(),
+        );
+        let result = execute_subrequest(
+            plan,
+            "GET",
+            current.as_str().to_string(),
+            headers,
+            None,
+            false,
+        )
+        .await?;
+
+        if (300..400).contains(&result.status_code) {
+            if redirects >= CHATGPT_WEB_IMAGE_DOWNLOAD_MAX_REDIRECTS {
+                return Err(ExecutionRuntimeTransportError::UpstreamRequest(
+                    "ChatGPT-Web image download exceeded redirect limit".to_string(),
+                ));
+            }
+            let location = result.headers.get("location").ok_or_else(|| {
+                ExecutionRuntimeTransportError::UpstreamRequest(
+                    "ChatGPT-Web image redirect is missing Location header".to_string(),
+                )
+            })?;
+            current = current.join(location).map_err(|err| {
+                ExecutionRuntimeTransportError::UpstreamRequest(format!(
+                    "ChatGPT-Web image redirect URL is invalid: {err}"
+                ))
+            })?;
+            validate_web_image_http_url(&current)?;
+            redirects += 1;
+            continue;
+        }
+
+        ensure_success(&result, "ChatGPT-Web image download")?;
+        return Ok(WebImageHttpPayload {
+            data: execution_result_bytes_with_limit(
+                &result,
+                chatgpt_web_image_raw_payload_limit_bytes(),
+            )?,
+            content_type: result.headers.get("content-type").cloned(),
+        });
+    }
+}
+
+async fn download_public_web_image(
+    mut current: url::Url,
+    timeouts: Option<&ExecutionTimeouts>,
+    allow_benchmarking_fake_ip: bool,
+) -> Result<WebImageHttpPayload, ExecutionRuntimeTransportError> {
+    let mut redirects = 0usize;
+    let total_timeout = bounded_chatgpt_web_image_timeout(
+        timeouts.and_then(|value| value.total_ms),
+        CHATGPT_WEB_IMAGE_PUBLIC_TOTAL_TIMEOUT_MS,
+    );
+    let deadline = Instant::now() + total_timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(ExecutionRuntimeTransportError::UpstreamRequest(
+                "ChatGPT-Web public image download timed out".to_string(),
+            ));
+        }
+        validate_web_image_http_url(&current)?;
+        let connect_timeout = bounded_chatgpt_web_image_timeout(
+            timeouts.and_then(|value| value.connect_ms),
+            CHATGPT_WEB_IMAGE_PUBLIC_CONNECT_TIMEOUT_MS,
+        );
+        let (host, resolved) = resolve_public_web_image_addrs(
+            &current,
+            connect_timeout.min(remaining),
+            allow_benchmarking_fake_ip,
+        )
+        .await?;
+        let mut builder = reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none());
+        builder = builder
+            .connect_timeout(
+                bounded_chatgpt_web_image_timeout(
+                    timeouts.and_then(|value| value.connect_ms),
+                    CHATGPT_WEB_IMAGE_PUBLIC_CONNECT_TIMEOUT_MS,
+                )
+                .min(remaining),
+            )
+            .read_timeout(
+                bounded_chatgpt_web_image_timeout(
+                    timeouts.and_then(|value| value.read_ms),
+                    CHATGPT_WEB_IMAGE_PUBLIC_READ_TIMEOUT_MS,
+                )
+                .min(remaining),
+            )
+            .timeout(remaining);
+        if host.parse::<IpAddr>().is_err() {
+            builder = builder.resolve_to_addrs(host.as_str(), &resolved);
+        }
+        let client = builder
+            .build()
+            .map_err(ExecutionRuntimeTransportError::ClientBuild)?;
+        let response = client
+            .get(current.clone())
+            .header(
+                reqwest::header::ACCEPT,
+                "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+            )
+            .send()
+            .await
+            .map_err(|err| {
+                ExecutionRuntimeTransportError::UpstreamRequest(format!(
+                    "ChatGPT-Web public image download failed: {}",
+                    format_upstream_request_error(&err)
+                ))
+            })?;
+
+        if response.status().is_redirection() {
+            if redirects >= CHATGPT_WEB_IMAGE_DOWNLOAD_MAX_REDIRECTS {
+                return Err(ExecutionRuntimeTransportError::UpstreamRequest(
+                    "ChatGPT-Web image download exceeded redirect limit".to_string(),
+                ));
+            }
+            let location = response
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|value| value.to_str().ok())
+                .ok_or_else(|| {
+                    ExecutionRuntimeTransportError::UpstreamRequest(
+                        "ChatGPT-Web image redirect is missing Location header".to_string(),
+                    )
+                })?;
+            current = current.join(location).map_err(|err| {
+                ExecutionRuntimeTransportError::UpstreamRequest(format!(
+                    "ChatGPT-Web image redirect URL is invalid: {err}"
+                ))
+            })?;
+            redirects += 1;
+            continue;
+        }
+        if !response.status().is_success() {
+            return Err(ExecutionRuntimeTransportError::UpstreamRequest(format!(
+                "ChatGPT-Web image download returned {}",
+                response.status().as_u16()
+            )));
+        }
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(ToOwned::to_owned);
+        let data = aether_http::read_response_bytes_with_limit(
+            response,
+            chatgpt_web_image_raw_payload_limit_bytes(),
+        )
+        .await
+        .map_err(|err| {
+            ExecutionRuntimeTransportError::UpstreamRequest(format!(
+                "ChatGPT-Web public image body read failed: {err}"
+            ))
+        })?;
+        return Ok(WebImageHttpPayload { data, content_type });
+    }
+}
+
+fn bounded_chatgpt_web_image_timeout(configured_ms: Option<u64>, default_ms: u64) -> Duration {
+    Duration::from_millis(configured_ms.unwrap_or(default_ms).clamp(1, 1_200_000))
+}
+
+async fn resolve_public_web_image_addrs(
+    url: &url::Url,
+    lookup_timeout: Duration,
+    allow_benchmarking_fake_ip: bool,
+) -> Result<(String, Vec<SocketAddr>), ExecutionRuntimeTransportError> {
+    let host = url.host_str().ok_or_else(|| {
+        ExecutionRuntimeTransportError::UpstreamRequest(
+            "ChatGPT-Web image URL is missing a host".to_string(),
+        )
+    })?;
+    let port = url.port_or_known_default().ok_or_else(|| {
+        ExecutionRuntimeTransportError::UpstreamRequest(
+            "ChatGPT-Web image URL is missing a port".to_string(),
+        )
+    })?;
+    let resolved = aether_http::lookup_host_with_limits(host, port, lookup_timeout)
+        .await
+        .map_err(|error| {
+            let message = match error.kind() {
+                std::io::ErrorKind::TimedOut => "ChatGPT-Web image URL DNS resolution timed out",
+                std::io::ErrorKind::InvalidData => {
+                    "ChatGPT-Web image URL DNS resolution returned too many addresses"
+                }
+                _ => "ChatGPT-Web image URL DNS resolution failed",
+            };
+            ExecutionRuntimeTransportError::UpstreamRequest(message.to_string())
+        })?;
+    if resolved.is_empty() {
+        return Err(ExecutionRuntimeTransportError::UpstreamRequest(
+            "ChatGPT-Web image URL DNS resolution returned no addresses".to_string(),
+        ));
+    }
+    validate_public_web_image_addresses(url, &resolved, allow_benchmarking_fake_ip)?;
+    Ok((host.to_string(), resolved))
+}
+
+fn validate_public_web_image_addresses(
+    url: &url::Url,
+    addresses: &[SocketAddr],
+    allow_benchmarking_fake_ip: bool,
+) -> Result<(), ExecutionRuntimeTransportError> {
+    let allows_benchmarking_fake_ip =
+        allow_benchmarking_fake_ip && web_image_storage_origin_allows_benchmarking_fake_ip(url);
+    if addresses.iter().any(|address| {
+        aether_http::is_private_or_reserved_ip(address.ip())
+            && !(allows_benchmarking_fake_ip
+                && aether_http::is_ipv4_benchmarking_fake_ip(address.ip()))
+    }) {
+        return Err(ExecutionRuntimeTransportError::UpstreamRequest(
+            "ChatGPT-Web image URL resolves to a private or reserved address".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Synthetic DNS is accepted only for the storage origins that ChatGPT uses
+/// for generated assets and upload blobs.  In particular, a user-supplied URL
+/// on an arbitrary host cannot opt into this exception merely by resolving to
+/// the RFC 2544 benchmark range.
+fn web_image_storage_origin_allows_benchmarking_fake_ip(url: &url::Url) -> bool {
+    url.scheme().eq_ignore_ascii_case("https")
+        && url.port_or_known_default() == Some(443)
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url
+            .host_str()
+            .is_some_and(chatgpt_web_upload_host_is_allowed)
+}
+
+/// Validate the destination returned by ChatGPT's upload-metadata endpoint.
+///
+/// The upload URL is provider-controlled data, not a trusted request target.
+/// Keep this boundary narrower than the generic execution URL policy: uploads
+/// must go to the storage origins used by ChatGPT, over HTTPS, without
+/// credentials or fragments.  Azure SAS query parameters are intentionally
+/// retained because they carry the upload authorization.
+fn validate_chatgpt_web_upload_url(
+    raw_url: &str,
+) -> Result<url::Url, ExecutionRuntimeTransportError> {
+    let raw_url = raw_url.trim();
+    if raw_url.is_empty() || raw_url.len() > CHATGPT_WEB_IMAGE_MAX_UPLOAD_URL_BYTES {
+        return Err(ExecutionRuntimeTransportError::UpstreamRequest(
+            "ChatGPT-Web upload URL is invalid or too large".to_string(),
+        ));
+    }
+    let url = url::Url::parse(raw_url).map_err(|_| {
+        ExecutionRuntimeTransportError::UpstreamRequest(
+            "ChatGPT-Web upload URL is invalid".to_string(),
+        )
+    })?;
+    if url.scheme() != "https"
+        || url.host_str().is_none()
+        || url.port().is_some_and(|port| port != 443)
+    {
+        return Err(ExecutionRuntimeTransportError::UpstreamRequest(
+            "ChatGPT-Web upload URL must use HTTPS on the default port".to_string(),
+        ));
+    }
+    if !url.username().is_empty() || url.password().is_some() || url.fragment().is_some() {
+        return Err(ExecutionRuntimeTransportError::UpstreamRequest(
+            "ChatGPT-Web upload URL must not contain credentials or a fragment".to_string(),
+        ));
+    }
+    let host = url.host_str().unwrap_or_default();
+    if host.parse::<IpAddr>().is_ok() || !chatgpt_web_upload_host_is_allowed(host) {
+        return Err(ExecutionRuntimeTransportError::UpstreamRequest(
+            "ChatGPT-Web upload URL host is not an allowed storage origin".to_string(),
+        ));
+    }
+    if url.path().len() > CHATGPT_WEB_IMAGE_MAX_UPLOAD_URL_BYTES
+        || url
+            .query()
+            .is_some_and(|query| query.len() > CHATGPT_WEB_IMAGE_MAX_UPLOAD_URL_BYTES)
+    {
+        return Err(ExecutionRuntimeTransportError::UpstreamRequest(
+            "ChatGPT-Web upload URL is too large".to_string(),
+        ));
+    }
+    Ok(url)
+}
+
+fn chatgpt_web_upload_host_is_allowed(host: &str) -> bool {
+    if !web_dns_host_is_valid(host) {
+        return false;
+    }
+    if web_host_is_domain_or_subdomain(host, "files.oaiusercontent.com") {
+        return true;
+    }
+    if web_host_is_domain_or_subdomain(host, "oaidalleapiprodscus.blob.core.windows.net") {
+        return true;
+    }
+    web_host_is_strict_subdomain(host, "blob.core.windows.net")
+        && !web_host_is_domain_or_subdomain(host, "openaiassets.blob.core.windows.net")
+}
+
+/// PUT image bytes to a validated ChatGPT storage URL using a DNS-pinned,
+/// proxy-free client.  The generic execution runtime intentionally supports
+/// configured proxies and broad public HTTPS targets; that is inappropriate
+/// for a provider-supplied upload destination.
+async fn upload_chatgpt_web_blob(
+    plan: &ExecutionPlan,
+    upload_url: &url::Url,
+    content_type: &str,
+    user_agent: &str,
+    base_url: &str,
+    body: Vec<u8>,
+) -> Result<(), ExecutionRuntimeTransportError> {
+    let total_timeout = bounded_chatgpt_web_image_timeout(
+        plan.timeouts
+            .as_ref()
+            .and_then(|timeouts| timeouts.total_ms),
+        CHATGPT_WEB_IMAGE_PUBLIC_TOTAL_TIMEOUT_MS,
+    );
+    let connect_timeout = bounded_chatgpt_web_image_timeout(
+        plan.timeouts
+            .as_ref()
+            .and_then(|timeouts| timeouts.connect_ms),
+        CHATGPT_WEB_IMAGE_PUBLIC_CONNECT_TIMEOUT_MS,
+    )
+    .min(total_timeout);
+    let read_timeout = bounded_chatgpt_web_image_timeout(
+        plan.timeouts.as_ref().and_then(|timeouts| timeouts.read_ms),
+        CHATGPT_WEB_IMAGE_PUBLIC_READ_TIMEOUT_MS,
+    )
+    .min(total_timeout);
+    let (host, resolved) =
+        resolve_public_web_image_addrs(upload_url, connect_timeout, true).await?;
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(connect_timeout)
+        .read_timeout(read_timeout)
+        .timeout(total_timeout)
+        .resolve_to_addrs(host.as_str(), &resolved)
+        .build()
+        .map_err(|_| {
+            ExecutionRuntimeTransportError::UpstreamRequest(
+                "ChatGPT-Web upload client initialization failed".to_string(),
+            )
+        })?;
+
+    let response = client
+        .put(upload_url.clone())
+        .header(reqwest::header::CONTENT_TYPE, content_type)
+        .header("x-ms-blob-type", "BlockBlob")
+        .header("x-ms-version", "2020-04-08")
+        .header(reqwest::header::ORIGIN, base_url)
+        .header(reqwest::header::REFERER, format!("{base_url}/"))
+        .header(reqwest::header::USER_AGENT, user_agent)
+        .body(body)
+        .send()
+        .await
+        .map_err(|_| {
+            ExecutionRuntimeTransportError::UpstreamRequest(
+                "ChatGPT-Web upload request failed".to_string(),
+            )
+        })?;
+    let status_code = response.status().as_u16();
+    if !(200..300).contains(&status_code) {
+        return Err(ExecutionRuntimeTransportError::UpstreamHttpStatus {
+            status_code,
+            message: chatgpt_web_stage_http_error_message("ChatGPT-Web upload blob", status_code),
+        });
+    }
+    aether_http::read_response_bytes_with_limit(
+        response,
+        CHATGPT_WEB_IMAGE_UPLOAD_RESPONSE_LIMIT_BYTES,
+    )
+    .await
+    .map_err(|_| {
+        ExecutionRuntimeTransportError::UpstreamRequest(
+            "ChatGPT-Web upload response body is invalid or too large".to_string(),
+        )
+    })?;
+    Ok(())
 }
 
 async fn web_upload_image(
@@ -785,10 +1544,21 @@ async fn web_upload_image(
     ref_url: &str,
     file_name: String,
 ) -> Result<WebUploadMeta, ExecutionRuntimeTransportError> {
-    let image = web_download_image(state, plan, base_url, fp, token, ref_url).await?;
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(image.b64_json.as_bytes())
-        .map_err(ExecutionRuntimeTransportError::BodyDecode)?;
+    let image = web_download_image(
+        state,
+        plan,
+        base_url,
+        fp,
+        token,
+        ref_url,
+        WebImageDownloadTrust::UntrustedInput,
+    )
+    .await?;
+    let bytes = decode_base64_body_with_limit(
+        image.b64_json.as_str(),
+        chatgpt_web_image_raw_payload_limit_bytes(),
+    )?;
+    let file_size = bytes.len();
     let path = "/backend-api/files";
     let mut headers = web_base_headers(fp, token, path);
     headers.insert("content-type".to_string(), "application/json".to_string());
@@ -811,7 +1581,7 @@ async fn web_upload_image(
     .await?;
     ensure_success(&result, "ChatGPT-Web upload metadata")?;
     let upload_payload = execution_result_json(&result)?;
-    let file_id = upload_payload
+    let raw_file_id = upload_payload
         .get("file_id")
         .and_then(Value::as_str)
         .map(str::trim)
@@ -820,8 +1590,8 @@ async fn web_upload_image(
             ExecutionRuntimeTransportError::UpstreamRequest(
                 "ChatGPT-Web upload response missing file_id".to_string(),
             )
-        })?
-        .to_string();
+        })?;
+    let file_id = validated_web_file_id(raw_file_id)?.to_string();
     let upload_url = upload_payload
         .get("upload_url")
         .and_then(Value::as_str)
@@ -832,29 +1602,16 @@ async fn web_upload_image(
                 "ChatGPT-Web upload response missing upload_url".to_string(),
             )
         })?;
-
-    let put_headers = BTreeMap::from([
-        ("content-type".to_string(), image.mime.clone()),
-        ("x-ms-blob-type".to_string(), "BlockBlob".to_string()),
-        ("x-ms-version".to_string(), "2020-04-08".to_string()),
-        ("origin".to_string(), base_url.to_string()),
-        ("referer".to_string(), format!("{base_url}/")),
-        ("user-agent".to_string(), fp.user_agent.to_string()),
-    ]);
-    let put_result = execute_subrequest(
+    let upload_url = validate_chatgpt_web_upload_url(upload_url)?;
+    upload_chatgpt_web_blob(
         plan,
-        "PUT",
-        upload_url.to_string(),
-        put_headers,
-        Some(RequestBody {
-            json_body: None,
-            body_bytes_b64: Some(base64::engine::general_purpose::STANDARD.encode(&bytes)),
-            body_ref: None,
-        }),
-        false,
+        &upload_url,
+        image.mime.as_str(),
+        fp.user_agent,
+        base_url,
+        bytes,
     )
     .await?;
-    ensure_success(&put_result, "ChatGPT-Web upload blob")?;
 
     let uploaded_path = format!("/backend-api/files/{file_id}/uploaded");
     let mut uploaded_headers = web_base_headers(fp, token, uploaded_path.as_str());
@@ -883,7 +1640,7 @@ async fn web_upload_image(
         file_id,
         library_file_id,
         file_name,
-        file_size: bytes.len(),
+        file_size,
         mime: image.mime,
         width: image.width,
         height: image.height,
@@ -931,7 +1688,7 @@ async fn web_process_upload_stream(
                     .and_then(|extra| extra.get("metadata_object_id"))
                     .and_then(Value::as_str)
                     .map(str::trim)
-                    .filter(|value| !value.is_empty())
+                    .filter(|value| web_opaque_id_is_safe(value))
                     .map(ToOwned::to_owned)
             })
     }))
@@ -941,14 +1698,10 @@ async fn execute_subrequest(
     plan: &ExecutionPlan,
     method: &str,
     url: String,
-    mut headers: BTreeMap<String, String>,
+    headers: BTreeMap<String, String>,
     body: Option<RequestBody>,
     stream: bool,
 ) -> Result<ExecutionResult, ExecutionRuntimeTransportError> {
-    headers.insert(
-        EXECUTION_REQUEST_ACCEPT_INVALID_CERTS_HEADER.to_string(),
-        "true".to_string(),
-    );
     let subplan = ExecutionPlan {
         request_id: plan.request_id.clone(),
         candidate_id: plan.candidate_id.clone(),
@@ -1079,7 +1832,7 @@ async fn apply_chatgpt_web_image_quota_request_delta(
         let Some(mut latest_key) = state
             .read_provider_catalog_keys_by_ids(&[key_id.to_string()])
             .await
-            .map_err(|err| err.into_message())?
+            .map_err(|_| "ChatGPT-Web quota state read failed".to_string())?
             .into_iter()
             .find(|key| key.id == key_id && key.provider_id == provider_id)
         else {
@@ -1106,7 +1859,8 @@ async fn apply_chatgpt_web_image_quota_request_delta(
             return Ok(false);
         }
 
-        let namespace_value = Value::Object(metadata);
+        let namespace_value =
+            admin_provider_metadata_bucket_safe_json("chatgpt_web", Some(&Value::Object(metadata)));
         let updated_upstream_metadata = merge_provider_metadata_object(
             latest_key.upstream_metadata.as_ref(),
             "chatgpt_web",
@@ -1139,7 +1893,7 @@ async fn apply_chatgpt_web_image_quota_request_delta(
                 },
             )
             .await
-            .map_err(|err| err.into_message())?;
+            .map_err(|_| "ChatGPT-Web quota state update failed".to_string())?;
         if persisted {
             return Ok(true);
         }
@@ -1422,7 +2176,7 @@ async fn refresh_chatgpt_web_image_quota_after_success(
     let key_available = state
         .read_provider_catalog_keys_by_ids(&key_ids)
         .await
-        .map_err(|err| err.into_message())?
+        .map_err(|_| "ChatGPT-Web quota key read failed".to_string())?
         .into_iter()
         .any(|key| key.id == key_id && key.provider_id == provider_id);
     if !key_available {
@@ -1431,7 +2185,7 @@ async fn refresh_chatgpt_web_image_quota_after_success(
     let Some(provider) = state
         .read_provider_catalog_providers_by_ids(&provider_ids)
         .await
-        .map_err(|err| err.into_message())?
+        .map_err(|_| "ChatGPT-Web quota provider read failed".to_string())?
         .into_iter()
         .find(|provider| provider.id == provider_id)
     else {
@@ -1454,19 +2208,16 @@ async fn refresh_chatgpt_web_image_quota_after_success(
     let result = DirectSyncExecutionRuntime::new()
         .execute_sync(&quota_plan)
         .await
-        .map_err(|err| err.to_string())?;
+        .map_err(|_| "ChatGPT-Web quota refresh request failed".to_string())?;
     if result.status_code != 200 {
-        let body_excerpt = String::from_utf8_lossy(&execution_result_body_bytes_lossy(&result))
-            .chars()
-            .take(320)
-            .collect::<String>();
         return Err(format!(
-            "conversation/init returned {}: {}",
-            result.status_code, body_excerpt
+            "ChatGPT-Web quota refresh returned HTTP {}",
+            result.status_code
         ));
     }
 
-    let body_json = execution_result_json(&result).map_err(|err| err.to_string())?;
+    let body_json = execution_result_json(&result)
+        .map_err(|_| "ChatGPT-Web quota refresh response was invalid".to_string())?;
     let now_unix_secs = current_unix_secs();
     let Some(metadata) = parse_chatgpt_web_conversation_init_response(&body_json, now_unix_secs)
     else {
@@ -1475,7 +2226,7 @@ async fn refresh_chatgpt_web_image_quota_after_success(
     let Some(latest_key) = state
         .read_provider_catalog_keys_by_ids(&key_ids)
         .await
-        .map_err(|err| err.into_message())?
+        .map_err(|_| "ChatGPT-Web quota key read failed".to_string())?
         .into_iter()
         .find(|key| key.id == key_id && key.provider_id == provider_id)
     else {
@@ -1489,6 +2240,7 @@ async fn refresh_chatgpt_web_image_quota_after_success(
         .cloned();
     let mut metadata = metadata.clone();
     normalize_chatgpt_web_image_quota_limit(&mut metadata, latest_key.upstream_metadata.as_ref());
+    metadata = admin_provider_metadata_bucket_safe_json("chatgpt_web", Some(&metadata));
 
     let mut updated_key = latest_key;
     let namespace_value = metadata.clone();
@@ -1524,18 +2276,17 @@ async fn refresh_chatgpt_web_image_quota_after_success(
             updated_at_unix_secs: updated_key.updated_at_unix_secs,
         })
         .await
-        .map_err(|err| err.into_message())?;
+        .map_err(|_| "ChatGPT-Web quota state update failed".to_string())?;
     if persisted {
         return state
             .update_provider_catalog_key_oauth_runtime_state(
                 &updated_key.id,
                 updated_key.oauth_invalid_at_unix_secs,
                 updated_key.oauth_invalid_reason.as_deref(),
-                None,
                 updated_key.updated_at_unix_secs,
             )
             .await
-            .map_err(|err| err.into_message());
+            .map_err(|_| "ChatGPT-Web OAuth state update failed".to_string());
     }
     // The conversation/init response is an authoritative snapshot.  A
     // conflict means a newer local delta won; do not overwrite it with
@@ -1553,20 +2304,13 @@ fn build_chatgpt_web_image_quota_refresh_plan(
         quota_kind: _,
         method,
         url,
-        mut headers,
+        headers,
         content_type,
         json_body,
         client_api_format,
         provider_api_format,
         model_name,
-        accept_invalid_certs,
     } = spec;
-    if accept_invalid_certs {
-        headers.insert(
-            EXECUTION_REQUEST_ACCEPT_INVALID_CERTS_HEADER.to_string(),
-            "true".to_string(),
-        );
-    }
     let body = json_body
         .map(RequestBody::from_json)
         .unwrap_or(RequestBody {
@@ -1912,28 +2656,37 @@ fn flush_sse_data(data_lines: &mut Vec<String>, summary: &mut WebImageSseSummary
             value.get("type").and_then(Value::as_str),
             Some("error" | "response.failed")
         ) {
-            summary.failure = Some(value.clone());
+            summary.failure = Some(bounded_web_failure_value(&value));
         }
         if let Some(text) = extract_assistant_text(&value) {
             summary.last_text = Some(text);
         }
-        if let Some(result) = value
-            .get("item")
-            .filter(|item| {
-                item.get("type").and_then(Value::as_str) == Some("image_generation_call")
-            })
-            .and_then(|item| item.get("result"))
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            add_unique_values(
-                &mut summary.direct_urls,
-                [format!("data:image/png;base64,{result}")],
-            );
+        if let Some(item) = value.get("item").filter(|item| {
+            item.get("type").and_then(Value::as_str) == Some("image_generation_call")
+        }) {
+            // Keep the provider's declared output format when constructing a
+            // data URL.  The bytes are still verified by `parse_data_url`
+            // before download, but labelling every output as PNG would create
+            // an avoidable MIME/signature mismatch (and an extra failed
+            // download attempt) for JPEG/WebP results.
+            if let Some(result) = item
+                .get("result")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                let mime = mime_for_web_output_format(
+                    item.get("output_format")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default(),
+                );
+                if let Some(url) = bounded_web_image_data_url(mime, result) {
+                    summary.add_values(WebImageSummaryCollection::DirectUrl, [url]);
+                }
+            }
         }
-        add_unique_values(
-            &mut summary.direct_urls,
+        summary.add_values(
+            WebImageSummaryCollection::DirectUrl,
             extract_web_image_payload_urls(&value),
         );
         extract_web_image_values(&value, summary);
@@ -1973,7 +2726,9 @@ fn extract_web_image_payload_urls(value: &Value) -> Vec<String> {
                         .and_then(Value::as_str)
                         .unwrap_or_default(),
                 );
-                add_unique_values(&mut urls, [format!("data:{mime};base64,{partial_b64}")]);
+                if let Some(url) = bounded_web_image_data_url(mime, partial_b64) {
+                    add_unique_values(&mut urls, [url]);
+                }
             }
         }
         _ => {
@@ -2019,6 +2774,9 @@ fn image_payload_url_from_object(value: &Value) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
+        if url.len() > CHATGPT_WEB_IMAGE_MAX_EXTERNAL_URL_BYTES {
+            return None;
+        }
         return Some(url.to_string());
     }
     let b64 = value
@@ -2034,14 +2792,32 @@ fn image_payload_url_from_object(value: &Value) -> Option<String> {
             .and_then(Value::as_str)
             .unwrap_or_default(),
     );
+    bounded_web_image_data_url(mime, b64)
+}
+
+fn bounded_web_image_data_url(mime: &str, b64: &str) -> Option<String> {
+    let b64 = b64.trim();
+    if b64.is_empty()
+        || b64.len()
+            > maximum_base64_len_for_decoded_limit(chatgpt_web_image_raw_payload_limit_bytes())
+    {
+        return None;
+    }
+    let prefix_len = "data:;base64,".len().saturating_add(mime.len());
+    if prefix_len.saturating_add(b64.len()) > chatgpt_web_image_sse_envelope_limit_bytes() {
+        return None;
+    }
     Some(format!("data:{mime};base64,{b64}"))
 }
 
 fn mime_for_web_output_format(format: &str) -> &'static str {
-    match format.trim().to_ascii_lowercase().as_str() {
-        "jpeg" | "jpg" => "image/jpeg",
-        "webp" => "image/webp",
-        _ => "image/png",
+    let format = format.trim();
+    if format.eq_ignore_ascii_case("jpeg") || format.eq_ignore_ascii_case("jpg") {
+        "image/jpeg"
+    } else if format.eq_ignore_ascii_case("webp") {
+        "image/webp"
+    } else {
+        "image/png"
     }
 }
 
@@ -2053,7 +2829,7 @@ fn extract_web_image_values(value: &Value, summary: &mut WebImageSseSummary) {
                     if let Some(conversation_id) = value
                         .as_str()
                         .map(str::trim)
-                        .filter(|value| !value.is_empty())
+                        .filter(|value| web_opaque_id_is_safe(value))
                     {
                         summary
                             .conversation_id
@@ -2070,15 +2846,21 @@ fn extract_web_image_values(value: &Value, summary: &mut WebImageSseSummary) {
         }
         Value::String(text) => {
             let text = text.trim();
-            if text.starts_with("sediment://") {
-                add_unique_values(
-                    &mut summary.sediment_ids,
-                    [text.trim_start_matches("sediment://").to_string()],
-                );
+            if let Some(sediment_id) = text.strip_prefix("sediment://") {
+                if web_opaque_id_is_safe(sediment_id) {
+                    summary.add_values(
+                        WebImageSummaryCollection::SedimentId,
+                        [sediment_id.to_string()],
+                    );
+                }
             } else if is_web_file_id(text) {
-                add_unique_values(&mut summary.file_ids, [text.to_string()]);
-            } else if is_generated_web_asset_url(text) || text.starts_with("data:image/") {
-                add_unique_values(&mut summary.direct_urls, [text.to_string()]);
+                summary.add_values(WebImageSummaryCollection::FileId, [text.to_string()]);
+            } else if (text.len() <= CHATGPT_WEB_IMAGE_MAX_EXTERNAL_URL_BYTES
+                && is_generated_web_asset_url(text))
+                || (text.len() <= chatgpt_web_image_sse_envelope_limit_bytes()
+                    && is_data_image_reference(text))
+            {
+                summary.add_values(WebImageSummaryCollection::DirectUrl, [text.to_string()]);
             }
         }
         _ => {}
@@ -2093,17 +2875,63 @@ fn extract_assistant_text(value: &Value) -> Option<String> {
         .and_then(Value::as_array)
         .and_then(|parts| parts.iter().filter_map(Value::as_str).next())
         .map(str::trim)
-        .filter(|value| !value.is_empty())
+        .filter(|value| {
+            !value.is_empty() && value.len() <= CHATGPT_WEB_IMAGE_SUMMARY_MAX_TEXT_BYTES
+        })
         .map(ToOwned::to_owned)
+}
+
+fn bounded_web_failure_value(value: &Value) -> Value {
+    if json_value_fits_serialized_limit(value, CHATGPT_WEB_IMAGE_SUMMARY_MAX_TEXT_BYTES) {
+        return value.clone();
+    }
+    if value.get("type").and_then(Value::as_str) == Some("response.failed") {
+        json!({
+            "type": "response.failed",
+            "response": {
+                "status": "failed",
+                "error": {
+                    "code": "chatgpt_web_image_failed",
+                    "message": "ChatGPT-Web image provider returned an oversized failure"
+                }
+            }
+        })
+    } else {
+        json!({
+            "type": "error",
+            "error": {
+                "code": "chatgpt_web_image_failed",
+                "message": "ChatGPT-Web image provider returned an oversized failure"
+            }
+        })
+    }
 }
 
 fn merge_web_summary(target: &mut WebImageSseSummary, source: &mut WebImageSseSummary) {
     if target.conversation_id.is_none() {
-        target.conversation_id = source.conversation_id.take();
+        target.conversation_id = source
+            .conversation_id
+            .take()
+            .filter(|value| web_opaque_id_is_safe(value));
     }
-    add_unique_values(&mut target.file_ids, source.file_ids.drain(..));
-    add_unique_values(&mut target.sediment_ids, source.sediment_ids.drain(..));
-    add_unique_values(&mut target.direct_urls, source.direct_urls.drain(..));
+    target.add_values(
+        WebImageSummaryCollection::FileId,
+        source
+            .file_ids
+            .drain(..)
+            .filter(|value| is_web_file_id(value)),
+    );
+    target.add_values(
+        WebImageSummaryCollection::SedimentId,
+        source
+            .sediment_ids
+            .drain(..)
+            .filter(|value| web_opaque_id_is_safe(value)),
+    );
+    target.add_values(
+        WebImageSummaryCollection::DirectUrl,
+        source.direct_urls.drain(..),
+    );
     if target.failure.is_none() {
         target.failure = source.failure.take();
     }
@@ -2130,10 +2958,19 @@ fn uploaded_file_ids(uploads: &[WebUploadMeta]) -> BTreeSet<String> {
 }
 
 fn add_unique_values(values: &mut Vec<String>, incoming: impl IntoIterator<Item = String>) {
+    let budget = chatgpt_web_image_sse_envelope_limit_bytes();
+    let mut retained_bytes = saturating_string_bytes(values);
     for value in incoming {
-        if !value.is_empty() && !values.iter().any(|existing| existing == &value) {
-            values.push(value);
+        if value.is_empty()
+            || value.len() > budget
+            || values.len() >= CHATGPT_WEB_IMAGE_SUMMARY_MAX_DIRECT_URLS
+            || value.len() > budget.saturating_sub(retained_bytes)
+            || values.iter().any(|existing| existing == &value)
+        {
+            continue;
         }
+        retained_bytes = retained_bytes.saturating_add(value.len());
+        values.push(value);
     }
 }
 
@@ -2521,12 +3358,14 @@ fn json_u64(value: Option<&Value>) -> Option<u64> {
 }
 
 fn chatgpt_web_image_operation(value: Option<&Value>) -> String {
-    value
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .map(str::to_ascii_lowercase)
-        .filter(|value| matches!(value.as_str(), "generate" | "edit"))
-        .unwrap_or_else(|| "generate".to_string())
+    let Some(value) = value.and_then(Value::as_str).map(str::trim) else {
+        return "generate".to_string();
+    };
+    if value.eq_ignore_ascii_case("edit") {
+        "edit".to_string()
+    } else {
+        "generate".to_string()
+    }
 }
 
 fn build_failed_sse(request: &ChatGptWebImageRequest, failure: &Value) -> String {
@@ -2609,9 +3448,15 @@ fn bytes_execution_result(
     headers: BTreeMap<String, String>,
     body: Vec<u8>,
     started_at: Instant,
-) -> ExecutionResult {
+) -> Result<ExecutionResult, ExecutionRuntimeTransportError> {
+    let envelope_limit = chatgpt_web_image_sse_envelope_limit_bytes();
+    if body.len() > envelope_limit {
+        return Err(ExecutionRuntimeTransportError::BodyTooLarge {
+            limit_bytes: envelope_limit,
+        });
+    }
     let body_len = body.len() as u64;
-    ExecutionResult {
+    Ok(ExecutionResult {
         request_id: plan.request_id.clone(),
         candidate_id: plan.candidate_id.clone(),
         status_code,
@@ -2623,15 +3468,19 @@ fn bytes_execution_result(
         }),
         telemetry: Some(telemetry(started_at, body_len)),
         error: None,
-    }
+    })
 }
 
 fn execution_result_frame_stream(
     plan: &ExecutionPlan,
     result: &ExecutionResult,
     report_context: Option<&Value>,
-) -> BoxStream<'static, Result<Bytes, IoError>> {
-    let body = execution_result_body_bytes_lossy(result);
+) -> Result<BoxStream<'static, Result<Bytes, IoError>>, ExecutionRuntimeTransportError> {
+    // The synthetic ChatGPT-Web SSE body embeds an image as base64, so its
+    // envelope is larger than the decoded image/body limit.  Use the bounded
+    // envelope budget here instead of rejecting valid images near 64 MiB.
+    let body =
+        execution_result_bytes_with_limit(result, chatgpt_web_image_sse_envelope_limit_bytes())?;
     let terminal_summary = chatgpt_web_stream_terminal_summary(plan, result, report_context, &body);
     let mut frames = vec![
         StreamFrame {
@@ -2653,11 +3502,11 @@ fn execution_result_frame_stream(
             },
         },
     ];
-    if !body.is_empty() {
+    for chunk in body.chunks(CHATGPT_WEB_IMAGE_STREAM_CHUNK_BYTES) {
         frames.push(StreamFrame {
             frame_type: StreamFrameType::Data,
             payload: StreamFramePayload::Data {
-                chunk_b64: Some(base64::engine::general_purpose::STANDARD.encode(body.as_slice())),
+                chunk_b64: Some(base64::engine::general_purpose::STANDARD.encode(chunk)),
                 text: None,
             },
         });
@@ -2673,12 +3522,12 @@ fn execution_result_frame_stream(
         },
     });
     frames.push(StreamFrame::eof_with_summary(terminal_summary));
-    stream::iter(
+    Ok(stream::iter(
         frames
             .into_iter()
             .map(|frame| encode_stream_frame_ndjson(&frame)),
     )
-    .boxed()
+    .boxed())
 }
 
 fn chatgpt_web_stream_terminal_summary(
@@ -2793,20 +3642,49 @@ fn execution_result_json(
 fn execution_result_bytes(
     result: &ExecutionResult,
 ) -> Result<Vec<u8>, ExecutionRuntimeTransportError> {
-    Ok(execution_result_body_bytes_lossy(result))
+    execution_result_bytes_with_limit(result, crate::headers::max_internal_buffered_body_bytes())
 }
 
-fn execution_result_body_bytes_lossy(result: &ExecutionResult) -> Vec<u8> {
+fn execution_result_bytes_with_limit(
+    result: &ExecutionResult,
+    body_limit: usize,
+) -> Result<Vec<u8>, ExecutionRuntimeTransportError> {
     let Some(body) = result.body.as_ref() else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     if let Some(json_body) = body.json_body.as_ref() {
-        return serde_json::to_vec(json_body).unwrap_or_default();
+        return serialize_json_body_with_limit(json_body, body_limit);
     }
     body.body_bytes_b64
         .as_deref()
-        .and_then(|value| base64::engine::general_purpose::STANDARD.decode(value).ok())
-        .unwrap_or_default()
+        .map(|value| decode_base64_body_with_limit(value, body_limit))
+        .unwrap_or_else(|| Ok(Vec::new()))
+}
+
+fn execution_result_body_bytes_lossy(result: &ExecutionResult) -> Vec<u8> {
+    execution_result_bytes(result).unwrap_or_default()
+}
+
+pub(super) fn chatgpt_web_image_sse_envelope_limit_bytes() -> usize {
+    let image_limit = crate::headers::max_internal_buffered_body_bytes();
+    maximum_base64_len_for_decoded_limit(image_limit)
+        .saturating_add(CHATGPT_WEB_IMAGE_SSE_WRAPPER_OVERHEAD_BYTES)
+        .min(CHATGPT_WEB_IMAGE_SSE_HARD_MAX_BYTES)
+}
+
+fn chatgpt_web_image_raw_payload_limit_bytes() -> usize {
+    let configured_limit = crate::headers::max_internal_buffered_body_bytes();
+    let envelope_limit = chatgpt_web_image_sse_envelope_limit_bytes();
+    let available_for_base64 =
+        envelope_limit.saturating_sub(CHATGPT_WEB_IMAGE_SSE_WRAPPER_OVERHEAD_BYTES);
+    // Standard base64 expands three bytes into four.  Use the floor of the
+    // inverse expansion so a raw image can always be represented by the
+    // synthetic SSE envelope without first allocating an over-sized body.
+    let representable_raw_limit = available_for_base64
+        .saturating_div(4)
+        .saturating_mul(3)
+        .max(1);
+    configured_limit.min(representable_raw_limit)
 }
 
 fn ensure_success(
@@ -2816,15 +3694,14 @@ fn ensure_success(
     if (200..300).contains(&result.status_code) {
         return Ok(());
     }
-    let body = String::from_utf8_lossy(&execution_result_body_bytes_lossy(result)).to_string();
     Err(ExecutionRuntimeTransportError::UpstreamHttpStatus {
         status_code: result.status_code,
-        message: format!(
-            "{stage} returned {}: {}",
-            result.status_code,
-            body.chars().take(320).collect::<String>()
-        ),
+        message: chatgpt_web_stage_http_error_message(stage, result.status_code),
     })
+}
+
+fn chatgpt_web_stage_http_error_message(stage: &str, status_code: u16) -> String {
+    format!("{stage} returned HTTP {status_code}")
 }
 
 fn chatgpt_web_base_url_from_plan(plan: &ExecutionPlan) -> String {
@@ -2908,7 +3785,10 @@ fn pow_generate(seed: &str, difficulty: &str, config: Vec<Value>) -> (String, bo
     let Some(diff_bytes) = hex_to_bytes(difficulty) else {
         return (encode_pow_seed(seed), false);
     };
-    if diff_bytes.is_empty() {
+    // `sha3_512` yields exactly 64 bytes.  Difficulty comes from the
+    // upstream sentinel response, so reject an overlong value before the
+    // comparison below could slice the digest out of bounds.
+    if diff_bytes.is_empty() || diff_bytes.len() > 64 {
         return (encode_pow_seed(seed), false);
     }
 
@@ -2943,7 +3823,13 @@ fn encode_pow_seed(seed: &str) -> String {
 }
 
 fn hex_to_bytes(value: &str) -> Option<Vec<u8>> {
-    let mut hex = value.trim().to_string();
+    // Avoid copying/allocating an unbounded upstream difficulty string.  The
+    // proof comparison cannot consume more than the 64-byte SHA-3 digest.
+    let trimmed = value.trim();
+    if trimmed.len() > 128 {
+        return None;
+    }
+    let mut hex = trimmed.to_string();
     if hex.len() % 2 == 1 {
         hex.insert(0, '0');
     }
@@ -3062,20 +3948,57 @@ fn keccak_f1600(state: &mut [u64; 25]) {
 }
 
 fn parse_data_url(value: &str) -> Option<DownloadedImage> {
+    parse_data_url_with_limit(value, chatgpt_web_image_raw_payload_limit_bytes())
+}
+
+fn parse_data_url_with_limit(value: &str, decoded_limit: usize) -> Option<DownloadedImage> {
     let (header, data) = value.trim().split_once(',')?;
-    let mime = header
-        .strip_prefix("data:")
-        .and_then(|value| value.split(';').next())
-        .filter(|value| value.starts_with("image/"))
-        .unwrap_or("image/png")
-        .to_string();
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(data)
-        .ok()?;
+    if header.is_empty()
+        || data.is_empty()
+        || header
+            .bytes()
+            .any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control())
+        || data
+            .bytes()
+            .any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control())
+    {
+        return None;
+    }
+
+    // Only pass image formats that the OpenAI image surface can represent safely.
+    // In particular, accepting arbitrary `image/*` values would allow SVG/XML
+    // payloads to cross a JSON image boundary and be interpreted as active markup.
+    let (scheme, metadata) = header.split_once(':')?;
+    if !scheme.eq_ignore_ascii_case("data") {
+        return None;
+    }
+    let (mime, encoding) = metadata.rsplit_once(';')?;
+    if !encoding.eq_ignore_ascii_case("base64") || mime.contains(';') {
+        return None;
+    }
+    let mime = if mime.eq_ignore_ascii_case("image/png") {
+        "image/png"
+    } else if mime.eq_ignore_ascii_case("image/jpeg") || mime.eq_ignore_ascii_case("image/jpg") {
+        "image/jpeg"
+    } else if mime.eq_ignore_ascii_case("image/webp") {
+        "image/webp"
+    } else {
+        return None;
+    };
+
+    // Check the encoded length before invoking the decoder.  The base64 engine
+    // allocates from the input length, so a decoded-size check performed after
+    // decoding would still leave an allocation DoS.  Keep the operator-configured
+    // 64 MiB default so valid large image responses remain supported.
+    let bytes = decode_base64_body_with_limit(data, decoded_limit).ok()?;
+    let detected_mime = validate_web_image_payload(&bytes, Some(mime)).ok()?;
     let (width, height) = image_dimensions(&bytes);
     Some(DownloadedImage {
-        b64_json: base64::engine::general_purpose::STANDARD.encode(bytes),
-        mime,
+        // `decode_base64_body_with_limit` has already validated the canonical
+        // alphabet and padding.  Preserve the source text to avoid a second
+        // 64 MiB-scale allocation when handling large images.
+        b64_json: data.to_string(),
+        mime: detected_mime.to_string(),
         width,
         height,
     })
@@ -3085,6 +4008,13 @@ fn image_dimensions(bytes: &[u8]) -> (Option<u32>, Option<u32>) {
     if bytes.starts_with(b"\x89PNG\r\n\x1a\n") && bytes.len() >= 24 {
         let width = u32::from_be_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]);
         let height = u32::from_be_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]);
+        if width == 0
+            || height == 0
+            || width > CHATGPT_WEB_IMAGE_MAX_DIMENSION
+            || height > CHATGPT_WEB_IMAGE_MAX_DIMENSION
+        {
+            return (None, None);
+        }
         return (Some(width), Some(height));
     }
     if bytes.starts_with(&[0xff, 0xd8]) {
@@ -3114,6 +4044,13 @@ fn image_dimensions(bytes: &[u8]) -> (Option<u32>, Option<u32>) {
             {
                 let height = u16::from_be_bytes([bytes[cursor + 5], bytes[cursor + 6]]) as u32;
                 let width = u16::from_be_bytes([bytes[cursor + 7], bytes[cursor + 8]]) as u32;
+                if width == 0
+                    || height == 0
+                    || width > CHATGPT_WEB_IMAGE_MAX_DIMENSION
+                    || height > CHATGPT_WEB_IMAGE_MAX_DIMENSION
+                {
+                    return (None, None);
+                }
                 return (Some(width), Some(height));
             }
             if segment_len < 2 {
@@ -3127,39 +4064,118 @@ fn image_dimensions(bytes: &[u8]) -> (Option<u32>, Option<u32>) {
 
 fn is_web_file_id(value: &str) -> bool {
     let value = value.trim();
-    (value.starts_with("file-") || value.starts_with("file_")) && value.len() >= 10
+    (value.starts_with("file-") || value.starts_with("file_"))
+        && value.len() >= 10
+        && web_opaque_id_is_safe(value)
+}
+
+fn web_opaque_id_is_safe(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= CHATGPT_WEB_OPAQUE_ID_MAX_BYTES
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
+fn validated_web_opaque_id<'a>(
+    value: &'a str,
+    field: &str,
+) -> Result<&'a str, ExecutionRuntimeTransportError> {
+    let value = value.trim();
+    if !web_opaque_id_is_safe(value) {
+        return Err(ExecutionRuntimeTransportError::UpstreamRequest(format!(
+            "ChatGPT-Web response contains an invalid {field}"
+        )));
+    }
+    Ok(value)
+}
+
+fn validated_web_file_id(value: &str) -> Result<&str, ExecutionRuntimeTransportError> {
+    let value = value.trim();
+    if !is_web_file_id(value) {
+        return Err(ExecutionRuntimeTransportError::UpstreamRequest(
+            "ChatGPT-Web response contains an invalid file ID".to_string(),
+        ));
+    }
+    Ok(value)
+}
+
+fn web_dns_host_is_valid(host: &str) -> bool {
+    let host = host.strip_suffix('.').unwrap_or(host);
+    !host.is_empty()
+        && !host.ends_with('.')
+        && host.len() <= 253
+        && host.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                && label
+                    .as_bytes()
+                    .first()
+                    .is_some_and(u8::is_ascii_alphanumeric)
+                && label
+                    .as_bytes()
+                    .last()
+                    .is_some_and(u8::is_ascii_alphanumeric)
+        })
+}
+
+fn web_host_is_domain_or_subdomain(host: &str, domain: &str) -> bool {
+    let host = host.strip_suffix('.').unwrap_or(host);
+    if !web_dns_host_is_valid(host) {
+        return false;
+    }
+    if host.eq_ignore_ascii_case(domain) {
+        return true;
+    }
+    host.len() > domain.len()
+        && host.as_bytes()[host.len() - domain.len() - 1] == b'.'
+        && host[host.len() - domain.len()..].eq_ignore_ascii_case(domain)
+}
+
+fn web_host_is_strict_subdomain(host: &str, domain: &str) -> bool {
+    web_host_is_domain_or_subdomain(host, domain)
+        && !host.trim_end_matches('.').eq_ignore_ascii_case(domain)
 }
 
 fn is_generated_web_asset_url(raw_url: &str) -> bool {
     let Ok(url) = url::Url::parse(raw_url.trim()) else {
         return false;
     };
-    let Some(host) = url.host_str().map(str::to_ascii_lowercase) else {
+    if validate_web_image_http_url(&url).is_err() {
+        return false;
+    }
+    let Some(host) = url.host_str() else {
         return false;
     };
     let path = url.path().to_ascii_lowercase();
-    if host.contains("openaiassets.blob.core.windows.net") {
+    if web_host_is_domain_or_subdomain(host, "openaiassets.blob.core.windows.net") {
         return false;
     }
     if path.contains("/$web/chatgpt/") {
         return false;
     }
-    host.contains("files.oaiusercontent.com")
-        || host.contains("oaidalleapiprodscus.blob.core.windows.net")
-        || (host.ends_with(".blob.core.windows.net") && !path.contains("/$web/"))
+    web_host_is_domain_or_subdomain(host, "files.oaiusercontent.com")
+        || web_host_is_domain_or_subdomain(host, "oaidalleapiprodscus.blob.core.windows.net")
+        || (web_host_is_strict_subdomain(host, "blob.core.windows.net") && !path.contains("/$web/"))
 }
 
-fn should_use_web_download_headers(base_url: &str, raw_url: &str) -> bool {
-    let Ok(url) = url::Url::parse(raw_url) else {
-        return raw_url.starts_with("/backend-api/");
-    };
-    if url.path().starts_with("/backend-api/") {
-        return true;
-    }
-    let Ok(base) = url::Url::parse(base_url) else {
-        return false;
-    };
-    url.domain() == base.domain()
+fn is_authenticated_web_download_url(base: &url::Url, target: &url::Url) -> bool {
+    target.path().starts_with("/backend-api/")
+        && web_download_url_is_same_origin(base, target)
+        && target.username().is_empty()
+        && target.password().is_none()
+}
+
+fn web_download_url_is_same_origin(base: &url::Url, target: &url::Url) -> bool {
+    target.scheme().eq_ignore_ascii_case(base.scheme())
+        && target
+            .host_str()
+            .zip(base.host_str())
+            .is_some_and(|(target, base)| target.eq_ignore_ascii_case(base))
+        && target.port_or_known_default() == base.port_or_known_default()
 }
 
 #[cfg(test)]
@@ -3256,7 +4272,7 @@ mod tests {
         .expect("key should build")
         .with_transport_fields(
             Some(json!(["openai:image"])),
-            Some("test-access-token".to_string()),
+            None,
             None,
             None,
             None,
@@ -3324,6 +4340,37 @@ mod tests {
         assert_eq!(gpt_image2_output_tokens(1536, 1024, "medium"), 1372);
         assert_eq!(gpt_image2_output_tokens(1024, 1536, "medium"), 1372);
         assert_eq!(gpt_image2_output_tokens(1024, 1024, "high"), 7024);
+    }
+
+    #[test]
+    fn chatgpt_web_http_status_error_omits_upstream_body() {
+        let result = ExecutionResult {
+            request_id: "req-chatgpt-web-image-test".to_string(),
+            candidate_id: None,
+            status_code: 502,
+            headers: BTreeMap::new(),
+            response_observation: None,
+            body: Some(ResponseBody {
+                json_body: Some(json!({"error": "Bearer secret-chatgpt-web-body"})),
+                body_bytes_b64: None,
+            }),
+            telemetry: None,
+            error: None,
+        };
+
+        let error = ensure_success(&result, "ChatGPT-Web bootstrap")
+            .expect_err("non-success result should be rejected");
+        let message = error.to_string();
+
+        assert!(matches!(
+            error,
+            ExecutionRuntimeTransportError::UpstreamHttpStatus {
+                status_code: 502,
+                ..
+            }
+        ));
+        assert_eq!(message, "ChatGPT-Web bootstrap returned HTTP 502");
+        assert!(!message.contains("secret-chatgpt-web-body"));
     }
 
     #[test]
@@ -3498,13 +4545,6 @@ mod tests {
         assert_eq!(
             quota_plan.headers.get("authorization").map(String::as_str),
             Some("Bearer test-access-token")
-        );
-        assert_eq!(
-            quota_plan
-                .headers
-                .get(EXECUTION_REQUEST_ACCEPT_INVALID_CERTS_HEADER)
-                .map(String::as_str),
-            Some("true")
         );
         assert_eq!(
             quota_plan
@@ -3825,6 +4865,22 @@ data: [DONE]
     }
 
     #[test]
+    fn parse_web_image_sse_preserves_inline_output_format() {
+        let jpeg_payload =
+            base64::engine::general_purpose::STANDARD.encode([0xff, 0xd8, 0xff, 0xd9]);
+        let event = format!(
+            "data: {{\"type\":\"response.output_item.done\",\"item\":{{\"type\":\"image_generation_call\",\"result\":\"{jpeg_payload}\",\"output_format\":\"jpeg\"}}}}\n\n"
+        );
+
+        let summary = parse_web_image_sse(event.as_bytes());
+
+        assert_eq!(
+            summary.direct_urls,
+            vec![format!("data:image/jpeg;base64,{jpeg_payload}")]
+        );
+    }
+
+    #[test]
     fn parse_web_image_sse_preserves_response_failed_event() {
         let summary = parse_web_image_sse(
             br#"data: {"type":"response.failed","response":{"status":"failed","error":{"code":"rate_limit_exceeded","message":"limited"}}}
@@ -3846,12 +4902,414 @@ data: [DONE]
 
     #[test]
     fn generated_asset_filter_does_not_drop_icon_or_logo_outputs() {
-        assert!(is_generated_web_asset_url(
-            "https://files.oaiusercontent.com/generated/icon-logo-output.png"
-        ));
+        for accepted in [
+            "https://files.oaiusercontent.com/generated/icon-logo-output.png",
+            "https://cdn.files.oaiusercontent.com/generated/image.png",
+            "https://oaidalleapiprodscus.blob.core.windows.net/generated/image.png",
+            "https://tenant.blob.core.windows.net/generated/image.png",
+            "https://files.oaiusercontent.com./generated/image.png",
+        ] {
+            assert!(
+                is_generated_web_asset_url(accepted),
+                "generated image host should be accepted: {accepted}"
+            );
+        }
         assert!(!is_generated_web_asset_url(
             "https://openaiassets.blob.core.windows.net/$web/chatgpt/filled-plus-icon.svg"
         ));
+
+        for rejected in [
+            "https://notfiles.oaiusercontent.com/generated/image.png",
+            "https://files.oaiusercontent.com.attacker.invalid/generated/image.png",
+            "https://not-oaidalleapiprodscus.blob.core.windows.net.attacker.invalid/image.png",
+            "https://blob.core.windows.net/generated/image.png",
+            "https://openaiassets.blob.core.windows.net/generated/image.png",
+            "https://sub.openaiassets.blob.core.windows.net/generated/image.png",
+            "ftp://files.oaiusercontent.com/generated/image.png",
+            "https://user@files.oaiusercontent.com/generated/image.png",
+        ] {
+            assert!(
+                !is_generated_web_asset_url(rejected),
+                "lookalike or static asset host should be rejected: {rejected}"
+            );
+        }
+    }
+
+    #[test]
+    fn web_opaque_ids_reject_path_and_query_injection() {
+        for accepted in ["conv-test_123", "file-generated-123456", "sediment_123"] {
+            assert!(web_opaque_id_is_safe(accepted));
+        }
+        assert!(is_web_file_id("file-generated-123456"));
+
+        for rejected in [
+            "../admin",
+            "conv/other",
+            "conv?inline=true",
+            "conv#fragment",
+            "conv%2fadmin",
+            "conv&inline=true",
+            "conv=value",
+            "conv value",
+            "\r\nX-Injected: true",
+        ] {
+            assert!(
+                !web_opaque_id_is_safe(rejected),
+                "unsafe opaque ID should be rejected: {rejected:?}"
+            );
+        }
+        assert!(!web_opaque_id_is_safe(
+            "a".repeat(CHATGPT_WEB_OPAQUE_ID_MAX_BYTES + 1).as_str()
+        ));
+        assert!(!is_web_file_id("file-generated-123456/../../admin"));
+        assert!(validated_web_file_id("file-generated-123456?download=1").is_err());
+    }
+
+    #[test]
+    fn web_image_value_extraction_keeps_only_safe_opaque_ids() {
+        let mut summary = WebImageSseSummary::default();
+        extract_web_image_values(
+            &json!({
+                "conversation_id": "conv-test_123",
+                "file": "file-generated-123456",
+                "sediment": "sediment://sediment_123"
+            }),
+            &mut summary,
+        );
+        assert_eq!(summary.conversation_id.as_deref(), Some("conv-test_123"));
+        assert_eq!(summary.file_ids, vec!["file-generated-123456"]);
+        assert_eq!(summary.sediment_ids, vec!["sediment_123"]);
+
+        let mut malicious = WebImageSseSummary::default();
+        extract_web_image_values(
+            &json!({
+                "conversation_id": "conv-test?inline=true",
+                "file": "file-generated-123456/../../admin",
+                "sediment": "sediment://sediment_123?download=1"
+            }),
+            &mut malicious,
+        );
+        assert!(malicious.conversation_id.is_none());
+        assert!(malicious.file_ids.is_empty());
+        assert!(malicious.sediment_ids.is_empty());
+    }
+
+    #[test]
+    fn chatgpt_web_image_url_validation_requires_absolute_http_without_credentials() {
+        assert!(parse_absolute_web_image_url("https://cdn.example/image.png").is_ok());
+
+        for rejected in [
+            "/relative.png",
+            "file:///etc/passwd",
+            "ftp://cdn.example/image.png",
+            "https://user:password@cdn.example/image.png",
+        ] {
+            assert!(
+                parse_absolute_web_image_url(rejected).is_err(),
+                "URL should be rejected: {rejected}"
+            );
+        }
+    }
+
+    #[test]
+    fn chatgpt_web_upload_url_is_restricted_to_signed_storage_origins() {
+        for accepted in [
+            "https://files.oaiusercontent.com/upload/blob?sig=abc&se=123",
+            "https://cdn.files.oaiusercontent.com/upload/blob?sig=abc",
+            "https://oaidalleapiprodscus.blob.core.windows.net/container/blob?sig=abc",
+            "https://tenant.blob.core.windows.net/container/blob?sig=abc",
+            "https://tenant.blob.core.windows.net:443/container/blob?sig=abc",
+        ] {
+            assert!(
+                validate_chatgpt_web_upload_url(accepted).is_ok(),
+                "valid storage URL should be accepted: {accepted}"
+            );
+        }
+
+        for rejected in [
+            "http://files.oaiusercontent.com/upload/blob?sig=abc",
+            "https://127.0.0.1/upload/blob?sig=abc",
+            "https://user:pass@files.oaiusercontent.com/upload/blob?sig=abc",
+            "https://files.oaiusercontent.com.attacker.invalid/upload/blob?sig=abc",
+            "https://attacker.invalid/upload/blob?sig=abc",
+            "https://blob.core.windows.net/upload/blob?sig=abc",
+            "https://openaiassets.blob.core.windows.net/upload/blob?sig=abc",
+            "https://tenant.blob.core.windows.net:8443/upload/blob?sig=abc",
+            "https://tenant.blob.core.windows.net/upload/blob?sig=abc#fragment",
+        ] {
+            assert!(
+                validate_chatgpt_web_upload_url(rejected).is_err(),
+                "unsafe storage URL should be rejected: {rejected}"
+            );
+        }
+
+        let oversized = format!(
+            "https://files.oaiusercontent.com/upload/blob?sig={}",
+            "a".repeat(CHATGPT_WEB_IMAGE_MAX_UPLOAD_URL_BYTES)
+        );
+        assert!(validate_chatgpt_web_upload_url(&oversized).is_err());
+    }
+
+    #[test]
+    fn chatgpt_web_image_request_fields_are_bounded() {
+        let oversized_prompt = json!({
+            "prompt": "x".repeat(CHATGPT_WEB_IMAGE_MAX_PROMPT_BYTES + 1)
+        });
+        assert!(ChatGptWebImageRequest::from_body(&oversized_prompt).is_err());
+
+        let oversized_images = json!({
+            "images": vec!["data:image/png;base64,AA=="; CHATGPT_WEB_IMAGE_MAX_INPUT_IMAGES + 1]
+        });
+        assert!(ChatGptWebImageRequest::from_body(&oversized_images).is_err());
+
+        let too_many_partial_images = json!({"partial_images": 4});
+        assert!(ChatGptWebImageRequest::from_body(&too_many_partial_images).is_err());
+    }
+
+    #[test]
+    fn chatgpt_web_image_summary_bounds_assets_across_merges() {
+        let mut summary = WebImageSseSummary::default();
+        for round in 0..32 {
+            let mut poll = WebImageSseSummary::default();
+            poll.add_values(
+                WebImageSummaryCollection::FileId,
+                (0..16).map(|index| format!("file-{round}-{index}")),
+            );
+            poll.add_values(
+                WebImageSummaryCollection::SedimentId,
+                (0..16).map(|index| format!("sediment-{round}-{index}")),
+            );
+            poll.add_values(
+                WebImageSummaryCollection::DirectUrl,
+                (0..16).map(|index| format!("https://files.oaiusercontent.com/{round}/{index}")),
+            );
+            merge_web_summary(&mut summary, &mut poll);
+        }
+        assert!(summary.retained_item_count() <= CHATGPT_WEB_IMAGE_SUMMARY_MAX_ITEMS);
+        assert!(summary.retained_value_bytes() <= chatgpt_web_image_sse_envelope_limit_bytes());
+    }
+
+    #[test]
+    fn chatgpt_web_image_data_url_is_bounded_before_formatting() {
+        let oversized = "A".repeat(
+            maximum_base64_len_for_decoded_limit(chatgpt_web_image_raw_payload_limit_bytes())
+                .saturating_add(1),
+        );
+        assert!(bounded_web_image_data_url("image/png", &oversized).is_none());
+        assert!(bounded_web_image_data_url("image/png", "AAAA").is_some());
+    }
+
+    #[test]
+    fn chatgpt_web_image_same_origin_requires_scheme_host_and_effective_port() {
+        let base = url::Url::parse("https://chatgpt.example").expect("base URL should parse");
+
+        for same_origin in [
+            "https://chatgpt.example/backend-api/files/download/file-1",
+            "https://CHATGPT.example:443/backend-api/files/download/file-1",
+        ] {
+            let target = url::Url::parse(same_origin).expect("target URL should parse");
+            assert!(web_download_url_is_same_origin(&base, &target));
+        }
+
+        for cross_origin in [
+            "http://chatgpt.example/backend-api/files/download/file-1",
+            "https://chatgpt.example:444/backend-api/files/download/file-1",
+            "https://cdn.chatgpt.example/backend-api/files/download/file-1",
+        ] {
+            let target = url::Url::parse(cross_origin).expect("target URL should parse");
+            assert!(!web_download_url_is_same_origin(&base, &target));
+        }
+    }
+
+    #[test]
+    fn chatgpt_web_image_authentication_is_limited_to_same_origin_backend_api_paths() {
+        let base = url::Url::parse("https://chatgpt.example").expect("base URL should parse");
+        let authenticated =
+            url::Url::parse("https://chatgpt.example/backend-api/files/download/file-1")
+                .expect("authenticated URL should parse");
+        assert!(is_authenticated_web_download_url(&base, &authenticated));
+
+        for unauthenticated in [
+            "https://chatgpt.example/generated.png",
+            "https://chatgpt.example/backend-api-impersonator/image.png",
+            "https://cdn.example/backend-api/files/download/file-1",
+            "http://chatgpt.example/backend-api/files/download/file-1",
+            "https://chatgpt.example:444/backend-api/files/download/file-1",
+            "https://user@chatgpt.example/backend-api/files/download/file-1",
+        ] {
+            let target = url::Url::parse(unauthenticated).expect("target URL should parse");
+            assert!(
+                !is_authenticated_web_download_url(&base, &target),
+                "provider credentials must not be sent to {unauthenticated}"
+            );
+        }
+    }
+
+    #[test]
+    fn chatgpt_web_data_url_parser_accepts_only_bounded_supported_image_types() {
+        let payload = base64::engine::general_purpose::STANDARD.encode(png_header_bytes(2, 3));
+        let png =
+            parse_data_url_with_limit(format!("data:image/png;base64,{payload}").as_str(), 64)
+                .expect("png data URL should parse");
+        assert_eq!(png.mime, "image/png");
+        assert_eq!(png.b64_json, payload);
+
+        let jpeg_payload =
+            base64::engine::general_purpose::STANDARD.encode([0xff, 0xd8, 0xff, 0xd9]);
+        let jpeg = parse_data_url_with_limit(
+            format!("DATA:IMAGE/JPEG;BASE64,{jpeg_payload}").as_str(),
+            64,
+        )
+        .expect("jpeg data URL should parse");
+        assert_eq!(jpeg.mime, "image/jpeg");
+
+        for rejected in [
+            "data:text/html;base64,PGh0bWw+",
+            "data:image/svg+xml;base64,PHN2Zz4=",
+            "data:image/gif;base64,R0lGODlh",
+            "data:image/png;base64,",
+            "data:image/png;base64,!!!!",
+            "data:image/png;charset=utf-8;base64,aW1hZ2U=",
+            "data:image/png;base64,aW1h\nZ2U=",
+            "data:image/png;base64,PHN2Zz4=",
+        ] {
+            assert!(
+                parse_data_url_with_limit(rejected, 64).is_none(),
+                "unsafe data URL should be rejected: {rejected}"
+            );
+        }
+    }
+
+    #[test]
+    fn chatgpt_web_data_url_parser_enforces_decoded_limit_before_allocation() {
+        let exact_bytes = png_header_bytes(2, 3);
+        let exact_payload = base64::engine::general_purpose::STANDARD.encode(&exact_bytes);
+        let exact = parse_data_url_with_limit(
+            format!("data:image/png;base64,{exact_payload}").as_str(),
+            exact_bytes.len(),
+        )
+        .expect("payload at the decoded limit should parse");
+        assert_eq!(exact.b64_json, exact_payload);
+
+        let exact_len = exact_bytes.len();
+        let mut over_bytes = exact_bytes.clone();
+        over_bytes.push(0);
+        let over_payload = base64::engine::general_purpose::STANDARD.encode(over_bytes);
+        assert!(
+            parse_data_url_with_limit(
+                format!("data:image/png;base64,{over_payload}").as_str(),
+                exact_len,
+            )
+            .is_none(),
+            "payload over the decoded limit must be rejected"
+        );
+    }
+
+    #[test]
+    fn chatgpt_web_image_payload_requires_supported_magic_and_matching_mime() {
+        let png = png_header_bytes(2, 3);
+        assert_eq!(
+            validate_web_image_payload(&png, Some("image/png; charset=binary"))
+                .expect("valid png should pass"),
+            "image/png"
+        );
+        assert_eq!(
+            validate_web_image_payload(&png, Some("application/octet-stream"))
+                .expect("octet-stream with a valid signature should pass"),
+            "image/png"
+        );
+        assert!(validate_web_image_payload(&png, Some("image/jpeg")).is_err());
+        assert!(validate_web_image_payload(&png, Some("image/svg+xml")).is_err());
+        assert!(validate_web_image_payload(b"<svg><script>x</script></svg>", None).is_err());
+        assert!(
+            validate_web_image_payload(b"<html>not an image</html>", Some("image/png")).is_err()
+        );
+        assert_eq!(
+            validate_web_image_payload(&[0xff, 0xd8, 0xff, 0xd9], Some("image/jpg"))
+                .expect("jpeg signature should pass"),
+            "image/jpeg"
+        );
+        assert_eq!(
+            validate_web_image_payload(b"RIFF\x04\0\0\0WEBP", None)
+                .expect("webp signature should pass"),
+            "image/webp"
+        );
+        assert!(validate_web_image_payload(&[0xff, 0xd8], Some("image/jpeg")).is_err());
+    }
+
+    #[test]
+    fn chatgpt_web_image_sse_envelope_budget_covers_base64_expansion() {
+        let raw_limit = crate::headers::max_internal_buffered_body_bytes();
+        let expected_minimum = maximum_base64_len_for_decoded_limit(raw_limit)
+            .saturating_add(CHATGPT_WEB_IMAGE_SSE_WRAPPER_OVERHEAD_BYTES)
+            .min(CHATGPT_WEB_IMAGE_SSE_HARD_MAX_BYTES);
+        assert!(chatgpt_web_image_sse_envelope_limit_bytes() >= expected_minimum);
+        assert!(chatgpt_web_image_sse_envelope_limit_bytes() >= raw_limit.min(64 * 1024 * 1024));
+    }
+
+    #[test]
+    fn chatgpt_web_execution_result_body_decode_is_bounded() {
+        let result = ExecutionResult {
+            request_id: "req-chatgpt-web-image-test".to_string(),
+            candidate_id: None,
+            status_code: 200,
+            headers: BTreeMap::new(),
+            response_observation: None,
+            body: Some(ResponseBody {
+                json_body: None,
+                body_bytes_b64: Some("!!!!".to_string()),
+            }),
+            telemetry: None,
+            error: None,
+        };
+        assert!(execution_result_bytes(&result).is_err());
+        assert!(execution_result_body_bytes_lossy(&result).is_empty());
+    }
+
+    #[tokio::test]
+    async fn chatgpt_web_public_image_resolution_rejects_private_ip_literals() {
+        for private_url in [
+            "http://127.0.0.1/image.png",
+            "http://169.254.169.254/latest/meta-data",
+        ] {
+            let url = url::Url::parse(private_url).expect("private URL should parse");
+            let error = resolve_public_web_image_addrs(&url, Duration::from_secs(5), false)
+                .await
+                .expect_err("private address must be rejected");
+            assert!(
+                error.to_string().contains("private or reserved"),
+                "unexpected error for {private_url}: {error}"
+            );
+        }
+
+        let public_url =
+            url::Url::parse("https://8.8.8.8/image.png").expect("public URL should parse");
+        let (host, addresses) =
+            resolve_public_web_image_addrs(&public_url, Duration::from_secs(5), false)
+                .await
+                .expect("public IP literal should be accepted");
+        assert_eq!(host, "8.8.8.8");
+        assert_eq!(addresses, vec!["8.8.8.8:443".parse().unwrap()]);
+    }
+
+    #[test]
+    fn chatgpt_web_image_fake_ip_exception_is_limited_to_storage_origins() {
+        let storage =
+            url::Url::parse("https://files.oaiusercontent.com/generated/image.png?sig=test")
+                .expect("storage URL should parse");
+        let fake = vec!["198.18.75.234:443".parse().unwrap()];
+        assert!(validate_public_web_image_addresses(&storage, &fake, true).is_ok());
+        assert!(validate_public_web_image_addresses(&storage, &fake, false).is_err());
+
+        let arbitrary = url::Url::parse("https://cdn.example/generated/image.png")
+            .expect("arbitrary URL should parse");
+        assert!(validate_public_web_image_addresses(&arbitrary, &fake, true).is_err());
+
+        let mixed = vec![
+            "198.18.75.234:443".parse().unwrap(),
+            "10.0.0.1:443".parse().unwrap(),
+        ];
+        assert!(validate_public_web_image_addresses(&storage, &mixed, true).is_err());
     }
 
     #[test]
@@ -3870,6 +5328,18 @@ data: [DONE]
         let (answer, solved) = pow_generate("seed", "ff", pow_config(CHATGPT_WEB_USER_AGENT));
         assert!(solved);
         assert!(!answer.is_empty());
+    }
+
+    #[test]
+    fn pow_generate_rejects_difficulty_larger_than_digest() {
+        let seed = "seed";
+        let (answer, solved) = pow_generate(
+            seed,
+            "f".repeat(130).as_str(),
+            pow_config(CHATGPT_WEB_USER_AGENT),
+        );
+        assert!(!solved);
+        assert_eq!(answer, encode_pow_seed(seed));
     }
 
     #[tokio::test]

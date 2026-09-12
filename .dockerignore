@@ -9,6 +9,10 @@ target/
 frontend/node_modules/
 frontend/dist/
 frontend/.vite/
+aether-vscodex/web/node_modules/
+aether-vscodex/web/dist/
+aether-vscodex/vscode-extension/node_modules/
+aether-vscodex/vscode-extension/dist/
 
 # Development
 .git/

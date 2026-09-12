@@ -253,7 +253,7 @@ async function loadSummary() {
       user_id: selectedUserId.value
     })
     if (requestId !== summaryRequestId) return
-    userSummary.value = summary
+    userSummary.value = { ...summary, error_rate: summary.error_rate ?? 0 }
   } finally {
     if (requestId === summaryRequestId) {
       summaryLoading.value = false

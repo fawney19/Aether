@@ -16,13 +16,13 @@ use serde_json::json;
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub(super) struct AdminProviderOAuthBatchImportRequest {
     pub credentials: String,
     pub proxy_node_id: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(super) struct AdminProviderOAuthBatchImportEntry {
     pub parse_error: Option<String>,
     pub refresh_token: Option<String>,
@@ -52,7 +52,7 @@ pub(super) struct AdminProviderOAuthBatchImportEntry {
     pub rate_limit_tier: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(super) struct AdminProviderOAuthBatchImportOutcome {
     pub total: usize,
     pub success: usize,
@@ -663,7 +663,7 @@ pub(super) fn parse_admin_provider_oauth_batch_import_entries(
                     .collect();
             }
             Ok(_) => {}
-            Err(error) => return vec![parse_error_entry(format!("JSON 数组解析失败: {error}"))],
+            Err(_) => return vec![parse_error_entry("JSON 数组解析失败".to_string())],
         }
     }
 
@@ -697,8 +697,8 @@ pub(super) fn parse_admin_provider_oauth_batch_import_entries(
                             "JSON 行必须是账号对象，不能作为 raw token 导入".to_string(),
                         ));
                     }
-                    Err(error) => {
-                        return Some(parse_error_entry(format!("JSON 行解析失败: {error}")));
+                    Err(_) => {
+                        return Some(parse_error_entry("JSON 行解析失败".to_string()));
                     }
                 }
             }
@@ -719,7 +719,7 @@ pub(super) fn parse_admin_provider_oauth_agent_identity_import_entries(
         return Err("Agent Identity 凭据不能为空".to_string());
     }
     let value = serde_json::from_str::<serde_json::Value>(raw)
-        .map_err(|error| format!("Agent Identity JSON 解析失败: {error}"))?;
+        .map_err(|_| "Agent Identity JSON 解析失败".to_string())?;
     let entries = match &value {
         serde_json::Value::Array(items) => items
             .iter()
@@ -808,6 +808,14 @@ pub(super) fn apply_admin_provider_oauth_batch_import_hints(
         return;
     }
     if provider_type == "antigravity" {
+        // The Google refresh-token response does not include the account email.
+        // Preserve the identity supplied by the imported Antigravity credentials so
+        // account naming and duplicate detection can use it after token exchange.
+        if let Some(email) = entry.email.as_ref() {
+            auth_config
+                .entry("email".to_string())
+                .or_insert_with(|| json!(email));
+        }
         if let Some(project_id) = entry.project_id.as_ref() {
             auth_config
                 .entry("project_id".to_string())
@@ -932,23 +940,7 @@ pub(super) async fn extract_admin_provider_oauth_batch_error_detail(
     response: Response<Body>,
 ) -> String {
     let status = response.status();
-    let raw_body = to_bytes(response.into_body(), crate::MAX_ERROR_BODY_BYTES)
-        .await
-        .ok();
-    if let Some(raw_body) = raw_body {
-        if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&raw_body) {
-            if let Some(detail) = value.get("detail").and_then(serde_json::Value::as_str) {
-                let normalized = detail.trim();
-                if !normalized.is_empty() {
-                    return normalized.to_string();
-                }
-            }
-        }
-        let normalized = String::from_utf8_lossy(&raw_body).trim().to_string();
-        if !normalized.is_empty() {
-            return normalized;
-        }
-    }
+    let _ = to_bytes(response.into_body(), crate::MAX_ERROR_BODY_BYTES).await;
     format!("HTTP {}", status.as_u16())
 }
 
@@ -1433,7 +1425,7 @@ mod tests {
     fn applies_antigravity_project_and_user_agent_hints_to_auth_config() {
         let entries = parse_admin_provider_oauth_batch_import_entries(
             "antigravity",
-            r#"{"refreshToken":"rt-1","cloudaicompanionProject":{"id":"project-antigravity-2"},"userAgent":"antigravity"}"#,
+            r#"{"refreshToken":"rt-1","email":"anti@example.com","cloudaicompanionProject":{"id":"project-antigravity-2"},"userAgent":"antigravity"}"#,
         );
         let mut auth_config = serde_json::Map::new();
 
@@ -1444,6 +1436,35 @@ mod tests {
             Some(&json!("project-antigravity-2"))
         );
         assert_eq!(auth_config.get("user_agent"), Some(&json!("antigravity")));
+        assert_eq!(auth_config.get("email"), Some(&json!("anti@example.com")));
+    }
+
+    #[test]
+    fn antigravity_batch_import_keeps_json_email_for_key_naming() {
+        let entries = parse_admin_provider_oauth_batch_import_entries(
+            "antigravity",
+            r#"{"access_token":"at-1","refresh_token":"rt-1","email":"anti@example.com","project_id":"project-antigravity-3","type":"antigravity"}"#,
+        );
+        // Simulate Google's refresh-token response, which carries no email.
+        let mut auth_config = json!({
+            "provider_type": "antigravity",
+            "refresh_token": "rt-1",
+        })
+        .as_object()
+        .cloned()
+        .expect("auth config should be an object");
+
+        apply_admin_provider_oauth_batch_import_hints("antigravity", &entries[0], &mut auth_config);
+
+        assert_eq!(auth_config.get("email"), Some(&json!("anti@example.com")));
+        assert_eq!(
+            super::super::super::helpers::admin_provider_oauth_key_name_from_auth_config(
+                "antigravity",
+                &auth_config,
+                Some(0),
+            ),
+            "anti@example.com"
+        );
     }
 
     #[test]

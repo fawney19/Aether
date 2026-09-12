@@ -10,21 +10,29 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::handlers::shared::{
-    api_key_placeholder_display, deserialize_optional_json_patch,
-    deserialize_optional_string_list_patch, generate_gateway_api_key_plaintext,
-    masked_gateway_api_key_display, normalize_feature_settings, normalize_ip_rules,
-    normalize_optional_api_key_concurrent_limit,
+    api_key_placeholder_display, decrypt_or_migrate_auth_api_key_secret,
+    deserialize_optional_json_patch, deserialize_optional_string_list_patch,
+    generate_gateway_api_key_plaintext, masked_gateway_api_key_display, normalize_feature_settings,
+    normalize_ip_rules, normalize_optional_api_key_concurrent_limit, open_auth_api_key_secret,
+    seal_auth_api_key_secret,
 };
 
 use super::{
-    build_auth_error_response, decrypt_catalog_secret_with_fallbacks,
-    encrypt_catalog_secret_with_fallbacks, format_users_me_optional_unix_secs_iso8601,
-    known_capability_names, normalize_user_model_capability_settings_input,
-    query_param_optional_bool, resolve_authenticated_local_user,
-    user_configurable_capability_names, AppState, GatewayPublicRequestContext,
+    build_auth_error_response, format_users_me_optional_unix_secs_iso8601, known_capability_names,
+    normalize_user_model_capability_settings_input, query_param_optional_bool,
+    resolve_authenticated_local_user, user_configurable_capability_names, AppState,
+    GatewayPublicRequestContext,
 };
 
 const USERS_ME_API_KEY_WRITE_UNAVAILABLE_DETAIL: &str = "用户 API 密钥写入暂不可用";
+
+fn users_me_api_key_secret_response(mut response: Response<Body>) -> Response<Body> {
+    response.headers_mut().insert(
+        http::header::CACHE_CONTROL,
+        http::HeaderValue::from_static("no-store"),
+    );
+    response
+}
 
 #[derive(Debug, Deserialize)]
 struct UsersMeCreateApiKeyRequest {
@@ -132,21 +140,28 @@ pub(super) fn users_me_api_key_capabilities_path_matches(request_path: &str) -> 
     users_me_api_key_nested_id_from_path(request_path, "capabilities").is_some()
 }
 
-fn users_me_masked_api_key_display(state: &AppState, ciphertext: Option<&str>) -> String {
-    let Some(ciphertext) = ciphertext.map(str::trim).filter(|value| !value.is_empty()) else {
+fn users_me_masked_api_key_display(
+    state: &AppState,
+    record: &aether_data::repository::auth::StoredAuthApiKeyExportRecord,
+) -> String {
+    let Ok(projection) = open_auth_api_key_secret(state, record) else {
         return api_key_placeholder_display();
     };
-    let Some(full_key) = decrypt_catalog_secret_with_fallbacks(state.encryption_key(), ciphertext)
-    else {
-        return api_key_placeholder_display();
-    };
-    masked_gateway_api_key_display(Some(full_key.as_str()))
+    masked_gateway_api_key_display(Some(projection.plaintext.as_str()))
 }
 
 fn build_users_me_api_key_writer_unavailable_response() -> Response<Body> {
     build_auth_error_response(
         http::StatusCode::SERVICE_UNAVAILABLE,
         USERS_ME_API_KEY_WRITE_UNAVAILABLE_DETAIL,
+        false,
+    )
+}
+
+fn build_users_me_api_key_mutation_conflict_response() -> Response<Body> {
+    build_auth_error_response(
+        http::StatusCode::CONFLICT,
+        "API密钥已锁定或状态已发生变化，请刷新后重试",
         false,
     )
 }
@@ -159,7 +174,7 @@ fn build_users_me_api_key_list_payload(
     json!({
         "id": record.api_key_id,
         "name": record.name,
-        "key_display": users_me_masked_api_key_display(state, record.key_encrypted.as_deref()),
+        "key_display": users_me_masked_api_key_display(state, record),
         "is_active": record.is_active,
         "is_locked": is_locked,
         "last_used_at": format_users_me_optional_unix_secs_iso8601(record.last_used_at_unix_secs),
@@ -183,7 +198,7 @@ fn build_users_me_api_key_detail_payload(
     json!({
         "id": record.api_key_id,
         "name": record.name,
-        "key_display": users_me_masked_api_key_display(state, record.key_encrypted.as_deref()),
+        "key_display": users_me_masked_api_key_display(state, record),
         "is_active": record.is_active,
         "is_locked": is_locked,
         "allowed_providers": record.allowed_providers,
@@ -413,16 +428,17 @@ pub(super) async fn handle_users_me_api_key_detail_get(
                 false,
             );
         }
-        let Some(full_key) =
-            decrypt_catalog_secret_with_fallbacks(state.encryption_key(), ciphertext)
-        else {
-            return build_auth_error_response(
-                http::StatusCode::INTERNAL_SERVER_ERROR,
-                "解密密钥失败",
-                false,
-            );
+        let full_key = match decrypt_or_migrate_auth_api_key_secret(state, &record).await {
+            Ok(value) => value,
+            Err(_) => {
+                return build_auth_error_response(
+                    http::StatusCode::INTERNAL_SERVER_ERROR,
+                    "解密或校验密钥失败",
+                    false,
+                );
+            }
         };
-        return Json(json!({ "key": full_key })).into_response();
+        return users_me_api_key_secret_response(Json(json!({ "key": full_key })).into_response());
     }
 
     let snapshot_ids = vec![api_key_id.clone()];
@@ -565,7 +581,16 @@ pub(super) async fn handle_users_me_api_key_create(
     };
 
     let plaintext_key = generate_users_me_api_key_plaintext();
-    let Some(key_encrypted) = encrypt_catalog_secret_with_fallbacks(state, &plaintext_key) else {
+    let api_key_id = uuid::Uuid::new_v4().to_string();
+    let key_hash = hash_users_me_api_key(&plaintext_key);
+    let Ok(key_encrypted) = seal_auth_api_key_secret(
+        state,
+        &auth.user.id,
+        &api_key_id,
+        &key_hash,
+        false,
+        &plaintext_key,
+    ) else {
         return build_auth_error_response(
             http::StatusCode::INTERNAL_SERVER_ERROR,
             "API密钥加密失败",
@@ -574,8 +599,8 @@ pub(super) async fn handle_users_me_api_key_create(
     };
     let record = aether_data::repository::auth::CreateUserApiKeyRecord {
         user_id: auth.user.id.clone(),
-        api_key_id: uuid::Uuid::new_v4().to_string(),
-        key_hash: hash_users_me_api_key(&plaintext_key),
+        api_key_id,
+        key_hash,
         key_encrypted: Some(key_encrypted),
         name: Some(name.clone()),
         allowed_providers: None,
@@ -585,6 +610,7 @@ pub(super) async fn handle_users_me_api_key_create(
         rate_limit,
         concurrent_limit,
         force_capabilities: None,
+        feature_settings,
         is_active: true,
         expires_at_unix_secs: None,
         auto_delete_on_expiry: false,
@@ -604,47 +630,27 @@ pub(super) async fn handle_users_me_api_key_create(
     }) else {
         return build_users_me_api_key_writer_unavailable_response();
     };
-    let created = if feature_settings.is_some() {
-        match state
-            .set_user_api_key_feature_settings(
-                &auth.user.id,
-                &created.api_key_id,
-                feature_settings.clone(),
-            )
-            .await
-        {
-            Ok(Some(record)) => record,
-            Ok(None) => return build_users_me_api_key_writer_unavailable_response(),
-            Err(err) => {
-                return build_auth_error_response(
-                    http::StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("user api key feature settings update failed: {err:?}"),
-                    false,
-                )
-            }
-        }
-    } else {
-        created
-    };
 
-    Json(json!({
-        "id": created.api_key_id,
-        "name": created.name,
-        "key": plaintext_key,
-        "key_display": users_me_masked_api_key_display(state, created.key_encrypted.as_deref()),
-        "is_active": created.is_active,
-        "is_locked": false,
-        "rate_limit": created.rate_limit,
-        "concurrent_limit": created.concurrent_limit,
-        "ip_rules": created.ip_rules,
-        "feature_settings": created.feature_settings,
-        "last_used_at": format_users_me_optional_unix_secs_iso8601(created.last_used_at_unix_secs),
-        "created_at": format_users_me_optional_unix_secs_iso8601(created.created_at_unix_secs),
-        "total_requests": created.total_requests,
-        "total_cost_usd": created.total_cost_usd,
-        "message": "API密钥创建成功",
-    }))
-    .into_response()
+    users_me_api_key_secret_response(
+        Json(json!({
+            "id": created.api_key_id,
+            "name": created.name,
+            "key": plaintext_key,
+            "key_display": users_me_masked_api_key_display(state, &created),
+            "is_active": created.is_active,
+            "is_locked": false,
+            "rate_limit": created.rate_limit,
+            "concurrent_limit": created.concurrent_limit,
+            "ip_rules": created.ip_rules,
+            "feature_settings": created.feature_settings,
+            "last_used_at": format_users_me_optional_unix_secs_iso8601(created.last_used_at_unix_secs),
+            "created_at": format_users_me_optional_unix_secs_iso8601(created.created_at_unix_secs),
+            "total_requests": created.total_requests,
+            "total_cost_usd": created.total_cost_usd,
+            "message": "API密钥创建成功",
+        }))
+        .into_response(),
+    )
 }
 
 pub(super) async fn handle_users_me_api_key_update(
@@ -727,16 +733,27 @@ pub(super) async fn handle_users_me_api_key_update(
         },
         None => None,
     };
+    let name_present = name.is_some();
+    let rate_limit_present = rate_limit.is_some();
+    let concurrent_limit_present = concurrent_limit.is_some();
 
     let Some(updated) = (match state
-        .update_user_api_key_basic(aether_data::repository::auth::UpdateUserApiKeyBasicRecord {
-            user_id: auth.user.id.clone(),
-            api_key_id: snapshot.api_key_id.clone(),
-            name,
-            rate_limit,
-            concurrent_limit,
-            ip_rules,
-        })
+        .update_user_api_key_basic_if_unlocked(
+            aether_data::repository::auth::UpdateUserApiKeyBasicRecord {
+                user_id: auth.user.id.clone(),
+                api_key_id: snapshot.api_key_id.clone(),
+                key_encrypted: None,
+                key_encrypted_present: false,
+                name,
+                name_present,
+                rate_limit,
+                rate_limit_present,
+                concurrent_limit,
+                concurrent_limit_present,
+                ip_rules,
+                feature_settings,
+            },
+        )
         .await
     {
         Ok(value) => value,
@@ -748,29 +765,7 @@ pub(super) async fn handle_users_me_api_key_update(
             )
         }
     }) else {
-        return build_users_me_api_key_writer_unavailable_response();
-    };
-    let updated = if let Some(feature_settings) = feature_settings {
-        match state
-            .set_user_api_key_feature_settings(
-                &auth.user.id,
-                &snapshot.api_key_id,
-                feature_settings,
-            )
-            .await
-        {
-            Ok(Some(record)) => record,
-            Ok(None) => return build_users_me_api_key_writer_unavailable_response(),
-            Err(err) => {
-                return build_auth_error_response(
-                    http::StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("user api key feature settings update failed: {err:?}"),
-                    false,
-                )
-            }
-        }
-    } else {
-        updated
+        return build_users_me_api_key_mutation_conflict_response();
     };
 
     let mut payload =
@@ -820,7 +815,7 @@ pub(super) async fn handle_users_me_api_key_patch(
     };
 
     let Some(updated) = (match state
-        .set_user_api_key_active(&auth.user.id, &snapshot.api_key_id, desired_is_active)
+        .set_user_api_key_active_if_unlocked(&auth.user.id, &snapshot.api_key_id, desired_is_active)
         .await
     {
         Ok(value) => value,
@@ -832,7 +827,7 @@ pub(super) async fn handle_users_me_api_key_patch(
             )
         }
     }) else {
-        return build_users_me_api_key_writer_unavailable_response();
+        return build_users_me_api_key_mutation_conflict_response();
     };
 
     Json(json!({
@@ -869,11 +864,11 @@ pub(super) async fn handle_users_me_api_key_delete(
     }
 
     match state
-        .delete_user_api_key(&auth.user.id, &snapshot.api_key_id)
+        .delete_user_api_key_if_unlocked(&auth.user.id, &snapshot.api_key_id)
         .await
     {
         Ok(true) => Json(json!({ "message": "API密钥已删除" })).into_response(),
-        Ok(false) => build_auth_error_response(http::StatusCode::NOT_FOUND, "API密钥不存在", false),
+        Ok(false) => build_users_me_api_key_mutation_conflict_response(),
         Err(err) => build_auth_error_response(
             http::StatusCode::INTERNAL_SERVER_ERROR,
             format!("user api key delete failed: {err:?}"),
@@ -995,7 +990,11 @@ pub(super) async fn handle_users_me_api_key_providers_put(
     };
 
     let Some(updated) = (match state
-        .set_user_api_key_allowed_providers(&auth.user.id, &snapshot.api_key_id, allowed_providers)
+        .set_user_api_key_allowed_providers_if_unlocked(
+            &auth.user.id,
+            &snapshot.api_key_id,
+            allowed_providers,
+        )
         .await
     {
         Ok(value) => value,
@@ -1007,7 +1006,7 @@ pub(super) async fn handle_users_me_api_key_providers_put(
             )
         }
     }) else {
-        return build_users_me_api_key_writer_unavailable_response();
+        return build_users_me_api_key_mutation_conflict_response();
     };
 
     Json(json!({
@@ -1065,7 +1064,7 @@ pub(super) async fn handle_users_me_api_key_capabilities_put(
     };
 
     let Some(updated) = (match state
-        .set_user_api_key_force_capabilities(
+        .set_user_api_key_force_capabilities_if_unlocked(
             &auth.user.id,
             &snapshot.api_key_id,
             force_capabilities,
@@ -1081,7 +1080,7 @@ pub(super) async fn handle_users_me_api_key_capabilities_put(
             )
         }
     }) else {
-        return build_users_me_api_key_writer_unavailable_response();
+        return build_users_me_api_key_mutation_conflict_response();
     };
 
     Json(json!({
@@ -1093,8 +1092,23 @@ pub(super) async fn handle_users_me_api_key_capabilities_put(
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_users_me_ip_rules, UsersMeUpdateApiKeyRequest};
+    use axum::{response::IntoResponse, Json};
+
+    use super::{
+        normalize_users_me_ip_rules, users_me_api_key_secret_response, UsersMeUpdateApiKeyRequest,
+    };
     use serde_json::json;
+
+    #[test]
+    fn plaintext_api_key_responses_are_never_cacheable() {
+        let response =
+            users_me_api_key_secret_response(Json(json!({ "key": "sk-secret" })).into_response());
+
+        assert_eq!(
+            response.headers().get(axum::http::header::CACHE_CONTROL),
+            Some(&axum::http::HeaderValue::from_static("no-store"))
+        );
+    }
 
     #[test]
     fn normalize_ip_rules_trims_ip_and_cidr_values() {

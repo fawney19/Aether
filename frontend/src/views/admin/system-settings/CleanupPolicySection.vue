@@ -308,8 +308,8 @@
     </div>
 
     <div class="mt-4 border border-border rounded-lg overflow-hidden">
-      <div class="flex items-center justify-between px-4 py-3 border-b border-border">
-        <div>
+      <div class="flex flex-wrap items-start justify-between gap-3 px-4 py-3 border-b border-border">
+        <div class="min-w-0 flex-1 basis-48">
           <h4 class="text-sm font-medium">
             最近清理记录
           </h4>
@@ -320,6 +320,7 @@
         <Button
           variant="outline"
           size="sm"
+          class="shrink-0"
           :disabled="cleanupRunsLoading"
           @click="loadCleanupRuns"
         >
@@ -447,7 +448,7 @@ defineEmits<{
 
 const cleanupRuns = ref<CleanupRunRecord[]>([])
 const cleanupRunsLoading = ref(false)
-let cleanupRunsTimer: ReturnType<typeof window.setInterval> | null = null
+let cleanupRunsTimer: number | null = null
 
 const manualCleanupDialogOpen = ref(false)
 const manualCleanupRunning = ref(false)

@@ -1,9 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use aether_contracts::ExecutionPlan;
-use aether_crypto::{
-    decrypt_python_fernet_ciphertext, encrypt_python_fernet_plaintext, DEVELOPMENT_ENCRYPTION_KEY,
-};
+use aether_crypto::DEVELOPMENT_ENCRYPTION_KEY;
 use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
 use aether_data_contracts::repository::provider_catalog::{
     ProviderCatalogKeyListQuery, ProviderCatalogReadRepository, StoredProviderCatalogEndpoint,
@@ -18,8 +16,8 @@ use http::StatusCode;
 use serde_json::json;
 
 use super::super::super::{
-    build_router_with_state, build_state_with_execution_runtime_override, sample_endpoint,
-    sample_key, sample_provider, start_server, AppState,
+    build_router_with_state, build_state_with_execution_runtime_override, sample_bound_auth_config,
+    sample_bound_key, sample_endpoint, sample_provider, start_server, AppState,
 };
 use crate::constants::{
     GATEWAY_HEADER, TRUSTED_ADMIN_SESSION_ID_HEADER, TRUSTED_ADMIN_USER_ID_HEADER,
@@ -28,6 +26,18 @@ use crate::constants::{
 use crate::data::GatewayDataState;
 
 const PROVIDER_KEYS_TEST_STACK_BYTES: usize = 16 * 1024 * 1024;
+
+fn open_provider_catalog_api_key_for_test(key: &StoredProviderCatalogKey) -> String {
+    let state = AppState::new()
+        .expect("gateway state should build")
+        .with_data_state_for_tests(
+            GatewayDataState::disabled().with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+        );
+    state
+        .decrypt_provider_catalog_key_api_key(key)
+        .expect("provider catalog API key should decrypt")
+        .expect("provider catalog API key should be present")
+}
 
 fn run_provider_keys_test<F, Fut>(test_name: &'static str, make_future: F)
 where
@@ -172,7 +182,7 @@ async fn gateway_handles_admin_provider_keys_locally_with_trusted_admin_principa
         }),
     );
 
-    let mut key_a = sample_key(
+    let mut key_a = sample_bound_key(
         "key-openai-a",
         "provider-openai",
         "openai:chat",
@@ -193,7 +203,7 @@ async fn gateway_handles_admin_provider_keys_locally_with_trusted_admin_principa
         "quota": {"code": "unknown", "exhausted": false}
     }));
 
-    let mut key_b = sample_key(
+    let mut key_b = sample_bound_key(
         "key-openai-b",
         "provider-openai",
         "openai:chat",
@@ -245,7 +255,7 @@ async fn gateway_handles_admin_provider_keys_locally_with_trusted_admin_principa
     assert_eq!(items[0]["success_count"], 9);
     assert_eq!(items[0]["error_count"], 3);
     assert_eq!(items[0]["note"], "primary key");
-    assert_eq!(items[0]["api_key_masked"], "sk-test-a***");
+    assert_eq!(items[0]["api_key_masked"], "sk***-a");
     assert_eq!(items[1]["id"], "key-openai-b");
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
@@ -255,25 +265,26 @@ async fn gateway_handles_admin_provider_keys_locally_with_trusted_admin_principa
 
 #[tokio::test]
 async fn gateway_provider_keys_expose_circuit_breaker_and_recover_clears_it() {
-    let key = sample_key("key-1", "provider-1", "openai:chat", "sk-test-a").with_health_fields(
-        Some(json!({"openai:chat": {
-            "health_score": 0.2,
-            "consecutive_failures": 8,
-            "last_failure_at": "2026-03-26T12:00:00+00:00"
-        }})),
-        Some(json!({"openai:chat": {
-            "open": true,
-            "open_at": "2026-03-26T12:00:00+00:00",
-            "reason": "consecutive_failures_8",
-            "next_probe_at": "2099-03-26T12:01:00+00:00",
-            "next_probe_at_unix_secs": 4078209660u64,
-            "probe_interval_minutes": 1,
-            "max_probe_interval_minutes": 32,
-            "half_open_until": null,
-            "half_open_successes": 0,
-            "half_open_failures": 0
-        }})),
-    );
+    let key = sample_bound_key("key-1", "provider-1", "openai:chat", "sk-test-a")
+        .with_health_fields(
+            Some(json!({"openai:chat": {
+                "health_score": 0.2,
+                "consecutive_failures": 8,
+                "last_failure_at": "2026-03-26T12:00:00+00:00"
+            }})),
+            Some(json!({"openai:chat": {
+                "open": true,
+                "open_at": "2026-03-26T12:00:00+00:00",
+                "reason": "consecutive_failures_8",
+                "next_probe_at": "2099-03-26T12:01:00+00:00",
+                "next_probe_at_unix_secs": 4078209660u64,
+                "probe_interval_minutes": 1,
+                "max_probe_interval_minutes": 32,
+                "half_open_until": null,
+                "half_open_successes": 0,
+                "half_open_failures": 0
+            }})),
+        );
     let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
         vec![sample_provider("provider-1", "openai", 10)],
         vec![sample_endpoint(
@@ -369,7 +380,7 @@ async fn gateway_handles_admin_provider_keys_page_locally_with_total() {
         }),
     );
 
-    let mut key_a = sample_key(
+    let mut key_a = sample_bound_key(
         "key-openai-a",
         "provider-openai",
         "openai:chat",
@@ -378,7 +389,7 @@ async fn gateway_handles_admin_provider_keys_page_locally_with_total() {
     key_a.internal_priority = 10;
     key_a.created_at_unix_ms = Some(1_711_000_000);
 
-    let mut key_b = sample_key(
+    let mut key_b = sample_bound_key(
         "key-openai-b",
         "provider-openai",
         "openai:chat",
@@ -387,7 +398,7 @@ async fn gateway_handles_admin_provider_keys_page_locally_with_total() {
     key_b.internal_priority = 20;
     key_b.created_at_unix_ms = Some(1_711_100_000);
 
-    let mut key_c = sample_key(
+    let mut key_c = sample_bound_key(
         "key-openai-c",
         "provider-openai",
         "openai:chat",
@@ -455,24 +466,22 @@ async fn gateway_admin_provider_keys_prefers_upstream_plan_type_over_auth_config
 
     let mut provider = sample_provider("provider-codex", "codex", 10);
     provider.provider_type = "codex".to_string();
-    let mut key = sample_key(
+    let mut key = sample_bound_key(
         "key-codex-oauth",
         "provider-codex",
         "openai:responses",
         "oauth-placeholder",
     );
     key.auth_type = "oauth".to_string();
-    key.encrypted_auth_config = Some(
-        encrypt_python_fernet_plaintext(
-            DEVELOPMENT_ENCRYPTION_KEY,
-            &json!({
-                "plan_type": "free",
-                "account_id": "acct-codex-legacy"
-            })
-            .to_string(),
-        )
-        .expect("auth config should encrypt"),
-    );
+    key.encrypted_auth_config = Some(sample_bound_auth_config(
+        "provider-codex",
+        "key-codex-oauth",
+        &json!({
+            "plan_type": "free",
+            "account_id": "acct-codex-legacy"
+        })
+        .to_string(),
+    ));
     key.upstream_metadata = Some(json!({
         "codex": {
             "plan_type": "plus",
@@ -539,20 +548,18 @@ async fn gateway_admin_provider_keys_marks_oauth_header_auth() {
 
     let mut provider = sample_provider("provider-codex", "codex", 10);
     provider.provider_type = "codex".to_string();
-    let mut key = sample_key(
+    let mut key = sample_bound_key(
         "key-codex-oauth-header",
         "provider-codex",
         "openai:responses",
         "imported-session-token",
     );
     key.auth_type = "oauth".to_string();
-    key.encrypted_auth_config = Some(
-        encrypt_python_fernet_plaintext(
-            DEVELOPMENT_ENCRYPTION_KEY,
-            r#"{"provider_type":"codex","headers":{"authorization":"Bearer imported-session-token"}}"#,
-        )
-        .expect("auth config should encrypt"),
-    );
+    key.encrypted_auth_config = Some(sample_bound_auth_config(
+        "provider-codex",
+        "key-codex-oauth-header",
+        r#"{"provider_type":"codex","headers":{"authorization":"Bearer imported-session-token"}}"#,
+    ));
 
     let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
         vec![provider],
@@ -657,7 +664,7 @@ async fn gateway_creates_admin_provider_key_locally_with_trusted_admin_principal
     assert_eq!(payload["name"], "created key");
     assert_eq!(payload["internal_priority"], 15);
     assert_eq!(payload["api_formats"], json!(["openai:chat"]));
-    assert_eq!(payload["api_key_masked"], "sk-creat***enai");
+    assert_eq!(payload["api_key_masked"], "sk-c***enai");
     assert_eq!(payload["request_count"], 0);
     assert_eq!(payload["success_count"], 0);
     assert_eq!(payload["error_count"], 0);
@@ -682,7 +689,7 @@ async fn generic_key_routes_reject_agent_identity_credential_writes() {
     let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
         vec![sample_provider("provider-codex", "codex", 10)],
         vec![],
-        vec![sample_key(
+        vec![sample_bound_key(
             "key-codex-existing",
             "provider-codex",
             "openai:responses",
@@ -776,20 +783,18 @@ async fn generic_key_routes_reject_agent_identity_credential_writes() {
 
 #[tokio::test]
 async fn generic_codex_key_credential_switch_rotates_generation_and_clears_quota() {
-    let mut existing_key = sample_key(
+    let mut existing_key = sample_bound_key(
         "key-codex-existing",
         "provider-codex",
         "openai:responses",
         "old-oauth-access-token",
     );
     existing_key.auth_type = "oauth".to_string();
-    existing_key.encrypted_auth_config = Some(
-        encrypt_python_fernet_plaintext(
-            DEVELOPMENT_ENCRYPTION_KEY,
-            r#"{"provider_type":"codex","refresh_token":"old-refresh-token"}"#,
-        )
-        .expect("old auth config should encrypt"),
-    );
+    existing_key.encrypted_auth_config = Some(sample_bound_auth_config(
+        "provider-codex",
+        "key-codex-existing",
+        r#"{"provider_type":"codex","refresh_token":"old-refresh-token"}"#,
+    ));
     existing_key.upstream_metadata = Some(json!({
         "codex": {
             "credential_generation": "generation-before-switch",
@@ -1038,7 +1043,7 @@ async fn provider_key_concurrent_limit_create_and_list_responses() {
 
 #[tokio::test]
 async fn provider_key_concurrent_limit_reads_existing_list_response() {
-    let mut key_a = sample_key(
+    let mut key_a = sample_bound_key(
         "provider-key-a",
         "test-provider-a",
         "openai:chat",
@@ -1046,7 +1051,7 @@ async fn provider_key_concurrent_limit_reads_existing_list_response() {
     );
     key_a.concurrent_limit = Some(1);
 
-    let mut key_b = sample_key(
+    let mut key_b = sample_bound_key(
         "provider-key-b",
         "test-provider-a",
         "openai:chat",
@@ -1232,7 +1237,7 @@ async fn gateway_reveals_admin_provider_key_locally_with_trusted_admin_principal
     let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
         vec![sample_provider("provider-openai", "openai", 10)],
         vec![],
-        vec![sample_key(
+        vec![sample_bound_key(
             "key-openai-a",
             "provider-openai",
             "openai:chat",
@@ -1290,20 +1295,18 @@ async fn gateway_exports_admin_provider_key_locally_with_trusted_admin_principal
         }),
     );
 
-    let mut key = sample_key(
+    let mut key = sample_bound_key(
         "key-kiro-a",
         "provider-kiro",
         "claude:messages",
         "oauth-access-token",
     );
     key.auth_type = "oauth".to_string();
-    key.encrypted_auth_config = Some(
-        encrypt_python_fernet_plaintext(
-            DEVELOPMENT_ENCRYPTION_KEY,
-            r#"{"provider_type":"kiro","auth_method":"idc","refresh_token":"rt-kiro-123"}"#,
-        )
-        .expect("auth config ciphertext should build"),
-    );
+    key.encrypted_auth_config = Some(sample_bound_auth_config(
+        "provider-kiro",
+        "key-kiro-a",
+        r#"{"provider_type":"kiro","auth_method":"idc","refresh_token":"rt-kiro-123"}"#,
+    ));
     key.upstream_metadata = Some(json!({"kiro": {"email": "alice@example.com"}}));
 
     let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
@@ -1366,20 +1369,18 @@ async fn gateway_exports_admin_provider_key_access_token_when_refresh_token_is_m
         }),
     );
 
-    let mut key = sample_key(
+    let mut key = sample_bound_key(
         "key-codex-a",
         "provider-codex",
         "openai:responses",
         "codex-access-token",
     );
     key.auth_type = "oauth".to_string();
-    key.encrypted_auth_config = Some(
-        encrypt_python_fernet_plaintext(
-            DEVELOPMENT_ENCRYPTION_KEY,
-            r#"{"provider_type":"codex","email":"codex@example.com","updated_at":1710000000}"#,
-        )
-        .expect("auth config ciphertext should build"),
-    );
+    key.encrypted_auth_config = Some(sample_bound_auth_config(
+        "provider-codex",
+        "key-codex-a",
+        r#"{"provider_type":"codex","email":"codex@example.com","updated_at":1710000000}"#,
+    ));
 
     let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
         vec![sample_provider("provider-codex", "codex", 10)],
@@ -1440,20 +1441,18 @@ async fn gateway_export_does_not_emit_access_token_from_imported_authorization_h
         }),
     );
 
-    let mut key = sample_key(
+    let mut key = sample_bound_key(
         "key-codex-a",
         "provider-codex",
         "openai:responses",
         "imported-session-token",
     );
     key.auth_type = "oauth".to_string();
-    key.encrypted_auth_config = Some(
-        encrypt_python_fernet_plaintext(
-            DEVELOPMENT_ENCRYPTION_KEY,
-            r#"{"provider_type":"codex","email":"codex@example.com","headers":{"authorization":"Bearer imported-session-token"}}"#,
-        )
-        .expect("auth config ciphertext should build"),
-    );
+    key.encrypted_auth_config = Some(sample_bound_auth_config(
+        "provider-codex",
+        "key-codex-a",
+        r#"{"provider_type":"codex","email":"codex@example.com","headers":{"authorization":"Bearer imported-session-token"}}"#,
+    ));
 
     let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
         vec![sample_provider("provider-codex", "codex", 10)],
@@ -1516,20 +1515,18 @@ async fn gateway_export_preserves_distinct_imported_access_token_with_authorizat
         }),
     );
 
-    let mut key = sample_key(
+    let mut key = sample_bound_key(
         "key-codex-a",
         "provider-codex",
         "openai:responses",
         "jwt-access-token",
     );
     key.auth_type = "oauth".to_string();
-    key.encrypted_auth_config = Some(
-        encrypt_python_fernet_plaintext(
-            DEVELOPMENT_ENCRYPTION_KEY,
-            r#"{"provider_type":"codex","email":"codex@example.com","access_token":"jwt-access-token","headers":{"authorization":"Bearer imported-session-token"}}"#,
-        )
-        .expect("auth config ciphertext should build"),
-    );
+    key.encrypted_auth_config = Some(sample_bound_auth_config(
+        "provider-codex",
+        "key-codex-a",
+        r#"{"provider_type":"codex","email":"codex@example.com","access_token":"jwt-access-token","headers":{"authorization":"Bearer imported-session-token"}}"#,
+    ));
 
     let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
         vec![sample_provider("provider-codex", "codex", 10)],
@@ -1581,27 +1578,25 @@ async fn gateway_generic_export_rejects_agent_identity_without_exposing_private_
     let private_key = "agent-private-key-must-not-leak";
     let mut provider = sample_provider("provider-codex", "codex", 10);
     provider.provider_type = "codex".to_string();
-    let mut key = sample_key(
+    let mut key = sample_bound_key(
         "key-codex-agent",
         "provider-codex",
         "openai:responses",
         "__placeholder__",
     );
     key.auth_type = "oauth".to_string();
-    key.encrypted_auth_config = Some(
-        encrypt_python_fernet_plaintext(
-            DEVELOPMENT_ENCRYPTION_KEY,
-            &json!({
-                "provider_type": "codex",
-                "auth_mode": "agentIdentity",
-                "agent_runtime_id": "runtime-must-not-leak",
-                "agent_private_key": private_key,
-                "task_id": "task-must-not-leak"
-            })
-            .to_string(),
-        )
-        .expect("Agent Identity auth config should encrypt"),
-    );
+    key.encrypted_auth_config = Some(sample_bound_auth_config(
+        "provider-codex",
+        "key-codex-agent",
+        &json!({
+            "provider_type": "codex",
+            "auth_mode": "agentIdentity",
+            "agent_runtime_id": "runtime-must-not-leak",
+            "agent_private_key": private_key,
+            "task_id": "task-must-not-leak"
+        })
+        .to_string(),
+    ));
     let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
         vec![provider],
         vec![],
@@ -1706,7 +1701,7 @@ async fn gateway_clears_admin_provider_key_oauth_invalid_locally_with_trusted_ad
         }),
     );
 
-    let mut key = sample_key(
+    let mut key = sample_bound_key(
         "key-openai-a",
         "provider-openai",
         "openai:chat",
@@ -1829,7 +1824,7 @@ async fn gateway_noops_admin_provider_key_oauth_invalid_clear_when_marker_absent
     let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
         vec![sample_provider("provider-openai", "openai", 10)],
         vec![],
-        vec![sample_key(
+        vec![sample_bound_key(
             "key-openai-a",
             "provider-openai",
             "openai:chat",
@@ -1886,7 +1881,7 @@ async fn gateway_updates_admin_provider_key_locally_with_trusted_admin_principal
         }),
     );
 
-    let mut key = sample_key(
+    let mut key = sample_bound_key(
         "key-openai-a",
         "provider-openai",
         "openai:chat",
@@ -1961,14 +1956,7 @@ async fn gateway_updates_admin_provider_key_locally_with_trusted_admin_principal
     assert_eq!(reloaded[0].allowed_models, None);
     assert_eq!(reloaded[0].note.as_deref(), Some("updated from rust"));
     assert!(!reloaded[0].is_active);
-    let decrypted = decrypt_python_fernet_ciphertext(
-        DEVELOPMENT_ENCRYPTION_KEY,
-        reloaded[0]
-            .encrypted_api_key
-            .as_deref()
-            .expect("api key should be present"),
-    )
-    .expect("ciphertext should decrypt");
+    let decrypted = open_provider_catalog_api_key_for_test(&reloaded[0]);
     assert_eq!(decrypted, "sk-updated-openai");
 
     gateway_handle.abort();
@@ -1977,7 +1965,7 @@ async fn gateway_updates_admin_provider_key_locally_with_trusted_admin_principal
 
 #[tokio::test]
 async fn provider_key_concurrent_limit_update_presence_semantics() {
-    let mut key = sample_key(
+    let mut key = sample_bound_key(
         "key-openai-a",
         "provider-openai",
         "openai:chat",
@@ -2123,7 +2111,7 @@ async fn gateway_clears_allowed_models_when_disabling_auto_fetch_on_provider_key
         }),
     );
 
-    let mut key = sample_key(
+    let mut key = sample_bound_key(
         "key-openai-a",
         "provider-openai",
         "openai:chat",
@@ -2229,7 +2217,7 @@ async fn gateway_overwrites_allowed_models_immediately_when_enabling_auto_fetch_
     );
     let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
 
-    let mut key = sample_key(
+    let mut key = sample_bound_key(
         "key-openai-a",
         "provider-openai",
         "openai:chat",
@@ -2345,7 +2333,7 @@ async fn gateway_fetches_allowed_models_immediately_when_enabling_auto_fetch_fro
     );
     let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
 
-    let mut key = sample_key(
+    let mut key = sample_bound_key(
         "key-openai-a",
         "provider-openai",
         "openai:chat",
@@ -2460,7 +2448,7 @@ async fn gateway_refreshes_allowed_models_when_updating_include_patterns_with_au
     );
     let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
 
-    let mut key = sample_key(
+    let mut key = sample_bound_key(
         "key-openai-a",
         "provider-openai",
         "openai:chat",
@@ -2572,7 +2560,7 @@ async fn gateway_refreshes_allowed_models_when_updating_exclude_patterns_with_au
     );
     let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
 
-    let mut key = sample_key(
+    let mut key = sample_bound_key(
         "key-openai-a",
         "provider-openai",
         "openai:chat",
@@ -2667,13 +2655,13 @@ async fn gateway_rejects_admin_provider_key_update_when_api_key_duplicates_exist
         vec![sample_provider("provider-openai", "openai", 10)],
         vec![],
         vec![
-            sample_key(
+            sample_bound_key(
                 "key-openai-a",
                 "provider-openai",
                 "openai:chat",
                 "sk-test-a",
             ),
-            sample_key(
+            sample_bound_key(
                 "key-openai-b",
                 "provider-openai",
                 "openai:chat",
@@ -2740,7 +2728,7 @@ async fn gateway_deletes_admin_provider_key_locally_with_trusted_admin_principal
     let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
         vec![sample_provider("provider-openai", "openai", 10)],
         vec![],
-        vec![sample_key(
+        vec![sample_bound_key(
             "key-openai-a",
             "provider-openai",
             "openai:chat",
@@ -2807,13 +2795,13 @@ async fn gateway_batch_deletes_admin_provider_keys_locally_with_trusted_admin_pr
         vec![sample_provider("provider-openai", "openai", 10)],
         vec![],
         vec![
-            sample_key(
+            sample_bound_key(
                 "key-openai-a",
                 "provider-openai",
                 "openai:chat",
                 "sk-test-a",
             ),
-            sample_key(
+            sample_bound_key(
                 "key-openai-b",
                 "provider-openai",
                 "openai:chat",
@@ -2884,7 +2872,7 @@ async fn gateway_handles_admin_keys_grouped_by_format_locally_with_trusted_admin
         }),
     );
 
-    let mut key_a = sample_key(
+    let mut key_a = sample_bound_key(
         "key-openai-a",
         "provider-openai",
         "openai:chat",
@@ -2900,7 +2888,7 @@ async fn gateway_handles_admin_keys_grouped_by_format_locally_with_trusted_admin
     key_a.health_by_format = Some(json!({"openai:chat": {"health_score": 0.8}}));
     key_a.circuit_breaker_by_format = Some(json!({"openai:chat": {"open": false}}));
 
-    let mut key_b = sample_key(
+    let mut key_b = sample_bound_key(
         "key-claude-a",
         "provider-claude",
         "claude:messages",
@@ -2912,20 +2900,18 @@ async fn gateway_handles_admin_keys_grouped_by_format_locally_with_trusted_admin
     key_b.created_at_unix_ms = Some(1_711_100_000);
     key_b.updated_at_unix_secs = Some(1_711_100_100);
 
-    let mut key_agent = sample_key(
+    let mut key_agent = sample_bound_key(
         "key-codex-agent",
         "provider-codex",
         "openai:responses",
         "__placeholder__",
     );
     key_agent.auth_type = "oauth".to_string();
-    key_agent.encrypted_auth_config = Some(
-        encrypt_python_fernet_plaintext(
-            DEVELOPMENT_ENCRYPTION_KEY,
-            r#"{"provider_type":"codex","auth_mode":"agentIdentity","agent_runtime_id":"runtime-1","agent_private_key":"base64-private-key","task_id":"task-1"}"#,
-        )
-        .expect("Agent Identity auth config should encrypt"),
-    );
+    key_agent.encrypted_auth_config = Some(sample_bound_auth_config(
+        "provider-codex",
+        "key-codex-agent",
+        r#"{"provider_type":"codex","auth_mode":"agentIdentity","agent_runtime_id":"runtime-1","agent_private_key":"base64-private-key","task_id":"task-1"}"#,
+    ));
 
     let mut codex_provider = sample_provider("provider-codex", "codex", 30);
     codex_provider.provider_type = "codex".to_string();

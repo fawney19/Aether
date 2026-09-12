@@ -28,6 +28,7 @@ use self::batch::{
 use self::billing::{
     build_admin_grant_user_billing_plan_response,
     build_admin_list_user_billing_entitlements_response,
+    build_admin_revoke_user_billing_entitlement_response,
 };
 use self::groups::{
     build_admin_create_user_group_response, build_admin_delete_user_group_response,
@@ -47,9 +48,10 @@ use self::sessions::{
 use self::shared::AdminUpdateUserPatch;
 use self::shared::{
     admin_default_user_initial_gift, build_admin_users_bad_request_response,
-    build_admin_users_data_unavailable_response, build_admin_users_read_only_response,
-    disabled_user_policy_detail, disabled_user_policy_field, format_optional_datetime_iso8601,
-    legacy_admin_list_policy_mode, legacy_admin_rate_limit_policy_mode,
+    build_admin_users_data_unavailable_response, build_admin_users_permission_denied_response,
+    build_admin_users_read_only_response, disabled_user_policy_detail, disabled_user_policy_field,
+    format_optional_datetime_iso8601, legacy_admin_list_policy_mode,
+    legacy_admin_rate_limit_policy_mode, management_token_may_administer_user_accounts,
     normalize_admin_optional_user_email, normalize_admin_user_group_ids, normalize_admin_user_role,
     normalize_admin_username, validate_admin_user_password, AdminCreateUserApiKeyRequest,
     AdminCreateUserRequest, AdminToggleUserApiKeyLockRequest, AdminUpdateUserApiKeyRequest,

@@ -34,6 +34,14 @@ impl PostgresTransactionOptions {
         }
     }
 
+    pub fn maintenance() -> Self {
+        Self {
+            mode: TransactionMode::ReadWrite,
+            statement_timeout_ms: Some(300_000),
+            lock_timeout_ms: Some(30_000),
+        }
+    }
+
     pub fn validate(&self) -> Result<(), DataLayerError> {
         if matches!(self.statement_timeout_ms, Some(0)) {
             return Err(DataLayerError::InvalidConfiguration(

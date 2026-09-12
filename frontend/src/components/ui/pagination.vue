@@ -1,8 +1,11 @@
 <template>
-  <div class="flex flex-col sm:flex-row gap-3 sm:gap-4 border-t border-border/60 px-4 sm:px-6 py-3 sm:py-4 bg-muted/20">
+  <div class="flex min-w-0 flex-col gap-3 border-t border-border/60 bg-muted/20 px-4 py-3 sm:flex-row sm:flex-wrap sm:items-center sm:gap-4 sm:px-6 sm:py-4">
     <!-- 左侧：记录范围和每页数量 -->
-    <div class="flex items-center justify-between sm:justify-start gap-3 text-sm text-muted-foreground">
-      <span class="font-medium whitespace-nowrap">
+    <div class="flex min-w-0 flex-wrap items-center justify-between gap-3 text-sm text-muted-foreground sm:justify-start">
+      <span
+        class="min-w-0 break-words font-medium tabular-nums"
+        aria-live="polite"
+      >
         {{ rangeSummary }}
       </span>
       <Select
@@ -10,7 +13,10 @@
         :model-value="String(pageSize)"
         @update:model-value="handlePageSizeChange"
       >
-        <SelectTrigger class="w-[120px] h-8 sm:h-9 border-border/60 text-xs sm:text-sm">
+        <SelectTrigger
+          class="h-8 w-auto min-w-[120px] shrink-0 border-border/60 text-xs sm:h-9 sm:text-sm"
+          :aria-label="t('pagination.pageSizeLabel')"
+        >
           <span class="flex-1 text-center">
             <SelectValue />
           </span>
@@ -31,8 +37,8 @@
     <div class="flex flex-wrap items-center justify-center gap-1.5 sm:gap-2 sm:ml-auto">
       <!-- 页码按钮（智能省略） -->
       <template
-        v-for="page in pageNumbers"
-        :key="page"
+        v-for="(page, index) in pageNumbers"
+        :key="`${page}-${index}`"
       >
         <Button
           v-if="typeof page === 'number'"
@@ -40,9 +46,11 @@
           size="sm"
           class="h-9 min-w-[36px] px-2"
           :class="page === current ? 'shadow-sm' : ''"
+          :aria-label="t('pagination.pageNumber', { page: formatNumber(page) })"
+          :aria-current="page === current ? 'page' : undefined"
           @click="handlePageChange(page)"
         >
-          {{ page }}
+          {{ formatNumber(page) }}
         </Button>
         <span
           v-else
@@ -55,18 +63,19 @@
         v-if="totalPages > 7"
         class="flex items-center gap-1.5 ml-2 text-sm text-muted-foreground"
       >
-        <span class="hidden sm:inline">{{ jumpToLabel }}</span>
+        <span class="hidden sm:inline">{{ t('pagination.goToPage') }}</span>
         <input
           v-model="jumpPageInput"
           type="text"
           inputmode="numeric"
           pattern="[0-9]*"
+          :aria-label="t('pagination.jumpToPage')"
           class="w-12 h-9 px-2 text-center text-sm border border-border/60 rounded-md bg-background focus:outline-none focus:ring-2 focus:ring-primary/40 focus:border-primary/60"
           @keydown.enter="handleJumpPage"
           @blur="handleJumpPage"
           @input="filterNumericInput"
         >
-        <span class="hidden sm:inline">{{ pageLabel }}</span>
+        <span class="hidden sm:inline">{{ t('pagination.pageLabel') }}</span>
       </div>
     </div>
   </div>
@@ -102,28 +111,29 @@ const props = withDefaults(defineProps<Props>(), {
 const emit = defineEmits<Emits>()
 
 const jumpPageInput = ref('')
-const locale = useI18n().locale
+const { locale, t } = useI18n()
+const numberFormatter = computed(() => new Intl.NumberFormat(locale.value))
+
+function formatNumber(value: number): string {
+  return numberFormatter.value.format(value)
+}
 
 const totalPages = computed(() => Math.ceil(props.total / props.pageSize))
 
 const recordRange = computed(() => {
-  const start = (props.current - 1) * props.pageSize + 1
+  const start = props.total === 0 ? 0 : (props.current - 1) * props.pageSize + 1
   const end = Math.min(props.current * props.pageSize, props.total)
   return { start, end }
 })
 
-const rangeSummary = computed(() => {
-  if (locale.value === 'en-US') {
-    return `Showing ${recordRange.value.start}-${recordRange.value.end} of ${props.total} items`
-  }
-  return `显示 ${recordRange.value.start}-${recordRange.value.end} 条，共 ${props.total} 条`
-})
-
-const jumpToLabel = computed(() => locale.value === 'en-US' ? 'Go to' : '跳至')
-const pageLabel = computed(() => locale.value === 'en-US' ? 'page' : '页')
+const rangeSummary = computed(() => t('pagination.range', {
+  start: formatNumber(recordRange.value.start),
+  end: formatNumber(recordRange.value.end),
+  total: formatNumber(props.total),
+}))
 
 function pageSizeLabel(size: number): string {
-  return locale.value === 'en-US' ? `${size} / page` : `${size} 条/页`
+  return t('pagination.pageSize', { size: formatNumber(size) })
 }
 
 const pageNumbers = computed(() => {

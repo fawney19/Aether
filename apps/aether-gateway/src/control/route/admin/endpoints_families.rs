@@ -303,6 +303,19 @@ pub(super) fn classify_admin_endpoints_family_route(
             false,
         ))
     } else if method == http::Method::GET
+        && normalized_path
+            .strip_prefix("/api/admin/endpoints/")
+            .and_then(|path| path.strip_suffix("/rules/reveal"))
+            .is_some_and(|endpoint_id| !endpoint_id.is_empty() && !endpoint_id.contains('/'))
+    {
+        Some(classified(
+            "admin_proxy",
+            "endpoints_manage",
+            "reveal_endpoint_rules",
+            "admin:endpoints_manage",
+            false,
+        ))
+    } else if method == http::Method::GET
         && normalized_path.starts_with("/api/admin/endpoints/")
         && !normalized_path.starts_with("/api/admin/endpoints/health/")
         && !normalized_path.starts_with("/api/admin/endpoints/rpm/")

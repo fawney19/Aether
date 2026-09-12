@@ -167,6 +167,11 @@ type = "int64"
 auto_increment = true
 
 [[table.ldap_configs.columns]]
+name = "singleton_key"
+type = "int32"
+default = 1
+
+[[table.ldap_configs.columns]]
 name = "server_url"
 type = "text"
 length = 255
@@ -235,6 +240,10 @@ type = "unix_seconds"
 [[table.ldap_configs.columns]]
 name = "updated_at"
 type = "unix_seconds"
+
+[[table.ldap_configs.uniques]]
+name = "ldap_configs_singleton_key_key"
+columns = ["singleton_key"]
 
 [table.user_oauth_links]
 domain = "auth_config"

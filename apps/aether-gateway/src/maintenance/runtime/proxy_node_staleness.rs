@@ -53,6 +53,7 @@ pub(super) async fn cleanup_stale_proxy_nodes_once(
         );
         let mutation = ProxyNodeTunnelStatusMutation {
             node_id: node.id.clone(),
+            expected_tunnel_generation: Some(node.tunnel_generation.clone()),
             connected: false,
             conn_count: 0,
             detail: Some(detail),

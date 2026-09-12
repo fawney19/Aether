@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::{
@@ -9,12 +10,27 @@ use axum::{
 };
 use serde_json::json;
 
+use crate::execution_runtime::transport::{
+    validate_execution_upstream_url, ExecutionSafeDnsResolver,
+};
+
 use super::test_connection_shared::select_test_connection_provider;
 use super::{
     provider_catalog_key_supports_format, query_param_value, AppState, GatewayPublicRequestContext,
 };
 
 const DEFAULT_NON_STREAM_TOTAL_TIMEOUT_MS: u64 = 300_000;
+const MAX_TEST_CONNECTION_RESPONSE_BYTES: usize = 256 * 1024;
+
+fn build_test_connection_client() -> Result<reqwest::Client, reqwest::Error> {
+    reqwest::Client::builder()
+        .no_proxy()
+        .dns_resolver(Arc::new(ExecutionSafeDnsResolver))
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(10))
+        .http2_adaptive_window(true)
+        .build()
+}
 
 pub(super) async fn maybe_build_local_test_connection_route_response(
     state: &AppState,
@@ -290,7 +306,38 @@ pub(super) async fn maybe_build_local_test_connection_route_response(
         );
     }
 
-    let mut upstream_request = state.client.post(&upstream_url);
+    let upstream_url = match validate_execution_upstream_url(&upstream_url) {
+        Ok(url) => url,
+        Err(reason) => {
+            tracing::warn!(
+                event_name = "provider_test_connection_target_rejected",
+                provider_id = %provider.id,
+                endpoint_id = %endpoint.id,
+                reason = %reason,
+                "provider connection test target was rejected"
+            );
+            return Some(
+                (
+                    http::StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({"detail": "Provider connection test unavailable"})),
+                )
+                    .into_response(),
+            );
+        }
+    };
+    let test_client = match build_test_connection_client() {
+        Ok(client) => client,
+        Err(_) => {
+            return Some(
+                (
+                    http::StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({"detail": "Provider connection test unavailable"})),
+                )
+                    .into_response(),
+            );
+        }
+    };
+    let mut upstream_request = test_client.post(upstream_url);
     for (name, value) in &provider_request_headers {
         upstream_request = upstream_request.header(name, value);
     }
@@ -301,31 +348,41 @@ pub(super) async fn maybe_build_local_test_connection_route_response(
 
     let response = match upstream_request.json(&provider_request_body).send().await {
         Ok(response) => response,
-        Err(error) => {
+        Err(_) => {
+            tracing::warn!(
+                event_name = "provider_test_connection_request_failed",
+                provider_id = %provider.id,
+                endpoint_id = %endpoint.id,
+                "provider connection test request failed"
+            );
             return Some(
                 (
                     http::StatusCode::SERVICE_UNAVAILABLE,
-                    Json(json!({"detail": error.to_string()})),
+                    Json(json!({"detail": "Provider connection test failed"})),
                 )
                     .into_response(),
-            )
+            );
         }
     };
 
     let status = response.status();
-    let response_json = response.json::<serde_json::Value>().await.ok();
+    let response_json =
+        aether_http::read_response_bytes_with_limit(response, MAX_TEST_CONNECTION_RESPONSE_BYTES)
+            .await
+            .ok()
+            .and_then(|body| serde_json::from_slice::<serde_json::Value>(&body).ok());
     if !status.is_success() {
-        let detail = response_json
-            .as_ref()
-            .and_then(|value| value.get("error"))
-            .and_then(|value| value.get("message").or(Some(value)))
-            .and_then(serde_json::Value::as_str)
-            .map(ToOwned::to_owned)
-            .unwrap_or_else(|| format!("upstream returned HTTP {status}"));
+        tracing::warn!(
+            event_name = "provider_test_connection_upstream_rejected",
+            provider_id = %provider.id,
+            endpoint_id = %endpoint.id,
+            upstream_status = %status,
+            "provider connection test upstream returned an error"
+        );
         return Some(
             (
                 http::StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({ "detail": detail })),
+                Json(json!({ "detail": "Provider connection test failed" })),
             )
                 .into_response(),
         );
@@ -352,4 +409,146 @@ pub(super) async fn maybe_build_local_test_connection_route_response(
         }))
         .into_response(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_test_connection_client, validate_execution_upstream_url};
+    use axum::{
+        body::Body,
+        http::{header, Request, StatusCode},
+        response::IntoResponse,
+        routing::post,
+        Router,
+    };
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    #[tokio::test]
+    async fn test_connection_client_never_forwards_credentials_across_redirects() {
+        let redirected_hits = Arc::new(AtomicUsize::new(0));
+        let redirected_hits_for_route = Arc::clone(&redirected_hits);
+        let redirected_listener = crate::test_support::bind_loopback_listener()
+            .await
+            .expect("redirect target listener");
+        let redirected_addr = redirected_listener
+            .local_addr()
+            .expect("redirect target addr");
+        let redirected_app = Router::new().route(
+            "/capture",
+            post(move |request: Request<Body>| {
+                let hits = Arc::clone(&redirected_hits_for_route);
+                async move {
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    assert!(request.headers().get(header::AUTHORIZATION).is_none());
+                    StatusCode::OK
+                }
+            }),
+        );
+        let redirected_server = tokio::spawn(async move {
+            axum::serve(redirected_listener, redirected_app)
+                .await
+                .expect("redirect target server");
+        });
+
+        let source_listener = crate::test_support::bind_loopback_listener()
+            .await
+            .expect("redirect source listener");
+        let source_addr = source_listener.local_addr().expect("redirect source addr");
+        let location = format!("http://{redirected_addr}/capture");
+        let source_app = Router::new().route(
+            "/redirect",
+            post(move || {
+                let location = location.clone();
+                async move { (StatusCode::FOUND, [(header::LOCATION, location)]).into_response() }
+            }),
+        );
+        let source_server = tokio::spawn(async move {
+            axum::serve(source_listener, source_app)
+                .await
+                .expect("redirect source server");
+        });
+
+        let response = build_test_connection_client()
+            .expect("client")
+            .post(format!("http://{source_addr}/redirect"))
+            .header(header::AUTHORIZATION, "Bearer stored-provider-secret")
+            .send()
+            .await
+            .expect("redirect response");
+        assert_eq!(response.status(), StatusCode::FOUND);
+        assert_eq!(redirected_hits.load(Ordering::SeqCst), 0);
+
+        source_server.abort();
+        redirected_server.abort();
+    }
+
+    #[test]
+    fn test_connection_target_rejects_private_literals_like_provider_requests() {
+        for raw_url in [
+            "http://10.0.0.1/v1/chat/completions",
+            "http://169.254.169.254/v1/chat/completions",
+            "https://10.0.0.1/v1/chat/completions",
+            "https://127.0.0.1/v1/chat/completions",
+            "https://[::1]/v1/chat/completions",
+            "https://198.18.78.41/v1/chat/completions",
+        ] {
+            assert!(
+                validate_execution_upstream_url(raw_url).is_err(),
+                "private provider target should be rejected: {raw_url}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_connection_target_accepts_public_http_and_https_addresses() {
+        for (raw_url, expected_port) in [
+            ("http://8.8.8.8/v1/chat", 80),
+            ("http://8.8.8.8:8080/v1/chat", 8080),
+            ("https://8.8.8.8/v1/chat", 443),
+            ("https://[2606:4700:4700::1111]/v1/chat", 443),
+        ] {
+            let url = validate_execution_upstream_url(raw_url)
+                .expect("public HTTP(S) provider target should be valid");
+            assert_eq!(url.as_str(), raw_url);
+            assert_eq!(url.port_or_known_default(), Some(expected_port));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_connection_target_defers_dns_and_accepts_provider_loopback_urls() {
+        for raw_url in [
+            "http://127.0.0.1:8080/v1/chat",
+            "http://[::1]:8080/v1/chat",
+            "http://localhost:8080/v1/chat",
+            "https://provider-dns.invalid/v1/chat",
+        ] {
+            let url = validate_execution_upstream_url(raw_url)
+                .expect("target validation must not depend on the current DNS answer");
+            let request = build_test_connection_client()
+                .expect("client should build without DNS")
+                .post(url)
+                .build()
+                .expect("provider request should build without DNS");
+            assert_eq!(request.url().as_str(), raw_url);
+        }
+    }
+
+    #[test]
+    fn test_connection_target_rejects_url_credentials_and_fragments() {
+        for raw_url in [
+            "https://user:pass@example.com/v1/chat",
+            "https://example.com/v1/chat#fragment",
+            "http://user:pass@example.com/v1/chat",
+            "http://example.com/v1/chat#fragment",
+            "ftp://example.com/v1/chat",
+        ] {
+            assert!(
+                validate_execution_upstream_url(raw_url).is_err(),
+                "unsafe provider target should be rejected: {raw_url}"
+            );
+        }
+    }
 }

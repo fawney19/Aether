@@ -63,7 +63,17 @@ pub(super) async fn admin_provider_ops_sub2api_balance_payload(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or("/api/v1/auth/me?timezone=Asia/Shanghai");
-    let me_url = admin_provider_ops_sub2api_request_url(base_url, me_endpoint);
+    let me_url = match admin_provider_ops_sub2api_request_url(base_url, me_endpoint) {
+        Ok(url) => url,
+        Err(message) => {
+            return admin_provider_ops_action_error(
+                "not_configured",
+                "query_balance",
+                message,
+                None,
+            )
+        }
+    };
     let subscription_endpoint = admin_provider_ops_json_object_map(json!({
         "endpoint": action_config
             .get("subscription_endpoint")
@@ -77,7 +87,17 @@ pub(super) async fn admin_provider_ops_sub2api_balance_payload(
     .unwrap_or("/api/v1/subscriptions/summary")
     .to_string();
     let subscription_url =
-        admin_provider_ops_sub2api_request_url(base_url, subscription_endpoint.as_str());
+        match admin_provider_ops_sub2api_request_url(base_url, subscription_endpoint.as_str()) {
+            Ok(url) => url,
+            Err(message) => {
+                return admin_provider_ops_action_error(
+                    "not_configured",
+                    "query_balance",
+                    message,
+                    None,
+                )
+            }
+        };
 
     let auth_value = match reqwest::header::HeaderValue::from_str(&format!("Bearer {access_token}"))
     {
@@ -197,8 +217,5 @@ fn network_error_message(error: &str) -> String {
     if lower.contains("timeout") || normalized.contains("超时") {
         return "请求超时".to_string();
     }
-    if normalized.starts_with("网络错误:") {
-        return normalized.to_string();
-    }
-    format!("网络错误: {normalized}")
+    "网络错误".to_string()
 }

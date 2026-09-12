@@ -61,7 +61,7 @@ pub(crate) enum AdminWalletMutationOutcome<T> {
     Unavailable,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub(crate) struct GatewayUserSessionView {
     pub(crate) id: String,
     pub(crate) user_id: String,
@@ -78,6 +78,7 @@ pub(crate) struct GatewayUserSessionView {
     pub(crate) user_agent: Option<String>,
     pub(crate) created_at: Option<chrono::DateTime<chrono::Utc>>,
     pub(crate) updated_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub(crate) security_version: i64,
 }
 
 impl GatewayUserSessionView {
@@ -131,7 +132,16 @@ impl GatewayUserSessionView {
             user_agent,
             created_at,
             updated_at,
+            security_version: 0,
         })
+    }
+
+    pub(crate) fn with_security_version(mut self, security_version: i64) -> Result<Self, String> {
+        if security_version < 0 {
+            return Err("user_sessions.security_version is negative".to_string());
+        }
+        self.security_version = security_version;
+        Ok(self)
     }
 
     pub(crate) fn hash_refresh_token(token: &str) -> String {
@@ -157,8 +167,10 @@ impl GatewayUserSessionView {
         let Some(rotated_at) = self.rotated_at else {
             return (false, false);
         };
+        let age = now.signed_duration_since(rotated_at);
         if prev_hash == &token_hash
-            && now.signed_duration_since(rotated_at).num_seconds() <= Self::REFRESH_GRACE_SECONDS
+            && age >= chrono::Duration::zero()
+            && age <= chrono::Duration::seconds(Self::REFRESH_GRACE_SECONDS)
         {
             return (true, true);
         }
@@ -183,6 +195,48 @@ impl GatewayUserSessionView {
     }
 }
 
+#[cfg(test)]
+mod gateway_user_session_view_tests {
+    use super::GatewayUserSessionView;
+    use chrono::{Duration, Utc};
+
+    fn session_with_rotation(rotated_at: chrono::DateTime<Utc>) -> GatewayUserSessionView {
+        GatewayUserSessionView::new(
+            "session-1".to_string(),
+            "user-1".to_string(),
+            "device-1".to_string(),
+            None,
+            GatewayUserSessionView::hash_refresh_token("current-token"),
+            Some(GatewayUserSessionView::hash_refresh_token("previous-token")),
+            Some(rotated_at),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("session should build")
+    }
+
+    #[test]
+    fn refresh_grace_rejects_future_rotation_timestamps() {
+        let now = Utc::now();
+        assert_eq!(
+            session_with_rotation(now - Duration::seconds(1))
+                .verify_refresh_token("previous-token", now),
+            (true, true)
+        );
+        assert_eq!(
+            session_with_rotation(now + Duration::milliseconds(1))
+                .verify_refresh_token("previous-token", now),
+            (false, false)
+        );
+    }
+}
+
 impl From<crate::data::state::StoredUserSessionRecord> for GatewayUserSessionView {
     fn from(value: crate::data::state::StoredUserSessionRecord) -> Self {
         Self {
@@ -201,6 +255,7 @@ impl From<crate::data::state::StoredUserSessionRecord> for GatewayUserSessionVie
             user_agent: value.user_agent,
             created_at: value.created_at,
             updated_at: value.updated_at,
+            security_version: value.security_version,
         }
     }
 }
@@ -229,6 +284,7 @@ impl From<GatewayUserSessionView> for crate::data::state::StoredUserSessionRecor
             user_agent: value.user_agent,
             created_at: value.created_at,
             updated_at: value.updated_at,
+            security_version: value.security_version,
         }
     }
 }
@@ -308,7 +364,7 @@ impl From<GatewayUserPreferenceView> for crate::data::state::StoredUserPreferenc
     }
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct GatewayAdminPaymentCallbackView {
     pub(crate) id: String,
     pub(crate) payment_order_id: Option<String>,
@@ -323,6 +379,33 @@ pub(crate) struct GatewayAdminPaymentCallbackView {
     pub(crate) error_message: Option<String>,
     pub(crate) created_at_unix_ms: u64,
     pub(crate) processed_at_unix_secs: Option<u64>,
+}
+
+impl std::fmt::Debug for GatewayAdminPaymentCallbackView {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("GatewayAdminPaymentCallbackView")
+            .field("id", &self.id)
+            .field("payment_order_id", &self.payment_order_id)
+            .field("payment_method", &self.payment_method)
+            .field("callback_key", &"[REDACTED]")
+            .field("order_no", &self.order_no)
+            .field("gateway_order_id", &self.gateway_order_id)
+            .field(
+                "payload_hash",
+                &self.payload_hash.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("signature_valid", &self.signature_valid)
+            .field("status", &self.status)
+            .field("payload", &self.payload.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "error_message",
+                &self.error_message.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("created_at_unix_ms", &self.created_at_unix_ms)
+            .field("processed_at_unix_secs", &self.processed_at_unix_secs)
+            .finish()
+    }
 }
 
 impl From<super::AdminPaymentCallbackRecord> for GatewayAdminPaymentCallbackView {

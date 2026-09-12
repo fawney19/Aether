@@ -21,6 +21,7 @@ use semver::Version;
 use serde::{de, de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::collections::BTreeSet;
+use url::Url;
 
 #[derive(Debug, Clone)]
 pub struct AdminSystemSettingsUpdate {
@@ -43,12 +44,37 @@ pub struct AdminEmailTemplateUpdate {
     pub html: Option<String>,
 }
 
+/// Email templates are administrator-configured, but they are rendered on
+/// authentication and notification paths. Keep their resource and protocol
+/// surface bounded before values reach storage or an SMTP header/body.
+pub const ADMIN_EMAIL_TEMPLATE_MAX_SUBJECT_BYTES: usize = 512;
+pub const ADMIN_EMAIL_TEMPLATE_MAX_HTML_BYTES: usize = 256 * 1024;
+pub const ADMIN_EMAIL_TEMPLATE_MAX_PREVIEW_BYTES: usize = 512 * 1024;
+pub const ADMIN_EMAIL_TEMPLATE_MAX_PREVIEW_VALUE_BYTES: usize = 64 * 1024;
+
+pub fn admin_email_template_subject_is_valid(value: &str) -> bool {
+    value.len() <= ADMIN_EMAIL_TEMPLATE_MAX_SUBJECT_BYTES
+        && !value.bytes().any(|byte| byte < 0x20 || byte == 0x7f)
+}
+
+pub fn admin_email_template_html_is_valid(value: &str) -> bool {
+    value.len() <= ADMIN_EMAIL_TEMPLATE_MAX_HTML_BYTES
+        && !value.bytes().any(|byte| {
+            byte == 0 || byte == 0x7f || (byte < 0x20 && !matches!(byte, b'\r' | b'\n' | b'\t'))
+        })
+}
+
 pub const ADMIN_SYSTEM_CONFIG_EXPORT_VERSION: &str = "2.3";
 pub const ADMIN_SYSTEM_CONFIG_SUPPORTED_VERSIONS: &[&str] =
     &["2.0", "2.1", "2.2", ADMIN_SYSTEM_CONFIG_EXPORT_VERSION];
-pub const ADMIN_SYSTEM_USERS_EXPORT_VERSION: &str = "1.6";
-pub const ADMIN_SYSTEM_USERS_SUPPORTED_VERSIONS: &[&str] =
-    &["1.3", "1.4", "1.5", ADMIN_SYSTEM_USERS_EXPORT_VERSION];
+pub const ADMIN_SYSTEM_USERS_EXPORT_VERSION: &str = "1.7";
+pub const ADMIN_SYSTEM_USERS_SUPPORTED_VERSIONS: &[&str] = &[
+    "1.3",
+    "1.4",
+    "1.5",
+    "1.6",
+    ADMIN_SYSTEM_USERS_EXPORT_VERSION,
+];
 pub const ADMIN_SYSTEM_PROVIDER_OPS_SENSITIVE_CREDENTIAL_FIELDS: &[&str] = &[
     "api_key",
     "password",
@@ -383,7 +409,7 @@ pub struct AdminSystemConfigGlobalModel {
     pub is_active: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct AdminSystemConfigEndpoint {
     pub api_format: String,
     pub base_url: String,
@@ -405,13 +431,40 @@ pub struct AdminSystemConfigEndpoint {
     pub proxy: Option<Value>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+impl std::fmt::Debug for AdminSystemConfigEndpoint {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AdminSystemConfigEndpoint")
+            .field("api_format", &self.api_format)
+            .field("base_url", &self.base_url)
+            .field(
+                "header_rules",
+                &self.header_rules.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "body_rules",
+                &self.body_rules.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("max_retries", &self.max_retries)
+            .field("is_active", &self.is_active)
+            .field("custom_path", &self.custom_path)
+            .field("config", &self.config.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "format_acceptance_config",
+                &self.format_acceptance_config.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("proxy", &self.proxy.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct AdminSystemConfigProviderKey {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
     #[serde(default)]
     pub auth_type: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_config: Option<Value>,
     #[serde(default)]
     pub name: Option<String>,
@@ -455,6 +508,27 @@ pub struct AdminSystemConfigProviderKey {
     pub proxy: Option<Value>,
     #[serde(default)]
     pub fingerprint: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_state: Option<String>,
+}
+
+impl std::fmt::Debug for AdminSystemConfigProviderKey {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AdminSystemConfigProviderKey")
+            .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
+            .field("auth_type", &self.auth_type)
+            .field(
+                "auth_config",
+                &self.auth_config.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("name", &self.name)
+            .field("note", &self.note)
+            .field("api_formats", &self.api_formats)
+            .field("is_active", &self.is_active)
+            .field("credential_state", &self.credential_state)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -484,7 +558,7 @@ pub struct AdminSystemConfigProviderModel {
     pub config: Option<Value>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct AdminSystemConfigProvider {
     pub name: String,
     #[serde(default)]
@@ -527,7 +601,24 @@ pub struct AdminSystemConfigProvider {
     pub models: Vec<AdminSystemConfigProviderModel>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+impl std::fmt::Debug for AdminSystemConfigProvider {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AdminSystemConfigProvider")
+            .field("name", &self.name)
+            .field("provider_type", &self.provider_type)
+            .field("billing_type", &self.billing_type)
+            .field("is_active", &self.is_active)
+            .field("proxy", &self.proxy.as_ref().map(|_| "[REDACTED]"))
+            .field("config", &self.config.as_ref().map(|_| "[REDACTED]"))
+            .field("endpoints", &self.endpoints)
+            .field("api_keys", &self.api_keys)
+            .field("models", &self.models.len())
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct AdminSystemConfigProxyNode {
     #[serde(default)]
     pub id: Option<String>,
@@ -543,9 +634,9 @@ pub struct AdminSystemConfigProxyNode {
     pub is_manual: Option<bool>,
     #[serde(default)]
     pub proxy_url: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy_username: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy_password: Option<String>,
     #[serde(default)]
     pub tunnel_mode: Option<bool>,
@@ -557,11 +648,38 @@ pub struct AdminSystemConfigProxyNode {
     pub config_version: Option<i32>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+impl std::fmt::Debug for AdminSystemConfigProxyNode {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AdminSystemConfigProxyNode")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .field("ip", &self.ip)
+            .field("port", &self.port)
+            .field("region", &self.region)
+            .field("is_manual", &self.is_manual)
+            .field("proxy_url", &self.proxy_url.as_ref().map(|_| "[REDACTED]"))
+            .field("proxy_username", &self.proxy_username)
+            .field(
+                "proxy_password",
+                &self.proxy_password.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("tunnel_mode", &self.tunnel_mode)
+            .field("heartbeat_interval", &self.heartbeat_interval)
+            .field(
+                "remote_config",
+                &self.remote_config.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("config_version", &self.config_version)
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct AdminSystemConfigLdap {
     pub server_url: String,
     pub bind_dn: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bind_password: Option<String>,
     pub base_dn: String,
     #[serde(default)]
@@ -582,12 +700,31 @@ pub struct AdminSystemConfigLdap {
     pub connect_timeout: Option<i32>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+impl std::fmt::Debug for AdminSystemConfigLdap {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AdminSystemConfigLdap")
+            .field("server_url", &self.server_url)
+            .field("bind_dn", &self.bind_dn)
+            .field(
+                "bind_password",
+                &self.bind_password.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("base_dn", &self.base_dn)
+            .field("is_enabled", &self.is_enabled)
+            .field("is_exclusive", &self.is_exclusive)
+            .field("use_starttls", &self.use_starttls)
+            .field("connect_timeout", &self.connect_timeout)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct AdminSystemConfigOAuthProvider {
     pub provider_type: String,
     pub display_name: String,
     pub client_id: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_secret: Option<String>,
     #[serde(default)]
     pub authorization_url_override: Option<String>,
@@ -607,7 +744,25 @@ pub struct AdminSystemConfigOAuthProvider {
     pub is_enabled: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+impl std::fmt::Debug for AdminSystemConfigOAuthProvider {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AdminSystemConfigOAuthProvider")
+            .field("provider_type", &self.provider_type)
+            .field("display_name", &self.display_name)
+            .field("client_id", &self.client_id)
+            .field(
+                "client_secret",
+                &self.client_secret.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("redirect_uri", &self.redirect_uri)
+            .field("frontend_callback_url", &self.frontend_callback_url)
+            .field("is_enabled", &self.is_enabled)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct AdminSystemConfigEntry {
     pub key: String,
     #[serde(default)]
@@ -616,11 +771,26 @@ pub struct AdminSystemConfigEntry {
     pub description: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+impl std::fmt::Debug for AdminSystemConfigEntry {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut debug = formatter.debug_struct("AdminSystemConfigEntry");
+        debug.field("key", &self.key);
+        if is_sensitive_admin_system_config_key(&self.key) {
+            debug.field("value", &"[REDACTED]");
+        } else {
+            debug.field("value", &self.value);
+        }
+        debug.field("description", &self.description).finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct AdminSystemConfigDocument {
     pub version: String,
     #[serde(default)]
     pub exported_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_state: Option<String>,
     #[serde(default)]
     pub global_models: Vec<AdminSystemConfigGlobalModel>,
     #[serde(default)]
@@ -635,6 +805,23 @@ pub struct AdminSystemConfigDocument {
     pub system_configs: Vec<AdminSystemConfigEntry>,
 }
 
+impl std::fmt::Debug for AdminSystemConfigDocument {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AdminSystemConfigDocument")
+            .field("version", &self.version)
+            .field("exported_at", &self.exported_at)
+            .field("credential_state", &self.credential_state)
+            .field("global_models", &self.global_models.len())
+            .field("providers", &self.providers)
+            .field("proxy_nodes", &self.proxy_nodes)
+            .field("ldap_config", &self.ldap_config)
+            .field("oauth_providers", &self.oauth_providers)
+            .field("system_configs", &self.system_configs)
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AdminSystemConfigImportRequest {
     #[serde(flatten)]
@@ -643,16 +830,36 @@ pub struct AdminSystemConfigImportRequest {
     pub merge_mode: AdminImportMergeMode,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ParsedAdminSystemConfigImportRequest {
     pub request: AdminSystemConfigImportRequest,
     pub root: Map<String, Value>,
 }
 
-#[derive(Debug, Clone)]
+impl std::fmt::Debug for ParsedAdminSystemConfigImportRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ParsedAdminSystemConfigImportRequest")
+            .field("request", &self.request)
+            .field("root", &"[REDACTED]")
+            .finish()
+    }
+}
+
+#[derive(Clone)]
 pub struct ParsedAdminSystemConfigObject<T> {
     pub raw: Map<String, Value>,
     pub value: T,
+}
+
+impl<T: std::fmt::Debug> std::fmt::Debug for ParsedAdminSystemConfigObject<T> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ParsedAdminSystemConfigObject")
+            .field("raw", &"[REDACTED]")
+            .field("value", &self.value)
+            .finish()
+    }
 }
 
 impl<T> ParsedAdminSystemConfigObject<T> {
@@ -1172,6 +1379,12 @@ pub fn admin_email_template_not_found_error(
 pub fn parse_admin_email_template_update(
     request_body: &[u8],
 ) -> Result<AdminEmailTemplateUpdate, (http::StatusCode, serde_json::Value)> {
+    if request_body.len() > ADMIN_EMAIL_TEMPLATE_MAX_PREVIEW_BYTES {
+        return Err((
+            http::StatusCode::BAD_REQUEST,
+            json!({ "detail": "模板请求体超过允许大小" }),
+        ));
+    }
     let payload = match serde_json::from_slice::<serde_json::Value>(request_body) {
         Ok(serde_json::Value::Object(payload)) => payload,
         _ => {
@@ -1183,7 +1396,15 @@ pub fn parse_admin_email_template_update(
     };
 
     let subject = match payload.get("subject") {
-        Some(serde_json::Value::String(value)) => Some(value.clone()),
+        Some(serde_json::Value::String(value)) if admin_email_template_subject_is_valid(value) => {
+            Some(value.clone())
+        }
+        Some(serde_json::Value::String(_)) => {
+            return Err((
+                http::StatusCode::BAD_REQUEST,
+                json!({ "detail": "模板 subject 超过大小限制或包含非法控制字符" }),
+            ));
+        }
         Some(serde_json::Value::Null) | None => None,
         Some(_) => {
             return Err((
@@ -1193,7 +1414,15 @@ pub fn parse_admin_email_template_update(
         }
     };
     let html = match payload.get("html") {
-        Some(serde_json::Value::String(value)) => Some(value.clone()),
+        Some(serde_json::Value::String(value)) if admin_email_template_html_is_valid(value) => {
+            Some(value.clone())
+        }
+        Some(serde_json::Value::String(_)) => {
+            return Err((
+                http::StatusCode::BAD_REQUEST,
+                json!({ "detail": "模板 html 超过大小限制或包含非法控制字符" }),
+            ));
+        }
         Some(serde_json::Value::Null) | None => None,
         Some(_) => {
             return Err((
@@ -1217,8 +1446,40 @@ pub fn parse_admin_email_template_preview_payload(
     request_body: Option<&[u8]>,
 ) -> Result<serde_json::Map<String, serde_json::Value>, (http::StatusCode, serde_json::Value)> {
     match request_body {
+        Some(bytes) if bytes.len() > ADMIN_EMAIL_TEMPLATE_MAX_PREVIEW_BYTES => Err((
+            http::StatusCode::BAD_REQUEST,
+            json!({ "detail": "模板预览请求体超过允许大小" }),
+        )),
         Some(bytes) => match serde_json::from_slice::<serde_json::Value>(bytes) {
-            Ok(serde_json::Value::Object(payload)) => Ok(payload),
+            Ok(serde_json::Value::Object(payload)) => {
+                if let Some(serde_json::Value::String(value)) = payload.get("html") {
+                    if !admin_email_template_html_is_valid(value) {
+                        return Err((
+                            http::StatusCode::BAD_REQUEST,
+                            json!({ "detail": "模板 html 超过大小限制或包含非法控制字符" }),
+                        ));
+                    }
+                }
+                if let Some(serde_json::Value::String(value)) = payload.get("subject") {
+                    if !admin_email_template_subject_is_valid(value) {
+                        return Err((
+                            http::StatusCode::BAD_REQUEST,
+                            json!({ "detail": "模板 subject 超过大小限制或包含非法控制字符" }),
+                        ));
+                    }
+                }
+                if payload.values().any(|value| {
+                    value.as_str().is_some_and(|value| {
+                        value.len() > ADMIN_EMAIL_TEMPLATE_MAX_PREVIEW_VALUE_BYTES
+                    })
+                }) {
+                    return Err((
+                        http::StatusCode::BAD_REQUEST,
+                        json!({ "detail": "模板预览变量超过允许大小" }),
+                    ));
+                }
+                Ok(payload)
+            }
             Ok(serde_json::Value::Null) => Ok(serde_json::Map::new()),
             _ => Err((
                 http::StatusCode::BAD_REQUEST,
@@ -1309,15 +1570,244 @@ pub fn ldap_module_config_is_valid(config: Option<&StoredLdapModuleConfig>) -> b
     let Some(config) = config else {
         return false;
     };
-    !config.server_url.trim().is_empty()
-        && !config.bind_dn.trim().is_empty()
-        && !config.base_dn.trim().is_empty()
+    normalize_ldap_transport_server_url(&config.server_url, config.use_starttls).is_some()
+        && ldap_module_config_fields_are_valid(config)
+}
+
+/// Validate LDAP configuration fields other than the transport endpoint.
+///
+/// Keeping this separate lets gateway test builds use their in-process
+/// `mockldap` transport while sharing every production data-shape check.
+pub fn ldap_module_config_fields_are_valid(config: &StoredLdapModuleConfig) -> bool {
+    let search_filter = config
+        .user_search_filter
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("(uid={username})");
+    let username_attr = config
+        .username_attr
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("uid");
+    let email_attr = config
+        .email_attr
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("mail");
+    let display_name_attr = config
+        .display_name_attr
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("cn");
+
+    ldap_distinguished_name_is_valid(&config.bind_dn)
+        && ldap_distinguished_name_is_valid(&config.base_dn)
+        && ldap_search_filter_is_valid(search_filter)
+        && ldap_attribute_description_is_valid(username_attr)
+        && ldap_attribute_description_is_valid(email_attr)
+        && ldap_attribute_description_is_valid(display_name_attr)
         && config
             .bind_password_encrypted
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .is_some()
+}
+
+/// Validate the bounded LDAP user filter shape used by the gateway login
+/// implementation.  This pure helper is shared by admin status/validation
+/// code so an imported malformed filter cannot be reported as active.
+pub fn ldap_search_filter_is_valid(value: &str) -> bool {
+    if value.chars().any(char::is_control) {
+        return false;
+    }
+    let value = value.trim();
+    if value.is_empty()
+        || value.len() > 200
+        || !value.contains("{username}")
+        || !value.starts_with('(')
+        || !value.ends_with(')')
+    {
+        return false;
+    }
+
+    let mut depth = 0i32;
+    let mut max_depth = 0i32;
+    let mut chars = value.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '(' => {
+                depth += 1;
+                max_depth = max_depth.max(depth);
+            }
+            ')' => {
+                depth -= 1;
+                if depth < 0 {
+                    return false;
+                }
+                // A valid LDAP filter has one outer pair. Reaching depth zero
+                // before EOF would allow a second top-level expression.
+                if depth == 0 && chars.peek().is_some() {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
+    depth == 0 && max_depth <= 5
+}
+
+/// Validate a DN as bounded, protocol-safe configuration data.
+///
+/// DN strings are encoded as their own LDAP protocol fields, so reparsing the
+/// full RFC 4514 grammar here would add compatibility risk without preventing
+/// filter injection. Raw control characters and unbounded values are the
+/// relevant configuration hazards at this boundary.
+pub fn ldap_distinguished_name_is_valid(value: &str) -> bool {
+    if value.chars().any(char::is_control) {
+        return false;
+    }
+    let value = value.trim();
+    !value.is_empty() && value.len() <= 4096
+}
+
+/// Validate an RFC 4512 AttributeDescription used both for requested LDAP
+/// attributes and, for the default username lookup, as filter syntax.
+pub fn ldap_attribute_description_is_valid(value: &str) -> bool {
+    if value.chars().any(char::is_control) {
+        return false;
+    }
+    let value = value.trim();
+    if value.is_empty() || value.len() > 128 || !value.is_ascii() {
+        return false;
+    }
+
+    let mut parts = value.split(';');
+    let Some(attribute_type) = parts.next() else {
+        return false;
+    };
+    if !ldap_attribute_type_is_valid(attribute_type) {
+        return false;
+    }
+    parts.all(|option| {
+        !option.is_empty()
+            && option
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    })
+}
+
+fn ldap_attribute_type_is_valid(value: &str) -> bool {
+    let mut bytes = value.bytes();
+    if value
+        .as_bytes()
+        .first()
+        .is_some_and(u8::is_ascii_alphabetic)
+    {
+        return bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'-');
+    }
+
+    let mut components = value.split('.');
+    let Some(first) = components.next() else {
+        return false;
+    };
+    let Some(second) = components.next() else {
+        return false;
+    };
+    ldap_oid_component_is_valid(first)
+        && ldap_oid_component_is_valid(second)
+        && components.all(ldap_oid_component_is_valid)
+}
+
+fn ldap_oid_component_is_valid(value: &str) -> bool {
+    !value.is_empty()
+        && value.bytes().all(|byte| byte.is_ascii_digit())
+        && (value.len() == 1 || !value.starts_with('0'))
+}
+
+/// Parse and canonicalize an LDAP transport endpoint.
+///
+/// LDAP simple binds carry credentials, therefore plaintext `ldap://` is only
+/// accepted when StartTLS is explicitly enabled.  This helper validates the
+/// transport URL shape and removes URL-controlled request data (credentials,
+/// query strings, fragments, and paths).  It intentionally does not apply an
+/// IP allow/deny policy: LDAP servers are commonly deployed on private
+/// networks, and network reachability policy belongs to the outbound
+/// transport layer rather than this pure configuration validator.
+pub fn normalize_ldap_transport_server_url(raw: &str, use_starttls: bool) -> Option<String> {
+    normalize_ldap_transport_server_url_inner(raw, use_starttls, false)
+}
+
+/// Test-only variant used by gateway fixtures that emulate an LDAP endpoint
+/// with the `mockldap://` scheme.  Production callers must use
+/// [`normalize_ldap_transport_server_url`].
+#[doc(hidden)]
+pub fn normalize_ldap_transport_server_url_for_tests(
+    raw: &str,
+    use_starttls: bool,
+) -> Option<String> {
+    normalize_ldap_transport_server_url_inner(raw, use_starttls, true)
+}
+
+fn normalize_ldap_transport_server_url_inner(
+    raw: &str,
+    use_starttls: bool,
+    allow_mockldap: bool,
+) -> Option<String> {
+    if raw.chars().any(char::is_control) {
+        return None;
+    }
+    let raw = raw.trim();
+    if raw.is_empty() || raw.contains('@') {
+        return None;
+    }
+    let candidate = if raw.contains("://") {
+        raw.to_string()
+    } else {
+        format!("ldap://{raw}")
+    };
+    let Ok(mut parsed) = Url::parse(&candidate) else {
+        return None;
+    };
+    let scheme = parsed.scheme().to_ascii_lowercase();
+    let secure_transport = match scheme.as_str() {
+        "ldaps" => true,
+        "ldap" => use_starttls,
+        "mockldap" => allow_mockldap,
+        _ => false,
+    };
+    if !secure_transport
+        || parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+        || (parsed.path() != "" && parsed.path() != "/")
+    {
+        return None;
+    }
+    let host = parsed
+        .host_str()?
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    if host.is_empty() {
+        return None;
+    }
+    parsed.set_host(Some(&host)).ok()?;
+    let default_port = match scheme.as_str() {
+        "ldaps" => Some(636),
+        "ldap" => Some(389),
+        "mockldap" => None,
+        _ => None,
+    };
+    if default_port.is_some_and(|port| parsed.port() == Some(port)) {
+        parsed.set_port(None).ok()?;
+    }
+    Some(parsed.to_string().trim_end_matches('/').to_string())
 }
 
 pub struct AdminModuleValidationInput<'a> {
@@ -1394,14 +1884,50 @@ pub fn build_admin_module_validation_result(
             let Some(config) = ldap_config else {
                 return (false, Some("请先配置 LDAP 连接信息".to_string()));
             };
-            if config.server_url.trim().is_empty() {
+            if normalize_ldap_transport_server_url(&config.server_url, config.use_starttls)
+                .is_none()
+            {
                 return (false, Some("请配置 LDAP 服务器地址".to_string()));
             }
-            if config.bind_dn.trim().is_empty() {
-                return (false, Some("请配置绑定 DN".to_string()));
+            if !ldap_distinguished_name_is_valid(&config.bind_dn) {
+                return (false, Some("请配置有效的绑定 DN".to_string()));
             }
-            if config.base_dn.trim().is_empty() {
-                return (false, Some("请配置搜索基准 DN".to_string()));
+            if !ldap_distinguished_name_is_valid(&config.base_dn) {
+                return (false, Some("请配置有效的搜索基准 DN".to_string()));
+            }
+            let search_filter = config
+                .user_search_filter
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or("(uid={username})");
+            if !ldap_search_filter_is_valid(search_filter) {
+                return (false, Some("请配置有效的 LDAP 搜索过滤器".to_string()));
+            }
+            for (attribute, label) in [
+                (
+                    config.username_attr.as_deref().unwrap_or("uid"),
+                    "用户名属性",
+                ),
+                (config.email_attr.as_deref().unwrap_or("mail"), "邮箱属性"),
+                (
+                    config.display_name_attr.as_deref().unwrap_or("cn"),
+                    "显示名称属性",
+                ),
+            ] {
+                let attribute = attribute.trim();
+                let attribute = if attribute.is_empty() {
+                    match label {
+                        "用户名属性" => "uid",
+                        "邮箱属性" => "mail",
+                        _ => "cn",
+                    }
+                } else {
+                    attribute
+                };
+                if !ldap_attribute_description_is_valid(attribute) {
+                    return (false, Some(format!("请配置有效的 LDAP {label}")));
+                }
             }
             if config
                 .bind_password_encrypted
@@ -1653,6 +2179,11 @@ pub fn normalize_admin_system_config_key(requested_key: &str) -> String {
         "module.server_chan_push.send_key".to_string()
     } else if trimmed.eq_ignore_ascii_case("module.important_notification.server_chan_template") {
         "module.server_chan_push.template".to_string()
+    } else if let Some(canonical) = SENSITIVE_SYSTEM_CONFIG_KEYS
+        .iter()
+        .find(|candidate| candidate.eq_ignore_ascii_case(trimmed))
+    {
+        (*canonical).to_string()
     } else {
         trimmed.to_string()
     }
@@ -1702,7 +2233,7 @@ pub fn admin_system_config_default_value(key: &str) -> Option<serde_json::Value>
         "site_subtitle" => Some(json!("AI Gateway")),
         "default_user_initial_gift_usd" => Some(json!(10.0)),
         "password_policy_level" => Some(json!("weak")),
-        REQUEST_RECORD_LEVEL_KEY => Some(json!("full")),
+        REQUEST_RECORD_LEVEL_KEY => Some(json!("basic")),
         "max_request_body_size" => Some(json!(0)),
         "max_response_body_size" => Some(json!(0)),
         "sensitive_headers" => Some(json!([
@@ -1725,8 +2256,6 @@ pub fn admin_system_config_default_value(key: &str) -> Option<serde_json::Value>
         "proxy_node_metrics_cleanup_batch_size" => Some(json!(5000)),
         "enable_provider_checkin" => Some(json!(true)),
         "provider_checkin_time" => Some(json!("01:05")),
-        "provider_priority_mode" => Some(json!("provider")),
-        "scheduling_mode" => Some(json!("cache_affinity")),
         "auto_delete_expired_keys" => Some(json!(false)),
         "turnstile_enabled" => Some(json!(false)),
         "turnstile_site_key" => Some(serde_json::Value::Null),
@@ -1754,10 +2283,12 @@ pub fn admin_system_config_default_value(key: &str) -> Option<serde_json::Value>
         "email_suffix_mode" => Some(json!("none")),
         "email_suffix_list" => Some(json!([])),
         "enable_format_conversion" => Some(json!(false)),
-        "cyber_continue_failover" => Some(json!(false)),
         "enable_model_directives" => Some(json!(false)),
+        // Failover after a provider-side Cyber policy refusal is an explicit
+        // opt-in.  Keep the system-config fallback aligned with the routing
+        // policy default so an unset value cannot accidentally enable it.
+        "cyber_continue_failover" => Some(json!(false)),
         "model_directives" => Some(aether_ai_formats::default_model_directives_config()),
-        "keep_priority_on_conversion" => Some(json!(false)),
         "audit_log_retention_days" => Some(json!(30)),
         "enable_db_maintenance" => Some(json!(true)),
         "system_proxy_node_id" => Some(serde_json::Value::Null),
@@ -1975,6 +2506,17 @@ fn normalize_nullable_string_config_value(
     }
 }
 
+fn normalize_smtp_control_config_value(value: serde_json::Value) -> Result<serde_json::Value, ()> {
+    let normalized = normalize_nullable_string_config_value(value)?;
+    if normalized
+        .as_str()
+        .is_some_and(|raw| raw.bytes().any(|byte| matches!(byte, b'\r' | b'\n' | 0)))
+    {
+        return Err(());
+    }
+    Ok(normalized)
+}
+
 fn normalize_bark_server_url_config_value(
     value: serde_json::Value,
 ) -> Result<serde_json::Value, ()> {
@@ -1985,10 +2527,20 @@ fn normalize_bark_server_url_config_value(
             if raw.is_empty() {
                 return Ok(json!(DEFAULT_BARK_API_BASE));
             }
-            if !raw.starts_with("https://") && !raw.starts_with("http://") {
+            if raw.len() > 2_048 {
                 return Err(());
             }
-            Ok(json!(raw))
+            let parsed = url::Url::parse(raw).map_err(|_| ())?;
+            if !matches!(parsed.scheme(), "https" | "http")
+                || parsed.host_str().is_none()
+                || !parsed.username().is_empty()
+                || parsed.password().is_some()
+                || parsed.query().is_some()
+                || parsed.fragment().is_some()
+            {
+                return Err(());
+            }
+            Ok(json!(parsed.as_str().trim_end_matches('/')))
         }
         _ => Err(()),
     }
@@ -2236,8 +2788,8 @@ pub fn parse_admin_system_config_update(
     }
 
     match normalized_key.as_str() {
-        "cyber_continue_failover"
-        | "enable_model_directives"
+        "enable_model_directives"
+        | "cyber_continue_failover"
         | "module.important_notification.enabled"
         | "module.important_notification.email_enabled"
         | "module.server_chan_push.enabled"
@@ -2329,6 +2881,14 @@ pub fn parse_admin_system_config_update(
                 }
             };
         }
+        "smtp_host" | "smtp_from_email" | "smtp_from_name" => {
+            value = normalize_smtp_control_config_value(value).map_err(|_| {
+                (
+                    http::StatusCode::BAD_REQUEST,
+                    json!({ "detail": "请求数据验证失败" }),
+                )
+            })?;
+        }
         "model_directives" => {
             if value.is_null() {
                 value = aether_ai_formats::default_model_directives_config();
@@ -2400,6 +2960,15 @@ pub fn parse_admin_system_config_update(
             }
         },
         _ => {}
+    }
+
+    if is_sensitive_admin_system_config_key(&normalized_key)
+        && !matches!(&value, Value::Null | Value::String(_))
+    {
+        return Err((
+            http::StatusCode::BAD_REQUEST,
+            json!({ "detail": "请求数据验证失败" }),
+        ));
     }
 
     Ok(AdminSystemConfigUpdate {
@@ -2719,6 +3288,9 @@ pub fn build_admin_proxy_nodes_not_found_response() -> Response<Body> {
 }
 
 pub fn build_admin_proxy_node_payload(node: &StoredProxyNode) -> serde_json::Value {
+    // Keep operational tunnel metadata, but never expose either legacy plaintext
+    // or encrypted credential material through an admin response.
+    let proxy_metadata = redact_admin_proxy_node_metadata(node.proxy_metadata.as_ref());
     let mut payload = serde_json::Map::from_iter([
         ("id".to_string(), json!(node.id)),
         ("name".to_string(), json!(node.name)),
@@ -2755,7 +3327,7 @@ pub fn build_admin_proxy_node_payload(node: &StoredProxyNode) -> serde_json::Val
         ("failed_requests".to_string(), json!(node.failed_requests)),
         ("dns_failures".to_string(), json!(node.dns_failures)),
         ("stream_errors".to_string(), json!(node.stream_errors)),
-        ("proxy_metadata".to_string(), json!(node.proxy_metadata)),
+        ("proxy_metadata".to_string(), json!(proxy_metadata)),
         ("hardware_info".to_string(), json!(node.hardware_info)),
         (
             "estimated_max_concurrency".to_string(),
@@ -2776,15 +3348,32 @@ pub fn build_admin_proxy_node_payload(node: &StoredProxyNode) -> serde_json::Val
     if node.is_manual {
         payload.insert("proxy_url".to_string(), json!(node.proxy_url));
         payload.insert("proxy_username".to_string(), json!(node.proxy_username));
-        payload.insert(
-            "proxy_password".to_string(),
-            json!(mask_admin_proxy_node_password(
-                node.proxy_password.as_deref()
-            )),
-        );
     }
+    payload.insert(
+        "has_proxy_password".to_string(),
+        json!(node
+            .proxy_password
+            .as_deref()
+            .is_some_and(|password| !password.is_empty())),
+    );
 
     serde_json::Value::Object(payload)
+}
+
+fn redact_admin_proxy_node_metadata(
+    metadata: Option<&serde_json::Value>,
+) -> Option<serde_json::Value> {
+    let metadata = metadata?;
+    let mut metadata = metadata.clone();
+    if let Some(tunnel_security) = metadata
+        .as_object_mut()
+        .and_then(|object| object.get_mut("tunnel_security"))
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        tunnel_security.remove("encryption_key");
+        tunnel_security.remove("encryption_key_encrypted");
+    }
+    Some(metadata)
 }
 
 pub fn build_admin_proxy_node_event_payload(event: &StoredProxyNodeEvent) -> serde_json::Value {
@@ -3114,24 +3703,247 @@ fn suffixed_path_identifier_from_path(
         .filter(|value| !value.is_empty() && !value.contains('/'))
 }
 
-fn mask_admin_proxy_node_password(password: Option<&str>) -> Option<String> {
-    let password = password?;
-    if password.is_empty() {
-        return None;
-    }
-    if password.len() < 8 {
-        return Some("****".to_string());
-    }
-    Some(format!(
-        "{}****{}",
-        &password[..2],
-        &password[password.len() - 2..]
-    ))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn email_template_update_rejects_oversized_and_control_fields() {
+        let oversized_subject = serde_json::json!({
+            "subject": "x".repeat(ADMIN_EMAIL_TEMPLATE_MAX_SUBJECT_BYTES + 1)
+        });
+        assert!(
+            parse_admin_email_template_update(oversized_subject.to_string().as_bytes()).is_err()
+        );
+
+        let control_html = serde_json::json!({ "html": "<p>ok</p>\u{0001}" });
+        assert!(parse_admin_email_template_update(control_html.to_string().as_bytes()).is_err());
+    }
+
+    #[test]
+    fn email_template_preview_bounds_html_and_variable_values() {
+        let oversized_html = serde_json::json!({
+            "html": "x".repeat(ADMIN_EMAIL_TEMPLATE_MAX_HTML_BYTES + 1)
+        });
+        assert!(parse_admin_email_template_preview_payload(Some(
+            oversized_html.to_string().as_bytes()
+        ))
+        .is_err());
+
+        let oversized_value = serde_json::json!({
+            "app_name": "x".repeat(ADMIN_EMAIL_TEMPLATE_MAX_PREVIEW_VALUE_BYTES + 1)
+        });
+        assert!(parse_admin_email_template_preview_payload(Some(
+            oversized_value.to_string().as_bytes()
+        ))
+        .is_err());
+    }
+
+    #[test]
+    fn email_template_field_validators_allow_normal_markup_and_subjects() {
+        assert!(admin_email_template_subject_is_valid("验证码"));
+        assert!(admin_email_template_html_is_valid("<p>{{app_name}}</p>\n"));
+        assert!(!admin_email_template_html_is_valid("<p>bad\u{007f}</p>"));
+    }
+
+    #[test]
+    fn ldap_module_validation_requires_an_encrypted_transport() {
+        let config = |server_url: &str, use_starttls: bool| StoredLdapModuleConfig {
+            server_url: server_url.to_string(),
+            bind_dn: "cn=bind,dc=example,dc=com".to_string(),
+            bind_password_encrypted: Some("sealed-password".to_string()),
+            base_dn: "dc=example,dc=com".to_string(),
+            user_search_filter: Some("(uid={username})".to_string()),
+            username_attr: Some("uid".to_string()),
+            email_attr: Some("mail".to_string()),
+            display_name_attr: Some("cn".to_string()),
+            is_enabled: true,
+            is_exclusive: false,
+            use_starttls,
+            connect_timeout: Some(10),
+        };
+
+        assert!(ldap_module_config_is_valid(Some(&config(
+            "ldaps://ldap.internal.example:636",
+            false,
+        ))));
+        assert!(ldap_module_config_is_valid(Some(&config(
+            "ldap://10.0.0.7:389",
+            true,
+        ))));
+        assert!(!ldap_module_config_is_valid(Some(&config(
+            "ldap://10.0.0.7:389",
+            false,
+        ))));
+        assert!(!ldap_module_config_is_valid(Some(&config(
+            "ldaps://user:password@ldap.internal.example",
+            false,
+        ))));
+        assert!(!ldap_module_config_is_valid(Some(&config(
+            "ldaps://ldap.internal.example?secret=1",
+            false,
+        ))));
+        assert!(!ldap_module_config_is_valid(Some(&config(
+            "ldaps://ldap.internal.example#fragment",
+            false,
+        ))));
+        assert!(
+            normalize_ldap_transport_server_url("mockldap://ldap.internal.example", false,)
+                .is_none()
+        );
+        assert!(normalize_ldap_transport_server_url_for_tests(
+            "mockldap://ldap.internal.example",
+            false,
+        )
+        .is_some());
+    }
+
+    #[test]
+    fn ldap_search_filter_requires_one_outer_expression() {
+        assert!(ldap_search_filter_is_valid("(uid={username})"));
+        assert!(ldap_search_filter_is_valid(
+            "(&(objectClass=person)(uid={username}))"
+        ));
+
+        assert!(!ldap_search_filter_is_valid(
+            "(uid={username})(objectClass=person)"
+        ));
+        assert!(!ldap_search_filter_is_valid(
+            "(uid={username}) (objectClass=person)"
+        ));
+        assert!(!ldap_search_filter_is_valid("(uid={username}))"));
+        assert!(!ldap_search_filter_is_valid("((uid={username})"));
+        assert!(!ldap_search_filter_is_valid("(uid=alice)"));
+    }
+
+    #[test]
+    fn ldap_attribute_descriptions_follow_bounded_rfc4512_shape() {
+        for valid in [
+            "uid",
+            "sAMAccountName",
+            "display-name",
+            "mail;lang-en",
+            "1.2.840.113556.1.4.221",
+        ] {
+            assert!(ldap_attribute_description_is_valid(valid), "{valid}");
+        }
+        for invalid in [
+            "",
+            "uid)(|(objectClass=*)",
+            "uid\nmail",
+            "-uid",
+            "01.2.3",
+            "1",
+            "uid;",
+            "uid;lang=en",
+            "用户名",
+        ] {
+            assert!(!ldap_attribute_description_is_valid(invalid), "{invalid}");
+        }
+        assert!(!ldap_attribute_description_is_valid(&"a".repeat(129)));
+    }
+
+    #[test]
+    fn ldap_distinguished_names_reject_control_and_unbounded_data() {
+        assert!(ldap_distinguished_name_is_valid(
+            "cn=service\\, account,ou=users,dc=example,dc=com"
+        ));
+        assert!(!ldap_distinguished_name_is_valid(""));
+        assert!(!ldap_distinguished_name_is_valid(
+            "cn=service\n,dc=example,dc=com"
+        ));
+        assert!(!ldap_distinguished_name_is_valid(&"a".repeat(4097)));
+    }
+
+    #[test]
+    fn ldap_module_field_validation_rejects_filter_and_attribute_injection() {
+        let mut config = StoredLdapModuleConfig {
+            server_url: "ldaps://ldap.internal.example".to_string(),
+            bind_dn: "cn=bind,dc=example,dc=com".to_string(),
+            bind_password_encrypted: Some("sealed-password".to_string()),
+            base_dn: "dc=example,dc=com".to_string(),
+            user_search_filter: Some("(uid={username})".to_string()),
+            username_attr: Some("uid".to_string()),
+            email_attr: Some("mail".to_string()),
+            display_name_attr: Some("cn".to_string()),
+            is_enabled: true,
+            is_exclusive: false,
+            use_starttls: false,
+            connect_timeout: Some(10),
+        };
+        assert!(ldap_module_config_fields_are_valid(&config));
+
+        config.user_search_filter = Some("(uid={username})(objectClass=*)".to_string());
+        assert!(!ldap_module_config_fields_are_valid(&config));
+        config.user_search_filter = Some("(uid={username})".to_string());
+        config.username_attr = Some("uid)(|(objectClass=*)".to_string());
+        assert!(!ldap_module_config_fields_are_valid(&config));
+        config.username_attr = Some("uid".to_string());
+        config.base_dn = "dc=example,dc=com\n".to_string();
+        assert!(!ldap_module_config_fields_are_valid(&config));
+    }
+
+    #[test]
+    fn admin_proxy_node_payload_redacts_tunnel_psk_and_password() {
+        let mut node = StoredProxyNode::new(
+            "node-1".to_string(),
+            "edge-1".to_string(),
+            "127.0.0.1".to_string(),
+            0,
+            true,
+            "online".to_string(),
+            30,
+            0,
+            0,
+            0,
+            0,
+            0,
+            false,
+            false,
+            0,
+        )
+        .expect("proxy node should build")
+        .with_manual_proxy_fields(
+            Some("http://proxy.example:8080".to_string()),
+            Some("alice".to_string()),
+            Some("supersecret".to_string()),
+        );
+        node.proxy_metadata = Some(json!({
+            "version": "1.2.3",
+            "tunnel_security": {
+                "mode": "non_tls_required",
+                "encryption_key": "secret-psk",
+                "encryption_key_encrypted": "sealed-secret-psk",
+                "rotation_id": "rotation-1"
+            }
+        }));
+
+        let payload = build_admin_proxy_node_payload(&node);
+
+        assert_eq!(payload["has_proxy_password"], json!(true));
+        assert!(payload.get("proxy_password").is_none());
+        assert_eq!(
+            payload["proxy_metadata"]["tunnel_security"]["mode"],
+            json!("non_tls_required")
+        );
+        assert_eq!(
+            payload["proxy_metadata"]["tunnel_security"]["rotation_id"],
+            json!("rotation-1")
+        );
+        assert!(payload["proxy_metadata"]["tunnel_security"]
+            .get("encryption_key")
+            .is_none());
+        assert!(payload["proxy_metadata"]["tunnel_security"]
+            .get("encryption_key_encrypted")
+            .is_none());
+        assert_eq!(
+            node.proxy_metadata
+                .as_ref()
+                .and_then(|value| value.pointer("/tunnel_security/encryption_key"))
+                .and_then(serde_json::Value::as_str),
+            Some("secret-psk")
+        );
+    }
 
     #[test]
     fn api_formats_payload_exposes_realtime_and_codex_live_separately() {
@@ -3309,6 +4121,57 @@ mod tests {
     }
 
     #[test]
+    fn system_config_debug_output_redacts_exported_credentials() {
+        let secrets = [
+            "debug-provider-api-key",
+            "debug-provider-auth-config",
+            "debug-proxy-password",
+            "debug-ldap-password",
+            "debug-oauth-client-secret",
+            "debug-smtp-password",
+        ];
+        let document = serde_json::from_value::<AdminSystemConfigDocument>(json!({
+            "version": "2.2",
+            "providers": [{
+                "name": "provider",
+                "api_keys": [{
+                    "api_key": secrets[0],
+                    "auth_config": {"refresh_token": secrets[1]}
+                }]
+            }],
+            "proxy_nodes": [{
+                "name": "proxy",
+                "proxy_password": secrets[2]
+            }],
+            "ldap_config": {
+                "server_url": "ldaps://ldap.example.com",
+                "bind_dn": "cn=admin,dc=example,dc=com",
+                "bind_password": secrets[3],
+                "base_dn": "dc=example,dc=com"
+            },
+            "oauth_providers": [{
+                "provider_type": "linuxdo",
+                "display_name": "Linux.do",
+                "client_id": "client-id",
+                "client_secret": secrets[4],
+                "redirect_uri": "https://gateway.example/api/oauth/linuxdo/callback",
+                "frontend_callback_url": "https://frontend.example/auth/callback"
+            }],
+            "system_configs": [{
+                "key": "smtp_password",
+                "value": secrets[5]
+            }]
+        }))
+        .expect("system config document should deserialize");
+        let rendered = format!("{document:?}");
+
+        for secret in secrets {
+            assert!(!rendered.contains(secret), "Debug output leaked {secret}");
+        }
+        assert!(rendered.contains("[REDACTED]"));
+    }
+
+    #[test]
     fn parse_admin_system_config_import_request_rejects_unknown_versions() {
         for version in ["1.9", "2.4"] {
             let err = parse_admin_system_config_import_request(
@@ -3470,6 +4333,42 @@ mod tests {
     }
 
     #[test]
+    fn sensitive_admin_system_config_keys_use_canonical_storage_spelling() {
+        assert_eq!(
+            normalize_admin_system_config_key(" SMTP_PASSWORD "),
+            "smtp_password"
+        );
+        assert_eq!(
+            normalize_admin_system_config_key("BACKUP_S3_SECRET_ACCESS_KEY"),
+            "backup_s3_secret_access_key"
+        );
+        assert_eq!(
+            normalize_admin_system_config_key("MODULE.BARK_PUSH.DEVICE_KEY"),
+            "module.bark_push.device_key"
+        );
+    }
+
+    #[test]
+    fn sensitive_admin_system_config_values_reject_non_strings() {
+        for key in SENSITIVE_SYSTEM_CONFIG_KEYS {
+            for value in [
+                json!(123),
+                json!(true),
+                json!(["secret"]),
+                json!({"secret": true}),
+            ] {
+                let body = serde_json::to_vec(&json!({ "value": value }))
+                    .expect("sensitive config body should serialize");
+                let error = parse_admin_system_config_update(key, &body)
+                    .expect_err("non-string sensitive value must fail closed");
+                assert_eq!(error.0, http::StatusCode::BAD_REQUEST, "key={key}");
+            }
+            assert!(parse_admin_system_config_update(key, br#"{"value":null}"#).is_ok());
+            assert!(parse_admin_system_config_update(key, br#"{"value":"secret"}"#).is_ok());
+        }
+    }
+
+    #[test]
     fn s3_backup_secret_access_key_is_sensitive() {
         assert!(is_sensitive_admin_system_config_key(
             "backup_s3_secret_access_key"
@@ -3528,6 +4427,28 @@ mod tests {
             br#"{"value":"true"}"#,
         )
         .is_err());
+    }
+
+    #[test]
+    fn smtp_control_fields_reject_header_and_command_injection() {
+        for key in ["smtp_host", "smtp_from_email", "smtp_from_name"] {
+            for value in [
+                "safe\r\nX-Injected: yes",
+                "safe\nMAIL FROM:<attacker>",
+                "safe\0tail",
+            ] {
+                let body = serde_json::to_vec(&json!({ "value": value }))
+                    .expect("SMTP config body should serialize");
+                let error = parse_admin_system_config_update(key, &body)
+                    .expect_err("SMTP control characters must be rejected");
+                assert_eq!(error.0, http::StatusCode::BAD_REQUEST);
+            }
+        }
+
+        let update =
+            parse_admin_system_config_update("smtp_from_name", br#"{"value":" Aether Mail "}"#)
+                .expect("normal SMTP display name should parse");
+        assert_eq!(update.value, json!("Aether Mail"));
     }
 
     #[test]

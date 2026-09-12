@@ -177,6 +177,7 @@ pub(crate) use aether_ai_formats::{
     api_format_defaults_to_client_error_failover, api_format_defaults_to_non_stream,
     api_format_permission_covers, codex_responses_lite_tool_is_client_executed,
     intersect_api_format_allowed_lists, is_embedding_api_format, is_rerank_api_format,
+    normalize_openai_responses_message_item_ids, openai_responses_message_item_id,
     openai_responses_request_operation, openai_responses_synthetic_reasoning_item_id,
     strip_incompatible_openai_responses_reasoning_items,
     strip_incompatible_openai_responses_reasoning_items_with_policy, ApiOperation, ClientSurface,

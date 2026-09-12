@@ -18,6 +18,7 @@ use crate::ai_serving::{
 };
 use crate::control::GatewayControlDecision;
 use crate::orchestration::release_pool_key_lease_from_report_context;
+use crate::plan_usage_policy::PlanUsagePolicySnapshot;
 use crate::{AppState, GatewayError};
 
 /// Owns a selected pool-key lease until the attempt lifecycle has taken over
@@ -149,6 +150,7 @@ pub(super) async fn begin_responses_websocket_turn_with_planned_lease(
     control_decision: &GatewayControlDecision,
     decision: AiExecutionDecision,
     client_event: &Value,
+    plan_usage_policy_snapshot: Option<PlanUsagePolicySnapshot>,
     mut planned_lease: PlannedPoolKeyLeaseGuard,
 ) -> Result<ActiveProviderAttempt, GatewayError> {
     let state = state.clone();
@@ -163,6 +165,7 @@ pub(super) async fn begin_responses_websocket_turn_with_planned_lease(
             &control_decision,
             decision,
             &client_event,
+            plan_usage_policy_snapshot,
         )
         .await?;
         // ActiveProviderAttempt now owns the report context containing the

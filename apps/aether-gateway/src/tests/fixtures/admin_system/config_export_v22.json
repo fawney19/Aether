@@ -89,6 +89,16 @@
       "description": "Site name from fixture"
     },
     {
+      "key": "smtp_host",
+      "value": "smtp.example.com",
+      "description": "SMTP host from fixture"
+    },
+    {
+      "key": "smtp_user",
+      "value": "smtp-user",
+      "description": "SMTP user from fixture"
+    },
+    {
       "key": "smtp_password",
       "value": "smtp-secret-v22",
       "description": "SMTP password from fixture"

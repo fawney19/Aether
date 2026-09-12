@@ -29,14 +29,13 @@ pub(super) async fn parse_admin_provider_oauth_refresh_request(
             "Key 不存在",
         )));
     };
-    let Some(encrypted_auth_config) = key.encrypted_auth_config.as_deref() else {
+    let Some(_encrypted_auth_config) = key.encrypted_auth_config.as_deref() else {
         return Ok(RefreshDispatch::Respond(response::control_error_response(
             http::StatusCode::BAD_REQUEST,
             "缺少 auth_config，无法 refresh",
         )));
     };
-    let Some(decrypted_auth_config) = helpers::decrypt_auth_config(state, encrypted_auth_config)
-    else {
+    let Some(decrypted_auth_config) = helpers::decrypt_auth_config(state, &key) else {
         return Ok(RefreshDispatch::Respond(response::control_error_response(
             http::StatusCode::SERVICE_UNAVAILABLE,
             "provider oauth encryption unavailable",

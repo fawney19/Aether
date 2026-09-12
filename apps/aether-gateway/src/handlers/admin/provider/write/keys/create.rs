@@ -7,7 +7,6 @@ use crate::handlers::admin::provider::write::normalize::{
 };
 use crate::handlers::admin::request::AdminAppState;
 use crate::handlers::admin::shared::{
-    decrypt_catalog_secret_with_fallbacks, encrypt_catalog_secret_with_fallbacks,
     normalize_json_object, normalize_string_list, parse_catalog_auth_config_json,
 };
 use crate::handlers::shared::normalize_optional_api_key_concurrent_limit;
@@ -73,6 +72,8 @@ pub(crate) async fn build_admin_create_provider_key_record(
         _ => {}
     }
 
+    let key_id = Uuid::new_v4().to_string();
+
     let existing_keys = state
         .list_provider_catalog_keys_by_provider_ids(std::slice::from_ref(&provider.id))
         .await
@@ -83,12 +84,10 @@ pub(crate) async fn build_admin_create_provider_key_record(
             .iter()
             .filter(|existing| raw_secret_auth_type(&existing.auth_type))
         {
-            let Some(decrypted) = existing
-                .encrypted_api_key
-                .as_deref()
-                .and_then(|ciphertext| {
-                    decrypt_catalog_secret_with_fallbacks(state.encryption_key(), ciphertext)
-                })
+            let Some(decrypted) = state
+                .decrypt_provider_catalog_key_api_key(existing)
+                .ok()
+                .flatten()
             else {
                 continue;
             };
@@ -139,8 +138,9 @@ pub(crate) async fn build_admin_create_provider_key_record(
 
     let encrypted_api_key = match auth_type.as_str() {
         "api_key" | "bearer" if !api_key.is_empty() => Some(
-            encrypt_catalog_secret_with_fallbacks(state, &api_key)
-                .ok_or_else(|| "gateway 未配置 provider key 加密密钥".to_string())?,
+            state
+                .seal_provider_catalog_key_api_key(&provider.id, &key_id, &api_key)
+                .map_err(|_| "gateway 未配置 provider key 加密密钥".to_string())?,
         ),
         _ => None,
     };
@@ -150,7 +150,12 @@ pub(crate) async fn build_admin_create_provider_key_record(
         .map(serde_json::to_string)
         .transpose()
         .map_err(|err| err.to_string())?
-        .and_then(|plaintext| encrypt_catalog_secret_with_fallbacks(state, &plaintext));
+        .map(|plaintext| {
+            state
+                .seal_provider_catalog_key_auth_config(&provider.id, &key_id, &plaintext)
+                .map_err(|_| "gateway 未配置 provider key 加密密钥".to_string())
+        })
+        .transpose()?;
 
     let now_unix_secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -160,7 +165,7 @@ pub(crate) async fn build_admin_create_provider_key_record(
     let inherits_provider_api_formats =
         auth_type == "oauth" && provider_type_is_fixed(&provider.provider_type);
     let mut key = StoredProviderCatalogKey::new(
-        Uuid::new_v4().to_string(),
+        key_id,
         provider.id.clone(),
         name.to_string(),
         auth_type,

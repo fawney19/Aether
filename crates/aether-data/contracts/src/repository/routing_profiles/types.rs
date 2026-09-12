@@ -10,6 +10,9 @@ pub struct StoredRoutingGroup {
     pub description: Option<String>,
     pub enabled: bool,
     pub is_system_default: bool,
+    /// Stable administrator-defined display order. This is intentionally not
+    /// consulted by request routing or candidate selection.
+    pub sort_order: i64,
     pub config_json: Value,
     pub version: i64,
     pub created_at: i64,
@@ -28,6 +31,7 @@ impl StoredRoutingGroup {
             description: record.description,
             enabled: record.enabled,
             is_system_default: record.is_system_default,
+            sort_order: record.sort_order.max(0),
             config_json: record.config_json,
             version: record.version.max(1),
             created_at: record.created_at,
@@ -44,6 +48,7 @@ pub struct CreateRoutingGroupRecord {
     pub description: Option<String>,
     pub enabled: bool,
     pub is_system_default: bool,
+    pub sort_order: i64,
     pub config_json: Value,
     pub version: i64,
     pub created_at: i64,
@@ -57,6 +62,7 @@ pub struct UpdateRoutingGroupRecord {
     pub description: Option<Option<String>>,
     pub enabled: Option<bool>,
     pub is_system_default: Option<bool>,
+    pub sort_order: Option<i64>,
     pub config_json: Option<Value>,
     pub version: Option<i64>,
     pub updated_at: i64,
@@ -254,6 +260,9 @@ pub fn apply_group_patch(
     }
     if let Some(is_system_default) = patch.is_system_default {
         group.is_system_default = is_system_default;
+    }
+    if let Some(sort_order) = patch.sort_order {
+        group.sort_order = sort_order.max(0);
     }
     if let Some(config_json) = patch.config_json {
         if !config_json.is_object() {

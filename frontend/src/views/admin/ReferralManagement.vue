@@ -261,6 +261,7 @@
 </template>
 
 <script setup lang="ts">
+import { getI18nLocale } from '@/i18n'
 import { computed, onMounted, ref } from 'vue'
 import { RefreshCw } from 'lucide-vue-next'
 import {
@@ -326,7 +327,7 @@ function formatUsd(value: number): string {
 
 function formatUnix(value?: number | null): string {
   if (!value) return '-'
-  return new Date(value * 1000).toLocaleString('zh-CN')
+  return new Date(value * 1000).toLocaleString(getI18nLocale())
 }
 
 function getRewardTypeLabel(value: string): string {
@@ -389,7 +390,6 @@ async function loadRewards() {
     offset: 0
   })
   rewards.value = response.items
-  stats.value = response.stats
 }
 
 async function loadAll() {

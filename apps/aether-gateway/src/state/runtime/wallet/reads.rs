@@ -191,6 +191,18 @@ impl AppState {
             .map_err(|err| GatewayError::Internal(err.to_string()))
     }
 
+    pub(crate) async fn find_wallet_recharge_order_by_order_no(
+        &self,
+        user_id: &str,
+        order_no: &str,
+    ) -> Result<Option<aether_data::repository::wallet::StoredAdminPaymentOrder>, GatewayError>
+    {
+        self.data
+            .find_wallet_recharge_order_by_order_no(user_id, order_no)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
     pub(crate) async fn find_pending_plan_purchase_order_by_user_id(
         &self,
         user_id: &str,
@@ -199,6 +211,28 @@ impl AppState {
     {
         self.data
             .find_pending_plan_purchase_order_by_user_id(user_id, product_id)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
+    pub(crate) async fn find_payment_order_by_order_no(
+        &self,
+        order_no: &str,
+    ) -> Result<Option<aether_data::repository::wallet::StoredAdminPaymentOrder>, GatewayError>
+    {
+        self.data
+            .find_payment_order_by_order_no(order_no)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
+    pub(crate) async fn find_payment_order_by_id(
+        &self,
+        order_id: &str,
+    ) -> Result<Option<aether_data::repository::wallet::StoredAdminPaymentOrder>, GatewayError>
+    {
+        self.data
+            .find_admin_payment_order(order_id)
             .await
             .map_err(|err| GatewayError::Internal(err.to_string()))
     }

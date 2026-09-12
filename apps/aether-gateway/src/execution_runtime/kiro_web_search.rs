@@ -21,11 +21,13 @@ use crate::execution_runtime::kiro_cache::{
 };
 use crate::execution_runtime::ndjson::encode_stream_frame_ndjson;
 use crate::execution_runtime::transport::{
-    DirectSyncExecutionRuntime, ExecutionRuntimeTransportError,
+    apply_upstream_response_body_limit, decode_base64_body_with_limit,
+    json_value_fits_serialized_limit, DirectSyncExecutionRuntime, ExecutionRuntimeTransportError,
 };
 use crate::AppState;
 
 const WEB_SEARCH_TOOL_NAME: &str = "web_search";
+const MAX_KIRO_MCP_JSON_BYTES: usize = 8 * 1024 * 1024;
 const WEB_SEARCH_TOOL_TYPE_PREFIX: &str = "web_search";
 const WEB_SEARCH_QUERY_PREFIX: &str = "Perform a web search for the query: ";
 
@@ -73,8 +75,6 @@ struct McpResponse {
 struct McpError {
     #[serde(default)]
     code: Option<i64>,
-    #[serde(default)]
-    message: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -146,14 +146,14 @@ pub(crate) async fn maybe_execute_kiro_web_search_stream(
         request_id = %plan.request_id,
         candidate_id = ?plan.candidate_id,
         status_code = mcp_execution.result.status_code,
-        mcp_url = %mcp_execution.url,
+        mcp_origin = %crate::handlers::shared::security_log_url_origin(&mcp_execution.url),
         profile_arn_present = mcp_execution.profile_arn_present,
         "gateway executed Kiro web_search through MCP endpoint"
     );
 
     if !(200..300).contains(&mcp_execution.result.status_code) {
         return Ok(Some(KiroWebSearchStream {
-            frame_stream: execution_result_frame_stream(&mcp_execution.result),
+            frame_stream: execution_result_failure_frame_stream(&mcp_execution.result),
             report_context: report_context.cloned(),
         }));
     }
@@ -183,7 +183,7 @@ pub(crate) async fn maybe_execute_kiro_web_search_stream(
         cache_usage,
     )
     .map_err(ExecutionRuntimeTransportError::BodyEncode)?;
-    let mut synthetic_context = synthetic_report_context(report_context, mcp_execution.url);
+    let mut synthetic_context = synthetic_report_context(report_context);
     if let Some(context) = synthetic_context.as_mut().and_then(Value::as_object_mut) {
         context.insert("kiro_web_search_mcp".to_string(), Value::Bool(true));
     }
@@ -214,13 +214,13 @@ async fn kiro_simulated_cache_enabled(state: &AppState, plan: &ExecutionPlan) ->
             .is_some_and(|provider| {
                 kiro_simulated_cache_enabled_from_provider_config(provider.config.as_ref())
             }),
-        Err(err) => {
+        Err(_) => {
             warn!(
                 event_name = "kiro_simulated_cache_config_read_failed",
                 log_type = "event",
                 request_id = %plan.request_id,
                 provider_id = %plan.provider_id,
-                error = ?err,
+                error_category = "provider_catalog_read_failed",
                 "failed to read Kiro simulated cache provider config; defaulting disabled"
             );
             false
@@ -228,28 +228,26 @@ async fn kiro_simulated_cache_enabled(state: &AppState, plan: &ExecutionPlan) ->
     }
 }
 
-fn execute_result_body_bytes(result: &ExecutionResult) -> Vec<u8> {
-    let Some(body) = result.body.as_ref() else {
-        return Vec::new();
-    };
-    if let Some(json_body) = body.json_body.as_ref() {
-        return serde_json::to_vec(json_body).unwrap_or_default();
-    }
-    body.body_bytes_b64
-        .as_deref()
-        .and_then(|body| base64::engine::general_purpose::STANDARD.decode(body).ok())
-        .unwrap_or_default()
-}
-
-fn execution_result_frame_stream(
+fn execution_result_failure_frame_stream(
     result: &ExecutionResult,
 ) -> BoxStream<'static, Result<Bytes, IoError>> {
+    let body = serde_json::to_vec(&kiro_mcp_failure_body(result.status_code)).unwrap_or_default();
     raw_response_frame_stream(
         result.status_code,
-        result.headers.clone(),
-        Bytes::from(execute_result_body_bytes(result)),
+        BTreeMap::from([("content-type".to_string(), "application/json".to_string())]),
+        Bytes::from(body),
         result.telemetry.clone(),
     )
+}
+
+fn kiro_mcp_failure_body(status_code: u16) -> Value {
+    json!({
+        "error": {
+            "type": "kiro_web_search_error",
+            "message": "Kiro web search request failed",
+            "code": status_code,
+        }
+    })
 }
 
 fn sse_frame_stream(body: Bytes) -> BoxStream<'static, Result<Bytes, IoError>> {
@@ -328,12 +326,7 @@ async fn execute_mcp_request(
     request: &McpRequest,
 ) -> Result<KiroMcpExecution, ExecutionRuntimeTransportError> {
     let mcp_url = aether_provider_transport::kiro::build_kiro_mcp_url_from_resolved_url(&plan.url)
-        .ok_or_else(|| {
-            ExecutionRuntimeTransportError::UpstreamRequest(format!(
-                "failed to build Kiro MCP url from {}",
-                plan.url
-            ))
-        })?;
+        .ok_or_else(kiro_mcp_url_build_error)?;
     let mut request_context = build_mcp_request_context(state, plan).await;
     if !request_context.profile_arn_present {
         if let Some(profile_arn) = discover_kiro_profile_arn(state, plan, &request_context).await? {
@@ -346,7 +339,7 @@ async fn execute_mcp_request(
     }
     let body_json =
         serde_json::to_value(request).map_err(ExecutionRuntimeTransportError::BodyEncode)?;
-    let mcp_plan = ExecutionPlan {
+    let mut mcp_plan = ExecutionPlan {
         request_id: plan.request_id.clone(),
         candidate_id: plan.candidate_id.clone(),
         provider_name: plan.provider_name.clone(),
@@ -367,6 +360,7 @@ async fn execute_mcp_request(
         transport_profile: plan.transport_profile.clone(),
         timeouts: plan.timeouts.clone(),
     };
+    apply_upstream_response_body_limit(&mut mcp_plan, MAX_KIRO_MCP_JSON_BYTES);
     let result = DirectSyncExecutionRuntime::new()
         .execute_sync(&mcp_plan)
         .await?;
@@ -390,7 +384,7 @@ async fn build_mcp_request_context(
     {
         Ok(Some(transport)) => transport,
         Ok(None) => return fallback(),
-        Err(err) => {
+        Err(_) => {
             warn!(
                 event_name = "kiro_web_search_transport_snapshot_unavailable",
                 log_type = "ops",
@@ -399,7 +393,7 @@ async fn build_mcp_request_context(
                 provider_id = %plan.provider_id,
                 endpoint_id = %plan.endpoint_id,
                 key_id = %plan.key_id,
-                error = ?err,
+                error_category = "transport_snapshot_read_failed",
                 "gateway could not read Kiro transport snapshot for web_search MCP"
             );
             return fallback();
@@ -574,7 +568,7 @@ async fn discover_kiro_profile_arn_in_region(
         if let Some(token) = next_token.as_deref() {
             body.insert("nextToken".to_string(), Value::String(token.to_string()));
         }
-        let list_plan = ExecutionPlan {
+        let mut list_plan = ExecutionPlan {
             request_id: plan.request_id.clone(),
             candidate_id: plan.candidate_id.clone(),
             provider_name: plan.provider_name.clone(),
@@ -598,6 +592,7 @@ async fn discover_kiro_profile_arn_in_region(
             transport_profile: plan.transport_profile.clone(),
             timeouts: plan.timeouts.clone(),
         };
+        apply_upstream_response_body_limit(&mut list_plan, MAX_KIRO_MCP_JSON_BYTES);
         let result = DirectSyncExecutionRuntime::new()
             .execute_sync(&list_plan)
             .await?;
@@ -676,6 +671,10 @@ fn kiro_runtime_base_url_for_region(region: &str) -> String {
 }
 
 fn kiro_runtime_host_for_region(region: &str) -> String {
+    // Region values can originate in persisted OAuth metadata.  Normalize
+    // before interpolation so a crafted value cannot turn the host header or
+    // URL into an attacker-controlled origin.
+    let region = aether_provider_transport::kiro::normalize_kiro_region(region);
     match region {
         "us-gov-east-1" | "us-gov-west-1" => format!("q-fips.{region}.amazonaws.com"),
         "us-iso-east-1" => "q.us-iso-east-1.c2s.ic.gov".to_string(),
@@ -959,7 +958,6 @@ fn parse_mcp_search_results(result: &ExecutionResult) -> Option<WebSearchResults
             event_name = "kiro_web_search_mcp_error",
             log_type = "event",
             code = error.code.unwrap_or_default(),
-            message = error.message.as_deref().unwrap_or("unknown"),
             "Kiro MCP web_search returned JSON-RPC error"
         );
         return None;
@@ -983,12 +981,18 @@ fn parse_mcp_search_results(result: &ExecutionResult) -> Option<WebSearchResults
 fn execution_result_body_json(result: &ExecutionResult) -> Option<Value> {
     let body = result.body.as_ref()?;
     if let Some(json_body) = body.json_body.as_ref() {
-        return Some(json_body.clone());
+        return json_value_fits_serialized_limit(json_body, MAX_KIRO_MCP_JSON_BYTES)
+            .then(|| json_body.clone());
     }
     let body = body.body_bytes_b64.as_deref()?;
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(body)
-        .ok()?;
+    // MCP responses are parsed into an owned JSON tree.  Keep a fixed ceiling
+    // here even if the operator disables the general internal body cap, so a
+    // forged execution result cannot trigger an unbounded base64 allocation.
+    let bytes = decode_base64_body_with_limit(
+        body,
+        crate::headers::max_internal_buffered_body_bytes().min(MAX_KIRO_MCP_JSON_BYTES),
+    )
+    .ok()?;
     serde_json::from_slice(&bytes).ok()
 }
 
@@ -1198,13 +1202,14 @@ fn generate_search_summary(query: &str, results: Option<&WebSearchResults>) -> S
                 }
                 summary.push_str(&format!("   Source: {}\n\n", result.url));
             }
-            if let Some(error) = results
+            if results
                 .error
                 .as_deref()
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
+                .is_some()
             {
-                summary.push_str(&format!("Search warning: {error}\n\n"));
+                summary.push_str("Search warning: the provider reported an incomplete result.\n\n");
             }
         }
         _ => summary.push_str("No results found.\n"),
@@ -1237,12 +1242,15 @@ fn estimate_text_tokens(text: &str) -> u64 {
     ((text.len() as u64 + 3) / 4).max(1)
 }
 
-fn synthetic_report_context(report_context: Option<&Value>, mcp_url: String) -> Option<Value> {
+fn kiro_mcp_url_build_error() -> ExecutionRuntimeTransportError {
+    ExecutionRuntimeTransportError::UpstreamRequest("failed to build Kiro MCP URL".to_string())
+}
+
+fn synthetic_report_context(report_context: Option<&Value>) -> Option<Value> {
     let mut context = report_context.cloned()?;
     if let Some(object) = context.as_object_mut() {
         object.insert("has_envelope".to_string(), Value::Bool(false));
         object.insert("needs_conversion".to_string(), Value::Bool(false));
-        object.insert("upstream_url".to_string(), Value::String(mcp_url));
         object.remove("envelope_name");
     }
     Some(context)
@@ -1257,7 +1265,9 @@ mod tests {
 
     use super::{
         build_mcp_headers_from_plan, build_web_search_sse_body, detect_kiro_web_search_request,
-        parse_mcp_search_results, strip_search_query_prefix, KiroPromptCacheUsage,
+        execution_result_body_json, generate_search_summary, kiro_mcp_failure_body,
+        kiro_mcp_url_build_error, parse_mcp_search_results, strip_search_query_prefix,
+        KiroPromptCacheUsage, WebSearchResult, WebSearchResults,
     };
 
     fn sample_plan(body: serde_json::Value) -> ExecutionPlan {
@@ -1444,6 +1454,43 @@ mod tests {
     }
 
     #[test]
+    fn kiro_mcp_url_build_error_omits_resolved_url() {
+        let sensitive_url = "https://token:secret-kiro-url@internal.example.invalid/path";
+        let message = kiro_mcp_url_build_error().to_string();
+
+        assert_eq!(
+            message,
+            "failed to execute upstream request: failed to build Kiro MCP URL"
+        );
+        assert!(!message.contains(sensitive_url));
+    }
+
+    #[test]
+    fn kiro_mcp_errors_and_search_warnings_do_not_copy_upstream_secrets() {
+        let secret = "authorization=Bearer upstream-secret";
+        let failure = kiro_mcp_failure_body(502).to_string();
+        let summary = generate_search_summary(
+            "test",
+            Some(&WebSearchResults {
+                results: vec![WebSearchResult {
+                    title: "Safe result".to_string(),
+                    url: "https://example.test/result".to_string(),
+                    snippet: None,
+                    published_date: None,
+                }],
+                total_results: Some(1),
+                query: None,
+                error: Some(secret.to_string()),
+            }),
+        );
+
+        assert!(failure.contains("Kiro web search request failed"));
+        assert!(summary.contains("provider reported an incomplete result"));
+        assert!(!failure.contains("upstream-secret"));
+        assert!(!summary.contains("upstream-secret"));
+    }
+
+    #[test]
     fn parses_mcp_search_result_text_payload() {
         let result = aether_contracts::ExecutionResult {
             request_id: "req-1".to_string(),
@@ -1472,6 +1519,29 @@ mod tests {
         let parsed = parse_mcp_search_results(&result).expect("results should parse");
         assert_eq!(parsed.results.len(), 1);
         assert_eq!(parsed.results[0].title, "Example");
+    }
+
+    #[test]
+    fn kiro_mcp_result_rejects_oversized_base64_before_decode() {
+        let encoded_limit =
+            crate::execution_runtime::transport::maximum_base64_len_for_decoded_limit(
+                super::MAX_KIRO_MCP_JSON_BYTES,
+            );
+        let result = aether_contracts::ExecutionResult {
+            request_id: "req-oversized".to_string(),
+            candidate_id: None,
+            status_code: 200,
+            headers: BTreeMap::new(),
+            response_observation: None,
+            body: Some(aether_contracts::ResponseBody {
+                json_body: None,
+                body_bytes_b64: Some("A".repeat(encoded_limit + 1)),
+            }),
+            telemetry: None,
+            error: None,
+        };
+
+        assert!(execution_result_body_json(&result).is_none());
     }
 
     #[test]

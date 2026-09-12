@@ -10,6 +10,11 @@ mod templates;
 
 const ADMIN_SYSTEM_DATA_EXPORT_VERSION: &str = "1.0";
 
+pub(crate) use self::export::{
+    is_interactive_export_private_system_config_key, SystemExportMode,
+    ADMIN_SYSTEM_EXPORT_CREDENTIALS_NOT_EXPORTED,
+};
+
 impl<'a> AdminAppState<'a> {
     pub(crate) async fn upsert_system_config_json_value(
         &self,

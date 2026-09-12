@@ -1,142 +1,39 @@
 use super::{
-    auth_access_token_expiry_hours, auth_client_ip, auth_jwt_secret, auth_now,
-    auth_refresh_cookie_name, auth_user_agent, build_auth_error_response, build_auth_json_response,
+    auth_access_token_expiry_hours, auth_now, auth_refresh_cookie_name, auth_user_agent,
+    build_auth_error_response, build_auth_internal_error_response, build_auth_json_response,
     build_auth_refresh_cookie_clear_header, build_auth_refresh_cookie_header, extract_bearer_token,
-    extract_client_device_id, extract_cookie_value, http, json, AppState, Body,
-    GatewayPublicRequestContext, Response, AUTH_REFRESH_TOKEN_EXPIRATION_DAYS,
+    extract_client_device_id, extract_client_device_id_header, extract_cookie_value, http, json,
+    AppState, Body, GatewayPublicRequestContext, Response, AUTH_REFRESH_TOKEN_EXPIRATION_DAYS,
 };
+use crate::handlers::public::support::mark_sensitive_response_no_store;
+use crate::local_auth_token::LocalAuthTokenType;
 use crate::GatewayUserSessionView;
 use uuid::Uuid;
 
-fn base64url_encode(bytes: &[u8]) -> String {
-    use base64::Engine;
-
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
-}
-
-fn base64url_decode(value: &str) -> Result<Vec<u8>, String> {
-    use base64::Engine;
-
-    base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(value)
-        .map_err(|_| "无效的Token".to_string())
+fn auth_token_error_is_internal(detail: &str) -> bool {
+    !matches!(detail, "无效的Token" | "Token已过期") && !detail.starts_with("Token类型错误:")
 }
 
 pub(crate) fn create_auth_token(
-    token_type: &str,
-    mut payload: serde_json::Map<String, serde_json::Value>,
+    token_type: LocalAuthTokenType,
+    payload: serde_json::Map<String, serde_json::Value>,
     expires_at: chrono::DateTime<chrono::Utc>,
 ) -> Result<String, String> {
-    use hmac::Mac;
-
-    let secret = auth_jwt_secret()?;
-    let header = serde_json::json!({ "alg": "HS256", "typ": "JWT" });
-    payload.insert("exp".to_string(), json!(expires_at.timestamp()));
-    payload.insert("type".to_string(), json!(token_type));
-    let header_segment = base64url_encode(
-        serde_json::to_vec(&header)
-            .map_err(|_| "无法序列化JWT header".to_string())?
-            .as_slice(),
-    );
-    let payload_segment = base64url_encode(
-        serde_json::to_vec(&payload)
-            .map_err(|_| "无法序列化JWT payload".to_string())?
-            .as_slice(),
-    );
-    let signing_input = format!("{header_segment}.{payload_segment}");
-    let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(secret.as_bytes())
-        .map_err(|_| "JWT secret 无效".to_string())?;
-    mac.update(signing_input.as_bytes());
-    let signature = mac.finalize().into_bytes();
-    Ok(format!(
-        "{header_segment}.{payload_segment}.{}",
-        base64url_encode(signature.as_slice())
-    ))
+    crate::local_auth_token::create_local_auth_token(token_type, payload, expires_at)
 }
 
 pub(crate) fn decode_auth_token(
     token: &str,
-    expected_type: &str,
+    expected_type: LocalAuthTokenType,
 ) -> Result<serde_json::Map<String, serde_json::Value>, String> {
-    use hmac::Mac;
-
-    let secret = auth_jwt_secret()?;
-    let mut parts = token.split('.');
-    let Some(header_segment) = parts.next() else {
-        return Err("无效的Token".to_string());
-    };
-    let Some(payload_segment) = parts.next() else {
-        return Err("无效的Token".to_string());
-    };
-    let Some(signature_segment) = parts.next() else {
-        return Err("无效的Token".to_string());
-    };
-    if parts.next().is_some() {
-        return Err("无效的Token".to_string());
-    }
-
-    let signing_input = format!("{header_segment}.{payload_segment}");
-    let signature = base64url_decode(signature_segment)?;
-    let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(secret.as_bytes())
-        .map_err(|_| "JWT secret 无效".to_string())?;
-    mac.update(signing_input.as_bytes());
-    mac.verify_slice(&signature)
-        .map_err(|_| "无效的Token".to_string())?;
-
-    let payload_bytes = base64url_decode(payload_segment)?;
-    let payload = serde_json::from_slice::<serde_json::Value>(&payload_bytes)
-        .map_err(|_| "无效的Token".to_string())?;
-    let payload = payload
-        .as_object()
-        .cloned()
-        .ok_or_else(|| "无效的Token".to_string())?;
-    let actual_type = payload
-        .get("type")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default();
-    if actual_type != expected_type {
-        return Err(format!(
-            "Token类型错误: 期望 {expected_type}, 实际 {actual_type}"
-        ));
-    }
-    let exp = payload
-        .get("exp")
-        .and_then(serde_json::Value::as_i64)
-        .ok_or_else(|| "无效的Token".to_string())?;
-    if exp <= auth_now().timestamp() {
-        return Err("Token已过期".to_string());
-    }
-    Ok(payload)
+    crate::local_auth_token::decode_local_auth_token(token, expected_type)
 }
 
 pub(super) fn auth_token_identity_matches_user(
     payload: &serde_json::Map<String, serde_json::Value>,
     user: &aether_data::repository::users::StoredUserAuthRecord,
 ) -> bool {
-    if let Some(token_email) = payload.get("email").and_then(serde_json::Value::as_str) {
-        if user
-            .email
-            .as_deref()
-            .is_some_and(|email| email != token_email)
-        {
-            return false;
-        }
-    }
-
-    let Some(token_created_at) = payload
-        .get("created_at")
-        .and_then(serde_json::Value::as_str)
-    else {
-        return true;
-    };
-    let Some(user_created_at) = user.created_at else {
-        return true;
-    };
-    let Ok(token_created_at) = chrono::DateTime::parse_from_rfc3339(token_created_at) else {
-        return false;
-    };
-    let token_created_at = token_created_at.with_timezone(&chrono::Utc);
-    (user_created_at - token_created_at).num_seconds().abs() <= 1
+    crate::local_auth_token::local_auth_token_identity_matches_user(payload, user)
 }
 
 pub(crate) fn build_auth_wallet_summary_payload(
@@ -217,14 +114,21 @@ pub(crate) async fn resolve_authenticated_local_user(
             false,
         ));
     };
-    let claims = match decode_auth_token(&token, "access") {
+    let claims = match decode_auth_token(&token, LocalAuthTokenType::Access) {
         Ok(value) => value,
         Err(detail) => {
+            if auth_token_error_is_internal(&detail) {
+                return Err(build_auth_internal_error_response(
+                    "auth_access_token_decode_failed",
+                    detail,
+                    false,
+                ));
+            }
             return Err(build_auth_error_response(
                 http::StatusCode::UNAUTHORIZED,
-                detail,
+                "无效的用户令牌",
                 false,
-            ))
+            ));
         }
     };
     let Some(user_id) = claims.get("user_id").and_then(serde_json::Value::as_str) else {
@@ -251,9 +155,9 @@ pub(crate) async fn resolve_authenticated_local_user(
             ))
         }
         Err(err) => {
-            return Err(build_auth_error_response(
-                http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("auth user lookup failed: {err:?}"),
+            return Err(build_auth_internal_error_response(
+                "auth_session_user_lookup_failed",
+                err,
                 false,
             ))
         }
@@ -280,9 +184,9 @@ pub(crate) async fn resolve_authenticated_local_user(
     let Some(session) = (match state.find_user_session(user_id, session_id).await {
         Ok(value) => value,
         Err(err) => {
-            return Err(build_auth_error_response(
-                http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("auth session lookup failed: {err:?}"),
+            return Err(build_auth_internal_error_response(
+                "auth_session_lookup_failed",
+                err,
                 false,
             ))
         }
@@ -293,7 +197,10 @@ pub(crate) async fn resolve_authenticated_local_user(
             false,
         ));
     };
-    if session.is_revoked() || session.is_expired(now) {
+    if session.is_revoked()
+        || session.is_expired(now)
+        || session.security_version != user.security_version
+    {
         return Err(build_auth_error_response(
             http::StatusCode::UNAUTHORIZED,
             "登录会话已失效，请重新登录",
@@ -341,18 +248,18 @@ pub(crate) async fn handle_auth_me(
     let feature_settings = match state.read_user_feature_settings(&auth.user.id).await {
         Ok(value) => value,
         Err(err) => {
-            return build_auth_error_response(
-                http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("user feature settings lookup failed: {err:?}"),
+            return build_auth_internal_error_response(
+                "auth_user_feature_settings_lookup_failed",
+                err,
                 false,
             )
         }
     };
-    build_auth_json_response(
+    mark_sensitive_response_no_store(build_auth_json_response(
         http::StatusCode::OK,
         build_auth_me_payload(&auth.user, wallet.as_ref(), feature_settings),
         None,
-    )
+    ))
 }
 
 pub(super) async fn handle_auth_refresh(
@@ -374,15 +281,17 @@ pub(super) async fn handle_auth_refresh(
     let Some(refresh_token) = extract_cookie_value(headers, &cookie_name) else {
         return build_auth_error_response(http::StatusCode::UNAUTHORIZED, "缺少刷新令牌", true);
     };
-    let claims = match decode_auth_token(&refresh_token, "refresh") {
+    let claims = match decode_auth_token(&refresh_token, LocalAuthTokenType::Refresh) {
         Ok(value) => value,
         Err(detail) => {
-            let detail = if detail == "Token已过期" || detail == "无效的Token" {
-                "刷新令牌失败".to_string()
-            } else {
-                detail
-            };
-            return build_auth_error_response(http::StatusCode::UNAUTHORIZED, detail, true);
+            if auth_token_error_is_internal(&detail) {
+                return build_auth_internal_error_response(
+                    "auth_refresh_token_decode_failed",
+                    detail,
+                    true,
+                );
+            }
+            return build_auth_error_response(http::StatusCode::UNAUTHORIZED, "刷新令牌失败", true);
         }
     };
     let Some(user_id) = claims.get("user_id").and_then(serde_json::Value::as_str) else {
@@ -401,11 +310,7 @@ pub(super) async fn handle_auth_refresh(
             )
         }
         Err(err) => {
-            return build_auth_error_response(
-                http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("auth user lookup failed: {err:?}"),
-                true,
-            )
+            return build_auth_internal_error_response("auth_refresh_user_lookup_failed", err, true)
         }
     };
     if !user.is_active {
@@ -417,7 +322,9 @@ pub(super) async fn handle_auth_refresh(
     if !auth_token_identity_matches_user(&claims, &user) {
         return build_auth_error_response(http::StatusCode::UNAUTHORIZED, "无效的刷新令牌", true);
     }
-    let client_device_id = match extract_client_device_id(request_context, headers) {
+    // Refresh is cookie-authenticated. Requiring a non-simple custom header keeps
+    // cross-site forms from rotating a victim's session via a query parameter.
+    let client_device_id = match extract_client_device_id_header(headers) {
         Ok(value) => value,
         Err(response) => return response,
     };
@@ -425,9 +332,9 @@ pub(super) async fn handle_auth_refresh(
     let Some(session) = (match state.find_user_session(user_id, session_id).await {
         Ok(value) => value,
         Err(err) => {
-            return build_auth_error_response(
-                http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("auth session lookup failed: {err:?}"),
+            return build_auth_internal_error_response(
+                "auth_refresh_session_lookup_failed",
+                err,
                 true,
             )
         }
@@ -438,7 +345,10 @@ pub(super) async fn handle_auth_refresh(
             true,
         );
     };
-    if session.is_revoked() || session.is_expired(now) {
+    if session.is_revoked()
+        || session.is_expired(now)
+        || session.security_version != user.security_version
+    {
         return build_auth_error_response(
             http::StatusCode::UNAUTHORIZED,
             "登录会话已失效，请重新登录",
@@ -454,19 +364,43 @@ pub(super) async fn handle_auth_refresh(
     }
     let (is_valid, is_prev) = session.verify_refresh_token(&refresh_token, now);
     if !is_valid {
-        let _ = state
+        match state
             .revoke_user_session(user_id, session_id, now, "refresh_token_reused")
-            .await;
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                return build_auth_internal_error_response(
+                    "auth_refresh_replay_revoke_failed",
+                    "refresh-token replay session was not revoked",
+                    true,
+                )
+            }
+            Err(err) => {
+                return build_auth_internal_error_response(
+                    "auth_refresh_replay_revoke_failed",
+                    err,
+                    true,
+                )
+            }
+        }
         return build_auth_error_response(
             http::StatusCode::UNAUTHORIZED,
             "登录会话已失效，请重新登录",
             true,
         );
     }
+    if is_prev {
+        return build_auth_error_response(
+            http::StatusCode::CONFLICT,
+            "刷新令牌已轮换，请重试请求",
+            false,
+        );
+    }
 
     let access_expires_at = now + chrono::Duration::hours(auth_access_token_expiry_hours());
     let access_token = match create_auth_token(
-        "access",
+        LocalAuthTokenType::Access,
         serde_json::Map::from_iter([
             ("user_id".to_string(), json!(user.id)),
             ("role".to_string(), json!(user.role)),
@@ -480,51 +414,66 @@ pub(super) async fn handle_auth_refresh(
     ) {
         Ok(value) => value,
         Err(detail) => {
-            return build_auth_error_response(http::StatusCode::INTERNAL_SERVER_ERROR, detail, true)
+            return build_auth_internal_error_response(
+                "auth_refresh_access_token_create_failed",
+                detail,
+                true,
+            )
         }
     };
 
-    let mut set_cookie = None;
-    if !is_prev {
-        let new_refresh_token = match create_auth_token(
-            "refresh",
-            serde_json::Map::from_iter([
-                ("user_id".to_string(), json!(user.id)),
-                (
-                    "created_at".to_string(),
-                    json!(user.created_at.map(|value| value.to_rfc3339())),
-                ),
-                ("session_id".to_string(), json!(session.id)),
-                ("jti".to_string(), json!(uuid::Uuid::new_v4().to_string())),
-            ]),
-            now + chrono::Duration::days(AUTH_REFRESH_TOKEN_EXPIRATION_DAYS),
-        ) {
-            Ok(value) => value,
-            Err(detail) => {
-                return build_auth_error_response(
-                    http::StatusCode::INTERNAL_SERVER_ERROR,
-                    detail,
-                    true,
-                )
-            }
-        };
-        let rotated = state
-            .rotate_user_session_refresh_token(
-                user_id,
-                session_id,
-                &session.refresh_token_hash,
-                &GatewayUserSessionView::hash_refresh_token(&new_refresh_token),
-                now,
-                now + chrono::Duration::days(AUTH_REFRESH_TOKEN_EXPIRATION_DAYS),
-                None,
-                auth_user_agent(headers).as_deref(),
+    let new_refresh_token = match create_auth_token(
+        LocalAuthTokenType::Refresh,
+        serde_json::Map::from_iter([
+            ("user_id".to_string(), json!(user.id)),
+            (
+                "created_at".to_string(),
+                json!(user.created_at.map(|value| value.to_rfc3339())),
+            ),
+            ("session_id".to_string(), json!(session.id)),
+            ("jti".to_string(), json!(uuid::Uuid::new_v4().to_string())),
+        ]),
+        now + chrono::Duration::days(AUTH_REFRESH_TOKEN_EXPIRATION_DAYS),
+    ) {
+        Ok(value) => value,
+        Err(detail) => {
+            return build_auth_internal_error_response(
+                "auth_refresh_token_create_failed",
+                detail,
+                true,
             )
-            .await;
-        if rotated.ok() != Some(true) {
-            return build_auth_error_response(http::StatusCode::UNAUTHORIZED, "刷新令牌失败", true);
         }
-        set_cookie = Some(build_auth_refresh_cookie_header(&new_refresh_token));
+    };
+    let rotated = state
+        .rotate_user_session_refresh_token(
+            user_id,
+            session_id,
+            &session.refresh_token_hash,
+            &GatewayUserSessionView::hash_refresh_token(&new_refresh_token),
+            now,
+            now + chrono::Duration::days(AUTH_REFRESH_TOKEN_EXPIRATION_DAYS),
+            None,
+            auth_user_agent(headers).as_deref(),
+        )
+        .await;
+    match rotated {
+        Ok(true) => {}
+        Ok(false) => {
+            return build_auth_error_response(
+                http::StatusCode::CONFLICT,
+                "刷新令牌已轮换，请重试请求",
+                false,
+            )
+        }
+        Err(err) => {
+            return build_auth_internal_error_response(
+                "auth_refresh_token_rotation_failed",
+                err,
+                true,
+            )
+        }
     }
+    let set_cookie = Some(build_auth_refresh_cookie_header(&new_refresh_token));
 
     build_auth_json_response(
         http::StatusCode::OK,
@@ -540,23 +489,23 @@ pub(super) async fn handle_auth_refresh(
 pub(crate) async fn build_auth_login_success_response(
     state: &AppState,
     headers: &http::HeaderMap,
+    client_ip: std::net::IpAddr,
     client_device_id: String,
     user: aether_data::repository::users::StoredUserAuthRecord,
+    expected_password_hash: Option<&str>,
 ) -> Response<Body> {
     let now = auth_now();
-    if let Err(err) = state.touch_auth_user_last_login(&user.id, now).await {
-        return build_auth_error_response(
-            http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("auth last login update failed: {err:?}"),
-            false,
-        );
+    if expected_password_hash.is_none() {
+        if let Err(err) = state.touch_auth_user_last_login(&user.id, now).await {
+            return build_auth_internal_error_response("auth_last_login_update_failed", err, false);
+        }
     }
 
     let session_id = Uuid::new_v4().to_string();
     let access_expires_at = now + chrono::Duration::hours(auth_access_token_expiry_hours());
     let refresh_expires_at = now + chrono::Duration::days(AUTH_REFRESH_TOKEN_EXPIRATION_DAYS);
     let access_token = match create_auth_token(
-        "access",
+        LocalAuthTokenType::Access,
         serde_json::Map::from_iter([
             ("user_id".to_string(), json!(user.id.clone())),
             ("role".to_string(), json!(user.role.clone())),
@@ -570,15 +519,15 @@ pub(crate) async fn build_auth_login_success_response(
     ) {
         Ok(value) => value,
         Err(detail) => {
-            return build_auth_error_response(
-                http::StatusCode::INTERNAL_SERVER_ERROR,
+            return build_auth_internal_error_response(
+                "auth_login_access_token_create_failed",
                 detail,
                 false,
             )
         }
     };
     let refresh_token = match create_auth_token(
-        "refresh",
+        LocalAuthTokenType::Refresh,
         serde_json::Map::from_iter([
             ("user_id".to_string(), json!(user.id.clone())),
             (
@@ -592,8 +541,8 @@ pub(crate) async fn build_auth_login_success_response(
     ) {
         Ok(value) => value,
         Err(detail) => {
-            return build_auth_error_response(
-                http::StatusCode::INTERNAL_SERVER_ERROR,
+            return build_auth_internal_error_response(
+                "auth_login_refresh_token_create_failed",
                 detail,
                 false,
             )
@@ -611,33 +560,43 @@ pub(crate) async fn build_auth_login_success_response(
         Some(refresh_expires_at),
         None,
         None,
-        auth_client_ip(headers),
+        Some(client_ip.to_string()),
         auth_user_agent(headers),
         Some(now),
         Some(now),
-    ) {
+    )
+    .and_then(|session| session.with_security_version(user.security_version))
+    {
         Ok(value) => value,
         Err(err) => {
-            return build_auth_error_response(
-                http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("auth session build failed: {err:?}"),
+            return build_auth_internal_error_response(
+                "auth_login_session_build_failed",
+                err,
                 false,
             )
         }
     };
-    let created = match state.create_user_session(session).await {
+    let created_result = match expected_password_hash {
+        Some(expected_password_hash) => {
+            state
+                .create_user_session_if_password_matches(session, expected_password_hash)
+                .await
+        }
+        None => state.create_user_session(session).await,
+    };
+    let created = match created_result {
         Ok(Some(session)) => session,
         Ok(None) => {
             return build_auth_error_response(
-                http::StatusCode::INTERNAL_SERVER_ERROR,
-                "auth session backend unavailable",
+                http::StatusCode::UNAUTHORIZED,
+                "邮箱或密码错误",
                 false,
-            )
+            );
         }
         Err(err) => {
-            return build_auth_error_response(
-                http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("auth session create failed: {err:?}"),
+            return build_auth_internal_error_response(
+                "auth_login_session_create_failed",
+                err,
                 false,
             )
         }
@@ -665,31 +624,65 @@ async fn try_auth_logout_with_access_token(
     headers: &http::HeaderMap,
 ) -> Option<Response<Body>> {
     let token = extract_bearer_token(headers)?;
-    let claims = decode_auth_token(&token, "access").ok()?;
+    let claims = decode_auth_token(&token, LocalAuthTokenType::Access).ok()?;
     let user_id = claims.get("user_id").and_then(serde_json::Value::as_str)?;
     let session_id = claims
         .get("session_id")
         .and_then(serde_json::Value::as_str)?;
-    let user = state.find_user_auth_by_id(user_id).await.ok().flatten()?;
+    let user = match state.find_user_auth_by_id(user_id).await {
+        Ok(Some(user)) => user,
+        Ok(None) => return None,
+        Err(err) => {
+            return Some(build_auth_internal_error_response(
+                "auth_logout_user_lookup_failed",
+                err,
+                true,
+            ))
+        }
+    };
     if !user.is_active || user.is_deleted || !auth_token_identity_matches_user(&claims, &user) {
         return None;
     }
     let client_device_id = extract_client_device_id(request_context, headers).ok()?;
     let now = auth_now();
-    let session = state
-        .find_user_session(user_id, session_id)
-        .await
-        .ok()
-        .flatten()?;
+    let session = match state.find_user_session(user_id, session_id).await {
+        Ok(Some(session)) => session,
+        Ok(None) => return None,
+        Err(err) => {
+            return Some(build_auth_internal_error_response(
+                "auth_logout_session_lookup_failed",
+                err,
+                true,
+            ))
+        }
+    };
     if session.is_revoked()
         || session.is_expired(now)
+        || session.security_version != user.security_version
         || session.client_device_id != client_device_id
     {
         return None;
     }
-    let _ = state
+    match state
         .revoke_user_session(user_id, session_id, now, "user_logout")
-        .await;
+        .await
+    {
+        Ok(true) => {}
+        Ok(false) => {
+            return Some(build_auth_internal_error_response(
+                "auth_logout_session_revoke_failed",
+                "auth session was not revoked",
+                true,
+            ))
+        }
+        Err(err) => {
+            return Some(build_auth_internal_error_response(
+                "auth_logout_session_revoke_failed",
+                err,
+                true,
+            ))
+        }
+    }
     Some(build_auth_json_response(
         http::StatusCode::OK,
         json!({ "message": "登出成功", "success": true }),
@@ -699,30 +692,76 @@ async fn try_auth_logout_with_access_token(
 
 async fn try_auth_logout_with_refresh_cookie(
     state: &AppState,
-    request_context: &GatewayPublicRequestContext,
+    _request_context: &GatewayPublicRequestContext,
     headers: &http::HeaderMap,
 ) -> Option<Response<Body>> {
     let refresh_token = extract_cookie_value(headers, &auth_refresh_cookie_name())?;
-    let claims = decode_auth_token(&refresh_token, "refresh").ok()?;
+    let claims = decode_auth_token(&refresh_token, LocalAuthTokenType::Refresh).ok()?;
     let user_id = claims.get("user_id").and_then(serde_json::Value::as_str)?;
     let session_id = claims
         .get("session_id")
         .and_then(serde_json::Value::as_str)?;
-    let client_device_id = extract_client_device_id(request_context, headers).ok()?;
+    let user = match state.find_user_auth_by_id(user_id).await {
+        Ok(Some(user)) => user,
+        Ok(None) => return None,
+        Err(err) => {
+            return Some(build_auth_internal_error_response(
+                "auth_logout_refresh_user_lookup_failed",
+                err,
+                true,
+            ))
+        }
+    };
+    if !user.is_active || user.is_deleted || !auth_token_identity_matches_user(&claims, &user) {
+        return None;
+    }
+    // The cookie fallback must not accept the device binding from the URL: a
+    // cross-site form can submit query parameters but cannot set this header.
+    let client_device_id = match extract_client_device_id_header(headers) {
+        Ok(value) => value,
+        Err(response) => return Some(response),
+    };
     let now = auth_now();
-    if let Some(session) = state
-        .find_user_session(user_id, session_id)
-        .await
-        .ok()
-        .flatten()
+    let session = match state.find_user_session(user_id, session_id).await {
+        Ok(Some(session)) => session,
+        Ok(None) => return None,
+        Err(err) => {
+            return Some(build_auth_internal_error_response(
+                "auth_logout_refresh_session_lookup_failed",
+                err,
+                true,
+            ))
+        }
+    };
+    if session.is_revoked()
+        || session.is_expired(now)
+        || session.security_version != user.security_version
+        || session.client_device_id != client_device_id
     {
-        if !session.is_revoked()
-            && !session.is_expired(now)
-            && session.client_device_id == client_device_id
-        {
-            let _ = state
-                .revoke_user_session(user_id, session_id, now, "user_logout")
-                .await;
+        return None;
+    }
+    let (refresh_token_is_valid, _) = session.verify_refresh_token(&refresh_token, now);
+    if !refresh_token_is_valid {
+        return None;
+    }
+    match state
+        .revoke_user_session(user_id, session_id, now, "user_logout")
+        .await
+    {
+        Ok(true) => {}
+        Ok(false) => {
+            return Some(build_auth_internal_error_response(
+                "auth_logout_refresh_session_revoke_failed",
+                "auth session was not revoked",
+                true,
+            ))
+        }
+        Err(err) => {
+            return Some(build_auth_internal_error_response(
+                "auth_logout_refresh_session_revoke_failed",
+                err,
+                true,
+            ))
         }
     }
     Some(build_auth_json_response(

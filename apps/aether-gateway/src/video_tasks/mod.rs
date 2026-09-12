@@ -1,4 +1,5 @@
 use crate::control::GatewayControlAuthContext;
+use crate::GatewayError;
 use aether_contracts::{ExecutionPlan, ExecutionTimeouts, ProxySnapshot, RequestBody};
 
 pub(crate) use self::service::VideoTaskService;
@@ -32,6 +33,17 @@ mod helpers;
 mod service;
 mod store;
 mod types;
+
+pub(crate) fn not_found_body() -> serde_json::Value {
+    serde_json::json!({"detail": "Video task not found"})
+}
+
+pub(crate) fn not_found_error() -> GatewayError {
+    GatewayError::Client {
+        status: http::StatusCode::NOT_FOUND,
+        message: "Video task not found".to_string(),
+    }
+}
 
 #[cfg(test)]
 mod tests;

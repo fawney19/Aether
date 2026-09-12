@@ -31,7 +31,11 @@ fn apply_frontdoor_cors_headers(
     );
     headers.insert(
         http::header::ACCESS_CONTROL_EXPOSE_HEADERS,
-        HeaderValue::from_static("*"),
+        HeaderValue::from_static(if headers.contains_key("x-aether-body-field") {
+            "*, X-Aether-Body-Encoding, X-Aether-Body-Field, X-Aether-Body-Error, X-Aether-Usage-Id"
+        } else {
+            "*"
+        }),
     );
     if let Some(value) = requested_headers {
         if let Ok(value) = HeaderValue::from_str(value) {
@@ -108,4 +112,37 @@ pub(crate) async fn frontdoor_cors_middleware(
         requested_headers.as_deref(),
     );
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn raw_body_headers_are_explicitly_exposed_for_credentialed_requests() {
+        let cors =
+            FrontdoorCorsConfig::new(vec!["https://console.example".to_string()], true).unwrap();
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            "x-aether-body-field",
+            HeaderValue::from_static("request_body"),
+        );
+        apply_frontdoor_cors_headers(&mut headers, &cors, "https://console.example", None);
+        let exposed = headers[http::header::ACCESS_CONTROL_EXPOSE_HEADERS]
+            .to_str()
+            .unwrap()
+            .to_ascii_lowercase();
+        for name in [
+            "x-aether-body-encoding",
+            "x-aether-body-field",
+            "x-aether-body-error",
+            "x-aether-usage-id",
+        ] {
+            assert!(exposed.split(',').any(|header| header.trim() == name));
+        }
+        assert_eq!(
+            headers[http::header::ACCESS_CONTROL_ALLOW_CREDENTIALS],
+            "true"
+        );
+    }
 }

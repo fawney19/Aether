@@ -826,6 +826,7 @@
 </template>
 
 <script setup lang="ts">
+import { useI18n } from '@/i18n'
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import {
   Activity,
@@ -890,6 +891,7 @@ type ProviderPerformanceParams = NonNullable<Parameters<typeof adminApi.getProvi
 
 const timeRange = ref<DateRangeParams>(getDateRangeFromPeriod('last7days'))
 const { error: showError } = useToast()
+const { legacyT } = useI18n()
 
 const percentiles = ref<PercentileItem[]>([])
 const percentileLoading = ref(false)
@@ -1228,7 +1230,7 @@ const errorTrendChartData = computed(() => ({
   labels: errorTrend.value.map(item => item.date),
   datasets: [
     {
-      label: '错误数',
+      label: legacyT('错误数'),
       data: errorTrend.value.map(item => item.total),
       borderColor: 'rgb(239, 68, 68)',
       tension: 0.25,

@@ -27,6 +27,36 @@ use axum::{
     Json,
 };
 use serde_json::json;
+use std::collections::HashSet;
+
+const MAX_ADMIN_GLOBAL_MODEL_BATCH_ITEMS: usize = 100;
+
+fn normalize_admin_global_model_batch_ids(
+    ids: Vec<String>,
+    field_name: &str,
+) -> Result<Vec<String>, String> {
+    if ids.len() > MAX_ADMIN_GLOBAL_MODEL_BATCH_ITEMS {
+        return Err(format!(
+            "{field_name} 最多 {MAX_ADMIN_GLOBAL_MODEL_BATCH_ITEMS} 个"
+        ));
+    }
+
+    let mut seen = HashSet::with_capacity(ids.len());
+    let mut normalized = Vec::with_capacity(ids.len());
+    for id in ids {
+        let trimmed = id.trim();
+        if trimmed.is_empty() {
+            // Keep the original value so batch-delete retains its existing per-item failure.
+            normalized.push(id);
+            continue;
+        }
+        let trimmed = trimmed.to_string();
+        if seen.insert(trimmed.clone()) {
+            normalized.push(trimmed);
+        }
+    }
+    Ok(normalized)
+}
 
 pub(super) async fn maybe_build_local_admin_global_models_write_response(
     state: &AdminAppState<'_>,
@@ -212,17 +242,20 @@ async fn build_batch_delete_global_models_response(
         Ok(payload) => payload,
         Err(response) => return Ok(response),
     };
+    let ids = match normalize_admin_global_model_batch_ids(payload.ids, "ids") {
+        Ok(ids) => ids,
+        Err(detail) => return Ok(bad_request_response(detail)),
+    };
 
     let mut success_count = 0usize;
     let mut failed = Vec::new();
-    for id in payload.ids {
-        let trimmed = id.trim();
-        if trimmed.is_empty() {
+    for id in ids {
+        if id.trim().is_empty() {
             failed.push(json!({"id": id, "error": "not found"}));
             continue;
         }
-        let Some(existing) = state.get_admin_global_model_by_id(trimmed).await? else {
-            failed.push(json!({"id": trimmed, "error": "not found"}));
+        let Some(existing) = state.get_admin_global_model_by_id(&id).await? else {
+            failed.push(json!({"id": id, "error": "not found"}));
             continue;
         };
         if state.delete_admin_global_model(&existing.id).await? {
@@ -259,10 +292,15 @@ async fn build_assign_to_providers_response(
         Ok(payload) => payload,
         Err(response) => return Ok(response),
     };
+    let provider_ids =
+        match normalize_admin_global_model_batch_ids(payload.provider_ids, "provider_ids") {
+            Ok(provider_ids) => provider_ids,
+            Err(detail) => return Ok(bad_request_response(detail)),
+        };
     let payload: serde_json::Value = match build_admin_assign_global_model_to_providers_payload(
         state,
         &global_model_id,
-        payload.provider_ids,
+        provider_ids,
         payload.create_models.unwrap_or(false),
     )
     .await
@@ -278,4 +316,44 @@ async fn build_assign_to_providers_response(
         "global_model",
         &global_model_id,
     ))
+}
+
+#[cfg(test)]
+mod batch_boundary_tests {
+    use super::{normalize_admin_global_model_batch_ids, MAX_ADMIN_GLOBAL_MODEL_BATCH_ITEMS};
+
+    #[test]
+    fn global_model_batch_ids_are_bounded_and_deduplicated() {
+        assert_eq!(
+            normalize_admin_global_model_batch_ids(
+                vec![
+                    "model-2".to_string(),
+                    "model-1".to_string(),
+                    " model-2 ".to_string(),
+                    "   ".to_string(),
+                ],
+                "ids",
+            )
+            .expect("valid ids"),
+            vec![
+                "model-2".to_string(),
+                "model-1".to_string(),
+                "   ".to_string(),
+            ]
+        );
+        assert!(normalize_admin_global_model_batch_ids(
+            (0..=MAX_ADMIN_GLOBAL_MODEL_BATCH_ITEMS)
+                .map(|index| format!("model-{index}"))
+                .collect(),
+            "ids",
+        )
+        .is_err());
+        assert!(normalize_admin_global_model_batch_ids(
+            (0..MAX_ADMIN_GLOBAL_MODEL_BATCH_ITEMS)
+                .map(|index| format!("provider-{index}"))
+                .collect(),
+            "provider_ids",
+        )
+        .is_ok());
+    }
 }

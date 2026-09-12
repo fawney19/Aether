@@ -441,7 +441,19 @@ pub fn sanitize_request_path(path: &str) -> Option<String> {
         // including for malformed routes that will later be rejected.
         return Some("/v1/live/{call_id}".to_string());
     }
-    Some(path.to_string())
+    Some(sanitize_sensitive_request_path(path))
+}
+
+fn sanitize_sensitive_request_path(path: &str) -> String {
+    for prefix in ["/install-tunnel/", "/install/", "/i/"] {
+        if path
+            .strip_prefix(prefix)
+            .is_some_and(|secret| !secret.is_empty())
+        {
+            return format!("{prefix}[redacted]");
+        }
+    }
+    path.to_string()
 }
 
 pub fn sanitize_request_query_string(query: &str) -> Option<String> {
@@ -1019,6 +1031,29 @@ mod tests {
             )
             .as_deref(),
             Some("/v1/realtime?call_id=%7Bcall_id%7D")
+        );
+    }
+
+    #[test]
+    fn request_path_metadata_sanitizer_redacts_install_session_codes() {
+        for (raw, expected) in [
+            ("/install/secret-code", "/install/[redacted]"),
+            ("/install/secret-code.ps1", "/install/[redacted]"),
+            ("/i/secret-code", "/i/[redacted]"),
+            (
+                "/install-tunnel/secret-code.ps1?token=also-secret",
+                "/install-tunnel/[redacted]",
+            ),
+        ] {
+            assert_eq!(sanitize_request_path(raw).as_deref(), Some(expected));
+            assert_eq!(
+                sanitize_request_path_and_query(raw, None).as_deref(),
+                Some(expected)
+            );
+        }
+        assert_eq!(
+            sanitize_request_path("/install/").as_deref(),
+            Some("/install/")
         );
     }
 

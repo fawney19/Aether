@@ -21,7 +21,8 @@
             <Input
               ref="searchInputRef"
               v-model="searchQuery"
-              :placeholder="searchPlaceholder"
+              :placeholder="searchPlaceholder ?? t('common.searchPlaceholder')"
+              :aria-label="searchPlaceholder ?? t('common.searchPlaceholder')"
               class="h-9 rounded-xl border-border/60 bg-background/80 pl-9 pr-3 text-sm"
               @keydown.stop
             />
@@ -34,7 +35,7 @@
           v-if="showEmptyState"
           class="px-3 py-2 text-sm text-muted-foreground"
         >
-          未找到匹配项
+          {{ t('common.noSearchResults') }}
         </div>
       </SelectViewport>
     </SelectContentPrimitive>
@@ -66,6 +67,7 @@ import {
   type RegisteredSelectItem,
 } from './select-search-context'
 import { matchesSearchQuery, preloadPinyin } from '@/utils/search'
+import { useI18n } from '@/i18n'
 
 interface Props {
   class?: string
@@ -90,9 +92,10 @@ const props = withDefaults(defineProps<Props>(), {
   disablePortal: undefined,
   searchable: true,
   searchThreshold: 8,
-  searchPlaceholder: '输入关键词搜索...',
+  searchPlaceholder: undefined,
 })
 
+const { t } = useI18n()
 const isInsideDialog = inject(DIALOG_CONTEXT_KEY, false)
 const shouldDisablePortal = computed(
   () => props.disablePortal ?? isInsideDialog,
@@ -177,7 +180,7 @@ watch(showSearchInput, async (visible) => {
 
 const contentClass = computed(() =>
   cn(
-    'z-[200] max-h-96 min-w-[8rem] overflow-hidden rounded-2xl border border-border bg-card text-foreground shadow-2xl backdrop-blur-xl pointer-events-auto',
+    'z-[200] max-h-96 min-w-[var(--radix-select-trigger-width,8rem)] max-w-[min(calc(100vw-1rem),var(--radix-select-content-available-width,100vw))] overflow-hidden rounded-2xl border border-border bg-card text-foreground shadow-2xl backdrop-blur-xl pointer-events-auto',
     'data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95',
     'data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2',
     props.class,

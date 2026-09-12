@@ -1,11 +1,7 @@
 use std::collections::BTreeMap;
 
-#[cfg(feature = "mysql")]
-use super::MysqlBackend;
 #[cfg(feature = "postgres")]
 use super::PostgresBackend;
-#[cfg(feature = "sqlite")]
-use super::SqliteBackend;
 use crate::repository::system::{
     AdminSystemPurgeSummary, AdminSystemPurgeTarget, AdminSystemUsageAggregateImportMode,
     AdminSystemUsageAggregateImportSummary, AdminSystemUsageAggregateSnapshot,
@@ -13,12 +9,8 @@ use crate::repository::system::{
 };
 use crate::DataLayerError;
 
-#[cfg(feature = "mysql")]
-mod mysql;
 #[cfg(feature = "postgres")]
 mod postgres;
-#[cfg(feature = "sqlite")]
-mod sqlite;
 
 const ADMIN_CONFIG_PURGE_TABLES: &[&str] = &[
     "api_key_provider_mappings",
@@ -124,11 +116,6 @@ fn checked_sql_identifier(value: &str) -> Result<&str, DataLayerError> {
     }
 }
 
-#[cfg(any(feature = "mysql", feature = "sqlite"))]
-fn current_unix_secs() -> u64 {
-    chrono::Utc::now().timestamp().max(0) as u64
-}
-
 fn i64_from_u64(value: u64, field_name: &str) -> Result<i64, DataLayerError> {
     i64::try_from(value)
         .map_err(|_| DataLayerError::InvalidInput(format!("{field_name} exceeds i64 range")))
@@ -170,22 +157,9 @@ fn should_skip_imported_aggregate(
     match mode {
         AdminSystemUsageAggregateImportMode::Skip => Ok(true),
         AdminSystemUsageAggregateImportMode::Overwrite => Ok(false),
-        AdminSystemUsageAggregateImportMode::Error => Err(DataLayerError::InvalidInput(format!(
-            "{table} aggregate already exists for date_unix_secs={date_unix_secs}"
-        ))),
+        AdminSystemUsageAggregateImportMode::Error
+        | AdminSystemUsageAggregateImportMode::ValidateError => Err(DataLayerError::InvalidInput(
+            format!("{table} aggregate already exists for date_unix_secs={date_unix_secs}"),
+        )),
     }
-}
-
-#[cfg(any(feature = "mysql", feature = "sqlite"))]
-fn serialize_json_value(value: &serde_json::Value) -> Result<String, DataLayerError> {
-    serde_json::to_string(value).map_err(|err| {
-        DataLayerError::UnexpectedValue(format!("invalid system config JSON value: {err}"))
-    })
-}
-
-#[cfg(any(feature = "mysql", feature = "sqlite"))]
-fn parse_json_value(value: String) -> Result<serde_json::Value, DataLayerError> {
-    serde_json::from_str(&value).map_err(|err| {
-        DataLayerError::UnexpectedValue(format!("invalid system config JSON value: {err}"))
-    })
 }

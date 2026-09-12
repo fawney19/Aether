@@ -101,7 +101,7 @@ onBeforeUnmount(() => {
         <Check class="h-4 w-4" />
       </SelectItemIndicator>
     </span>
-    <SelectItemText>
+    <SelectItemText class="min-w-0 whitespace-normal break-words text-left">
       <slot />
     </SelectItemText>
   </SelectItemPrimitive>

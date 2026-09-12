@@ -38,6 +38,16 @@ async function createAbortedNavigationFailure(path: string) {
 }
 
 describe('navigateAfterLogin', () => {
+  it('never passes a cross-origin target to router or document navigation', async () => {
+    const push = vi.fn<Router['push']>().mockResolvedValue(undefined)
+    const documentNavigate = vi.fn()
+
+    await navigateAfterLogin(createRouterMock(push), '//attacker.example/steal', documentNavigate)
+
+    expect(push).toHaveBeenCalledWith('/')
+    expect(documentNavigate).not.toHaveBeenCalled()
+  })
+
   it('treats duplicated Vue Router navigation as a completed login navigation', async () => {
     const push = vi.fn<Router['push']>().mockResolvedValue(await createDuplicatedNavigationFailure('/dashboard'))
     const documentNavigate = vi.fn()

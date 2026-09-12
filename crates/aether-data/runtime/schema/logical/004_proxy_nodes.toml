@@ -9,6 +9,11 @@ type = "text_id"
 length = 64
 
 [[table.proxy_nodes.columns]]
+name = "tunnel_generation"
+type = "text_id"
+length = 64
+
+[[table.proxy_nodes.columns]]
 name = "name"
 type = "text"
 length = 255
@@ -85,7 +90,6 @@ nullable = true
 [[table.proxy_nodes.columns]]
 name = "proxy_password"
 type = "text"
-length = 500
 nullable = true
 
 [[table.proxy_nodes.columns]]
@@ -150,6 +154,10 @@ default = 0
 name = "proxy_metadata"
 type = "json"
 nullable = true
+
+[[table.proxy_nodes.uniques]]
+name = "uq_proxy_node_ip_port"
+columns = ["ip", "port"]
 
 [table.proxy_node_events]
 domain = "proxy_nodes"

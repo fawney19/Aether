@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 pub(crate) mod admission;
+pub(crate) mod attempt_cancellation;
 pub(crate) mod attempt_lifecycle;
 mod chatgpt_web_image;
 mod constants;
@@ -19,6 +20,7 @@ mod response_header_rules;
 mod server;
 pub(crate) mod stream;
 mod stream_pump;
+mod stream_read_timeout;
 pub(crate) mod submission;
 pub(crate) mod sync;
 pub(crate) mod transport;
@@ -30,7 +32,8 @@ pub(crate) use self::admission::{
 };
 pub(crate) use self::chatgpt_web_image::maybe_execute_chatgpt_web_image_sync;
 pub(crate) use self::constants::{
-    MAX_ERROR_BODY_BYTES, MAX_STREAM_PREFETCH_BYTES, MAX_STREAM_PREFETCH_FRAMES,
+    MAX_ERROR_BODY_BYTES, MAX_EXECUTION_STREAM_FRAME_LINE_BYTES, MAX_STREAM_BODY_CAPTURE_BYTES,
+    MAX_STREAM_PREFETCH_BYTES, MAX_STREAM_PREFETCH_FRAMES,
 };
 pub(crate) use self::fallback::{
     analyze_local_candidate_failover_sync, local_failover_response_text,

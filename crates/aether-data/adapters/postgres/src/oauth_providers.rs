@@ -3,7 +3,7 @@ use sqlx::{postgres::PgRow, PgPool, Postgres, QueryBuilder, Row};
 
 use aether_data_contracts::repository::oauth_providers::{
     OAuthProviderReadRepository, OAuthProviderWriteRepository, StoredOAuthProviderConfig,
-    UpsertOAuthProviderConfigRecord,
+    UpsertOAuthProviderConfigOutcome, UpsertOAuthProviderConfigRecord,
 };
 use aether_data_contracts::DataLayerError;
 use aether_data_query::{push_eq, push_limit, WhereClause};
@@ -148,6 +148,18 @@ RETURNING
 const DELETE_OAUTH_PROVIDER_CONFIG_SQL: &str = r#"
 DELETE FROM oauth_providers
 WHERE provider_type = $1
+  AND NOT EXISTS (
+    SELECT 1
+    FROM user_oauth_links
+    WHERE user_oauth_links.provider_type = oauth_providers.provider_type
+  )
+"#;
+
+const COMPARE_AND_SWAP_OAUTH_PROVIDER_CLIENT_SECRET_SQL: &str = r#"
+UPDATE oauth_providers
+SET client_secret_encrypted = $3
+WHERE provider_type = $1
+  AND client_secret_encrypted = $2
 "#;
 
 #[derive(Debug, Clone)]
@@ -218,11 +230,54 @@ impl OAuthProviderReadRepository for SqlxOAuthProviderRepository {
 
 #[async_trait]
 impl OAuthProviderWriteRepository for SqlxOAuthProviderRepository {
-    async fn upsert_oauth_provider_config(
+    async fn upsert_oauth_provider_config_guarded(
         &self,
         record: &UpsertOAuthProviderConfigRecord,
-    ) -> Result<StoredOAuthProviderConfig, DataLayerError> {
+        ldap_exclusive: bool,
+        force_disable: bool,
+        _locked_users_snapshot: usize,
+    ) -> Result<UpsertOAuthProviderConfigOutcome, DataLayerError> {
         record.validate()?;
+        let mut tx = self.pool.begin().await.map_postgres_err()?;
+        let existing_enabled: Option<bool> = if record.is_enabled || force_disable {
+            None
+        } else {
+            // All provider status changes serialize in provider_type order before an
+            // enabled-link count is used to authorize a disable.
+            sqlx::query_scalar::<_, String>(
+                "SELECT provider_type FROM oauth_providers ORDER BY provider_type FOR UPDATE",
+            )
+            .fetch_all(&mut *tx)
+            .await
+            .map_postgres_err()?;
+            sqlx::query_scalar("SELECT is_enabled FROM oauth_providers WHERE provider_type = $1")
+                .bind(&record.provider_type)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_postgres_err()?
+        };
+        if existing_enabled == Some(true) {
+            let affected_count: i64 =
+                sqlx::query_scalar(COUNT_LOCKED_USERS_IF_PROVIDER_DISABLED_SQL)
+                    .bind(&record.provider_type)
+                    .bind(ldap_exclusive)
+                    .fetch_one(&mut *tx)
+                    .await
+                    .map_postgres_err()?;
+            let affected_count = usize::try_from(affected_count).map_err(|_| {
+                DataLayerError::UnexpectedValue(
+                    "oauth_providers.locked_user_count is negative".to_string(),
+                )
+            })?;
+            if affected_count > 0 {
+                tx.rollback().await.map_postgres_err()?;
+                return Ok(
+                    UpsertOAuthProviderConfigOutcome::DisableRequiresConfirmation {
+                        affected_count,
+                    },
+                );
+            }
+        }
         let row = sqlx::query(UPSERT_OAUTH_PROVIDER_CONFIG_SQL)
             .bind(&record.provider_type)
             .bind(&record.display_name)
@@ -239,22 +294,57 @@ impl OAuthProviderWriteRepository for SqlxOAuthProviderRepository {
             .bind(record.extra_config.as_ref())
             .bind(record.icon_url.as_deref())
             .bind(record.is_enabled)
-            .fetch_one(&self.pool)
+            .fetch_one(&mut *tx)
             .await
             .map_postgres_err()?;
-        map_oauth_provider_row(&row)
+        let provider = map_oauth_provider_row(&row)?;
+        tx.commit().await.map_postgres_err()?;
+        Ok(UpsertOAuthProviderConfigOutcome::Upserted(provider))
     }
 
-    async fn delete_oauth_provider_config(
+    async fn compare_and_swap_oauth_provider_client_secret(
         &self,
         provider_type: &str,
+        expected: &str,
+        replacement: &str,
     ) -> Result<bool, DataLayerError> {
-        let result = sqlx::query(DELETE_OAUTH_PROVIDER_CONFIG_SQL)
+        let result = sqlx::query(COMPARE_AND_SWAP_OAUTH_PROVIDER_CLIENT_SECRET_SQL)
             .bind(provider_type)
+            .bind(expected)
+            .bind(replacement)
             .execute(&self.pool)
             .await
             .map_postgres_err()?;
-        Ok(result.rows_affected() > 0)
+        Ok(result.rows_affected() == 1)
+    }
+
+    async fn delete_oauth_provider_config_if_unlinked(
+        &self,
+        provider_type: &str,
+        has_links_snapshot: bool,
+    ) -> Result<bool, DataLayerError> {
+        if has_links_snapshot {
+            return Ok(false);
+        }
+        let mut tx = self.pool.begin().await.map_postgres_err()?;
+        let provider_exists: Option<String> = sqlx::query_scalar(
+            "SELECT provider_type FROM oauth_providers WHERE provider_type = $1 FOR UPDATE",
+        )
+        .bind(provider_type)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_postgres_err()?;
+        if provider_exists.is_none() {
+            tx.rollback().await.map_postgres_err()?;
+            return Ok(false);
+        }
+        let result = sqlx::query(DELETE_OAUTH_PROVIDER_CONFIG_SQL)
+            .bind(provider_type)
+            .execute(&mut *tx)
+            .await
+            .map_postgres_err()?;
+        tx.commit().await.map_postgres_err()?;
+        Ok(result.rows_affected() == 1)
     }
 }
 
@@ -349,7 +439,10 @@ fn map_oauth_provider_row(row: &PgRow) -> Result<StoredOAuthProviderConfig, Data
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_scopes, SqlxOAuthProviderRepository};
+    use super::{
+        parse_scopes, SqlxOAuthProviderRepository,
+        COMPARE_AND_SWAP_OAUTH_PROVIDER_CLIENT_SECRET_SQL,
+    };
     use crate::{PostgresPoolConfig, PostgresPoolFactory};
     use aether_data_contracts::DataLayerError;
 
@@ -400,6 +493,15 @@ mod tests {
             DataLayerError::UnexpectedValue(ref message)
                 if message == "oauth_providers.scopes is not a JSON array"
         ));
+    }
+
+    #[test]
+    fn client_secret_cas_updates_only_the_secret_column() {
+        assert!(COMPARE_AND_SWAP_OAUTH_PROVIDER_CLIENT_SECRET_SQL
+            .contains("SET client_secret_encrypted = $3"));
+        assert!(COMPARE_AND_SWAP_OAUTH_PROVIDER_CLIENT_SECRET_SQL
+            .contains("client_secret_encrypted = $2"));
+        assert!(!COMPARE_AND_SWAP_OAUTH_PROVIDER_CLIENT_SECRET_SQL.contains("updated_at"));
     }
 
     #[tokio::test]

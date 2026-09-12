@@ -16,6 +16,7 @@ use crate::ai_serving::{
     build_execution_runtime_auth_context, resolve_execution_runtime_auth_context,
     GatewayControlDecision,
 };
+use crate::state::VideoTaskRouteAccess;
 use crate::{AiExecutionDecision, AppState, GatewayError};
 
 pub(crate) async fn maybe_build_sync_decision_payload(
@@ -191,10 +192,6 @@ async fn maybe_build_local_video_task_follow_up_sync_decision_payload(
         return Ok(None);
     }
 
-    let _ = state
-        .hydrate_video_task_for_route(decision.route_family.as_deref(), parts.uri.path())
-        .await?;
-
     let auth_context = resolve_execution_runtime_auth_context(
         state,
         decision,
@@ -204,16 +201,30 @@ async fn maybe_build_local_video_task_follow_up_sync_decision_payload(
     )
     .await?;
     let Some(auth_context) = auth_context else {
-        return Ok(None);
+        return Err(crate::video_tasks::not_found_error());
     };
-    let Some(follow_up) = state.video_tasks.prepare_follow_up_sync_plan(
+    if !auth_context.access_allowed || auth_context.user_id.trim().is_empty() {
+        return Err(crate::video_tasks::not_found_error());
+    }
+    if state
+        .hydrate_video_task_for_route_for_user(
+            decision.route_family.as_deref(),
+            parts.uri.path(),
+            &auth_context.user_id,
+        )
+        .await?
+        != VideoTaskRouteAccess::Allowed
+    {
+        return Err(crate::video_tasks::not_found_error());
+    }
+    let Some(follow_up) = state.video_tasks.prepare_follow_up_sync_plan_for_user(
         plan_kind,
         parts.uri.path(),
         Some(body_json),
         Some(&auth_context),
         trace_id,
     ) else {
-        return Ok(None);
+        return Err(crate::video_tasks::not_found_error());
     };
 
     let aether_video_tasks_core::LocalVideoTaskFollowUpPlan {
@@ -236,8 +247,7 @@ async fn maybe_build_local_video_task_follow_up_sync_decision_payload(
         downstream_path = %parts.uri.path(),
         provider_api_format = %plan.provider_api_format,
         client_api_format = %plan.client_api_format,
-        upstream_base_url = ?upstream_base_url,
-        upstream_url = %plan.url,
+        upstream_origin = %crate::handlers::shared::security_log_url_origin(&plan.url),
         "gateway built local video follow-up sync decision payload"
     );
 

@@ -1,12 +1,13 @@
 use super::{
-    auth_client_ip_with_cf, build_auth_error_response, decrypt_catalog_secret_with_fallbacks, http,
-    system_config_bool, system_config_string, system_config_string_list, AppState, Body, Response,
+    build_auth_error_response, decrypt_or_migrate_system_config_secret, http, system_config_bool,
+    system_config_string, system_config_string_list, AppState, Body, Response,
 };
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tracing::warn;
 
 const TURNSTILE_SITEVERIFY_URL: &str = "https://challenges.cloudflare.com/turnstile/v0/siteverify";
+const MAX_TURNSTILE_RESPONSE_BYTES: usize = 64 * 1024;
 const TURNSTILE_TOKEN_MAX_LEN: usize = 2048;
 const TURNSTILE_SITEVERIFY_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -25,7 +26,6 @@ impl AuthTurnstileAction {
     }
 }
 
-#[derive(Debug)]
 struct AuthTurnstileConfig {
     enabled: bool,
     site_key: Option<String>,
@@ -33,7 +33,7 @@ struct AuthTurnstileConfig {
     allowed_hostnames: Vec<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 struct TurnstileSiteverifyRequest<'a> {
     secret: &'a str,
     response: &'a str,
@@ -74,12 +74,11 @@ impl AuthTurnstileFailure {
 
 pub(super) async fn verify_auth_turnstile(
     state: &AppState,
-    headers: &http::HeaderMap,
-    cf_connecting_ip: Option<&str>,
+    client_ip: std::net::IpAddr,
     token: Option<&str>,
     action: AuthTurnstileAction,
 ) -> Result<(), Response<Body>> {
-    match verify_auth_turnstile_inner(state, headers, cf_connecting_ip, token, action).await {
+    match verify_auth_turnstile_inner(state, client_ip, token, action).await {
         Ok(()) => Ok(()),
         Err(err) => Err(err.into_response()),
     }
@@ -87,8 +86,7 @@ pub(super) async fn verify_auth_turnstile(
 
 async fn verify_auth_turnstile_inner(
     state: &AppState,
-    headers: &http::HeaderMap,
-    cf_connecting_ip: Option<&str>,
+    client_ip: std::net::IpAddr,
     token: Option<&str>,
     action: AuthTurnstileAction,
 ) -> Result<(), AuthTurnstileFailure> {
@@ -118,11 +116,11 @@ async fn verify_auth_turnstile_inner(
         return Err(AuthTurnstileFailure::BadRequest("人机验证失败，请重试"));
     }
 
-    let remoteip = auth_client_ip_with_cf(headers, cf_connecting_ip);
+    let remoteip = client_ip.to_string();
     let siteverify_request = TurnstileSiteverifyRequest {
         secret: secret_key,
         response: token,
-        remoteip: remoteip.as_deref(),
+        remoteip: Some(remoteip.as_str()),
         idempotency_key: uuid::Uuid::new_v4().to_string(),
     };
     let siteverify_url = turnstile_siteverify_url(state);
@@ -139,8 +137,8 @@ async fn verify_auth_turnstile_inner(
         warn!("turnstile siteverify request timed out");
         AuthTurnstileFailure::ServiceUnavailable("人机验证服务暂不可用，请稍后重试")
     })?
-    .map_err(|err| {
-        warn!(error = %err, "turnstile siteverify request failed");
+    .map_err(|_| {
+        warn!("turnstile siteverify request failed");
         AuthTurnstileFailure::ServiceUnavailable("人机验证服务暂不可用，请稍后重试")
     })?;
     if !response.status().is_success() {
@@ -153,13 +151,16 @@ async fn verify_auth_turnstile_inner(
             "人机验证服务暂不可用，请稍后重试",
         ));
     }
-    let payload = response
-        .json::<TurnstileSiteverifyResponse>()
+    let body = aether_http::read_response_bytes_with_limit(response, MAX_TURNSTILE_RESPONSE_BYTES)
         .await
-        .map_err(|err| {
-            warn!(error = %err, "turnstile siteverify response decode failed");
+        .map_err(|_| {
+            warn!("turnstile siteverify response read failed");
             AuthTurnstileFailure::ServiceUnavailable("人机验证服务暂不可用，请稍后重试")
         })?;
+    let payload = serde_json::from_slice::<TurnstileSiteverifyResponse>(&body).map_err(|_| {
+        warn!("turnstile siteverify response decode failed");
+        AuthTurnstileFailure::ServiceUnavailable("人机验证服务暂不可用，请稍后重试")
+    })?;
 
     if !payload.success {
         warn!(
@@ -221,34 +222,42 @@ async fn read_auth_turnstile_config(
         .read_system_config_json_value("turnstile_enabled")
         .await
         .map_err(|err| {
-            warn!(error = ?err, "turnstile enabled config lookup failed");
+            warn!(error = %crate::error::redact_error_debug(&err), "turnstile enabled config lookup failed");
             AuthTurnstileFailure::ServiceUnavailable("人机验证服务暂不可用，请稍后重试")
         })?;
     let site_key = state
         .read_system_config_json_value("turnstile_site_key")
         .await
         .map_err(|err| {
-            warn!(error = ?err, "turnstile site key config lookup failed");
+            warn!(error = %crate::error::redact_error_debug(&err), "turnstile site key config lookup failed");
             AuthTurnstileFailure::ServiceUnavailable("人机验证服务暂不可用，请稍后重试")
         })?;
     let secret_key = state
         .read_system_config_json_value("turnstile_secret_key")
         .await
         .map_err(|err| {
-            warn!(error = ?err, "turnstile secret key config lookup failed");
+            warn!(error = %crate::error::redact_error_debug(&err), "turnstile secret key config lookup failed");
             AuthTurnstileFailure::ServiceUnavailable("人机验证服务暂不可用，请稍后重试")
         })?;
     let allowed_hostnames = state
         .read_system_config_json_value("turnstile_allowed_hostnames")
         .await
         .map_err(|err| {
-            warn!(error = ?err, "turnstile hostname config lookup failed");
+            warn!(error = %crate::error::redact_error_debug(&err), "turnstile hostname config lookup failed");
             AuthTurnstileFailure::ServiceUnavailable("人机验证服务暂不可用，请稍后重试")
         })?;
 
-    let secret_key = system_config_string(secret_key.as_ref()).map(|value| {
-        decrypt_catalog_secret_with_fallbacks(state.encryption_key(), &value).unwrap_or(value)
-    });
+    let secret_key = match system_config_string(secret_key.as_ref()) {
+        Some(value) => Some(
+            decrypt_or_migrate_system_config_secret(state, "turnstile_secret_key", value)
+                .await
+                .map_err(|error| {
+                    warn!(error = %crate::error::redact_error_debug(&error), "turnstile secret key migration failed");
+                    AuthTurnstileFailure::ServiceUnavailable("人机验证服务暂不可用，请稍后重试")
+                })?,
+        ),
+        None => None,
+    };
 
     Ok(AuthTurnstileConfig {
         enabled: system_config_bool(enabled.as_ref(), false),

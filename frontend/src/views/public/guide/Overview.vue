@@ -102,14 +102,14 @@ function copyStep(stepId: string, code: string) {
         class="mt-6"
       >
         <!-- Tab 切换 -->
-        <div class="flex border-b border-[#e5e4df] dark:border-[rgba(227,224,211,0.12)] px-5">
+        <div class="flex max-w-full overflow-x-auto border-b border-[#e5e4df] dark:border-[rgba(227,224,211,0.12)] px-5">
           <button
             v-for="(tab, idx) in [
               { icon: Container, label: 'Docker 预构建镜像' },
               { icon: Monitor, label: '本地开发' }
             ]"
             :key="idx"
-            class="flex items-center gap-2 px-4 py-3 text-sm font-medium whitespace-nowrap transition-colors border-b-2 -mb-px hover:text-[#262624] dark:hover:text-[#f1ead8]"
+            class="flex shrink-0 items-center gap-2 px-4 py-3 text-sm font-medium whitespace-nowrap transition-colors border-b-2 -mb-px hover:text-[#262624] dark:hover:text-[#f1ead8]"
             :class="activeDeployTab === idx
               ? 'border-[#cc785c] text-[#cc785c] dark:text-[#d4a27f]'
               : 'border-transparent text-[#666663] dark:text-[#a3a094]'"
@@ -117,7 +117,7 @@ function copyStep(stepId: string, code: string) {
           >
             <component
               :is="tab.icon"
-              class="h-4 w-4"
+              class="h-4 w-4 shrink-0"
             />
             {{ tab.label }}
           </button>

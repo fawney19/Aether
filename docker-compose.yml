@@ -3,13 +3,14 @@
 
 services:
   postgres:
-    image: postgres:15
+    # OCI index digest for the official multi-architecture postgres:15.19 image.
+    image: postgres:15.19@sha256:5f72c7b5bd616308ccfd2e74d6be16fb06364e5eecbb815fe9dc6ab9761d2111
     container_name: aether-postgres
     shm_size: ${POSTGRES_SHM_SIZE:-512mb}
     environment:
       POSTGRES_DB: aether
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env}
       TZ: Asia/Shanghai
     volumes:
       - postgres_data:/var/lib/postgresql/data
@@ -41,51 +42,39 @@ services:
     restart: unless-stopped
 
   redis:
-    image: redis:7-alpine
+    # OCI index digest for the official multi-architecture redis:7.4.11-alpine image.
+    image: redis:7.4.11-alpine@sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf
     container_name: aether-redis
-    command: redis-server --dir /tmp --appendonly no --save "" --requirepass ${REDIS_PASSWORD} --maxclients ${REDIS_MAXCLIENTS:-10000}
+    command: redis-server --dir /tmp --appendonly no --save "" --requirepass ${REDIS_PASSWORD:?set REDIS_PASSWORD in .env} --maxclients ${REDIS_MAXCLIENTS:-10000}
     ports:
       - "127.0.0.1:${REDIS_PORT:-6379}:6379"
     healthcheck:
-      test: [ "CMD-SHELL", "redis-cli -a \"${REDIS_PASSWORD}\" ping | grep -q PONG" ]
+      test: [ "CMD-SHELL", "redis-cli -a \"${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}\" ping | grep -q PONG" ]
       interval: 5s
       timeout: 3s
       retries: 5
-    restart: unless-stopped
-
-  mysql:
-    image: mysql:8.0
-    container_name: aether-mysql
-    profiles:
-      - mysql
-    environment:
-      MYSQL_DATABASE: ${MYSQL_DATABASE:-aether}
-      MYSQL_USER: ${MYSQL_USER:-aether}
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-aether}
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-aether_root}
-      TZ: Asia/Shanghai
-    volumes:
-      - mysql_data:/var/lib/mysql
-    healthcheck:
-      test:
-        [
-          "CMD-SHELL",
-          "mysqladmin ping -h 127.0.0.1 -u$${MYSQL_USER} -p$${MYSQL_PASSWORD} --silent"
-        ]
-      interval: 5s
-      timeout: 5s
-      retries: 10
     restart: unless-stopped
 
   app:
     image: ${APP_IMAGE:-ghcr.io/fawney19/aether:latest}
     container_name: aether-app
     user: "0:0"
+    read_only: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - DAC_OVERRIDE
+      - FOWNER
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,mode=1777
     env_file:
       - .env
     environment:
-      DATABASE_URL: postgresql://postgres:${DB_PASSWORD}@postgres:5432/aether
-      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      AETHER_DATABASE_DRIVER: postgres
+      DATABASE_URL: postgresql://postgres:${DB_PASSWORD:?set DB_PASSWORD in .env}@postgres:5432/aether
+      REDIS_URL: redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}@redis:6379/0
       TZ: Asia/Shanghai
       AETHER_BASE_DIR: /opt/aether
       AETHER_UPDATE_STRATEGY: docker
@@ -110,4 +99,3 @@ services:
 
 volumes:
   postgres_data:
-  mysql_data:

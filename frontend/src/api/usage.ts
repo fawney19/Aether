@@ -2,6 +2,7 @@ import apiClient from './client'
 import { cachedRequest, dedupedRequest, buildCacheKey } from '@/utils/cache'
 import type { ActivityHeatmap } from '@/types/activity'
 import type { ImageProgress } from './requestTrace'
+import type { UsageRecord as UsageListRecord } from './usageRecords'
 
 const ACTIVITY_HEATMAP_CACHE_TTL_MS = 30 * 60 * 1000
 const USAGE_ANALYTICS_CACHE_TTL_MS = 30 * 1000
@@ -58,6 +59,12 @@ export interface UsageStats {
   avg_response_time: number
   error_count?: number
   error_rate?: number
+  cache_stats?: {
+    cache_creation_tokens: number
+    cache_read_tokens: number
+    cache_creation_cost: number
+    cache_read_cost: number
+  }
   today?: {
     requests: number
     tokens: number
@@ -67,6 +74,7 @@ export interface UsageStats {
 }
 
 export interface UsageByModel {
+  actual_cost?: number
   model: string
   request_count: number
   total_tokens: number
@@ -511,7 +519,7 @@ export const usageApi = {
     limit?: number
     offset?: number
   }): Promise<{
-    records: Array<Record<string, unknown>>
+    records: UsageListRecord[]
     total: number
     limit: number
     offset: number
@@ -519,7 +527,13 @@ export const usageApi = {
   }> {
     const key = buildCacheKey('usage:records', params as Record<string, unknown> | undefined)
     return dedupedRequest(key, async () => {
-      const response = await apiClient.get('/api/admin/usage/records', { params })
+      const response = await apiClient.get<{
+        records: UsageListRecord[]
+        total: number
+        limit: number
+        offset: number
+        total_is_estimated?: boolean
+      }>('/api/admin/usage/records', { params })
       return response.data
     })
   },
@@ -630,7 +644,54 @@ export const usageApi = {
     if (typeof timeRange?.tz_offset_minutes === 'number') {
       params.tz_offset_minutes = timeRange.tz_offset_minutes
     }
-    const response = await apiClient.get('/api/admin/usage/active', { params })
+    const response = await apiClient.get<{
+    requests: Array<{
+      id: string
+      status: 'pending' | 'streaming' | 'completed' | 'failed' | 'cancelled'
+      input_tokens: number
+      effective_input_tokens?: number | null
+      output_tokens: number
+      cache_creation_input_tokens?: number | null
+      cache_creation_ephemeral_5m_input_tokens?: number | null
+      cache_creation_ephemeral_1h_input_tokens?: number | null
+      cache_read_input_tokens?: number | null
+      cost: number
+      actual_cost?: number | null
+      rate_multiplier?: number | null
+      response_time_ms: number | null
+      first_byte_time_ms: number | null
+      end_to_end_time_ms?: number | null
+      end_to_end_first_byte_time_ms?: number | null
+      updated_at?: string | null
+      response_time_updated_at?: string | null
+      status_code?: number | null
+      error_message?: string | null
+      provider?: string | null
+      api_key_name?: string | null
+      provider_key_name?: string | null
+      api_format?: string | null
+      endpoint_api_format?: string | null
+      is_stream?: boolean | null
+      is_websocket?: boolean | null
+      websocket_transport?: string | null
+      usage_available?: boolean | null
+      usage_pricing_available?: boolean | null
+      input_audio_tokens?: number | null
+      output_audio_tokens?: number | null
+      upstream_is_stream?: boolean | null
+      client_requested_stream?: boolean | null
+      client_is_stream?: boolean | null
+      has_format_conversion?: boolean | null
+      has_fallback?: boolean | null
+      target_model?: string | null
+      request_type?: string | null
+      requested_reasoning_effort?: string | null
+      reasoning_effort?: string | null
+      service_tier?: string | null
+      actual_service_tier?: string | null
+      image_progress?: ImageProgress | null
+    }>
+  }>('/api/admin/usage/active', { params })
     return response.data
   },
 

@@ -10,6 +10,16 @@ import { cache } from '@/utils/cache'
 // 在开发环境下使用代理,生产环境使用环境变量
 const API_BASE_URL = import.meta.env.VITE_API_URL || ''
 export const AUTH_STATE_CHANGE_EVENT = 'aether-auth-state-change'
+export const AUTH_SESSION_SIGNAL_KEY = 'aether_auth_session_signal'
+
+export type AuthStateChangeDetail = {
+  authenticated: boolean
+}
+
+export type AuthSessionSignal = AuthStateChangeDetail & {
+  eventId: string
+  emittedAt: number
+}
 
 type MockRuntime = typeof import('@/mocks')
 
@@ -46,6 +56,14 @@ function isPublicEndpoint(url?: string, method?: string): boolean {
  */
 function isAuthRequest(url?: string): boolean {
   return url?.includes('/auth/login') || url?.includes('/auth/refresh') || url?.includes('/auth/logout') || false
+}
+
+function isProtectedOperationalEndpoint(url?: string): boolean {
+  if (!url) return false
+  const path = url.split('?', 1)[0]
+  return path === '/_gateway/metrics' ||
+         path.startsWith('/_gateway/audit/') ||
+         path.startsWith('/_gateway/async-tasks/')
 }
 
 /**
@@ -100,16 +118,10 @@ function createDemoAdapter(defaultAdapter: AxiosAdapter) {
 class ApiClient {
   private client: AxiosInstance
   private token: string | null = null
+  private authStateVersion = 0
   private isRefreshing = false
   private refreshPromise: Promise<string> | null = null
   private readonly refreshCoordinator = new CrossTabRefreshCoordinator()
-
-  private readonly onStorageSync = (event: StorageEvent): void => {
-    if (event.key !== 'access_token') {
-      return
-    }
-    this.syncTokenState(event.newValue)
-  }
 
   constructor() {
     this.client = axios.create({
@@ -126,7 +138,7 @@ class ApiClient {
     this.client.defaults.adapter = createDemoAdapter(defaultAdapter)
 
     this.setupInterceptors()
-    this.setupCrossTabAuthSync()
+    this.purgeLegacyStoredTokens()
   }
 
   /**
@@ -136,12 +148,15 @@ class ApiClient {
     // 请求拦截器 - 仅处理认证
     this.client.interceptors.request.use(
       (config) => {
-        if (config.url?.includes('/api/')) {
+        const carriesSessionCredentials = config.url?.includes('/api/') ||
+          isProtectedOperationalEndpoint(config.url)
+
+        if (carriesSessionCredentials) {
           config.headers['X-Client-Device-Id'] = getClientDeviceId()
         }
 
         const requiresAuth = !isPublicEndpoint(config.url, config.method) &&
-                           config.url?.includes('/api/')
+                           carriesSessionCredentials
 
         if (requiresAuth) {
           const token = this.getToken()
@@ -161,27 +176,55 @@ class ApiClient {
     )
   }
 
-  private setupCrossTabAuthSync(): void {
-    if (typeof window !== 'undefined') {
-      window.addEventListener('storage', this.onStorageSync)
-    }
-  }
-
-  private emitAuthStateChange(token: string | null): void {
+  private emitAuthStateChange(authenticated: boolean): void {
     if (typeof window === 'undefined') {
       return
     }
     window.dispatchEvent(
-      new CustomEvent<{ token: string | null }>(AUTH_STATE_CHANGE_EVENT, {
-        detail: { token },
+      new CustomEvent<AuthStateChangeDetail>(AUTH_STATE_CHANGE_EVENT, {
+        detail: { authenticated },
       })
     )
+  }
+
+  private publishAuthSessionSignal(authenticated: boolean): void {
+    if (typeof window === 'undefined') {
+      return
+    }
+
+    const signal: AuthSessionSignal = {
+      authenticated,
+      eventId: typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      emittedAt: Date.now(),
+    }
+
+    try {
+      window.localStorage.setItem(AUTH_SESSION_SIGNAL_KEY, JSON.stringify(signal))
+    } catch {
+      // Cross-tab notification is best effort. The HttpOnly cookie remains the
+      // source of truth when another tab starts or makes its next request.
+    }
+  }
+
+  private purgeLegacyStoredTokens(): void {
+    if (typeof window === 'undefined') {
+      return
+    }
+    for (const storage of [window.localStorage, window.sessionStorage]) {
+      try {
+        storage.removeItem('access_token')
+      } catch {
+        // Storage may be disabled; the token still only lives in memory.
+      }
+    }
   }
 
   /**
    * 处理响应错误
    */
-  private async handleResponseError(error: unknown): Promise<never> {
+  private async handleResponseError(error: unknown): Promise<AxiosResponse> {
     // 请求被取消
     if (axios.isCancel(error)) {
       return Promise.reject(error)
@@ -274,23 +317,21 @@ class ApiClient {
     originalRequest: InternalAxiosRequestConfig,
     originalError: import('axios').AxiosError
   ): Promise<AxiosResponse> {
-    this.isRefreshing = true
-    this.refreshPromise = this.coordinatedRefresh()
-
     try {
-      const accessToken = await this.refreshPromise
-      this.setToken(accessToken)
-      this.isRefreshing = false
-      this.refreshPromise = null
+      const accessToken = await this.restoreSession()
 
       // 重试原始请求
       originalRequest.headers.Authorization = `Bearer ${accessToken}`
       return this.client.request(originalRequest)
     } catch (refreshError: unknown) {
       log.error('Token refresh failed', refreshError instanceof Error ? refreshError.message : String(refreshError))
-      this.isRefreshing = false
-      this.refreshPromise = null
-      this.clearAuth()
+      const status = axios.isAxiosError(refreshError) ? refreshError.response?.status : undefined
+      // Network errors and refresh-rotation conflicts do not prove that the
+      // current access token or another tab's newly rotated session is invalid.
+      // Only an authoritative refresh rejection signs the browser out.
+      if (status === 401 || status === 403) {
+        this.clearAuth()
+      }
       return Promise.reject(originalError)
     }
   }
@@ -314,32 +355,58 @@ class ApiClient {
     currentMockUserToken = token
   }
 
-  setToken(token: string): void {
+  setToken(token: string, notifyOtherTabs = false): void {
+    this.purgeLegacyStoredTokens()
+    this.authStateVersion += 1
     if (this.token === token) {
       cache.clear()
     }
     this.syncTokenState(token)
-    localStorage.setItem('access_token', token)
+    this.emitAuthStateChange(true)
+    if (notifyOtherTabs) {
+      this.publishAuthSessionSignal(true)
+    }
   }
 
   getToken(): string | null {
-    if (!this.token) {
-      this.syncTokenState(localStorage.getItem('access_token'))
-    }
     return this.token
   }
 
-  clearAuth(): void {
-    const hadAuth = this.token !== null || localStorage.getItem('access_token') !== null
-    if (hadAuth && this.token === null) {
-      cache.clear()
-    }
+  clearAuth(notifyOtherTabs = true, emitLocalEvent = true): void {
+    const hadAuth = this.token !== null
+    this.authStateVersion += 1
     this.syncTokenState(null)
-    localStorage.removeItem('access_token')
-    // 同标签页内清理认证状态时不会触发 storage 事件，这里主动广播一次。
-    if (hadAuth) {
-      this.emitAuthStateChange(null)
+    this.purgeLegacyStoredTokens()
+    if (emitLocalEvent && hadAuth) {
+      this.emitAuthStateChange(false)
     }
+    if (notifyOtherTabs) {
+      this.publishAuthSessionSignal(false)
+    }
+  }
+
+  async restoreSession(notifyOtherTabs = false): Promise<string> {
+    if (this.refreshPromise) {
+      return this.refreshPromise
+    }
+
+    this.isRefreshing = true
+    const requestAuthStateVersion = this.authStateVersion
+    const restorePromise = (async () => {
+      const accessToken = await this.coordinatedRefresh()
+      if (requestAuthStateVersion !== this.authStateVersion) {
+        throw new Error('Auth state changed during session restore')
+      }
+      this.setToken(accessToken, notifyOtherTabs)
+      return accessToken
+    })().finally(() => {
+      if (this.refreshPromise === restorePromise) {
+        this.refreshPromise = null
+        this.isRefreshing = false
+      }
+    })
+    this.refreshPromise = restorePromise
+    return restorePromise
   }
 
   async refreshToken(): Promise<AxiosResponse> {
@@ -369,6 +436,23 @@ class ApiClient {
 
   async delete<T = unknown>(url: string, config?: AxiosRequestConfig): Promise<AxiosResponse<T>> {
     return this.client.delete<T>(url, config)
+  }
+}
+
+export function parseAuthSessionSignal(raw: string | null): AuthSessionSignal | null {
+  if (!raw) return null
+  try {
+    const signal = JSON.parse(raw) as Partial<AuthSessionSignal>
+    if (
+      typeof signal.authenticated !== 'boolean' ||
+      typeof signal.eventId !== 'string' ||
+      typeof signal.emittedAt !== 'number'
+    ) {
+      return null
+    }
+    return signal as AuthSessionSignal
+  } catch {
+    return null
   }
 }
 

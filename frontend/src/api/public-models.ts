@@ -36,6 +36,6 @@ export async function getPublicGlobalModels(params?: {
   is_active?: boolean
   search?: string
 }): Promise<PublicGlobalModelListResponse> {
-  const response = await client.get('/api/public/global-models', { params })
+  const response = await client.get<PublicGlobalModelListResponse>('/api/public/global-models', { params })
   return response.data
 }

@@ -133,6 +133,9 @@ pub(super) async fn list_local_video_create_candidate_attempts(
             input.client_session_affinity.as_ref(),
             current_unix_secs(),
             false,
+            crate::ai_serving::planner::candidate_ranking::scheduler_ordering_config_for_routing_policy(
+                input.routing_policy.as_ref(),
+            ),
         )
         .await
     {
@@ -190,6 +193,9 @@ pub(super) async fn build_local_video_create_candidate_attempt_source<'a>(
             input.client_session_affinity.as_ref(),
             current_unix_secs(),
             false,
+            crate::ai_serving::planner::candidate_ranking::scheduler_ordering_config_for_routing_policy(
+                input.routing_policy.as_ref(),
+            ),
         )
         .await
     {

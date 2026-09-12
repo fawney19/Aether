@@ -6,6 +6,9 @@ use chrono::{TimeZone, Utc};
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
+use super::redaction::{
+    admin_provider_status_snapshot_safe_json, admin_secret_safe_json, admin_secret_safe_proxy,
+};
 use super::status as provider_status;
 
 #[derive(Debug, Default, Clone, serde::Deserialize)]
@@ -18,7 +21,7 @@ pub struct AdminPoolResolveSelectionRequest {
     pub quick_selectors: Vec<String>,
 }
 
-#[derive(Debug, Default, Clone, serde::Deserialize)]
+#[derive(Default, Clone, serde::Deserialize)]
 pub struct AdminPoolBatchActionRequest {
     #[serde(default)]
     pub key_ids: Vec<String>,
@@ -26,6 +29,17 @@ pub struct AdminPoolBatchActionRequest {
     pub action: String,
     #[serde(default)]
     pub payload: Option<Value>,
+}
+
+impl std::fmt::Debug for AdminPoolBatchActionRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AdminPoolBatchActionRequest")
+            .field("key_ids", &self.key_ids)
+            .field("action", &self.action)
+            .field("payload", &self.payload.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,13 +53,32 @@ pub enum AdminPoolBatchActionKind {
     Delete,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AdminPoolBatchActionPlan {
     pub key_ids: Vec<String>,
     pub action: AdminPoolBatchActionKind,
     pub action_label: &'static str,
     pub proxy_payload: Option<Value>,
     pub settings_payload: Option<Value>,
+}
+
+impl std::fmt::Debug for AdminPoolBatchActionPlan {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AdminPoolBatchActionPlan")
+            .field("key_ids", &self.key_ids)
+            .field("action", &self.action)
+            .field("action_label", &self.action_label)
+            .field(
+                "proxy_payload",
+                &self.proxy_payload.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "settings_payload",
+                &self.settings_payload.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -58,7 +91,7 @@ pub struct AdminPoolKeyPayloadContext {
     pub cost_limit: Option<u64>,
 }
 
-#[derive(Debug, Default, Clone, serde::Deserialize)]
+#[derive(Default, Clone, serde::Deserialize)]
 pub struct AdminPoolBatchImportRequest {
     #[serde(default)]
     pub keys: Vec<AdminPoolBatchImportItem>,
@@ -70,7 +103,19 @@ pub struct AdminPoolBatchImportRequest {
     pub settings: Option<Value>,
 }
 
-#[derive(Debug, Default, Clone, serde::Deserialize)]
+impl std::fmt::Debug for AdminPoolBatchImportRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AdminPoolBatchImportRequest")
+            .field("keys", &self.keys)
+            .field("proxy_node_id", &self.proxy_node_id)
+            .field("api_formats", &self.api_formats)
+            .field("settings", &self.settings.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
+}
+
+#[derive(Default, Clone, serde::Deserialize)]
 pub struct AdminPoolBatchImportItem {
     #[serde(default)]
     pub name: String,
@@ -82,6 +127,19 @@ pub struct AdminPoolBatchImportItem {
     pub api_formats: Vec<String>,
     #[serde(default)]
     pub settings: Option<Value>,
+}
+
+impl std::fmt::Debug for AdminPoolBatchImportItem {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AdminPoolBatchImportItem")
+            .field("name", &self.name)
+            .field("api_key", &"[REDACTED]")
+            .field("auth_type", &self.auth_type)
+            .field("api_formats", &self.api_formats)
+            .field("settings", &self.settings.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
 }
 
 fn admin_pool_reason_indicates_ban(reason: &str) -> bool {
@@ -118,6 +176,30 @@ pub fn admin_pool_key_quota_hard_blocked(
     aether_provider_pool::provider_pool_key_quota_hard_blocked(key, provider_type)
 }
 
+pub fn admin_pool_key_model_quota_exhausted(
+    key: &StoredProviderCatalogKey,
+    provider_type: &str,
+    provider_model_name: &str,
+) -> Option<bool> {
+    aether_provider_pool::provider_pool_key_model_quota_exhausted(
+        key,
+        provider_type,
+        provider_model_name,
+    )
+}
+
+pub fn admin_pool_key_model_quota_hard_blocked(
+    key: &StoredProviderCatalogKey,
+    provider_type: &str,
+    provider_model_name: &str,
+) -> bool {
+    aether_provider_pool::provider_pool_key_model_quota_hard_blocked(
+        key,
+        provider_type,
+        provider_model_name,
+    )
+}
+
 fn admin_pool_has_proxy(key: &StoredProviderCatalogKey) -> bool {
     match key.proxy.as_ref() {
         Some(Value::Object(values)) => !values.is_empty(),
@@ -152,6 +234,14 @@ fn admin_pool_json_object(value: Option<&Value>) -> Option<serde_json::Map<Strin
         .and_then(Value::as_object)
         .cloned()
         .filter(|value| !value.is_empty())
+}
+
+fn admin_pool_secret_safe_json_object(value: Option<&Value>) -> Value {
+    admin_pool_json_object(value)
+        .map(Value::Object)
+        .as_ref()
+        .map(|value| admin_secret_safe_json(Some(value)))
+        .unwrap_or(Value::Null)
 }
 
 fn admin_pool_health_score(key: &StoredProviderCatalogKey) -> f64 {
@@ -656,7 +746,8 @@ mod tests {
         apply_admin_pool_key_settings, build_admin_pool_batch_action_plan,
         build_admin_pool_batch_import_key_record, build_admin_pool_key_payload,
         resolve_admin_pool_key_settings, validate_admin_pool_key_settings_payload,
-        AdminPoolBatchActionKind, AdminPoolBatchActionRequest, AdminPoolKeyPayloadContext,
+        AdminPoolBatchActionKind, AdminPoolBatchActionRequest, AdminPoolBatchImportItem,
+        AdminPoolBatchImportRequest, AdminPoolKeyPayloadContext,
     };
     use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey;
     use serde_json::json;
@@ -673,6 +764,31 @@ mod tests {
         .expect("key should build");
         key.upstream_metadata = upstream_metadata;
         key
+    }
+
+    #[test]
+    fn admin_pool_import_debug_output_redacts_api_keys_and_settings() {
+        let request = AdminPoolBatchImportRequest {
+            keys: vec![AdminPoolBatchImportItem {
+                name: "key".to_string(),
+                api_key: "pool-api-key-canary".to_string(),
+                auth_type: "api_key".to_string(),
+                api_formats: vec!["openai:chat".to_string()],
+                settings: Some(json!({"credential": "item-settings-canary"})),
+            }],
+            proxy_node_id: None,
+            api_formats: Vec::new(),
+            settings: Some(json!({"password": "request-settings-canary"})),
+        };
+        let debug = format!("{request:?}");
+        assert!(debug.contains("[REDACTED]"));
+        for secret in [
+            "pool-api-key-canary",
+            "item-settings-canary",
+            "request-settings-canary",
+        ] {
+            assert!(!debug.contains(secret), "debug output leaked {secret}");
+        }
     }
 
     #[test]
@@ -864,6 +980,52 @@ mod tests {
     }
 
     #[test]
+    fn admin_pool_payload_projects_historical_status_and_cooldown_diagnostics() {
+        let mut key = sample_key(None);
+        key.status_snapshot = Some(json!({
+            "oauth": {
+                "code": "invalid",
+                "reason": "Authorization: Bearer upstream-secret"
+            },
+            "account": {
+                "code": "account_disabled",
+                "blocked": true,
+                "reason": "https://user:password@internal.test?q=secret"
+            },
+            "quota": {
+                "code": "cooldown",
+                "exhausted": false,
+                "reason": "Authorization: Bearer upstream-secret",
+                "reset_credits": {
+                    "detail_error": "https://user:password@internal.test?q=secret"
+                }
+            }
+        }));
+        let context = AdminPoolKeyPayloadContext {
+            cooldown_reason: Some(
+                "Authorization: Bearer upstream-secret https://user:password@internal.test?q=secret"
+                    .to_string(),
+            ),
+            ..AdminPoolKeyPayloadContext::default()
+        };
+
+        let payload = build_admin_pool_key_payload(&key, &context);
+
+        assert_eq!(
+            payload["cooldown_reason"],
+            json!("Provider key is cooling down")
+        );
+        assert_eq!(
+            payload.pointer("/status_snapshot/oauth/reason"),
+            Some(&json!("OAuth token is invalid"))
+        );
+        let serialized = payload.to_string();
+        assert!(!serialized.contains("upstream-secret"));
+        assert!(!serialized.contains("user:password"));
+        assert!(!serialized.contains("q=secret"));
+    }
+
+    #[test]
     fn validates_and_applies_shared_key_settings() {
         let settings = json!({
             "internal_priority": 12,
@@ -972,10 +1134,14 @@ pub fn build_admin_pool_key_payload(
 ) -> Value {
     let health_score = admin_pool_health_score(key);
     let circuit_breaker_open = false;
+    let cooldown_reason = context
+        .cooldown_reason
+        .as_ref()
+        .map(|_| "Provider key is cooling down".to_string());
     let (scheduling_status, scheduling_reason, scheduling_label, scheduling_reasons) =
         admin_pool_scheduling_payload(
             key,
-            context.cooldown_reason.as_deref(),
+            cooldown_reason.as_deref(),
             context.cooldown_ttl_seconds,
         );
 
@@ -984,25 +1150,29 @@ pub fn build_admin_pool_key_payload(
         "key_name": key.name,
         "is_active": key.is_active,
         "auth_type": key.auth_type,
-        "status_snapshot": key.status_snapshot.clone().unwrap_or_else(|| json!({})),
+        "status_snapshot": key
+            .status_snapshot
+            .as_ref()
+            .map(|value| admin_provider_status_snapshot_safe_json(Some(value)))
+            .unwrap_or_else(|| json!({})),
         "health_score": health_score,
         "circuit_breaker_open": circuit_breaker_open,
         "api_formats": admin_pool_api_formats(key),
-        "rate_multipliers": admin_pool_json_object(key.rate_multipliers.as_ref()),
+        "rate_multipliers": admin_pool_secret_safe_json_object(key.rate_multipliers.as_ref()),
         "internal_priority": key.internal_priority,
         "rpm_limit": key.rpm_limit,
         "cache_ttl_minutes": key.cache_ttl_minutes,
         "max_probe_interval_minutes": key.max_probe_interval_minutes,
         "note": key.note,
         "allowed_models": admin_pool_string_list(key.allowed_models.as_ref()),
-        "capabilities": admin_pool_json_object(key.capabilities.as_ref()),
+        "capabilities": admin_pool_secret_safe_json_object(key.capabilities.as_ref()),
         "auto_fetch_models": key.auto_fetch_models,
         "locked_models": admin_pool_string_list(key.locked_models.as_ref()),
         "model_include_patterns": admin_pool_string_list(key.model_include_patterns.as_ref()),
         "model_exclude_patterns": admin_pool_string_list(key.model_exclude_patterns.as_ref()),
-        "proxy": key.proxy.clone(),
-        "fingerprint": key.fingerprint.clone(),
-        "cooldown_reason": context.cooldown_reason,
+        "proxy": admin_secret_safe_proxy(key.proxy.as_ref()),
+        "fingerprint": admin_secret_safe_json(key.fingerprint.as_ref()),
+        "cooldown_reason": cooldown_reason,
         "cooldown_ttl_seconds": context.cooldown_ttl_seconds,
         "cost_window_usage": context.cost_window_usage,
         "cost_limit": context.cost_limit,

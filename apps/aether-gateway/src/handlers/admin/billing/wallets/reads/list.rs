@@ -6,6 +6,7 @@ use super::super::shared::{
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::handlers::admin::shared::{query_param_value, unix_secs_to_rfc3339};
 use crate::GatewayError;
+use aether_data::repository::wallet::stored_timestamp_unix_secs;
 use axum::{
     body::Body,
     response::{IntoResponse, Response},
@@ -61,7 +62,10 @@ pub(in super::super) async fn build_admin_wallet_list_response(
             "total_consumed": wallet.total_consumed,
             "total_refunded": wallet.total_refunded,
             "total_adjusted": wallet.total_adjusted,
-            "created_at": wallet.created_at_unix_ms.and_then(unix_secs_to_rfc3339),
+            "created_at": wallet
+                .created_at_unix_ms
+                .map(stored_timestamp_unix_secs)
+                .and_then(unix_secs_to_rfc3339),
             "updated_at": wallet.updated_at_unix_secs.and_then(unix_secs_to_rfc3339),
         });
         enrich_admin_wallet_package_summary(

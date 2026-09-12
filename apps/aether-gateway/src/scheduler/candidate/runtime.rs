@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::future::Future;
 
 use aether_admin::provider::{
     pool as admin_provider_pool_pure, status as admin_provider_status_pure,
@@ -10,7 +11,8 @@ use aether_scheduler_core::{
     candidate_is_selectable_with_runtime_state, candidate_runtime_skip_reason_with_state,
     effective_provider_key_rpm_limit, CandidateRuntimeSelectabilityInput,
 };
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::time::Instant;
 
 use crate::data::auth::GatewayAuthApiKeySnapshot;
 use crate::GatewayError;
@@ -109,25 +111,92 @@ pub(super) fn auth_snapshot_concurrency_limit_reached(
     snapshot: &CandidateRuntimeSelectionSnapshot,
     now_unix_secs: u64,
 ) -> bool {
-    auth_snapshot
-        .and_then(|snapshot| {
-            usize::try_from(snapshot.api_key_concurrent_limit?)
-                .ok()
-                .and_then(|limit| {
-                    if limit == 0 {
-                        return None;
-                    }
-                    Some((snapshot.api_key_id.as_str(), limit))
-                })
-        })
-        .is_some_and(|(api_key_id, limit)| {
-            auth_api_key_concurrency_limit_reached(
-                &snapshot.recent_candidates,
-                now_unix_secs,
-                api_key_id,
-                limit,
+    auth_snapshot_concurrency_limit(auth_snapshot).is_some_and(|(api_key_id, limit)| {
+        auth_api_key_concurrency_limit_reached(
+            &snapshot.recent_candidates,
+            now_unix_secs,
+            api_key_id,
+            limit,
+        )
+    })
+}
+
+fn auth_snapshot_concurrency_limit(
+    auth_snapshot: Option<&GatewayAuthApiKeySnapshot>,
+) -> Option<(&str, usize)> {
+    let snapshot = auth_snapshot?;
+    let limit = usize::try_from(snapshot.api_key_concurrent_limit?).ok()?;
+    (limit > 0).then_some((snapshot.api_key_id.as_str(), limit))
+}
+
+async fn read_auth_api_key_concurrency_limit_reached(
+    state: &(impl SchedulerRuntimeState + ?Sized),
+    auth_snapshot: Option<&GatewayAuthApiKeySnapshot>,
+) -> Result<bool, GatewayError> {
+    let Some((api_key_id, limit)) = auth_snapshot_concurrency_limit(auth_snapshot) else {
+        return Ok(false);
+    };
+    let recent_candidates = state.read_recent_request_candidates(128).await?;
+    Ok(auth_api_key_concurrency_limit_reached(
+        &recent_candidates,
+        crate::clock::current_unix_secs(),
+        api_key_id,
+        limit,
+    ))
+}
+
+/// A retry always rebuilds candidates, including at the deadline. Only the
+/// intervening polls omit catalog, quota and ranking work while auth is blocked.
+pub(crate) async fn wait_for_auth_api_key_concurrency_retry(
+    state: &(impl SchedulerRuntimeState + ?Sized),
+    auth_snapshot: Option<&GatewayAuthApiKeySnapshot>,
+    deadline: Instant,
+    poll_interval: Duration,
+) -> Result<bool, GatewayError> {
+    if Instant::now() >= deadline {
+        return Ok(false);
+    }
+    let poll_interval = poll_interval.max(Duration::from_millis(1));
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        tokio::time::sleep(poll_interval.min(remaining)).await;
+        if Instant::now() >= deadline
+            || !read_auth_api_key_concurrency_limit_reached(state, auth_snapshot).await?
+        {
+            return Ok(true);
+        }
+    }
+}
+
+pub(crate) async fn select_with_auth_concurrency_wait<T, Select, Selection>(
+    state: &(impl SchedulerRuntimeState + ?Sized),
+    auth_snapshot: Option<&GatewayAuthApiKeySnapshot>,
+    now_unix_secs: u64,
+    wait_timeout: Duration,
+    poll_interval: Duration,
+    mut select: Select,
+) -> Result<T, GatewayError>
+where
+    Select: FnMut(u64) -> Selection,
+    Selection: Future<Output = Result<(T, bool), GatewayError>>,
+{
+    let deadline = Instant::now() + wait_timeout;
+    let mut attempt_now_unix_secs = now_unix_secs;
+    loop {
+        let (result, auth_limit_blocked) = select(attempt_now_unix_secs).await?;
+        if !auth_limit_blocked
+            || !wait_for_auth_api_key_concurrency_retry(
+                state,
+                auth_snapshot,
+                deadline,
+                poll_interval,
             )
-        })
+            .await?
+        {
+            return Ok(result);
+        }
+        attempt_now_unix_secs = crate::clock::current_unix_secs();
+    }
 }
 
 pub(super) fn is_candidate_selectable(
@@ -341,18 +410,33 @@ fn read_key_account_quota_exhaustion_map(
     candidates
         .iter()
         .map(|candidate| {
-            let exhausted = provider_skip_exhausted_accounts
-                .get(candidate.provider_id.as_str())
-                .copied()
-                .unwrap_or(false)
-                && provider_key_rpm_states
-                    .get(candidate.key_id.as_str())
-                    .is_some_and(|key| {
-                        admin_provider_pool_pure::admin_pool_key_account_quota_exhausted(
+            let exhausted = provider_key_rpm_states
+                .get(candidate.key_id.as_str())
+                .is_some_and(|key| {
+                    let account_exhausted =
+                        admin_provider_pool_pure::admin_pool_key_model_quota_exhausted(
                             key,
                             candidate.provider_type.as_str(),
+                            candidate.selected_provider_model_name.as_str(),
                         )
-                    });
+                        .unwrap_or_else(|| {
+                            admin_provider_pool_pure::admin_pool_key_account_quota_exhausted(
+                                key,
+                                candidate.provider_type.as_str(),
+                            )
+                        });
+                    let hard_blocked =
+                        admin_provider_pool_pure::admin_pool_key_model_quota_hard_blocked(
+                            key,
+                            candidate.provider_type.as_str(),
+                            candidate.selected_provider_model_name.as_str(),
+                        );
+                    let skip_configured = provider_skip_exhausted_accounts
+                        .get(candidate.provider_id.as_str())
+                        .copied()
+                        .unwrap_or(false);
+                    hard_blocked || (skip_configured && account_exhausted)
+                });
             (candidate.key_id.clone(), exhausted)
         })
         .collect()

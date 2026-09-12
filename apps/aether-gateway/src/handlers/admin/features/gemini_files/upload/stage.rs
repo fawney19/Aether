@@ -1,15 +1,23 @@
 use super::super::admin_gemini_files_key_capable;
 use super::request::AdminGeminiFilesUploadRequest;
+use crate::execution_runtime::transport::{
+    apply_upstream_response_body_limit, decode_base64_body_with_limit,
+    json_value_fits_serialized_limit,
+};
 use crate::handlers::admin::request::AdminAppState;
 use crate::GatewayError;
 use aether_contracts::{ExecutionPlan, ExecutionResult, RequestBody};
+use aether_data_contracts::repository::gemini_file_mappings::{
+    GEMINI_FILE_MAPPING_MAX_DISPLAY_NAME_CHARS, GEMINI_FILE_MAPPING_MAX_MIME_TYPE_CHARS,
+};
 use aether_data_contracts::repository::provider_catalog::{
     StoredProviderCatalogEndpoint, StoredProviderCatalogKey,
 };
 use axum::http;
-use base64::Engine;
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
+
+const MAX_GEMINI_UPLOAD_RESPONSE_JSON_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug)]
 struct AdminGeminiFilesUploadExecutionSuccess {
@@ -138,7 +146,7 @@ async fn admin_gemini_files_upload_single_key(
     let transport = state
         .read_provider_transport_snapshot(&key.provider_id, &endpoint.id, &key.id)
         .await
-        .map_err(|err| format!("{err:?}"))?
+        .map_err(|_| "无法读取 Key 传输配置".to_string())?
         .ok_or_else(|| "无法读取 Key 传输配置".to_string())?;
     if !state.supports_local_gemini_transport_with_network(&transport, "gemini:generate_content") {
         return Err("Key 传输配置不支持 Gemini Files 上传".to_string());
@@ -188,7 +196,7 @@ async fn admin_gemini_files_upload_single_key(
         .build_gemini_files_passthrough_url(&transport.endpoint.base_url, upload_path, upload_query)
         .ok_or_else(|| "无法构建 Gemini Files 上传地址".to_string())?;
 
-    let plan = ExecutionPlan {
+    let mut plan = ExecutionPlan {
         request_id: format!("{trace_id}:admin-gemini-upload:{}", key.id),
         candidate_id: None,
         provider_name: Some(transport.provider.name.clone()),
@@ -215,10 +223,11 @@ async fn admin_gemini_files_upload_single_key(
         transport_profile: state.resolve_transport_profile(&transport),
         timeouts: state.resolve_transport_execution_timeouts(&transport),
     };
+    apply_upstream_response_body_limit(&mut plan, MAX_GEMINI_UPLOAD_RESPONSE_JSON_BYTES);
 
     let result = admin_gemini_files_execute_upload_plan(state, trace_id, &plan)
         .await
-        .map_err(|error| format!("{error:?}"))?;
+        .map_err(|_| "Gemini Files 上传执行失败".to_string())?;
     if result.status_code >= 400 {
         return Err(admin_gemini_files_execution_error_message(&result));
     }
@@ -241,7 +250,7 @@ async fn admin_gemini_files_upload_single_key(
                 .or(Some(upload.mime_type.as_str())),
         )
         .await
-        .map_err(|err| format!("上传成功但本地映射写入失败: {err:?}"))?;
+        .map_err(|_| "上传成功但本地映射写入失败".to_string())?;
     Ok(success)
 }
 
@@ -261,7 +270,8 @@ fn admin_gemini_files_execution_json_body(result: &ExecutionResult) -> Option<se
         .as_ref()
         .and_then(|body| body.json_body.as_ref())
     {
-        return Some(body_json.clone());
+        return json_value_fits_serialized_limit(body_json, MAX_GEMINI_UPLOAD_RESPONSE_JSON_BYTES)
+            .then(|| body_json.clone());
     }
     let content_type = result
         .headers
@@ -278,9 +288,12 @@ fn admin_gemini_files_execution_json_body(result: &ExecutionResult) -> Option<se
         .body
         .as_ref()
         .and_then(|body| body.body_bytes_b64.as_deref())?;
-    let decoded = base64::engine::general_purpose::STANDARD
-        .decode(body_bytes_b64)
-        .ok()?;
+    let decoded = decode_base64_body_with_limit(
+        body_bytes_b64,
+        crate::headers::max_internal_buffered_body_bytes()
+            .min(MAX_GEMINI_UPLOAD_RESPONSE_JSON_BYTES),
+    )
+    .ok()?;
     serde_json::from_slice(&decoded).ok()
 }
 
@@ -296,13 +309,20 @@ fn admin_gemini_files_upload_success_from_body(
         .get("name")
         .and_then(serde_json::Value::as_str)
         .map(str::trim)
-        .filter(|value| !value.is_empty())?;
+        .filter(|value| !value.is_empty())
+        .filter(|value| aether_usage_runtime::normalize_gemini_file_name(value).is_some())?;
     let display_name = file_object
         .get("displayName")
         .or_else(|| file_object.get("display_name"))
         .and_then(serde_json::Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
+        .filter(|value| {
+            value
+                .chars()
+                .nth(GEMINI_FILE_MAPPING_MAX_DISPLAY_NAME_CHARS)
+                .is_none()
+        })
         .map(ToOwned::to_owned)
         .or_else(|| Some(upload.display_name.clone()));
     let mime_type = file_object
@@ -311,6 +331,12 @@ fn admin_gemini_files_upload_success_from_body(
         .and_then(serde_json::Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
+        .filter(|value| {
+            value
+                .chars()
+                .nth(GEMINI_FILE_MAPPING_MAX_MIME_TYPE_CHARS)
+                .is_none()
+        })
         .map(ToOwned::to_owned)
         .or_else(|| Some(upload.mime_type.clone()));
     Some(AdminGeminiFilesUploadExecutionSuccess {
@@ -330,7 +356,7 @@ fn admin_gemini_files_execution_error_message(result: &ExecutionResult) -> Strin
             .map(str::trim)
             .filter(|value| !value.is_empty())
         {
-            return message.to_string();
+            return bound_gemini_files_error_message(message);
         }
         if let Some(message) = body_json
             .get("message")
@@ -338,7 +364,7 @@ fn admin_gemini_files_execution_error_message(result: &ExecutionResult) -> Strin
             .map(str::trim)
             .filter(|value| !value.is_empty())
         {
-            return message.to_string();
+            return bound_gemini_files_error_message(message);
         }
     }
     if let Some(error) = result
@@ -347,7 +373,112 @@ fn admin_gemini_files_execution_error_message(result: &ExecutionResult) -> Strin
         .map(|error| error.message.trim())
         .filter(|value| !value.is_empty())
     {
-        return error.to_string();
+        return bound_gemini_files_error_message(error);
     }
     format!("上传失败，状态码 {}", result.status_code)
+}
+
+fn bound_gemini_files_error_message(value: &str) -> String {
+    let value = value.trim();
+    let end = value.floor_char_boundary(value.len().min(crate::MAX_ERROR_BODY_BYTES));
+    value[..end].to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use aether_contracts::{ExecutionResult, ResponseBody};
+    use aether_data_contracts::repository::gemini_file_mappings::{
+        GEMINI_FILE_MAPPING_MAX_DISPLAY_NAME_CHARS, GEMINI_FILE_MAPPING_MAX_FILE_NAME_CHARS,
+        GEMINI_FILE_MAPPING_MAX_MIME_TYPE_CHARS,
+    };
+
+    use super::super::request::AdminGeminiFilesUploadRequest;
+    use super::{
+        admin_gemini_files_execution_error_message, admin_gemini_files_execution_json_body,
+        admin_gemini_files_upload_success_from_body,
+    };
+
+    fn sample_upload() -> AdminGeminiFilesUploadRequest {
+        AdminGeminiFilesUploadRequest {
+            display_name: "fallback.bin".to_string(),
+            mime_type: "application/octet-stream".to_string(),
+            body_bytes: vec![1],
+            body_bytes_b64: "AQ==".to_string(),
+        }
+    }
+
+    #[test]
+    fn gemini_upload_result_rejects_file_name_beyond_storage_limit() {
+        let body = serde_json::json!({
+            "file": {"name": "n".repeat(GEMINI_FILE_MAPPING_MAX_FILE_NAME_CHARS + 1)}
+        });
+
+        assert!(admin_gemini_files_upload_success_from_body(&body, &sample_upload()).is_none());
+    }
+
+    #[test]
+    fn gemini_upload_result_ignores_oversized_optional_metadata() {
+        let body = serde_json::json!({
+            "file": {
+                "name": "files/safe",
+                "displayName": "d".repeat(GEMINI_FILE_MAPPING_MAX_DISPLAY_NAME_CHARS + 1),
+                "mimeType": "m".repeat(GEMINI_FILE_MAPPING_MAX_MIME_TYPE_CHARS + 1),
+            }
+        });
+
+        let success = admin_gemini_files_upload_success_from_body(&body, &sample_upload())
+            .expect("valid file name should remain usable");
+        assert_eq!(success.display_name.as_deref(), Some("fallback.bin"));
+        assert_eq!(
+            success.mime_type.as_deref(),
+            Some("application/octet-stream")
+        );
+    }
+
+    #[test]
+    fn gemini_upload_result_rejects_oversized_base64_before_decode() {
+        let encoded_limit =
+            crate::execution_runtime::transport::maximum_base64_len_for_decoded_limit(
+                super::MAX_GEMINI_UPLOAD_RESPONSE_JSON_BYTES,
+            );
+        let result = ExecutionResult {
+            request_id: "gemini-upload-oversized".to_string(),
+            candidate_id: None,
+            status_code: 200,
+            headers: BTreeMap::from([("content-type".to_string(), "application/json".to_string())]),
+            response_observation: None,
+            body: Some(ResponseBody {
+                json_body: None,
+                body_bytes_b64: Some("A".repeat(encoded_limit + 1)),
+            }),
+            telemetry: None,
+            error: None,
+        };
+
+        assert!(admin_gemini_files_execution_json_body(&result).is_none());
+    }
+
+    #[test]
+    fn gemini_upload_error_message_is_bounded_without_splitting_utf8() {
+        let message = format!("{}界", "x".repeat(crate::MAX_ERROR_BODY_BYTES));
+        let result = ExecutionResult {
+            request_id: "gemini-upload-oversized-error".to_string(),
+            candidate_id: None,
+            status_code: 500,
+            headers: BTreeMap::new(),
+            response_observation: None,
+            body: Some(ResponseBody {
+                json_body: Some(serde_json::json!({"error": {"message": message}})),
+                body_bytes_b64: None,
+            }),
+            telemetry: None,
+            error: None,
+        };
+
+        let detail = admin_gemini_files_execution_error_message(&result);
+        assert_eq!(detail.len(), crate::MAX_ERROR_BODY_BYTES);
+        assert!(detail.bytes().all(|byte| byte == b'x'));
+    }
 }

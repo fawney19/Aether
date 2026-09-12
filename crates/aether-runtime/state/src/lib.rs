@@ -1,6 +1,7 @@
 mod error;
 mod memory;
 pub mod redis;
+mod score_window;
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -17,6 +18,7 @@ use async_trait::async_trait;
 pub use error::DataLayerError;
 use memory::MemoryRuntimeBackend;
 pub use memory::MemoryRuntimeStateConfig;
+pub use score_window::{ScoreWindowU64Stats, SCORE_WINDOW_AGGREGATION_MEMBER_LIMIT};
 use tokio::task::JoinHandle;
 use tracing::warn;
 use uuid::Uuid;
@@ -137,6 +139,16 @@ impl RuntimeStateConfig {
         if self.memory.max_kv_entries == 0 {
             return Err(DataLayerError::InvalidConfiguration(
                 "runtime memory max_kv_entries must be positive".to_string(),
+            ));
+        }
+        if self.memory.max_usage_limit_windows == 0 {
+            return Err(DataLayerError::InvalidConfiguration(
+                "runtime memory max_usage_limit_windows must be positive".to_string(),
+            ));
+        }
+        if self.memory.max_usage_limit_events == 0 {
+            return Err(DataLayerError::InvalidConfiguration(
+                "runtime memory max_usage_limit_events must be positive".to_string(),
             ));
         }
         if matches!(self.command_timeout_ms, Some(0)) {
@@ -366,6 +378,28 @@ impl RuntimeState {
         }
     }
 
+    /// Atomically creates an expiring key without replacing an existing value.
+    pub async fn kv_set_if_absent(
+        &self,
+        key: &str,
+        value: impl Into<String> + Send,
+        ttl: Duration,
+    ) -> Result<bool, DataLayerError> {
+        if ttl.is_zero() {
+            return Err(DataLayerError::InvalidInput(
+                "runtime kv set-if-absent ttl must be positive".to_string(),
+            ));
+        }
+        match self.backend.as_ref() {
+            RuntimeStateBackend::Memory(memory) => {
+                Ok(memory.kv_set_if_absent(key, value.into(), ttl).await)
+            }
+            RuntimeStateBackend::Redis(redis) => {
+                redis.runtime.kv_set_if_absent(key, value.into(), ttl).await
+            }
+        }
+    }
+
     pub async fn kv_get(&self, key: &str) -> Result<Option<String>, DataLayerError> {
         match self.backend.as_ref() {
             RuntimeStateBackend::Memory(memory) => Ok(memory.kv_get(key).await),
@@ -464,6 +498,42 @@ impl RuntimeState {
         }
     }
 
+    pub async fn check_and_consume_usage_limits(
+        &self,
+        input: UsageLimitInput<'_>,
+    ) -> Result<UsageLimitCheck, DataLayerError> {
+        if input.rules.is_empty() {
+            return Ok(UsageLimitCheck::Allowed);
+        }
+        validate_usage_limit_input(input)?;
+        match self.backend.as_ref() {
+            RuntimeStateBackend::Memory(memory) => {
+                memory.check_and_consume_usage_limits(input).await
+            }
+            RuntimeStateBackend::Redis(redis) => {
+                redis.runtime.check_and_consume_usage_limits(input).await
+            }
+        }
+    }
+
+    /// Removes an idempotency event from every supplied usage-limit window.
+    ///
+    /// This is a compensation primitive for callers that compose the short-lived runtime
+    /// counters with a second durable admission store. It is intentionally idempotent.
+    pub async fn release_usage_limits(
+        &self,
+        input: UsageLimitReleaseInput<'_>,
+    ) -> Result<(), DataLayerError> {
+        if input.rules.is_empty() {
+            return Ok(());
+        }
+        validate_usage_limit_release_input(input)?;
+        match self.backend.as_ref() {
+            RuntimeStateBackend::Memory(memory) => memory.release_usage_limits(input).await,
+            RuntimeStateBackend::Redis(redis) => redis.runtime.release_usage_limits(input).await,
+        }
+    }
+
     pub async fn rate_limit_count(&self, key: &str, bucket: u64) -> Result<u32, DataLayerError> {
         match self.backend.as_ref() {
             RuntimeStateBackend::Memory(memory) => memory.rate_limit_count(key, bucket),
@@ -549,6 +619,32 @@ impl RuntimeState {
             }
             RuntimeStateBackend::Redis(redis) => {
                 redis.runtime.score_range_by_min(key, min_score).await
+            }
+        }
+    }
+
+    /// Aggregate at most 512 timestamped `prefix:u64` members per key without
+    /// transferring their history. `None` requires an exact full-range fallback;
+    /// it never represents an empty or cached window.
+    pub async fn score_window_u64_stats_by_min(
+        &self,
+        keys: &[String],
+        min_score: f64,
+    ) -> Result<Vec<Option<ScoreWindowU64Stats>>, DataLayerError> {
+        if !min_score.is_finite() {
+            return Err(DataLayerError::InvalidInput(
+                "runtime window minimum score must be finite".to_string(),
+            ));
+        }
+        match self.backend.as_ref() {
+            RuntimeStateBackend::Memory(memory) => {
+                Ok(memory.score_window_u64_stats_by_min(keys, min_score).await)
+            }
+            RuntimeStateBackend::Redis(redis) => {
+                redis
+                    .runtime
+                    .score_window_u64_stats_by_min(keys, min_score)
+                    .await
             }
         }
     }
@@ -717,7 +813,27 @@ impl RuntimeState {
         limit: usize,
         config: RuntimeSemaphoreConfig,
     ) -> Result<RuntimeSemaphore, RuntimeSemaphoreError> {
-        RuntimeSemaphore::new(self.clone(), gate, limit, config)
+        RuntimeSemaphore::new(self.clone(), gate, None, limit, config)
+    }
+
+    pub fn keyed_semaphore<K: Into<String>>(
+        &self,
+        gate: &'static str,
+        resource_key: K,
+        limit: usize,
+        config: RuntimeSemaphoreConfig,
+    ) -> Result<RuntimeSemaphore, RuntimeSemaphoreError> {
+        let resource_key = resource_key.into();
+        let prefix = format!("admission:{gate}:");
+        let resource_key = resource_key
+            .strip_prefix(&prefix)
+            .unwrap_or(resource_key.as_str());
+        if resource_key.is_empty() {
+            return Err(RuntimeSemaphoreError::InvalidConfiguration(
+                "runtime semaphore resource key cannot be empty".to_string(),
+            ));
+        }
+        RuntimeSemaphore::new(self.clone(), gate, Some(resource_key), limit, config)
     }
 }
 
@@ -761,10 +877,221 @@ pub struct RateLimitInput<'a> {
     pub ttl_seconds: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UsageLimitRule<'a> {
+    /// A caller-defined key containing the same non-empty Redis hash tag as every sibling rule.
+    /// The key must change when the rule's window definition changes.
+    pub key: &'a str,
+    pub limit: u64,
+    /// Duration used to decide which events still count toward the limit.
+    pub window_seconds: u64,
+    /// Duration for retaining this rule's backing state after the current check.
+    pub retention_seconds: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UsageLimitInput<'a> {
+    pub rules: &'a [UsageLimitRule<'a>],
+    pub event_id: &'a str,
+    pub now_unix_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UsageLimitReleaseInput<'a> {
+    pub rules: &'a [UsageLimitRule<'a>],
+    pub event_id: &'a str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UsageLimitCheck {
+    Allowed,
+    Rejected {
+        rule_index: usize,
+        limit: u64,
+        retry_after: u64,
+    },
+}
+
+const MAX_REDIS_LUA_EXACT_INTEGER: u64 = (1_u64 << 53) - 1;
+
+fn validate_usage_limit_input(input: UsageLimitInput<'_>) -> Result<(), DataLayerError> {
+    if input.event_id.trim().is_empty() {
+        return Err(DataLayerError::InvalidInput(
+            "usage limit event_id must not be empty".to_string(),
+        ));
+    }
+    if input.now_unix_ms > MAX_REDIS_LUA_EXACT_INTEGER {
+        return Err(DataLayerError::InvalidInput(
+            "usage limit now_unix_ms exceeds the exact Redis Lua integer range".to_string(),
+        ));
+    }
+
+    let mut expected_hash_tag = None;
+    for (index, rule) in input.rules.iter().enumerate() {
+        if rule.key.trim().is_empty() {
+            return Err(DataLayerError::InvalidInput(format!(
+                "usage limit rule {index} key must not be empty"
+            )));
+        }
+        if rule.limit == 0 {
+            return Err(DataLayerError::InvalidInput(format!(
+                "usage limit rule {index} must have a positive limit"
+            )));
+        }
+        if rule.limit > MAX_REDIS_LUA_EXACT_INTEGER {
+            return Err(DataLayerError::InvalidInput(format!(
+                "usage limit rule {index} limit exceeds the exact Redis Lua integer range"
+            )));
+        }
+        if rule.window_seconds == 0 {
+            return Err(DataLayerError::InvalidInput(format!(
+                "usage limit rule {index} must have a positive window_seconds"
+            )));
+        }
+        let window_ms = rule.window_seconds.checked_mul(1_000).ok_or_else(|| {
+            DataLayerError::InvalidInput(format!(
+                "usage limit rule {index} window_seconds is too large"
+            ))
+        })?;
+        if window_ms > MAX_REDIS_LUA_EXACT_INTEGER {
+            return Err(DataLayerError::InvalidInput(format!(
+                "usage limit rule {index} window_seconds exceeds the exact Redis Lua integer range"
+            )));
+        }
+        if rule.retention_seconds == 0 {
+            return Err(DataLayerError::InvalidInput(format!(
+                "usage limit rule {index} must have a positive retention_seconds"
+            )));
+        }
+        let retention_ms = rule.retention_seconds.checked_mul(1_000).ok_or_else(|| {
+            DataLayerError::InvalidInput(format!(
+                "usage limit rule {index} retention_seconds is too large"
+            ))
+        })?;
+        if retention_ms > MAX_REDIS_LUA_EXACT_INTEGER {
+            return Err(DataLayerError::InvalidInput(format!(
+                "usage limit rule {index} retention_seconds exceeds the exact Redis Lua integer range"
+            )));
+        }
+        if input
+            .now_unix_ms
+            .checked_add(window_ms)
+            .is_none_or(|expires_at| expires_at > MAX_REDIS_LUA_EXACT_INTEGER)
+        {
+            return Err(DataLayerError::InvalidInput(format!(
+                "usage limit rule {index} window extends beyond the exact Redis Lua integer range"
+            )));
+        }
+        if input
+            .now_unix_ms
+            .checked_add(retention_ms)
+            .is_none_or(|expires_at| expires_at > MAX_REDIS_LUA_EXACT_INTEGER)
+        {
+            return Err(DataLayerError::InvalidInput(format!(
+                "usage limit rule {index} retention extends beyond the exact Redis Lua integer range"
+            )));
+        }
+        if input.rules[..index]
+            .iter()
+            .any(|previous| previous.key == rule.key)
+        {
+            return Err(DataLayerError::InvalidInput(format!(
+                "usage limit rule {index} duplicates key {}",
+                rule.key
+            )));
+        }
+
+        let hash_tag = redis_hash_tag(rule.key).ok_or_else(|| {
+            DataLayerError::InvalidInput(format!(
+                "usage limit rule {index} key must contain a non-empty Redis hash tag"
+            ))
+        })?;
+        if let Some(expected) = expected_hash_tag {
+            if hash_tag != expected {
+                return Err(DataLayerError::InvalidInput(
+                    "usage limit rule keys must use the same Redis hash tag".to_string(),
+                ));
+            }
+        } else {
+            expected_hash_tag = Some(hash_tag);
+        }
+    }
+    Ok(())
+}
+
+fn validate_usage_limit_release_input(
+    input: UsageLimitReleaseInput<'_>,
+) -> Result<(), DataLayerError> {
+    if input.event_id.trim().is_empty() {
+        return Err(DataLayerError::InvalidInput(
+            "usage limit event_id must not be empty".to_string(),
+        ));
+    }
+    let mut expected_hash_tag = None;
+    for (index, rule) in input.rules.iter().enumerate() {
+        if rule.key.trim().is_empty() {
+            return Err(DataLayerError::InvalidInput(format!(
+                "usage limit rule {index} key must not be empty"
+            )));
+        }
+        if input.rules[..index]
+            .iter()
+            .any(|previous| previous.key == rule.key)
+        {
+            return Err(DataLayerError::InvalidInput(format!(
+                "usage limit rule {index} duplicates key {}",
+                rule.key
+            )));
+        }
+        let hash_tag = redis_hash_tag(rule.key).ok_or_else(|| {
+            DataLayerError::InvalidInput(format!(
+                "usage limit rule {index} key must contain a non-empty Redis hash tag"
+            ))
+        })?;
+        if let Some(expected) = expected_hash_tag {
+            if hash_tag != expected {
+                return Err(DataLayerError::InvalidInput(
+                    "usage limit rule keys must use the same Redis hash tag".to_string(),
+                ));
+            }
+        } else {
+            expected_hash_tag = Some(hash_tag);
+        }
+    }
+    Ok(())
+}
+
+fn redis_hash_tag(key: &str) -> Option<&str> {
+    let tag_start = key.find('{')?.saturating_add(1);
+    let remainder = key.get(tag_start..)?;
+    let tag_end = remainder.find('}')?;
+    (tag_end > 0).then_some(&remainder[..tag_end])
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeQueueEntry {
     pub id: String,
     pub fields: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeQueueReclaimPage {
+    /// Resume the next reclaim scan here; `0-0` marks the end of the current scan.
+    pub next_start_id: String,
+    pub entries: Vec<RuntimeQueueEntry>,
+    pub deleted_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeQueueTransferOutcome {
+    Transferred {
+        destination_id: String,
+        acked: usize,
+        deleted: usize,
+    },
+    /// No pending entry was present. This does not assert that it was archived:
+    /// another consumer, deletion, or retention policy may have removed it.
+    NotPending,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -806,6 +1133,45 @@ fn validate_runtime_queue_reclaim_config(
     Ok(())
 }
 
+pub(crate) fn validate_runtime_queue_transfer(
+    source: &str,
+    group: &str,
+    entry_id: &str,
+    destination: &str,
+    destination_fields: &BTreeMap<String, String>,
+) -> Result<(), DataLayerError> {
+    validate_runtime_queue_name(source, "runtime queue source stream")?;
+    validate_runtime_queue_name(group, "runtime queue group")?;
+    validate_runtime_queue_name(destination, "runtime queue destination stream")?;
+    if source == destination {
+        return Err(DataLayerError::InvalidInput(
+            "runtime queue transfer source and destination must differ".to_string(),
+        ));
+    }
+    if destination_fields.is_empty() {
+        return Err(DataLayerError::InvalidInput(
+            "runtime queue transfer destination fields cannot be empty".to_string(),
+        ));
+    }
+    let canonical_u64 = |value: &str| {
+        !value.is_empty()
+            && value.bytes().all(|byte| byte.is_ascii_digit())
+            && (value.len() == 1 || !value.starts_with('0'))
+            && value.parse::<u64>().is_ok()
+    };
+    if !entry_id
+        .split_once('-')
+        .is_some_and(|(milliseconds, sequence)| {
+            canonical_u64(milliseconds) && canonical_u64(sequence)
+        })
+    {
+        return Err(DataLayerError::InvalidInput(
+            "runtime queue transfer entry id must be a canonical u64-u64 stream id".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 #[async_trait]
 pub trait RuntimeQueueStore: Send + Sync {
     async fn ensure_consumer_group(
@@ -839,6 +1205,39 @@ pub trait RuntimeQueueStore: Send + Sync {
         start_id: &str,
         config: RuntimeQueueReclaimConfig,
     ) -> Result<Vec<RuntimeQueueEntry>, DataLayerError>;
+
+    /// Existing queue backends can retain their complete-scan behavior without implementing paging.
+    async fn claim_stale_page(
+        &self,
+        stream: &str,
+        group: &str,
+        consumer: &str,
+        start_id: &str,
+        config: RuntimeQueueReclaimConfig,
+    ) -> Result<RuntimeQueueReclaimPage, DataLayerError> {
+        Ok(RuntimeQueueReclaimPage {
+            next_start_id: "0-0".to_string(),
+            entries: self
+                .claim_stale(stream, group, consumer, start_id, config)
+                .await?,
+            deleted_ids: Vec::new(),
+        })
+    }
+
+    /// Atomically append caller-supplied fields, acknowledge the pending source entry, and
+    /// delete that source ID. Repeated calls must not append when the entry is no longer pending.
+    /// `None` means unsupported and has no side effects; callers may explicitly retain their
+    /// existing non-atomic fallback for third-party queue implementations.
+    async fn try_transfer_pending_to_stream(
+        &self,
+        _source: &str,
+        _group: &str,
+        _entry_id: &str,
+        _destination: &str,
+        _destination_fields: &BTreeMap<String, String>,
+    ) -> Result<Option<RuntimeQueueTransferOutcome>, DataLayerError> {
+        Ok(None)
+    }
 
     async fn ack(&self, stream: &str, group: &str, ids: &[String])
         -> Result<usize, DataLayerError>;
@@ -963,6 +1362,20 @@ impl RuntimeQueueStore for RuntimeState {
         start_id: &str,
         config: RuntimeQueueReclaimConfig,
     ) -> Result<Vec<RuntimeQueueEntry>, DataLayerError> {
+        Ok(self
+            .claim_stale_page(stream, group, consumer, start_id, config)
+            .await?
+            .entries)
+    }
+
+    async fn claim_stale_page(
+        &self,
+        stream: &str,
+        group: &str,
+        consumer: &str,
+        start_id: &str,
+        config: RuntimeQueueReclaimConfig,
+    ) -> Result<RuntimeQueueReclaimPage, DataLayerError> {
         validate_runtime_queue_name(stream, "runtime queue stream")?;
         validate_runtime_queue_name(group, "runtime queue group")?;
         validate_runtime_queue_name(consumer, "runtime queue consumer")?;
@@ -971,30 +1384,74 @@ impl RuntimeQueueStore for RuntimeState {
         match self.backend.as_ref() {
             RuntimeStateBackend::Memory(memory) => {
                 memory
-                    .queue_claim_stale(stream, group, consumer, start_id, config)
+                    .queue_claim_stale_page(stream, group, consumer, start_id, config)
                     .await
             }
-            RuntimeStateBackend::Redis(redis) => Ok(redis
-                .stream
-                .claim_stale(
-                    &RedisStreamName(stream.to_string()),
-                    &RedisConsumerGroup(group.to_string()),
-                    &RedisConsumerName(consumer.to_string()),
-                    start_id,
-                    RedisStreamReclaimConfig {
-                        min_idle_ms: config.min_idle_ms,
-                        count: config.count,
-                    },
-                )
-                .await?
-                .entries
-                .into_iter()
-                .map(|entry| RuntimeQueueEntry {
-                    id: entry.id,
-                    fields: entry.fields,
+            RuntimeStateBackend::Redis(redis) => {
+                let page = redis
+                    .stream
+                    .claim_stale(
+                        &RedisStreamName(stream.to_string()),
+                        &RedisConsumerGroup(group.to_string()),
+                        &RedisConsumerName(consumer.to_string()),
+                        start_id,
+                        RedisStreamReclaimConfig {
+                            min_idle_ms: config.min_idle_ms,
+                            count: config.count,
+                        },
+                    )
+                    .await?;
+                Ok(RuntimeQueueReclaimPage {
+                    next_start_id: page.next_start_id,
+                    entries: page
+                        .entries
+                        .into_iter()
+                        .map(|entry| RuntimeQueueEntry {
+                            id: entry.id,
+                            fields: entry.fields,
+                        })
+                        .collect(),
+                    deleted_ids: page.deleted_ids,
                 })
-                .collect()),
+            }
         }
+    }
+
+    async fn try_transfer_pending_to_stream(
+        &self,
+        source: &str,
+        group: &str,
+        entry_id: &str,
+        destination: &str,
+        destination_fields: &BTreeMap<String, String>,
+    ) -> Result<Option<RuntimeQueueTransferOutcome>, DataLayerError> {
+        validate_runtime_queue_transfer(source, group, entry_id, destination, destination_fields)?;
+        let outcome = match self.backend.as_ref() {
+            RuntimeStateBackend::Memory(memory) => {
+                memory
+                    .queue_transfer_pending_to_stream(
+                        source,
+                        group,
+                        entry_id,
+                        destination,
+                        destination_fields,
+                    )
+                    .await?
+            }
+            RuntimeStateBackend::Redis(redis) => {
+                redis
+                    .stream
+                    .try_transfer_pending_to_stream(
+                        source,
+                        group,
+                        entry_id,
+                        destination,
+                        destination_fields,
+                    )
+                    .await?
+            }
+        };
+        Ok(Some(outcome))
     }
 
     async fn ack(
@@ -1067,6 +1524,12 @@ pub trait ExpiringKvStore: Send + Sync {
         value: String,
         ttl: Option<Duration>,
     ) -> Result<(), DataLayerError>;
+    async fn set_if_absent(
+        &self,
+        key: &str,
+        value: String,
+        ttl: Duration,
+    ) -> Result<bool, DataLayerError>;
     async fn get(&self, key: &str) -> Result<Option<String>, DataLayerError>;
     async fn get_many(&self, keys: &[String]) -> Result<Vec<Option<String>>, DataLayerError>;
     async fn take(&self, key: &str) -> Result<Option<String>, DataLayerError>;
@@ -1083,6 +1546,15 @@ impl ExpiringKvStore for RuntimeState {
         ttl: Option<Duration>,
     ) -> Result<(), DataLayerError> {
         self.kv_set(key, value, ttl).await
+    }
+
+    async fn set_if_absent(
+        &self,
+        key: &str,
+        value: String,
+        ttl: Duration,
+    ) -> Result<bool, DataLayerError> {
+        self.kv_set_if_absent(key, value, ttl).await
     }
 
     async fn get(&self, key: &str) -> Result<Option<String>, DataLayerError> {
@@ -1202,6 +1674,7 @@ impl RuntimeSemaphore {
     fn new(
         runtime: RuntimeState,
         gate: &'static str,
+        resource_key: Option<&str>,
         limit: usize,
         config: RuntimeSemaphoreConfig,
     ) -> Result<Self, RuntimeSemaphoreError> {
@@ -1222,7 +1695,9 @@ impl RuntimeSemaphore {
         }
         Ok(Self {
             state: Arc::new(RuntimeSemaphoreState {
-                key: format!("admission:{gate}"),
+                key: resource_key
+                    .map(|resource_key| format!("admission:{gate}:{resource_key}"))
+                    .unwrap_or_else(|| format!("admission:{gate}")),
                 runtime,
                 gate,
                 limit,
@@ -1256,6 +1731,7 @@ pub struct RuntimeSemaphorePermit {
     token: String,
     renew_task: JoinHandle<()>,
     healthy: Arc<std::sync::atomic::AtomicBool>,
+    released: bool,
 }
 
 impl aether_runtime::AdmissionPermitHealth for RuntimeSemaphorePermit {
@@ -1264,8 +1740,22 @@ impl aether_runtime::AdmissionPermitHealth for RuntimeSemaphorePermit {
     }
 }
 
+impl RuntimeSemaphorePermit {
+    pub async fn release(mut self) -> Result<(), RuntimeSemaphoreError> {
+        self.renew_task.abort();
+        let result = self.state.release(&self.token).await;
+        if result.is_ok() {
+            self.released = true;
+        }
+        result
+    }
+}
+
 impl Drop for RuntimeSemaphorePermit {
     fn drop(&mut self) {
+        if self.released {
+            return;
+        }
         self.renew_task.abort();
         let state = Arc::clone(&self.state);
         let token = self.token.clone();
@@ -1331,6 +1821,7 @@ impl RuntimeSemaphoreState {
             token,
             renew_task,
             healthy,
+            released: false,
         })
     }
 
@@ -1504,6 +1995,26 @@ mod tests {
     use std::process::{Child, Command, Stdio};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+    async fn redis_test_connection(url: &str) -> ::redis::aio::MultiplexedConnection {
+        ::redis::Client::open(url)
+            .expect("test Redis client")
+            .get_multiplexed_async_connection()
+            .await
+            .expect("test Redis connection")
+    }
+
+    mod stream_receive {
+        include!("redis/stream_receive_tests.rs");
+    }
+
+    mod dead_letter_transfer {
+        include!("redis/dead_letter_transfer_tests.rs");
+    }
+
+    mod usage_limit_cleanup {
+        include!("redis/usage_limit_cleanup_tests.rs");
+    }
+
     #[tokio::test]
     async fn memory_kv_expires_entries() {
         let runtime = RuntimeState::memory(MemoryRuntimeStateConfig::default());
@@ -1528,6 +2039,17 @@ mod tests {
             Some("payload")
         );
         assert_eq!(runtime.kv_take("nonce").await.expect("take"), None);
+    }
+
+    #[tokio::test]
+    async fn runtime_backends_share_atomic_kv_set_if_absent_contract() {
+        let memory = RuntimeState::memory(MemoryRuntimeStateConfig::default());
+        assert_kv_set_if_absent_contract(&memory).await;
+
+        let Some((_redis, redis_runtime)) = redis_runtime_for_test("kv-set-if-absent").await else {
+            return;
+        };
+        assert_kv_set_if_absent_contract(&redis_runtime).await;
     }
 
     #[tokio::test]
@@ -1638,6 +2160,325 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn memory_usage_limits_check_all_windows_before_consuming() {
+        let runtime = RuntimeState::memory(MemoryRuntimeStateConfig::default());
+        let rules = [
+            UsageLimitRule {
+                key: "usage:{user-1}:qps",
+                limit: 2,
+                window_seconds: 10,
+                retention_seconds: 10,
+            },
+            UsageLimitRule {
+                key: "usage:{user-1}:weekly",
+                limit: 1,
+                window_seconds: 60,
+                retention_seconds: 60,
+            },
+        ];
+
+        assert_eq!(
+            runtime
+                .check_and_consume_usage_limits(UsageLimitInput {
+                    rules: &rules,
+                    event_id: "request-1",
+                    now_unix_ms: 100_000,
+                })
+                .await
+                .expect("first request"),
+            UsageLimitCheck::Allowed
+        );
+        assert_eq!(
+            runtime
+                .check_and_consume_usage_limits(UsageLimitInput {
+                    rules: &rules,
+                    event_id: "request-2",
+                    now_unix_ms: 105_000,
+                })
+                .await
+                .expect("second request"),
+            UsageLimitCheck::Rejected {
+                rule_index: 1,
+                limit: 1,
+                retry_after: 55,
+            }
+        );
+
+        let qps_only = [rules[0]];
+        assert_eq!(
+            runtime
+                .check_and_consume_usage_limits(UsageLimitInput {
+                    rules: &qps_only,
+                    event_id: "request-3",
+                    now_unix_ms: 105_000,
+                })
+                .await
+                .expect("weekly rejection must not consume qps"),
+            UsageLimitCheck::Allowed
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_usage_limits_are_true_sliding_windows_and_idempotent() {
+        let runtime = RuntimeState::memory(MemoryRuntimeStateConfig::default());
+        let rules = [UsageLimitRule {
+            key: "usage:{user-1}:rolling-10",
+            limit: 2,
+            window_seconds: 10,
+            retention_seconds: 10,
+        }];
+        let consume = |event_id, now_unix_ms| UsageLimitInput {
+            rules: &rules,
+            event_id,
+            now_unix_ms,
+        };
+
+        assert_eq!(
+            runtime
+                .check_and_consume_usage_limits(consume("request-1", 100_000))
+                .await
+                .unwrap(),
+            UsageLimitCheck::Allowed
+        );
+        assert_eq!(
+            runtime
+                .check_and_consume_usage_limits(consume("request-2", 105_000))
+                .await
+                .unwrap(),
+            UsageLimitCheck::Allowed
+        );
+        assert_eq!(
+            runtime
+                .check_and_consume_usage_limits(consume("request-2", 106_000))
+                .await
+                .unwrap(),
+            UsageLimitCheck::Allowed,
+            "replaying the same event must not consume twice"
+        );
+        assert_eq!(
+            runtime
+                .check_and_consume_usage_limits(consume("request-3", 109_000))
+                .await
+                .unwrap(),
+            UsageLimitCheck::Rejected {
+                rule_index: 0,
+                limit: 2,
+                retry_after: 1,
+            }
+        );
+        assert_eq!(
+            runtime
+                .check_and_consume_usage_limits(consume("request-3", 110_000))
+                .await
+                .unwrap(),
+            UsageLimitCheck::Allowed,
+            "the event at the exact rolling cutoff must expire"
+        );
+        assert_eq!(
+            runtime
+                .check_and_consume_usage_limits(consume("request-4", 111_000))
+                .await
+                .unwrap(),
+            UsageLimitCheck::Rejected {
+                rule_index: 0,
+                limit: 2,
+                retry_after: 4,
+            },
+            "the first event's expiry must not reset when later events arrive"
+        );
+    }
+
+    #[tokio::test]
+    async fn usage_limit_input_requires_unique_co_located_rule_keys() {
+        let runtime = RuntimeState::memory(MemoryRuntimeStateConfig::default());
+        let different_tags = [
+            UsageLimitRule {
+                key: "usage:{user-1}:one",
+                limit: 1,
+                window_seconds: 1,
+                retention_seconds: 1,
+            },
+            UsageLimitRule {
+                key: "usage:{user-2}:two",
+                limit: 1,
+                window_seconds: 1,
+                retention_seconds: 1,
+            },
+        ];
+        assert!(matches!(
+            runtime
+                .check_and_consume_usage_limits(UsageLimitInput {
+                    rules: &different_tags,
+                    event_id: "request-1",
+                    now_unix_ms: 100_000,
+                })
+                .await,
+            Err(DataLayerError::InvalidInput(_))
+        ));
+
+        let zero_retention = [UsageLimitRule {
+            retention_seconds: 0,
+            ..different_tags[0]
+        }];
+        assert!(matches!(
+            runtime
+                .check_and_consume_usage_limits(UsageLimitInput {
+                    rules: &zero_retention,
+                    event_id: "request-1",
+                    now_unix_ms: 100_000,
+                })
+                .await,
+            Err(DataLayerError::InvalidInput(message))
+                if message.contains("retention_seconds")
+        ));
+
+        let duplicate_keys = [different_tags[0], different_tags[0]];
+        assert!(matches!(
+            runtime
+                .check_and_consume_usage_limits(UsageLimitInput {
+                    rules: &duplicate_keys,
+                    event_id: "request-1",
+                    now_unix_ms: 100_000,
+                })
+                .await,
+            Err(DataLayerError::InvalidInput(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn memory_usage_limits_apply_the_current_window_when_configuration_changes() {
+        let runtime = RuntimeState::memory(MemoryRuntimeStateConfig::default());
+        let long_window = [UsageLimitRule {
+            key: "usage:{user-1}:changing-window",
+            limit: 1,
+            window_seconds: 60,
+            retention_seconds: 60,
+        }];
+        assert_eq!(
+            runtime
+                .check_and_consume_usage_limits(UsageLimitInput {
+                    rules: &long_window,
+                    event_id: "request-1",
+                    now_unix_ms: 100_000,
+                })
+                .await
+                .unwrap(),
+            UsageLimitCheck::Allowed
+        );
+
+        let short_window = [UsageLimitRule {
+            window_seconds: 10,
+            retention_seconds: 10,
+            ..long_window[0]
+        }];
+        assert_eq!(
+            runtime
+                .check_and_consume_usage_limits(UsageLimitInput {
+                    rules: &short_window,
+                    event_id: "request-2",
+                    now_unix_ms: 111_000,
+                })
+                .await
+                .unwrap(),
+            UsageLimitCheck::Allowed,
+            "the old event is outside the newly configured shorter window"
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_usage_limits_keep_subsecond_events_in_a_one_second_window() {
+        let runtime = RuntimeState::memory(MemoryRuntimeStateConfig::default());
+        let rules = [UsageLimitRule {
+            key: "usage:{user-1}:qps",
+            limit: 1,
+            window_seconds: 1,
+            retention_seconds: 1,
+        }];
+        assert_eq!(
+            runtime
+                .check_and_consume_usage_limits(UsageLimitInput {
+                    rules: &rules,
+                    event_id: "request-1",
+                    now_unix_ms: 1_900,
+                })
+                .await
+                .unwrap(),
+            UsageLimitCheck::Allowed
+        );
+        assert_eq!(
+            runtime
+                .check_and_consume_usage_limits(UsageLimitInput {
+                    rules: &rules,
+                    event_id: "request-2",
+                    now_unix_ms: 2_100,
+                })
+                .await
+                .unwrap(),
+            UsageLimitCheck::Rejected {
+                rule_index: 0,
+                limit: 1,
+                retry_after: 1,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_usage_limits_do_not_expire_epoch_events_before_the_window_elapses() {
+        let runtime = RuntimeState::memory(MemoryRuntimeStateConfig::default());
+        let rules = [UsageLimitRule {
+            key: "usage:{user-1}:epoch",
+            limit: 1,
+            window_seconds: 1,
+            retention_seconds: 1,
+        }];
+        assert_eq!(
+            runtime
+                .check_and_consume_usage_limits(UsageLimitInput {
+                    rules: &rules,
+                    event_id: "request-1",
+                    now_unix_ms: 0,
+                })
+                .await
+                .unwrap(),
+            UsageLimitCheck::Allowed
+        );
+        assert_eq!(
+            runtime
+                .check_and_consume_usage_limits(UsageLimitInput {
+                    rules: &rules,
+                    event_id: "request-2",
+                    now_unix_ms: 500,
+                })
+                .await
+                .unwrap(),
+            UsageLimitCheck::Rejected {
+                rule_index: 0,
+                limit: 1,
+                retry_after: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn runtime_memory_usage_limit_capacity_must_be_positive() {
+        let mut config = RuntimeStateConfig::memory();
+        config.memory.max_usage_limit_windows = 0;
+        assert!(matches!(
+            config.validate(),
+            Err(DataLayerError::InvalidConfiguration(message))
+                if message.contains("max_usage_limit_windows")
+        ));
+
+        let mut config = RuntimeStateConfig::memory();
+        config.memory.max_usage_limit_events = 0;
+        assert!(matches!(
+            config.validate(),
+            Err(DataLayerError::InvalidConfiguration(message))
+                if message.contains("max_usage_limit_events")
+        ));
+    }
+
+    #[tokio::test]
     async fn memory_rate_limit_concurrent_checks_do_not_exceed_limit() {
         let runtime =
             std::sync::Arc::new(RuntimeState::memory(MemoryRuntimeStateConfig::default()));
@@ -1731,6 +2572,87 @@ mod tests {
         drop(permit);
         tokio::time::sleep(Duration::from_millis(5)).await;
         assert_eq!(gate.snapshot().await.expect("snapshot").in_flight, 0);
+    }
+
+    #[tokio::test]
+    async fn keyed_memory_semaphores_share_only_the_same_subject_key() {
+        let runtime = RuntimeState::memory(MemoryRuntimeStateConfig::default());
+        let first = runtime
+            .keyed_semaphore(
+                "plan_usage_concurrency",
+                "admission:plan_usage_concurrency:user-1",
+                1,
+                RuntimeSemaphoreConfig::default(),
+            )
+            .expect("first gate");
+        let same_subject = runtime
+            .keyed_semaphore(
+                "plan_usage_concurrency",
+                "admission:plan_usage_concurrency:user-1",
+                1,
+                RuntimeSemaphoreConfig::default(),
+            )
+            .expect("same subject gate");
+        let other_subject = runtime
+            .keyed_semaphore(
+                "plan_usage_concurrency",
+                "admission:plan_usage_concurrency:user-2",
+                1,
+                RuntimeSemaphoreConfig::default(),
+            )
+            .expect("other subject gate");
+
+        let permit = first.try_acquire().await.expect("first permit");
+        assert!(matches!(
+            same_subject.try_acquire().await,
+            Err(RuntimeSemaphoreError::Saturated { limit: 1, .. })
+        ));
+        assert!(other_subject.try_acquire().await.is_ok());
+        drop(permit);
+        for _ in 0..20 {
+            if same_subject.snapshot().await.expect("snapshot").in_flight == 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(same_subject.try_acquire().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn memory_keyed_semaphores_isolate_resource_capacity() {
+        let runtime = RuntimeState::memory(MemoryRuntimeStateConfig::default());
+        let first = runtime
+            .keyed_semaphore(
+                "provider_key",
+                "key-a",
+                1,
+                RuntimeSemaphoreConfig::default(),
+            )
+            .expect("first gate should build");
+        let second = runtime
+            .keyed_semaphore(
+                "provider_key",
+                "key-b",
+                1,
+                RuntimeSemaphoreConfig::default(),
+            )
+            .expect("second gate should build");
+        let permit = first.try_acquire().await.expect("first permit");
+
+        assert!(matches!(
+            first
+                .try_acquire()
+                .await
+                .expect_err("same key should saturate"),
+            RuntimeSemaphoreError::Saturated { .. }
+        ));
+        let second_permit = second
+            .try_acquire()
+            .await
+            .expect("different key should retain independent capacity");
+
+        drop(second_permit);
+        drop(permit);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1999,6 +2921,131 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn redis_large_stream_batches_preserve_fields_across_read_reclaim_and_ack() {
+        let Some(redis) = TestRedisServer::start().await else {
+            return;
+        };
+        for protocol in ["resp2", "resp3"] {
+            let runtime = RuntimeState::redis(
+                RedisClientConfig {
+                    url: format!("{}?protocol={protocol}", redis.redis_url),
+                    key_prefix: Some(format!("large-batch-{protocol}")),
+                },
+                Some(5_000),
+            )
+            .await
+            .expect("large batch runtime should connect");
+            let stream = "usage:large-batch";
+            let group = "workers";
+            RuntimeQueueStore::ensure_consumer_group(&runtime, stream, group, "0-0")
+                .await
+                .unwrap();
+            let payload = format!(
+                "{}\r\n\"escaped\"\\\u{4e2d}\u{6587}",
+                "x".repeat(512 * 1024)
+            );
+            let mut expected = BTreeMap::new();
+            for sequence in 0..24 {
+                let fields = BTreeMap::from([
+                    ("payload".to_string(), payload.clone()),
+                    ("sequence".to_string(), sequence.to_string()),
+                    ("legacy_marker".to_string(), "preserve exactly".to_string()),
+                ]);
+                let id =
+                    RuntimeQueueStore::append_fields_with_maxlen(&runtime, stream, &fields, None)
+                        .await
+                        .unwrap();
+                expected.insert(id, sequence.to_string());
+            }
+            let mut readers = tokio::task::JoinSet::new();
+            for index in 0..3 {
+                let runtime = runtime.clone();
+                readers.spawn(async move {
+                    RuntimeQueueStore::read_group(
+                        &runtime,
+                        stream,
+                        group,
+                        &format!("reader-{index}"),
+                        8,
+                        Some(1),
+                    )
+                    .await
+                    .unwrap()
+                });
+            }
+            let mut delivered = std::collections::BTreeSet::new();
+            while let Some(entries) = readers.join_next().await {
+                let entries = entries.unwrap();
+                assert_eq!(entries.len(), 8);
+                for entry in entries {
+                    assert_eq!(entry.fields.len(), 3);
+                    assert_eq!(entry.fields["payload"].as_bytes(), payload.as_bytes());
+                    assert_eq!(entry.fields["sequence"], expected[&entry.id]);
+                    assert_eq!(entry.fields["legacy_marker"], "preserve exactly");
+                    assert!(delivered.insert(entry.id));
+                }
+            }
+            assert_eq!(delivered.len(), 24);
+            let stats = RuntimeQueueStore::stats(&runtime, stream, Some(group))
+                .await
+                .unwrap();
+            assert_eq!(stats.group_pending, 24);
+            assert_eq!(stats.group_lag, Some(0));
+
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            let mut reclaimed = std::collections::BTreeSet::new();
+            while reclaimed.len() < 24 {
+                let entries = RuntimeQueueStore::claim_stale(
+                    &runtime,
+                    stream,
+                    group,
+                    "retry-consumer",
+                    "0-0",
+                    RuntimeQueueReclaimConfig {
+                        min_idle_ms: 1,
+                        count: 5,
+                    },
+                )
+                .await
+                .unwrap();
+                assert!(!entries.is_empty());
+                assert!(entries.len() <= 5);
+                let mut ids = Vec::new();
+                for entry in entries {
+                    assert_eq!(entry.fields.len(), 3);
+                    assert_eq!(entry.fields["payload"].as_bytes(), payload.as_bytes());
+                    assert_eq!(entry.fields["sequence"], expected[&entry.id]);
+                    assert_eq!(entry.fields["legacy_marker"], "preserve exactly");
+                    assert!(reclaimed.insert(entry.id.clone()));
+                    ids.push(entry.id);
+                }
+                assert_eq!(
+                    RuntimeQueueStore::ack(&runtime, stream, group, &ids)
+                        .await
+                        .unwrap(),
+                    ids.len()
+                );
+                assert_eq!(
+                    RuntimeQueueStore::delete(&runtime, stream, &ids)
+                        .await
+                        .unwrap(),
+                    ids.len()
+                );
+            }
+            assert_eq!(reclaimed, delivered);
+            let stats = RuntimeQueueStore::stats(&runtime, stream, Some(group))
+                .await
+                .unwrap();
+            assert_eq!(stats.stream_length, 0);
+            assert_eq!(stats.group_pending, 0);
+            assert_eq!(stats.group_lag, Some(0));
+            eprintln!(
+                "verified {protocol}: 24 large records, 3 readers, read/reclaim/ack complete"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn redis_connection_manager_recovers_after_restart() {
         let Some(mut redis) = TestRedisServer::start().await else {
             return;
@@ -2053,6 +3100,269 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn runtime_backends_share_bounded_score_window_aggregation() {
+        let memory = RuntimeState::memory(MemoryRuntimeStateConfig::default());
+        assert_bounded_score_window_aggregation(&memory).await;
+
+        let Some((_server, runtime)) = redis_runtime_for_test("score-window").await else {
+            return;
+        };
+        assert_bounded_score_window_aggregation(&runtime).await;
+    }
+
+    async fn assert_bounded_score_window_aggregation(runtime: &RuntimeState) {
+        let keys = (0..35)
+            .map(|index| format!("window:{index}"))
+            .collect::<Vec<_>>();
+        for (member, score) in [
+            ("expired:999", 99.999),
+            ("boundary:7", 100.0),
+            ("recent:9007199254740993", 101.0),
+            ("nested:prefix:+00012", 102.0),
+            ("zero:0", 103.0),
+            ("invalid:1.5", 104.0),
+            ("invalid:-1", 105.0),
+            ("invalid:18446744073709551616", 106.0),
+            ("invalid: 12", 107.0),
+            ("missing-separator", 108.0),
+        ] {
+            runtime
+                .score_set(&keys[0], member, score)
+                .await
+                .expect("seed values");
+        }
+        runtime
+            .score_set(&keys[1], "max:18446744073709551615", 100.0)
+            .await
+            .expect("seed max");
+        runtime
+            .score_set(&keys[2], "max:18446744073709551615", 100.0)
+            .await
+            .expect("seed overflow");
+        runtime
+            .score_set(&keys[2], "additional:2", 100.0)
+            .await
+            .expect("seed overflow addition");
+        for index in 0..SCORE_WINDOW_AGGREGATION_MEMBER_LIMIT {
+            runtime
+                .score_set(&keys[3], &format!("{index}:3"), 100.0)
+                .await
+                .expect("seed bounded window");
+        }
+        runtime
+            .score_set(&keys[3], "expired:9999", 0.0)
+            .await
+            .expect("seed expired sample");
+        let stats = runtime
+            .score_window_u64_stats_by_min(&keys, 100.0)
+            .await
+            .expect("aggregate");
+        assert_eq!(
+            stats.len(),
+            keys.len(),
+            "pipeline batches preserve key order"
+        );
+        assert_eq!(
+            stats[0],
+            Some(ScoreWindowU64Stats {
+                sum: 9_007_199_254_741_012,
+                positive_count: 3
+            })
+        );
+        assert_eq!(
+            stats[1],
+            Some(ScoreWindowU64Stats {
+                sum: u64::MAX,
+                positive_count: 1
+            })
+        );
+        assert_eq!(
+            stats[2],
+            Some(ScoreWindowU64Stats {
+                sum: u64::MAX,
+                positive_count: 2
+            })
+        );
+        assert_eq!(
+            stats[3],
+            Some(ScoreWindowU64Stats {
+                sum: 1536,
+                positive_count: 512
+            })
+        );
+        assert!(stats[4..]
+            .iter()
+            .all(|stats| *stats == Some(ScoreWindowU64Stats::default())));
+
+        runtime
+            .score_set(&keys[3], "overflowing-window:11", 101.0)
+            .await
+            .expect("exceed server limit");
+        let stats = runtime
+            .score_window_u64_stats_by_min(&keys[3..4], 100.0)
+            .await
+            .expect("bounded fallback");
+        assert_eq!(
+            stats,
+            vec![None],
+            "oversized windows require the full exact read"
+        );
+        let members = runtime
+            .score_range_by_min(&keys[3], 100.0)
+            .await
+            .expect("full window");
+        assert_eq!(
+            ScoreWindowU64Stats::from_members(members.iter().map(String::as_str)).sum,
+            1547
+        );
+        runtime
+            .score_remove(&keys[3], "overflowing-window:11")
+            .await
+            .expect("remove newest");
+        assert_eq!(
+            runtime
+                .score_window_u64_stats_by_min(&keys[3..4], 100.0)
+                .await
+                .expect("read after remove")[0]
+                .unwrap()
+                .sum,
+            1536
+        );
+        runtime
+            .score_set(&keys[3], "0:3", 99.0)
+            .await
+            .expect("move sample outside window");
+        assert_eq!(
+            runtime
+                .score_window_u64_stats_by_min(&keys[3..4], 100.0)
+                .await
+                .expect("read changed score")[0]
+                .unwrap()
+                .sum,
+            1533
+        );
+        assert!(runtime
+            .score_window_u64_stats_by_min(&[], 100.0)
+            .await
+            .expect("empty query")
+            .is_empty());
+        assert!(runtime
+            .score_window_u64_stats_by_min(&keys, f64::NAN)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn redis_score_window_aggregation_reloads_scripts_without_caching_old_cost() {
+        let Some((server, runtime)) = redis_runtime_for_test("score-window-reload").await else {
+            return;
+        };
+        let keys = vec!["reload:cost".to_string()];
+        runtime
+            .score_set(&keys[0], "first:7", 100.0)
+            .await
+            .expect("first cost");
+        assert_eq!(
+            runtime
+                .score_window_u64_stats_by_min(&keys, 100.0)
+                .await
+                .expect("first aggregate")[0]
+                .unwrap()
+                .sum,
+            7
+        );
+        let client = ::redis::Client::open(server.redis_url.as_str()).expect("test Redis client");
+        let mut connection = client
+            .get_multiplexed_async_connection()
+            .await
+            .expect("test connection");
+        ::redis::cmd("SCRIPT")
+            .arg("FLUSH")
+            .query_async::<()>(&mut connection)
+            .await
+            .expect("flush scripts");
+        runtime
+            .score_set(&keys[0], "second:11", 101.0)
+            .await
+            .expect("new cost");
+        assert_eq!(
+            runtime
+                .score_window_u64_stats_by_min(&keys, 100.0)
+                .await
+                .expect("reload aggregate")[0]
+                .unwrap()
+                .sum,
+            18
+        );
+        assert_eq!(
+            runtime
+                .score_window_u64_stats_by_min(&keys, 101.0)
+                .await
+                .expect("changed window")[0]
+                .unwrap()
+                .sum,
+            11
+        );
+        runtime
+            .key_expire(&keys[0], Duration::ZERO)
+            .await
+            .expect("expire window");
+        assert_eq!(
+            runtime
+                .score_window_u64_stats_by_min(&keys, 100.0)
+                .await
+                .expect("expired aggregate"),
+            vec![Some(ScoreWindowU64Stats::default())]
+        );
+    }
+
+    #[tokio::test]
+    async fn redis_score_window_aggregation_observes_completed_concurrent_writes() {
+        let Some((_server, runtime)) = redis_runtime_for_test("score-window-concurrent").await
+        else {
+            return;
+        };
+        let writer_runtime = runtime.clone();
+        let (written_tx, mut written_rx) = tokio::sync::mpsc::channel(8);
+        let writer = tokio::spawn(async move {
+            for index in 1..=128_u64 {
+                writer_runtime
+                    .score_set("concurrent:cost", &format!("{index}:2"), 100.0)
+                    .await
+                    .expect("concurrent write");
+                written_tx.send(index).await.expect("notify reader");
+            }
+        });
+        let keys = vec!["concurrent:cost".to_string()];
+        while let Some(written) = written_rx.recv().await {
+            let stats = runtime
+                .score_window_u64_stats_by_min(&keys, 100.0)
+                .await
+                .expect("concurrent aggregate")[0]
+                .unwrap();
+            assert!(
+                stats.positive_count >= written,
+                "completed writes must not be hidden by a stale aggregate"
+            );
+            assert_eq!(
+                stats.sum,
+                stats.positive_count * 2,
+                "one script observes one consistent window"
+            );
+        }
+        writer.await.expect("writer task");
+        assert_eq!(
+            runtime
+                .score_window_u64_stats_by_min(&keys, 100.0)
+                .await
+                .expect("final aggregate")[0]
+                .unwrap()
+                .sum,
+            256
+        );
+    }
+
+    #[tokio::test]
     async fn runtime_backends_reject_invalid_shared_inputs() {
         let memory = RuntimeState::memory(MemoryRuntimeStateConfig::default());
         assert_invalid_shared_inputs(&memory).await;
@@ -2061,6 +3371,44 @@ mod tests {
             return;
         };
         assert_invalid_shared_inputs(&redis_runtime).await;
+    }
+
+    #[tokio::test]
+    async fn runtime_backends_share_atomic_sliding_usage_limit_contract() {
+        let memory = RuntimeState::memory(MemoryRuntimeStateConfig::default());
+        assert_sliding_usage_limit_contract(&memory).await;
+        assert_concurrent_usage_limit_cap(&memory).await;
+
+        let Some((_redis, redis_runtime)) = redis_runtime_for_test("usage-limits").await else {
+            return;
+        };
+        assert_sliding_usage_limit_contract(&redis_runtime).await;
+        assert_concurrent_usage_limit_cap(&redis_runtime).await;
+    }
+
+    #[tokio::test]
+    async fn runtime_backends_share_short_remaining_usage_limit_retention_contract() {
+        let memory = RuntimeState::memory(MemoryRuntimeStateConfig::default());
+        let redis = redis_runtime_for_test("usage-limit-retention").await;
+        let rules = [UsageLimitRule {
+            key: "usage:{retention-user}:period-bucket",
+            limit: 1,
+            window_seconds: 60,
+            retention_seconds: 1,
+        }];
+
+        assert_usage_limit_retention_seed(&memory, &rules).await;
+        if let Some((_, redis_runtime)) = &redis {
+            assert_usage_limit_retention_seed(redis_runtime, &rules).await;
+        }
+
+        // Redis deliberately adds one second of expiry grace to the requested retention.
+        tokio::time::sleep(Duration::from_millis(2_200)).await;
+
+        assert_usage_limit_retention_expired(&memory, &rules).await;
+        if let Some((_, redis_runtime)) = &redis {
+            assert_usage_limit_retention_expired(redis_runtime, &rules).await;
+        }
     }
 
     #[tokio::test]
@@ -2330,6 +3678,12 @@ mod tests {
     async fn assert_invalid_shared_inputs(runtime: &RuntimeState) {
         assert!(matches!(
             runtime
+                .kv_set_if_absent("contract:invalid-ttl", "value", Duration::ZERO)
+                .await,
+            Err(DataLayerError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            runtime
                 .score_set("contract:invalid-score", "nan", f64::NAN)
                 .await,
             Err(DataLayerError::InvalidInput(_))
@@ -2353,6 +3707,275 @@ mod tests {
             .await,
             Err(DataLayerError::InvalidInput(_))
         ));
+    }
+
+    async fn assert_kv_set_if_absent_contract(runtime: &RuntimeState) {
+        let key = "contract:kv:set-if-absent";
+        assert!(runtime
+            .kv_set_if_absent(key, "first", Duration::from_millis(30))
+            .await
+            .expect("first set-if-absent should succeed"));
+        assert!(!runtime
+            .kv_set_if_absent(key, "second", Duration::from_secs(30))
+            .await
+            .expect("duplicate set-if-absent should be rejected"));
+        assert_eq!(
+            runtime
+                .kv_get(key)
+                .await
+                .expect("existing value should be readable")
+                .as_deref(),
+            Some("first"),
+            "a rejected set-if-absent must not replace the existing value"
+        );
+
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        assert!(runtime
+            .kv_set_if_absent(key, "after-expiry", Duration::from_secs(30))
+            .await
+            .expect("expired key should be reusable"));
+        assert_eq!(
+            runtime
+                .kv_get(key)
+                .await
+                .expect("replacement value should be readable")
+                .as_deref(),
+            Some("after-expiry")
+        );
+
+        let concurrent_key = "contract:kv:set-if-absent:concurrent";
+        let mut tasks = Vec::new();
+        for index in 0..64 {
+            let runtime = runtime.clone();
+            tasks.push(tokio::spawn(async move {
+                runtime
+                    .kv_set_if_absent(
+                        concurrent_key,
+                        format!("candidate-{index}"),
+                        Duration::from_secs(30),
+                    )
+                    .await
+                    .expect("concurrent set-if-absent should complete")
+            }));
+        }
+        let mut created = 0;
+        for task in tasks {
+            if task.await.expect("set-if-absent task should join") {
+                created += 1;
+            }
+        }
+        assert_eq!(
+            created, 1,
+            "exactly one concurrent caller may create the key"
+        );
+        assert!(runtime
+            .kv_get(concurrent_key)
+            .await
+            .expect("winning value should be readable")
+            .is_some());
+    }
+
+    async fn assert_sliding_usage_limit_contract(runtime: &RuntimeState) {
+        let rules = [
+            UsageLimitRule {
+                key: "usage:{shared-user}:short",
+                limit: 2,
+                window_seconds: 10,
+                retention_seconds: 10,
+            },
+            UsageLimitRule {
+                key: "usage:{shared-user}:long",
+                limit: 1,
+                window_seconds: 60,
+                retention_seconds: 60,
+            },
+        ];
+        let consume = |event_id, now_unix_ms, rules| UsageLimitInput {
+            rules,
+            event_id,
+            now_unix_ms,
+        };
+
+        assert_eq!(
+            runtime
+                .check_and_consume_usage_limits(consume("event-1", 100_000, &rules))
+                .await
+                .expect("first event"),
+            UsageLimitCheck::Allowed
+        );
+        assert_eq!(
+            runtime
+                .check_and_consume_usage_limits(consume("event-1", 101_000, &rules))
+                .await
+                .expect("idempotent replay"),
+            UsageLimitCheck::Allowed
+        );
+        assert_eq!(
+            runtime
+                .check_and_consume_usage_limits(consume("event-2", 105_000, &rules))
+                .await
+                .expect("long window rejection"),
+            UsageLimitCheck::Rejected {
+                rule_index: 1,
+                limit: 1,
+                retry_after: 55,
+            }
+        );
+
+        assert_eq!(
+            runtime
+                .check_and_consume_usage_limits(consume("event-3", 105_000, &rules[..1]))
+                .await
+                .expect("rejection must leave short rule untouched"),
+            UsageLimitCheck::Allowed
+        );
+        assert_eq!(
+            runtime
+                .check_and_consume_usage_limits(consume("event-4", 109_000, &rules[..1]))
+                .await
+                .expect("short rule rejection"),
+            UsageLimitCheck::Rejected {
+                rule_index: 0,
+                limit: 2,
+                retry_after: 1,
+            }
+        );
+        assert_eq!(
+            runtime
+                .check_and_consume_usage_limits(consume("event-4", 110_000, &rules[..1]))
+                .await
+                .expect("event at cutoff expires"),
+            UsageLimitCheck::Allowed
+        );
+
+        let qps = [UsageLimitRule {
+            key: "usage:{shared-user}:qps",
+            limit: 1,
+            window_seconds: 1,
+            retention_seconds: 1,
+        }];
+        assert_eq!(
+            runtime
+                .check_and_consume_usage_limits(consume("qps-1", 200_900, &qps))
+                .await
+                .expect("first qps event"),
+            UsageLimitCheck::Allowed
+        );
+        assert_eq!(
+            runtime
+                .check_and_consume_usage_limits(consume("qps-2", 201_100, &qps))
+                .await
+                .expect("subsecond qps rejection"),
+            UsageLimitCheck::Rejected {
+                rule_index: 0,
+                limit: 1,
+                retry_after: 1,
+            }
+        );
+        assert_eq!(
+            runtime
+                .check_and_consume_usage_limits(consume("qps-2", 201_900, &qps))
+                .await
+                .expect("qps event at cutoff"),
+            UsageLimitCheck::Allowed
+        );
+
+        runtime
+            .release_usage_limits(UsageLimitReleaseInput {
+                rules: &qps,
+                event_id: "qps-2",
+            })
+            .await
+            .expect("release consumed qps event");
+        assert_eq!(
+            runtime
+                .check_and_consume_usage_limits(consume("qps-3", 201_900, &qps))
+                .await
+                .expect("released qps capacity should be reusable"),
+            UsageLimitCheck::Allowed
+        );
+        runtime
+            .release_usage_limits(UsageLimitReleaseInput {
+                rules: &qps,
+                event_id: "qps-2",
+            })
+            .await
+            .expect("release should be idempotent");
+    }
+
+    async fn assert_usage_limit_retention_seed(
+        runtime: &RuntimeState,
+        rules: &[UsageLimitRule<'_>],
+    ) {
+        assert_eq!(
+            runtime
+                .check_and_consume_usage_limits(UsageLimitInput {
+                    rules,
+                    event_id: "period-event-1",
+                    now_unix_ms: 100_000,
+                })
+                .await
+                .expect("seed short-retention period bucket"),
+            UsageLimitCheck::Allowed
+        );
+    }
+
+    async fn assert_usage_limit_retention_expired(
+        runtime: &RuntimeState,
+        rules: &[UsageLimitRule<'_>],
+    ) {
+        assert_eq!(
+            runtime
+                .check_and_consume_usage_limits(UsageLimitInput {
+                    rules,
+                    event_id: "period-event-2",
+                    now_unix_ms: 102_200,
+                })
+                .await
+                .expect("expired period bucket must be reusable"),
+            UsageLimitCheck::Allowed,
+            "retention must expire the bucket before its full counting window"
+        );
+    }
+
+    async fn assert_concurrent_usage_limit_cap(runtime: &RuntimeState) {
+        let mut tasks = Vec::new();
+        for index in 0..64 {
+            let runtime = runtime.clone();
+            tasks.push(tokio::spawn(async move {
+                let event_id = format!("parallel-event-{index}");
+                let rules = [UsageLimitRule {
+                    key: "usage:{shared-user}:parallel",
+                    limit: 8,
+                    window_seconds: 60,
+                    retention_seconds: 60,
+                }];
+                runtime
+                    .check_and_consume_usage_limits(UsageLimitInput {
+                        rules: &rules,
+                        event_id: &event_id,
+                        now_unix_ms: 300_000,
+                    })
+                    .await
+                    .expect("concurrent usage limit check")
+            }));
+        }
+
+        let mut allowed = 0;
+        let mut rejected = 0;
+        for task in tasks {
+            match task.await.expect("concurrent usage limit task") {
+                UsageLimitCheck::Allowed => allowed += 1,
+                UsageLimitCheck::Rejected {
+                    rule_index: 0,
+                    limit: 8,
+                    retry_after: 60,
+                } => rejected += 1,
+                unexpected => panic!("unexpected usage limit result: {unexpected:?}"),
+            }
+        }
+        assert_eq!(allowed, 8);
+        assert_eq!(rejected, 56);
     }
 
     async fn redis_runtime_for_test(prefix: &str) -> Option<(TestRedisServer, RuntimeState)> {

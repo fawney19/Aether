@@ -2,6 +2,7 @@ pub use aether_oauth::provider::providers::{
     generate_kiro_machine_id as generate_machine_id,
     normalize_kiro_machine_id as normalize_machine_id, KiroAuthConfig, DEFAULT_REGION,
 };
+pub use aether_oauth::provider::providers::{is_valid_kiro_region, normalize_kiro_region};
 
 #[cfg(test)]
 mod tests {

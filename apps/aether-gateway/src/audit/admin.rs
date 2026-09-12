@@ -34,6 +34,7 @@ pub(crate) fn emit_admin_audit(
     path_and_query: &str,
     control_decision: Option<&GatewayControlDecision>,
 ) {
+    let sanitized_path_and_query = sanitize_admin_audit_path(path_and_query);
     let Some(decision) = control_decision else {
         return;
     };
@@ -64,9 +65,10 @@ pub(crate) fn emit_admin_audit(
             },
             route_kind,
             default_target_type(route_family),
-            path_and_query.to_string(),
+            sanitized_path_and_query.clone(),
         )
     };
+    let target_id = sanitize_admin_audit_target_id(target_id);
 
     let (audit_status, log_level) = classify_admin_audit_response(method, response.status());
     if log_level == AdminAuditLogLevel::Info {
@@ -83,7 +85,7 @@ pub(crate) fn emit_admin_audit(
             route_family,
             route_kind,
             method = %method,
-            path = %path_and_query,
+            path = %sanitized_path_and_query,
             action,
             target_type,
             target_id = %target_id,
@@ -103,13 +105,24 @@ pub(crate) fn emit_admin_audit(
             route_family,
             route_kind,
             method = %method,
-            path = %path_and_query,
+            path = %sanitized_path_and_query,
             action,
             target_type,
             target_id = %target_id,
             "admin audit event"
         );
     }
+}
+
+fn sanitize_admin_audit_path(path_and_query: &str) -> String {
+    crate::middleware::sanitize_access_log_path(path_and_query)
+}
+
+fn sanitize_admin_audit_target_id(target_id: String) -> String {
+    if target_id.trim_start().starts_with('/') {
+        return sanitize_admin_audit_path(&target_id);
+    }
+    target_id
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -151,7 +164,10 @@ fn is_admin_read_method(method: &http::Method) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{classify_admin_audit_response, AdminAuditLogLevel};
+    use super::{
+        classify_admin_audit_response, sanitize_admin_audit_path, sanitize_admin_audit_target_id,
+        AdminAuditLogLevel,
+    };
     use axum::http::{Method, StatusCode};
 
     #[test]
@@ -167,6 +183,34 @@ mod tests {
         assert_eq!(
             classify_admin_audit_response(&Method::DELETE, StatusCode::NOT_FOUND),
             ("failed", AdminAuditLogLevel::Warn)
+        );
+    }
+
+    #[test]
+    fn audit_paths_drop_sensitive_query_values() {
+        assert_eq!(
+            sanitize_admin_audit_path(
+                "/api/admin/providers?token=secret&api_key=live-key&limit=25"
+            ),
+            "/api/admin/providers?limit=25"
+        );
+        assert_eq!(
+            sanitize_admin_audit_path("/install/one-time-secret?view=raw"),
+            "/install/[redacted]?view=raw"
+        );
+    }
+
+    #[test]
+    fn path_shaped_audit_targets_drop_sensitive_query_values() {
+        assert_eq!(
+            sanitize_admin_audit_target_id(
+                "/api/admin/monitoring/trace/request-1?token=secret&limit=25".to_string(),
+            ),
+            "/api/admin/monitoring/trace/request-1?limit=25"
+        );
+        assert_eq!(
+            sanitize_admin_audit_target_id("resource-id?literal".to_string()),
+            "resource-id?literal"
         );
     }
 }

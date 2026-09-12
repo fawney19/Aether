@@ -14,7 +14,7 @@ import type {
  * 获取健康状态摘要
  */
 export async function getHealthSummary(): Promise<HealthSummary> {
-  const response = await client.get('/api/admin/endpoints/health/summary')
+  const response = await client.get<HealthSummary>('/api/admin/endpoints/health/summary')
   return response.data
 }
 
@@ -22,7 +22,7 @@ export async function getHealthSummary(): Promise<HealthSummary> {
  * 获取 Endpoint 健康状态
  */
 export async function getEndpointHealth(endpointId: string): Promise<HealthStatus> {
-  const response = await client.get(`/api/admin/endpoints/health/endpoint/${endpointId}`)
+  const response = await client.get<HealthStatus>(`/api/admin/endpoints/health/endpoint/${endpointId}`)
   return response.data
 }
 
@@ -30,7 +30,7 @@ export async function getEndpointHealth(endpointId: string): Promise<HealthStatu
  * 获取 Key 健康状态
  */
 export async function getKeyHealth(keyId: string): Promise<HealthStatus> {
-  const response = await client.get(`/api/admin/endpoints/health/key/${keyId}`)
+  const response = await client.get<HealthStatus>(`/api/admin/endpoints/health/key/${keyId}`)
   return response.data
 }
 
@@ -48,7 +48,15 @@ export async function recoverKeyHealth(keyId: string, apiFormat?: string): Promi
     is_active: boolean
   }
 }> {
-  const response = await client.patch(`/api/admin/endpoints/health/keys/${keyId}`, null, {
+  const response = await client.patch<{
+  message: string
+  details: {
+    api_format?: string
+    health_score: number
+    circuit_breaker_open: boolean
+    is_active: boolean
+  }
+}>(`/api/admin/endpoints/health/keys/${keyId}`, null, {
     params: apiFormat ? { api_format: apiFormat } : undefined
   })
   return response.data
@@ -66,7 +74,15 @@ export async function recoverAllKeysHealth(): Promise<{
     endpoint_id: string
   }>
 }> {
-  const response = await client.patch('/api/admin/endpoints/health/keys')
+  const response = await client.patch<{
+  message: string
+  recovered_count: number
+  recovered_keys: Array<{
+    key_id: string
+    key_name: string
+    endpoint_id: string
+  }>
+}>('/api/admin/endpoints/health/keys')
   return response.data
 }
 
@@ -77,7 +93,7 @@ export async function getEndpointStatusMonitor(params?: {
   lookback_hours?: number
   per_format_limit?: number
 }): Promise<EndpointStatusMonitorResponse> {
-  const response = await client.get('/api/admin/endpoints/health/api-formats', {
+  const response = await client.get<EndpointStatusMonitorResponse>('/api/admin/endpoints/health/api-formats', {
     params
   })
   return response.data
@@ -90,7 +106,7 @@ export async function getPublicEndpointStatusMonitor(params?: {
   lookback_hours?: number
   per_format_limit?: number
 }): Promise<PublicEndpointStatusMonitorResponse> {
-  const response = await client.get('/api/public/health/api-formats', {
+  const response = await client.get<PublicEndpointStatusMonitorResponse>('/api/public/health/api-formats', {
     params
   })
   return response.data
@@ -104,7 +120,7 @@ export async function getModelStatusMonitor(params?: {
   model_limit?: number
   per_model_limit?: number
 }): Promise<ModelStatusMonitorResponse> {
-  const response = await client.get('/api/admin/endpoints/health/models', {
+  const response = await client.get<ModelStatusMonitorResponse>('/api/admin/endpoints/health/models', {
     params
   })
   return response.data
@@ -118,7 +134,7 @@ export async function getPublicModelStatusMonitor(params?: {
   model_limit?: number
   per_model_limit?: number
 }): Promise<ModelStatusMonitorResponse> {
-  const response = await client.get('/api/public/health/models', {
+  const response = await client.get<ModelStatusMonitorResponse>('/api/public/health/models', {
     params
   })
   return response.data
@@ -133,7 +149,7 @@ export async function getProviderStatusMonitor(params?: {
   per_provider_model_limit?: number
   per_model_limit?: number
 }): Promise<ProviderStatusMonitorResponse> {
-  const response = await client.get('/api/admin/endpoints/health/providers', {
+  const response = await client.get<ProviderStatusMonitorResponse>('/api/admin/endpoints/health/providers', {
     params
   })
   return response.data
@@ -146,7 +162,7 @@ export async function getHealthRelatedMonitor(params: {
   related_limit?: number
   per_item_limit?: number
 }): Promise<HealthRelatedMonitorResponse> {
-  const response = await client.get('/api/admin/endpoints/health/related', {
+  const response = await client.get<HealthRelatedMonitorResponse>('/api/admin/endpoints/health/related', {
     params
   })
   return response.data
@@ -159,7 +175,7 @@ export async function getPublicHealthRelatedMonitor(params: {
   related_limit?: number
   per_item_limit?: number
 }): Promise<HealthRelatedMonitorResponse> {
-  const response = await client.get('/api/public/health/related', {
+  const response = await client.get<HealthRelatedMonitorResponse>('/api/public/health/related', {
     params
   })
   return response.data

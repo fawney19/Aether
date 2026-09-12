@@ -133,7 +133,7 @@ pub(crate) async fn frontdoor_manifest(State(state): State<AppState>) -> impl In
             "internal_gateway": {
                 "route_groups": INTERNAL_GATEWAY_ROUTE_GROUPS,
                 "path_prefixes": INTERNAL_GATEWAY_PATH_PREFIXES,
-                "status": "rust_native_control_plane",
+                "status": state.internal_gateway_auth_status(),
             },
         },
         "features": {

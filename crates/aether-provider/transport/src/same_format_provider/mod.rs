@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::fmt;
 
 use serde::Serialize;
 use serde_json::Value;
@@ -66,7 +67,7 @@ pub struct SameFormatProviderRequestBehavior {
     pub report_kind: &'static str,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 pub struct SameFormatProviderRequestBodyInput<'a> {
     pub body_json: &'a Value,
     pub mapped_model: &'a str,
@@ -83,11 +84,62 @@ pub struct SameFormatProviderRequestBodyInput<'a> {
     pub enable_model_directives: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+impl fmt::Debug for SameFormatProviderRequestBodyInput<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SameFormatProviderRequestBodyInput")
+            .field(
+                "body_json_bytes",
+                &serde_json::to_vec(self.body_json)
+                    .ok()
+                    .map(|bytes| bytes.len()),
+            )
+            .field("mapped_model", &self.mapped_model)
+            .field("client_api_format", &self.client_api_format)
+            .field("provider_api_format", &self.provider_api_format)
+            .field("source_model", &self.source_model)
+            .field("family", &self.family)
+            .field("has_body_rules", &self.body_rules.is_some())
+            .field(
+                "request_header_names",
+                &self
+                    .request_headers
+                    .map(|headers| headers.keys().map(|name| name.as_str()).collect::<Vec<_>>()),
+            )
+            .field("upstream_is_stream", &self.upstream_is_stream)
+            .field("force_body_stream_field", &self.force_body_stream_field)
+            .field("has_kiro_auth_config", &self.kiro_auth_config.is_some())
+            .field("is_claude_code", &self.is_claude_code)
+            .field("enable_model_directives", &self.enable_model_directives)
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize)]
 pub struct SameFormatProviderRequestBodyOutput {
     pub body: Value,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub compatibility_edits: Vec<SameFormatProviderCompatibilityEdit>,
+}
+
+impl fmt::Debug for SameFormatProviderRequestBodyOutput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SameFormatProviderRequestBodyOutput")
+            .field(
+                "body_bytes",
+                &serde_json::to_vec(&self.body).ok().map(|bytes| bytes.len()),
+            )
+            .field(
+                "compatibility_edits",
+                &self
+                    .compatibility_edits
+                    .iter()
+                    .map(|edit| (edit.field.as_str(), edit.action, edit.detail.len()))
+                    .collect::<Vec<_>>(),
+            )
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -106,7 +158,7 @@ pub enum SameFormatProviderCompatibilityEditAction {
     OperatorRule,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 pub struct SameFormatProviderUpstreamUrlParams<'a> {
     pub provider_api_format: &'a str,
     pub mapped_model: &'a str,
@@ -117,7 +169,26 @@ pub struct SameFormatProviderUpstreamUrlParams<'a> {
     pub provider_request_body: Option<&'a Value>,
 }
 
-#[derive(Debug, Clone, Copy)]
+impl fmt::Debug for SameFormatProviderUpstreamUrlParams<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SameFormatProviderUpstreamUrlParams")
+            .field("provider_api_format", &self.provider_api_format)
+            .field("mapped_model", &self.mapped_model)
+            .field("upstream_is_stream", &self.upstream_is_stream)
+            .field("has_request_query", &self.request_query.is_some())
+            .field("request_query_len", &self.request_query.map(str::len))
+            .field("kiro_api_region", &self.kiro_api_region)
+            .field("api_operation", &self.api_operation)
+            .field(
+                "has_provider_request_body",
+                &self.provider_request_body.is_some(),
+            )
+            .finish()
+    }
+}
+
+#[derive(Clone, Copy)]
 pub struct SameFormatProviderHeadersInput<'a> {
     pub headers: &'a http::HeaderMap,
     pub provider_request_body: &'a Value,
@@ -130,6 +201,45 @@ pub struct SameFormatProviderHeadersInput<'a> {
     pub extra_headers: &'a BTreeMap<String, String>,
     pub kiro_auth_config: Option<&'a KiroAuthConfig>,
     pub kiro_machine_id: Option<&'a str>,
+}
+
+impl fmt::Debug for SameFormatProviderHeadersInput<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SameFormatProviderHeadersInput")
+            .field(
+                "request_header_names",
+                &self
+                    .headers
+                    .keys()
+                    .map(|name| name.as_str())
+                    .collect::<Vec<_>>(),
+            )
+            .field(
+                "provider_request_body_bytes",
+                &serde_json::to_vec(self.provider_request_body)
+                    .ok()
+                    .map(|bytes| bytes.len()),
+            )
+            .field(
+                "original_request_body_bytes",
+                &serde_json::to_vec(self.original_request_body)
+                    .ok()
+                    .map(|bytes| bytes.len()),
+            )
+            .field("has_header_rules", &self.header_rules.is_some())
+            .field("behavior", &self.behavior)
+            .field("api_operation", &self.api_operation)
+            .field("auth_header", &self.auth_header)
+            .field("has_auth_value", &self.auth_value.is_some())
+            .field(
+                "extra_header_names",
+                &self.extra_headers.keys().collect::<Vec<_>>(),
+            )
+            .field("has_kiro_auth_config", &self.kiro_auth_config.is_some())
+            .field("has_kiro_machine_id", &self.kiro_machine_id.is_some())
+            .finish()
+    }
 }
 
 pub fn classify_same_format_provider_request_behavior(
@@ -721,6 +831,12 @@ pub fn build_same_format_provider_headers(
         provider_request_headers.insert("accept".to_string(), "text/event-stream".to_string());
         force_identity_accept_encoding(&mut provider_request_headers);
     }
+    let declared_connection_headers =
+        crate::headers::declared_connection_header_names(input.headers, input.extra_headers);
+    crate::headers::remove_declared_connection_headers(
+        &mut provider_request_headers,
+        &declared_connection_headers,
+    );
     Some(provider_request_headers)
 }
 

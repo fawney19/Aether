@@ -6,6 +6,7 @@ use super::{
     TRACE_ID_HEADER,
 };
 use crate::data::GatewayDataState;
+use aether_ai_formats::openai_responses_message_item_id;
 use aether_crypto::{encrypt_python_fernet_plaintext, DEVELOPMENT_ENCRYPTION_KEY};
 use aether_data::repository::auth::{
     InMemoryAuthApiKeySnapshotRepository, StoredAuthApiKeySnapshot,
@@ -429,7 +430,7 @@ async fn gateway_executes_openai_responses_sync_upstream_stream_via_local_finali
             "output_text": "Hello",
             "output": [{
                 "type": "message",
-                "id": "resp_stream_001_msg",
+                "id": openai_responses_message_item_id("resp_stream_001", 0),
                 "role": "assistant",
                 "status": "completed",
                 "content": [{
@@ -985,6 +986,11 @@ async fn gateway_executes_kiro_claude_cli_sync_upstream_stream_via_local_finaliz
                     Arc::clone(&request_candidate_repository),
                     Arc::clone(&usage_repository),
                     DEVELOPMENT_ENCRYPTION_KEY,
+                )
+                .attach_proxy_node_repository_for_tests(
+                    crate::tests::ai_execute::ai_execute_proxy_node_repository([
+                        "proxy-node-kiro-cli-finalize-local",
+                    ]),
                 ),
             );
     let gateway = build_router_with_state(gateway_state);

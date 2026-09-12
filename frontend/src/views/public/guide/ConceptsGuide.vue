@@ -68,14 +68,6 @@ import { BookOpen } from 'lucide-vue-next'
       <div class="space-y-4 mt-4 text-[#666663] dark:text-[#a3a094] text-sm">
         <ul class="list-decimal pl-5 space-y-2">
           <li><strong class="text-[#262624] dark:text-[#f1ead8] font-medium">提供商类型：</strong>自定义或反代；一般自定义即可，反代请进入反代章节。</li>
-          <li>
-            <strong class="text-[#262624] dark:text-[#f1ead8] font-medium">计费类型：</strong>
-            <ul class="list-disc pl-5 mt-1 space-y-1">
-              <li>按量付费：持续使用</li>
-              <li>月卡额度：按周期(天)限额</li>
-              <li>免费套餐：不计入成本即倍率为0</li>
-            </ul>
-          </li>
           <li><strong class="text-[#262624] dark:text-[#f1ead8] font-medium">最大重试次数：</strong>在缓存亲和调度模式下，首次请求失败后的重试次数。</li>
           <li>
             <strong class="text-[#262624] dark:text-[#f1ead8] font-medium">超时时间：</strong>

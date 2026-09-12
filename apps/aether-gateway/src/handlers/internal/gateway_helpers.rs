@@ -204,6 +204,11 @@ pub(crate) fn build_internal_gateway_request_parts(
     };
     let (mut parts, _) = request.into_parts();
     parts.headers = mapped_headers;
+    parts
+        .extensions
+        .insert(crate::headers::request_origin_from_trusted_headers(
+            &parts.headers,
+        ));
     Ok(parts)
 }
 
@@ -243,6 +248,30 @@ pub(crate) fn build_internal_finalize_decision(
             Some(signature),
         )
         .with_execution_runtime_candidate(true),
+    )
+}
+
+pub(crate) fn internal_finalize_report_kind_is_supported(report_kind: &str) -> bool {
+    matches!(
+        report_kind.trim().to_ascii_lowercase().as_str(),
+        "openai_chat_sync_finalize"
+            | "openai_responses_sync_finalize"
+            | "openai_responses_compact_sync_finalize"
+            | "openai_compact_sync_finalize"
+            | "openai_cli_sync_finalize"
+            | "openai_embedding_sync_finalize"
+            | "openai_image_sync_finalize"
+            | "claude_chat_sync_finalize"
+            | "claude_cli_sync_finalize"
+            | "gemini_chat_sync_finalize"
+            | "gemini_interactions_sync_finalize"
+            | "gemini_cli_sync_finalize"
+            | "openai_video_create_sync_finalize"
+            | "openai_video_remix_sync_finalize"
+            | "openai_video_delete_sync_finalize"
+            | "openai_video_cancel_sync_finalize"
+            | "gemini_video_create_sync_finalize"
+            | "gemini_video_cancel_sync_finalize"
     )
 }
 
@@ -353,10 +382,6 @@ pub(crate) async fn maybe_build_internal_finalize_video_response(
     Ok(None)
 }
 
-pub(crate) fn gateway_error_message(error: GatewayError) -> String {
-    error.into_message()
-}
-
 pub(crate) fn build_internal_tunnel_heartbeat_ack(
     node: &StoredProxyNode,
     heartbeat_id: u64,
@@ -391,7 +416,12 @@ pub(crate) fn parse_internal_tunnel_heartbeat_request(
         })?;
 
     let node_id = payload.node_id.trim();
-    if node_id.is_empty() || node_id.len() > 36 || payload.heartbeat_id == 0 {
+    if node_id.is_empty()
+        || node_id.len() > 36
+        || payload.heartbeat_id == 0
+        || crate::tunnel::validate_tunnel_heartbeat_session_id(&payload.heartbeat_session_id)
+            .is_err()
+    {
         return Err(build_internal_control_error_response(
             http::StatusCode::BAD_REQUEST,
             "invalid heartbeat payload",

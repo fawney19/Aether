@@ -36,7 +36,10 @@ function providerModelsFetchResult(response: ProviderModelsQueryResponse): Fetch
   if (response.success && response.data?.models) {
     const partialWarning = response.data.warning ?? response.data.error
     return {
-      models: response.data.models,
+      models: response.data.models.map((model) => ({
+        ...model,
+        api_formats: model.api_formats ?? (model.api_format ? [model.api_format] : []),
+      })),
       warning: partialWarning ? parseUpstreamModelError(partialWarning) : undefined,
       fromCache: response.data.from_cache,
     }

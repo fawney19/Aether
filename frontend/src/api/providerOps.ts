@@ -8,6 +8,7 @@
  */
 
 import client from './client'
+import type { CredentialsSchema } from './providerCredentials'
 
 // ==================== Types ====================
 
@@ -46,11 +47,11 @@ export interface ArchitectureInfo {
   architecture_id: string
   display_name: string
   description: string
-  credentials_schema: Record<string, unknown>
+  credentials_schema: CredentialsSchema
   supported_auth_types: Array<{
     type: string
     display_name: string
-    credentials_schema?: Record<string, unknown>
+    credentials_schema?: CredentialsSchema
   }>
   supported_actions: Array<{
     type: string

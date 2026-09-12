@@ -1,26 +1,14 @@
 use axum::{extract::Request, middleware::Next, response::Response, Router};
-use http::{header::HeaderName, HeaderMap};
+use http::header::HeaderName;
 
 const CF_EXACT_HEADERS: &[&str] = &["cdn-loop", "true-client-ip"];
-
-#[derive(Clone, Debug)]
-pub struct CfConnectingIp(pub String);
 
 fn should_strip_cf_header(name: &HeaderName) -> bool {
     let normalized = name.as_str();
     normalized.starts_with("cf-") || CF_EXACT_HEADERS.contains(&normalized)
 }
 
-fn cf_connecting_ip(headers: &HeaderMap) -> Option<String> {
-    headers
-        .get("cf-connecting-ip")
-        .and_then(|value| value.to_str().ok())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|value| value.chars().take(45).collect())
-}
-
-fn strip_cf_headers(headers: &mut HeaderMap) {
+fn strip_cf_headers(headers: &mut http::HeaderMap) {
     let to_remove: Vec<_> = headers
         .keys()
         .filter(|name| should_strip_cf_header(name))
@@ -36,9 +24,6 @@ pub fn apply_cf_header_stripping(router: Router) -> Router {
 }
 
 pub async fn strip_cf_headers_middleware(mut request: Request, next: Next) -> Response {
-    if let Some(client_ip) = cf_connecting_ip(request.headers()) {
-        request.extensions_mut().insert(CfConnectingIp(client_ip));
-    }
     strip_cf_headers(request.headers_mut());
 
     let mut response = next.run(request).await;

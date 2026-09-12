@@ -3,9 +3,7 @@ use std::sync::{Arc, Mutex};
 use aether_contracts::{
     ExecutionPlan, EXECUTION_REQUEST_FOLLOW_REDIRECTS_HEADER, EXECUTION_REQUEST_HTTP1_ONLY_HEADER,
 };
-use aether_crypto::{
-    decrypt_python_fernet_ciphertext, encrypt_python_fernet_plaintext, DEVELOPMENT_ENCRYPTION_KEY,
-};
+use aether_crypto::{encrypt_python_fernet_plaintext, DEVELOPMENT_ENCRYPTION_KEY};
 use aether_data::repository::background_tasks::InMemoryBackgroundTaskRepository;
 use aether_data::repository::management_tokens::{
     InMemoryManagementTokenRepository, ManagementTokenReadRepository,
@@ -16,12 +14,14 @@ use aether_data::repository::oauth_providers::{
 use aether_data::repository::pool_scores::InMemoryPoolMemberScoreRepository;
 use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
 use aether_data::repository::proxy_nodes::InMemoryProxyNodeRepository;
+use aether_data::repository::users::{InMemoryUserReadRepository, UserReadRepository};
 use aether_data_contracts::repository::background_tasks::BackgroundTaskReadRepository;
 use aether_data_contracts::repository::pool_scores::{
     GetPoolMemberScoresByIdsQuery, PoolMemberHardState, PoolMemberIdentity, PoolScoreReadRepository,
 };
 use aether_data_contracts::repository::provider_catalog::{
-    ProviderCatalogReadRepository, ProviderCatalogWriteRepository, StoredProviderCatalogEndpoint,
+    ProviderCatalogKeyCredentialsCasUpdate, ProviderCatalogReadRepository,
+    ProviderCatalogWriteRepository, StoredProviderCatalogEndpoint, StoredProviderCatalogKey,
 };
 use axum::body::{to_bytes, Body, Bytes};
 use axum::response::{IntoResponse, Response};
@@ -32,8 +32,8 @@ use serde_json::{json, Value};
 
 use super::super::{
     build_router_with_state, build_state_with_execution_runtime_override, hash_management_token,
-    sample_endpoint, sample_key, sample_management_token, sample_oauth_provider_config,
-    sample_provider, sample_proxy_node, start_server, AppState,
+    sample_bound_key, sample_endpoint, sample_key, sample_management_token,
+    sample_oauth_provider_config, sample_provider, sample_proxy_node, start_server, AppState,
 };
 use crate::admin_api::{
     maybe_build_local_admin_provider_oauth_response, AdminAppState, AdminRequestContext,
@@ -71,6 +71,28 @@ where
     if let Err(payload) = handle.join() {
         std::panic::resume_unwind(payload);
     }
+}
+
+fn decrypt_persisted_provider_api_key(key: &StoredProviderCatalogKey) -> String {
+    AppState::new()
+        .expect("credential test state should build")
+        .with_data_state_for_tests(
+            GatewayDataState::disabled().with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+        )
+        .decrypt_provider_catalog_key_api_key(key)
+        .expect("persisted api key should decrypt")
+        .expect("persisted api key should exist")
+}
+
+fn decrypt_persisted_provider_auth_config(key: &StoredProviderCatalogKey) -> String {
+    AppState::new()
+        .expect("credential test state should build")
+        .with_data_state_for_tests(
+            GatewayDataState::disabled().with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+        )
+        .decrypt_provider_catalog_key_auth_config(key)
+        .expect("persisted auth config should decrypt")
+        .expect("persisted auth config should exist")
 }
 
 fn trusted_admin_headers() -> HeaderMap {
@@ -429,6 +451,11 @@ async fn gateway_authorizes_claude_cookie_without_persisting_cookie_impl() {
         vec![endpoint],
         vec![],
     ));
+    let mut tunnel_node = sample_proxy_node("proxy-node-claude");
+    tunnel_node.status = "online".to_string();
+    tunnel_node.tunnel_mode = true;
+    tunnel_node.tunnel_connected = true;
+    let proxy_node_repository = Arc::new(InMemoryProxyNodeRepository::seed(vec![tunnel_node]));
 
     let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
     let state = build_state_with_execution_runtime_override(execution_runtime_url)
@@ -436,6 +463,17 @@ async fn gateway_authorizes_claude_cookie_without_persisting_cookie_impl() {
             GatewayDataState::with_provider_catalog_repository_for_tests(
                 provider_catalog_repository.clone(),
             )
+            .attach_proxy_node_repository_for_tests(proxy_node_repository)
+            .with_system_config_values_for_tests(vec![(
+                "tunnel.attachments.proxy-node-claude".to_string(),
+                json!({
+                        "gateway_instance_id": "gateway-owner",
+                        "relay_base_url": "http://gateway-owner.internal",
+                        "tunnel_generation": "test-generation-1",
+                        "conn_count": 1,
+                        "observed_at_unix_secs": 4_102_444_800u64,
+                }),
+            )])
             .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
         )
         .with_provider_oauth_token_url_for_tests(
@@ -475,23 +513,9 @@ async fn gateway_authorizes_claude_cookie_without_persisting_cookie_impl() {
         .await
         .expect("keys should load");
     assert_eq!(keys.len(), 1);
-    let decrypted_api_key = decrypt_python_fernet_ciphertext(
-        DEVELOPMENT_ENCRYPTION_KEY,
-        keys[0]
-            .encrypted_api_key
-            .as_deref()
-            .expect("api key should be encrypted"),
-    )
-    .expect("api key should decrypt");
+    let decrypted_api_key = decrypt_persisted_provider_api_key(&keys[0]);
     assert_eq!(decrypted_api_key, "sk-ant-oat01-created");
-    let decrypted_auth_config = decrypt_python_fernet_ciphertext(
-        DEVELOPMENT_ENCRYPTION_KEY,
-        keys[0]
-            .encrypted_auth_config
-            .as_deref()
-            .expect("auth config should be encrypted"),
-    )
-    .expect("auth config should decrypt");
+    let decrypted_auth_config = decrypt_persisted_provider_auth_config(&keys[0]);
     let auth_config: serde_json::Value =
         serde_json::from_str(&decrypted_auth_config).expect("auth config should parse");
     assert_eq!(auth_config["refresh_token"], "sk-ant-ort01-created");
@@ -638,12 +662,28 @@ async fn gateway_batch_authorizes_claude_cookies_as_redacted_task_impl() {
         vec![],
     ));
     let background_task_repository = Arc::new(InMemoryBackgroundTaskRepository::default());
+    let mut tunnel_node = sample_proxy_node("proxy-node-claude");
+    tunnel_node.status = "online".to_string();
+    tunnel_node.tunnel_mode = true;
+    tunnel_node.tunnel_connected = true;
+    let proxy_node_repository = Arc::new(InMemoryProxyNodeRepository::seed(vec![tunnel_node]));
     let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
     let state = build_state_with_execution_runtime_override(execution_runtime_url)
         .with_data_state_for_tests(
             GatewayDataState::with_provider_catalog_repository_for_tests(
                 provider_catalog_repository.clone(),
             )
+            .attach_proxy_node_repository_for_tests(proxy_node_repository)
+            .with_system_config_values_for_tests(vec![(
+                "tunnel.attachments.proxy-node-claude".to_string(),
+                json!({
+                        "gateway_instance_id": "gateway-owner",
+                        "relay_base_url": "http://gateway-owner.internal",
+                        "tunnel_generation": "test-generation-1",
+                        "conn_count": 1,
+                        "observed_at_unix_secs": 4_102_444_800u64,
+                }),
+            )])
             .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY)
             .with_background_task_repository_for_tests(background_task_repository.clone()),
         )
@@ -741,6 +781,20 @@ async fn gateway_batch_authorizes_claude_cookies_as_redacted_task_impl() {
             "raw task state contains {forbidden}"
         );
     }
+    let persisted_task_state = state
+        .runtime_kv_get(format!("provider_oauth_batch_task:{task_id}").as_str())
+        .await
+        .expect("runtime task state lookup should succeed")
+        .expect("runtime task state should exist");
+    assert!(crate::handlers::shared::runtime_secret_payload_is_sealed(
+        &persisted_task_state
+    ));
+    for forbidden in ["sessionKey", "batch-sid-one", "batch-sid-two"] {
+        assert!(
+            !persisted_task_state.contains(forbidden),
+            "persisted task state contains {forbidden}"
+        );
+    }
     let background_run = background_task_repository
         .find_run(&task_id)
         .await
@@ -761,13 +815,7 @@ async fn gateway_batch_authorizes_claude_cookies_as_redacted_task_impl() {
         .expect("keys should load");
     assert_eq!(keys.len(), 2);
     for key in &keys {
-        let auth_config = decrypt_python_fernet_ciphertext(
-            DEVELOPMENT_ENCRYPTION_KEY,
-            key.encrypted_auth_config
-                .as_deref()
-                .expect("auth config should be encrypted"),
-        )
-        .expect("auth config should decrypt");
+        let auth_config = decrypt_persisted_provider_auth_config(key);
         assert!(!auth_config.contains("batch-sid"));
         assert!(!auth_config.contains("sessionKey"));
     }
@@ -1070,23 +1118,9 @@ async fn gateway_handles_admin_provider_oauth_device_poll_for_windsurf_one_time_
         persisted.proxy,
         Some(json!({"node_id": "proxy-node-windsurf", "enabled": true}))
     );
-    let decrypted_api_key = decrypt_python_fernet_ciphertext(
-        DEVELOPMENT_ENCRYPTION_KEY,
-        persisted
-            .encrypted_api_key
-            .as_deref()
-            .expect("api key should be present"),
-    )
-    .expect("api key should decrypt");
+    let decrypted_api_key = decrypt_persisted_provider_api_key(&persisted);
     assert_eq!(decrypted_api_key, "devin-session-token$registered");
-    let decrypted_auth_config = decrypt_python_fernet_ciphertext(
-        DEVELOPMENT_ENCRYPTION_KEY,
-        persisted
-            .encrypted_auth_config
-            .as_deref()
-            .expect("auth config should exist"),
-    )
-    .expect("auth config should decrypt");
+    let decrypted_auth_config = decrypt_persisted_provider_auth_config(&persisted);
     let auth_config: serde_json::Value =
         serde_json::from_str(&decrypted_auth_config).expect("auth config should parse");
     assert_eq!(auth_config["provider_type"], "windsurf");
@@ -1551,6 +1585,10 @@ async fn gateway_handles_admin_provider_oauth_device_poll_locally_with_trusted_a
         .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
         .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
         .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .header(
+            TRUSTED_ADMIN_MANAGEMENT_TOKEN_ID_HEADER,
+            "management-token-123",
+        )
         .json(&json!({
             "session_id": "session-123"
         }))
@@ -1593,23 +1631,9 @@ async fn gateway_handles_admin_provider_oauth_device_poll_locally_with_trusted_a
         persisted.proxy,
         Some(json!({"node_id": "proxy-node-kiro", "enabled": true}))
     );
-    let decrypted_api_key = decrypt_python_fernet_ciphertext(
-        DEVELOPMENT_ENCRYPTION_KEY,
-        persisted
-            .encrypted_api_key
-            .as_deref()
-            .expect("api key should be present"),
-    )
-    .expect("api key should decrypt");
+    let decrypted_api_key = decrypt_persisted_provider_api_key(&persisted);
     assert_eq!(decrypted_api_key, expected_access_token);
-    let decrypted_auth_config = decrypt_python_fernet_ciphertext(
-        DEVELOPMENT_ENCRYPTION_KEY,
-        persisted
-            .encrypted_auth_config
-            .as_deref()
-            .expect("auth config should exist"),
-    )
-    .expect("auth config should decrypt");
+    let decrypted_auth_config = decrypt_persisted_provider_auth_config(&persisted);
     let auth_config: serde_json::Value =
         serde_json::from_str(&decrypted_auth_config).expect("auth config should parse");
     assert_eq!(auth_config["provider_type"], "kiro");
@@ -1729,6 +1753,10 @@ async fn gateway_handles_admin_provider_oauth_device_poll_for_kiro_social_callba
         .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
         .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
         .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .header(
+            TRUSTED_ADMIN_MANAGEMENT_TOKEN_ID_HEADER,
+            "management-token-123",
+        )
         .json(&json!({
             "session_id": "session-social",
             "callback_url": "http://localhost:49153/signin/callback?login_option=github&code=social-code-123&state=session-social"
@@ -1780,23 +1808,9 @@ async fn gateway_handles_admin_provider_oauth_device_poll_for_kiro_social_callba
         .expect("persisted key should exist");
     assert_eq!(persisted.name, "social@example.com (Github)");
     assert_eq!(persisted.auth_type, "oauth");
-    let decrypted_api_key = decrypt_python_fernet_ciphertext(
-        DEVELOPMENT_ENCRYPTION_KEY,
-        persisted
-            .encrypted_api_key
-            .as_deref()
-            .expect("api key should be present"),
-    )
-    .expect("api key should decrypt");
+    let decrypted_api_key = decrypt_persisted_provider_api_key(&persisted);
     assert_eq!(decrypted_api_key, expected_access_token);
-    let decrypted_auth_config = decrypt_python_fernet_ciphertext(
-        DEVELOPMENT_ENCRYPTION_KEY,
-        persisted
-            .encrypted_auth_config
-            .as_deref()
-            .expect("auth config should exist"),
-    )
-    .expect("auth config should decrypt");
+    let decrypted_auth_config = decrypt_persisted_provider_auth_config(&persisted);
     let auth_config: serde_json::Value =
         serde_json::from_str(&decrypted_auth_config).expect("auth config should parse");
     assert_eq!(auth_config["provider_type"], "kiro");
@@ -2053,6 +2067,10 @@ async fn gateway_revalidates_kiro_device_poll_via_idc_refresh_and_backfills_emai
         .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
         .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
         .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .header(
+            TRUSTED_ADMIN_MANAGEMENT_TOKEN_ID_HEADER,
+            "management-token-123",
+        )
         .json(&json!({
             "session_id": "session-refresh-email"
         }))
@@ -2111,23 +2129,9 @@ async fn gateway_revalidates_kiro_device_poll_via_idc_refresh_and_backfills_emai
         persisted.proxy,
         Some(json!({"node_id": "proxy-node-kiro", "enabled": true}))
     );
-    let decrypted_api_key = decrypt_python_fernet_ciphertext(
-        DEVELOPMENT_ENCRYPTION_KEY,
-        persisted
-            .encrypted_api_key
-            .as_deref()
-            .expect("api key should be present"),
-    )
-    .expect("api key should decrypt");
+    let decrypted_api_key = decrypt_persisted_provider_api_key(&persisted);
     assert_eq!(decrypted_api_key, expected_refreshed_access_token);
-    let decrypted_auth_config = decrypt_python_fernet_ciphertext(
-        DEVELOPMENT_ENCRYPTION_KEY,
-        persisted
-            .encrypted_auth_config
-            .as_deref()
-            .expect("auth config should exist"),
-    )
-    .expect("auth config should decrypt");
+    let decrypted_auth_config = decrypt_persisted_provider_auth_config(&persisted);
     let auth_config: serde_json::Value =
         serde_json::from_str(&decrypted_auth_config).expect("auth config should parse");
     assert_eq!(auth_config["provider_type"], "kiro");
@@ -2459,7 +2463,7 @@ async fn gateway_handles_admin_provider_oauth_start_key_locally_with_trusted_adm
     let mut provider = sample_provider("provider-codex", "codex", 10);
     provider.provider_type = "codex".to_string();
 
-    let mut key = sample_key(
+    let mut key = sample_bound_key(
         "key-codex-oauth",
         "provider-codex",
         "openai:chat",
@@ -2504,6 +2508,14 @@ async fn gateway_handles_admin_provider_oauth_start_key_locally_with_trusted_adm
         .expect("request should succeed");
 
     assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get(http::header::CACHE_CONTROL),
+        Some(&HeaderValue::from_static("no-store"))
+    );
+    assert_eq!(
+        response.headers().get(http::header::PRAGMA),
+        Some(&HeaderValue::from_static("no-cache"))
+    );
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
     assert_eq!(payload["provider_type"], "codex");
     assert_eq!(
@@ -2574,6 +2586,14 @@ async fn gateway_handles_admin_provider_oauth_start_provider_locally_with_truste
         .expect("request should succeed");
 
     assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get(http::header::CACHE_CONTROL),
+        Some(&HeaderValue::from_static("no-store"))
+    );
+    assert_eq!(
+        response.headers().get(http::header::PRAGMA),
+        Some(&HeaderValue::from_static("no-cache"))
+    );
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
     assert_eq!(payload["provider_type"], "codex");
     assert_eq!(
@@ -2668,7 +2688,7 @@ async fn gateway_handles_admin_provider_oauth_batch_import_task_status_locally_w
     assert_eq!(payload["status"], "completed");
     assert_eq!(payload["total"], 2);
     assert_eq!(payload["processed"], 2);
-    assert_eq!(payload["success"], 1);
+    assert_eq!(payload["success"], 1, "payload={payload}");
     assert_eq!(payload["failed"], 1);
     assert_eq!(payload["created_count"], 0);
     assert_eq!(payload["replaced_count"], 1);
@@ -2906,7 +2926,7 @@ async fn gateway_batch_imports_admin_provider_oauth_locally_with_trusted_admin_p
     assert_eq!(response.status(), StatusCode::OK);
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
     assert_eq!(payload["total"], 2);
-    assert_eq!(payload["success"], 1);
+    assert_eq!(payload["success"], 1, "payload={payload}");
     assert_eq!(payload["failed"], 1);
     let results = payload["results"]
         .as_array()
@@ -2936,14 +2956,7 @@ async fn gateway_batch_imports_admin_provider_oauth_locally_with_trusted_admin_p
         persisted.proxy,
         Some(json!({"node_id": "proxy-node-batch-import", "enabled": true}))
     );
-    let decrypted_api_key = decrypt_python_fernet_ciphertext(
-        DEVELOPMENT_ENCRYPTION_KEY,
-        persisted
-            .encrypted_api_key
-            .as_deref()
-            .expect("api key should be present"),
-    )
-    .expect("api key should decrypt");
+    let decrypted_api_key = decrypt_persisted_provider_api_key(persisted);
     assert_eq!(decrypted_api_key, "batch-imported-codex-access-token");
 
     gateway_handle.abort();
@@ -3041,7 +3054,7 @@ async fn gateway_batch_imports_chatgpt_web_access_tokens_with_pool_hints_impl() 
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
     assert_eq!(status, StatusCode::OK, "payload={payload}");
     assert_eq!(payload["total"], 1);
-    assert_eq!(payload["success"], 1);
+    assert_eq!(payload["success"], 1, "payload={payload}");
     assert_eq!(payload["failed"], 0);
     assert_eq!(*token_hits.lock().expect("mutex should lock"), 0);
 
@@ -3051,23 +3064,9 @@ async fn gateway_batch_imports_chatgpt_web_access_tokens_with_pool_hints_impl() 
         .expect("keys should load");
     let persisted = reloaded.first().expect("persisted key should exist");
     assert_eq!(persisted.expires_at_unix_secs, Some(2_100_000_000));
-    let decrypted_api_key = decrypt_python_fernet_ciphertext(
-        DEVELOPMENT_ENCRYPTION_KEY,
-        persisted
-            .encrypted_api_key
-            .as_deref()
-            .expect("api key should be present"),
-    )
-    .expect("api key should decrypt");
+    let decrypted_api_key = decrypt_persisted_provider_api_key(persisted);
     assert_eq!(decrypted_api_key, "chatgpt-web-batch-access-token");
-    let decrypted_auth_config = decrypt_python_fernet_ciphertext(
-        DEVELOPMENT_ENCRYPTION_KEY,
-        persisted
-            .encrypted_auth_config
-            .as_deref()
-            .expect("auth config should be stored"),
-    )
-    .expect("auth config should decrypt");
+    let decrypted_auth_config = decrypt_persisted_provider_auth_config(persisted);
     let auth_config: serde_json::Value =
         serde_json::from_str(&decrypted_auth_config).expect("auth config json should parse");
     assert_eq!(auth_config["provider_type"], "chatgpt_web");
@@ -3577,18 +3576,38 @@ async fn gateway_completes_admin_provider_oauth_key_locally_with_trusted_admin_p
                 .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
             )
             .with_provider_oauth_state_entry_for_tests(
-                "nonce-codex-123",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                 json!({
-                    "nonce": "nonce-codex-123",
+                    "nonce": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                     "key_id": "key-codex-oauth",
                     "provider_id": "provider-codex",
                     "provider_type": "codex",
                     "pkce_verifier": "verifier-codex-123",
+                    "initiated_by_user_id": "admin-user-123",
+                    "initiated_by_session_id": "session-123",
+                    "created_at": aether_admin::provider::state::current_unix_secs(),
                 }),
             )
             .with_provider_oauth_token_url_for_tests("codex", format!("{token_url}/oauth/token")),
     );
     let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let wrong_session_response = reqwest::Client::new()
+        .post(format!(
+            "{gateway_url}/api/admin/provider-oauth/keys/key-codex-oauth/complete"
+        ))
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-attacker")
+        .json(&json!({
+            "callback_url": "http://localhost:1455/auth/callback?code=code-codex-123&state=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }))
+        .send()
+        .await
+        .expect("mismatched-session request should succeed");
+    assert_eq!(wrong_session_response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(*token_hits.lock().expect("mutex should lock"), 0);
 
     let response = reqwest::Client::new()
         .post(format!(
@@ -3599,7 +3618,7 @@ async fn gateway_completes_admin_provider_oauth_key_locally_with_trusted_admin_p
         .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
         .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
         .json(&json!({
-            "callback_url": "http://localhost:1455/auth/callback?code=code-codex-123&state=nonce-codex-123"
+            "callback_url": "http://localhost:1455/auth/callback?code=code-codex-123&state=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         }))
         .send()
         .await
@@ -3686,23 +3705,9 @@ async fn gateway_completes_admin_provider_oauth_key_locally_with_trusted_admin_p
         scores[0].hard_state.schedulable(),
         "OAuth completion should replace AuthInvalid with a schedulable score"
     );
-    let decrypted_api_key = decrypt_python_fernet_ciphertext(
-        DEVELOPMENT_ENCRYPTION_KEY,
-        persisted
-            .encrypted_api_key
-            .as_deref()
-            .expect("api key should be present"),
-    )
-    .expect("api key should decrypt");
+    let decrypted_api_key = decrypt_persisted_provider_api_key(persisted);
     assert_eq!(decrypted_api_key, "new-codex-access-token");
-    let decrypted_auth_config = decrypt_python_fernet_ciphertext(
-        DEVELOPMENT_ENCRYPTION_KEY,
-        persisted
-            .encrypted_auth_config
-            .as_deref()
-            .expect("auth config should be stored"),
-    )
-    .expect("auth config should decrypt");
+    let decrypted_auth_config = decrypt_persisted_provider_auth_config(persisted);
     let auth_config: serde_json::Value =
         serde_json::from_str(&decrypted_auth_config).expect("auth config json should parse");
     assert_eq!(auth_config["provider_type"], "codex");
@@ -3822,13 +3827,16 @@ async fn gateway_completes_admin_provider_oauth_provider_locally_with_trusted_ad
                 .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
             )
             .with_provider_oauth_state_entry_for_tests(
-                "nonce-provider-codex-123",
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
                 json!({
-                    "nonce": "nonce-provider-codex-123",
+                    "nonce": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
                     "key_id": "",
                     "provider_id": "provider-codex",
                     "provider_type": "codex",
                     "pkce_verifier": "verifier-provider-codex-123",
+                    "initiated_by_user_id": "admin-user-123",
+                    "initiated_by_session_id": "session-123",
+                    "created_at": aether_admin::provider::state::current_unix_secs(),
                 }),
             )
             .with_provider_oauth_token_url_for_tests("codex", format!("{token_url}/oauth/token")),
@@ -3844,7 +3852,7 @@ async fn gateway_completes_admin_provider_oauth_provider_locally_with_trusted_ad
         .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
         .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
         .json(&json!({
-            "callback_url": "http://localhost:1455/auth/callback?code=provider-code-123&state=nonce-provider-codex-123",
+            "callback_url": "http://localhost:1455/auth/callback?code=provider-code-123&state=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
             "proxy_node_id": "proxy-node-codex-oauth",
             "name": "should-not-override-inactive-name"
         }))
@@ -3887,23 +3895,9 @@ async fn gateway_completes_admin_provider_oauth_provider_locally_with_trusted_ad
         persisted.proxy,
         Some(json!({"node_id": "proxy-node-codex-oauth", "enabled": true}))
     );
-    let decrypted_api_key = decrypt_python_fernet_ciphertext(
-        DEVELOPMENT_ENCRYPTION_KEY,
-        persisted
-            .encrypted_api_key
-            .as_deref()
-            .expect("api key should be present"),
-    )
-    .expect("api key should decrypt");
+    let decrypted_api_key = decrypt_persisted_provider_api_key(persisted);
     assert_eq!(decrypted_api_key, "provider-codex-access-token");
-    let decrypted_auth_config = decrypt_python_fernet_ciphertext(
-        DEVELOPMENT_ENCRYPTION_KEY,
-        persisted
-            .encrypted_auth_config
-            .as_deref()
-            .expect("auth config should be stored"),
-    )
-    .expect("auth config should decrypt");
+    let decrypted_auth_config = decrypt_persisted_provider_auth_config(persisted);
     let auth_config: serde_json::Value =
         serde_json::from_str(&decrypted_auth_config).expect("auth config json should parse");
     assert_eq!(auth_config["provider_type"], "codex");
@@ -3916,6 +3910,218 @@ async fn gateway_completes_admin_provider_oauth_provider_locally_with_trusted_ad
     gateway_handle.abort();
     token_handle.abort();
     upstream_handle.abort();
+}
+
+#[test]
+fn gateway_names_new_antigravity_oauth_account_from_google_userinfo_email() {
+    run_admin_oauth_test(
+        "gateway_names_new_antigravity_oauth_account_from_google_userinfo_email",
+        || {
+            assert_antigravity_oauth_account_uses_google_userinfo_email(
+                "complete",
+                json!({
+                    "callback_url": "http://localhost:51121/oauth2callback?code=antigravity-code-123&state=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                }),
+            )
+        },
+    );
+}
+
+#[test]
+fn gateway_names_imported_antigravity_oauth_account_from_google_userinfo_email() {
+    run_admin_oauth_test(
+        "gateway_names_imported_antigravity_oauth_account_from_google_userinfo_email",
+        || {
+            assert_antigravity_oauth_account_uses_google_userinfo_email(
+                "import-refresh-token",
+                json!({"refresh_token": "antigravity-import-refresh-token"}),
+            )
+        },
+    );
+}
+
+#[test]
+fn gateway_names_batch_imported_antigravity_oauth_account_from_google_userinfo_email() {
+    run_admin_oauth_test(
+        "gateway_names_batch_imported_antigravity_oauth_account_from_google_userinfo_email",
+        || {
+            assert_antigravity_oauth_account_uses_google_userinfo_email(
+                "batch-import",
+                json!({"credentials": "antigravity-import-refresh-token"}),
+            )
+        },
+    );
+}
+
+async fn assert_antigravity_oauth_account_uses_google_userinfo_email(
+    operation: &str,
+    request_body: Value,
+) {
+    let upstream_hits = Arc::new(Mutex::new(0usize));
+    let upstream_hits_clone = Arc::clone(&upstream_hits);
+    let upstream = Router::new().fallback(any(move |_request: Request| {
+        let upstream_hits_inner = Arc::clone(&upstream_hits_clone);
+        async move {
+            *upstream_hits_inner.lock().expect("mutex should lock") += 1;
+            (StatusCode::OK, Body::from("unexpected upstream hit"))
+        }
+    }));
+
+    let token_hits = Arc::new(Mutex::new(0usize));
+    let token_hits_clone = Arc::clone(&token_hits);
+    let user_info_hits = Arc::new(Mutex::new(0usize));
+    let user_info_hits_clone = Arc::clone(&user_info_hits);
+    let seen_user_info_authorization = Arc::new(Mutex::new(None::<String>));
+    let seen_user_info_authorization_clone = Arc::clone(&seen_user_info_authorization);
+    let google_server = Router::new()
+        .route(
+            "/oauth/token",
+            post(move || {
+                let token_hits_inner = Arc::clone(&token_hits_clone);
+                async move {
+                    *token_hits_inner.lock().expect("mutex should lock") += 1;
+                    Json(json!({
+                        "access_token": "antigravity-access-token",
+                        "refresh_token": "antigravity-refresh-token",
+                        "token_type": "Bearer",
+                        "expires_in": 3600,
+                        "scope": "https://www.googleapis.com/auth/userinfo.email"
+                    }))
+                }
+            }),
+        )
+        .route(
+            "/oauth/userinfo",
+            get(move |headers: HeaderMap| {
+                let user_info_hits_inner = Arc::clone(&user_info_hits_clone);
+                let seen_authorization_inner = Arc::clone(&seen_user_info_authorization_clone);
+                async move {
+                    *user_info_hits_inner.lock().expect("mutex should lock") += 1;
+                    *seen_authorization_inner.lock().expect("mutex should lock") = headers
+                        .get(http::header::AUTHORIZATION)
+                        .and_then(|value| value.to_str().ok())
+                        .map(ToOwned::to_owned);
+                    Json(json!({
+                        "email": "new-antigravity@example.com",
+                        "verified_email": true,
+                        "name": "Antigravity User"
+                    }))
+                }
+            }),
+        );
+
+    let mut provider = sample_provider("provider-antigravity", "antigravity", 10);
+    provider.provider_type = "antigravity".to_string();
+    let endpoint = sample_endpoint(
+        "endpoint-antigravity",
+        "provider-antigravity",
+        "gemini:generate_content",
+        "https://daily-cloudcode-pa.googleapis.com",
+    );
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        vec![endpoint],
+        vec![],
+    ));
+
+    let (upstream_url, upstream_handle) = start_server(upstream).await;
+    let (google_url, google_handle) = start_server(google_server).await;
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(
+                GatewayDataState::with_provider_catalog_repository_for_tests(
+                    provider_catalog_repository.clone(),
+                )
+                .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+            )
+            .with_provider_oauth_state_entry_for_tests(
+                "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                json!({
+                    "nonce": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                    "key_id": "",
+                    "provider_id": "provider-antigravity",
+                    "provider_type": "antigravity",
+                    "pkce_verifier": "verifier-antigravity-123",
+                    "initiated_by_user_id": "admin-user-123",
+                    "initiated_by_session_id": "session-123",
+                    "created_at": aether_admin::provider::state::current_unix_secs(),
+                }),
+            )
+            .with_provider_oauth_token_url_for_tests(
+                "antigravity",
+                format!("{google_url}/oauth/token"),
+            )
+            .with_provider_oauth_token_url_for_tests(
+                "antigravity_user_info",
+                format!("{google_url}/oauth/userinfo"),
+            ),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .post(format!(
+            "{gateway_url}/api/admin/provider-oauth/providers/provider-antigravity/{operation}"
+        ))
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&request_body)
+        .send()
+        .await
+        .expect("request should succeed");
+
+    let status = response.status();
+    let payload: Value = response.json().await.expect("json body should parse");
+    assert_eq!(status, StatusCode::OK, "payload={payload}");
+    let account_result = if operation == "batch-import" {
+        assert_eq!(payload["total"], 1);
+        assert_eq!(payload["success"], 1, "payload={payload}");
+        assert_eq!(payload["failed"], 0);
+        assert_eq!(payload["results"][0]["status"], "success");
+        assert_eq!(
+            payload["results"][0]["key_name"],
+            "new-antigravity@example.com"
+        );
+        &payload["results"][0]
+    } else {
+        assert_eq!(payload["provider_type"], "antigravity");
+        assert_eq!(payload["email"], "new-antigravity@example.com");
+        &payload
+    };
+    assert_eq!(account_result["replaced"], false);
+    assert_eq!(*token_hits.lock().expect("mutex should lock"), 1);
+    assert_eq!(*user_info_hits.lock().expect("mutex should lock"), 1);
+    assert_eq!(
+        seen_user_info_authorization
+            .lock()
+            .expect("mutex should lock")
+            .as_deref(),
+        Some("Bearer antigravity-access-token")
+    );
+    assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
+
+    let key_id = account_result["key_id"]
+        .as_str()
+        .expect("created key id should be returned")
+        .to_string();
+    let persisted_keys = provider_catalog_repository
+        .list_keys_by_ids(std::slice::from_ref(&key_id))
+        .await
+        .expect("created key should load");
+    let persisted = persisted_keys.first().expect("created key should exist");
+    assert_eq!(persisted.name, "new-antigravity@example.com");
+    let decrypted_auth_config = decrypt_persisted_provider_auth_config(persisted);
+    let auth_config: Value =
+        serde_json::from_str(&decrypted_auth_config).expect("auth config json should parse");
+    assert_eq!(auth_config["email"], "new-antigravity@example.com");
+    assert_eq!(auth_config["refresh_token"], "antigravity-refresh-token");
+
+    gateway_handle.abort();
+    google_handle.abort();
+    upstream_handle.abort();
+    drop(upstream_url);
 }
 
 #[test]
@@ -4072,23 +4278,9 @@ async fn gateway_imports_admin_provider_oauth_refresh_token_locally_with_trusted
         persisted.proxy,
         Some(json!({"node_id": "proxy-node-codex-import", "enabled": true}))
     );
-    let decrypted_api_key = decrypt_python_fernet_ciphertext(
-        DEVELOPMENT_ENCRYPTION_KEY,
-        persisted
-            .encrypted_api_key
-            .as_deref()
-            .expect("api key should be present"),
-    )
-    .expect("api key should decrypt");
+    let decrypted_api_key = decrypt_persisted_provider_api_key(persisted);
     assert_eq!(decrypted_api_key, "imported-codex-access-token");
-    let decrypted_auth_config = decrypt_python_fernet_ciphertext(
-        DEVELOPMENT_ENCRYPTION_KEY,
-        persisted
-            .encrypted_auth_config
-            .as_deref()
-            .expect("auth config should be stored"),
-    )
-    .expect("auth config should decrypt");
+    let decrypted_auth_config = decrypt_persisted_provider_auth_config(persisted);
     let auth_config: serde_json::Value =
         serde_json::from_str(&decrypted_auth_config).expect("auth config json should parse");
     assert_eq!(auth_config["provider_type"], "codex");
@@ -4188,23 +4380,9 @@ async fn gateway_imports_codex_access_token_without_refresh_token_as_temporary_a
         .expect("keys should load");
     let persisted = reloaded.first().expect("persisted key should exist");
     assert_eq!(persisted.expires_at_unix_secs, Some(2_000_000_000));
-    let decrypted_api_key = decrypt_python_fernet_ciphertext(
-        DEVELOPMENT_ENCRYPTION_KEY,
-        persisted
-            .encrypted_api_key
-            .as_deref()
-            .expect("api key should be present"),
-    )
-    .expect("api key should decrypt");
+    let decrypted_api_key = decrypt_persisted_provider_api_key(persisted);
     assert_eq!(decrypted_api_key, access_token);
-    let decrypted_auth_config = decrypt_python_fernet_ciphertext(
-        DEVELOPMENT_ENCRYPTION_KEY,
-        persisted
-            .encrypted_auth_config
-            .as_deref()
-            .expect("auth config should be stored"),
-    )
-    .expect("auth config should decrypt");
+    let decrypted_auth_config = decrypt_persisted_provider_auth_config(persisted);
     let auth_config: serde_json::Value =
         serde_json::from_str(&decrypted_auth_config).expect("auth config json should parse");
     assert_eq!(auth_config["provider_type"], "codex");
@@ -4284,23 +4462,9 @@ async fn gateway_imports_codex_header_authorization_without_overwriting_payload_
         .await
         .expect("keys should load");
     let persisted = reloaded.first().expect("persisted key should exist");
-    let decrypted_api_key = decrypt_python_fernet_ciphertext(
-        DEVELOPMENT_ENCRYPTION_KEY,
-        persisted
-            .encrypted_api_key
-            .as_deref()
-            .expect("api key should be present"),
-    )
-    .expect("api key should decrypt");
+    let decrypted_api_key = decrypt_persisted_provider_api_key(persisted);
     assert_eq!(decrypted_api_key, access_token);
-    let decrypted_auth_config = decrypt_python_fernet_ciphertext(
-        DEVELOPMENT_ENCRYPTION_KEY,
-        persisted
-            .encrypted_auth_config
-            .as_deref()
-            .expect("auth config should be stored"),
-    )
-    .expect("auth config should decrypt");
+    let decrypted_auth_config = decrypt_persisted_provider_auth_config(persisted);
     let auth_config: serde_json::Value =
         serde_json::from_str(&decrypted_auth_config).expect("auth config json should parse");
     assert_eq!(auth_config["email"], "profile@example.com");
@@ -4404,23 +4568,9 @@ async fn gateway_imports_chatgpt_web_access_token_without_refresh_token_as_tempo
         .expect("keys should load");
     let persisted = reloaded.first().expect("persisted key should exist");
     assert_eq!(persisted.expires_at_unix_secs, Some(2_000_000_000));
-    let decrypted_api_key = decrypt_python_fernet_ciphertext(
-        DEVELOPMENT_ENCRYPTION_KEY,
-        persisted
-            .encrypted_api_key
-            .as_deref()
-            .expect("api key should be present"),
-    )
-    .expect("api key should decrypt");
+    let decrypted_api_key = decrypt_persisted_provider_api_key(persisted);
     assert_eq!(decrypted_api_key, access_token);
-    let decrypted_auth_config = decrypt_python_fernet_ciphertext(
-        DEVELOPMENT_ENCRYPTION_KEY,
-        persisted
-            .encrypted_auth_config
-            .as_deref()
-            .expect("auth config should be stored"),
-    )
-    .expect("auth config should decrypt");
+    let decrypted_auth_config = decrypt_persisted_provider_auth_config(persisted);
     let auth_config: serde_json::Value =
         serde_json::from_str(&decrypted_auth_config).expect("auth config json should parse");
     assert_eq!(auth_config["provider_type"], "chatgpt_web");
@@ -4501,14 +4651,7 @@ async fn gateway_imports_codex_access_token_with_payload_expires_at_when_token_h
         .expect("keys should load");
     let persisted = reloaded.first().expect("persisted key should exist");
     assert_eq!(persisted.expires_at_unix_secs, Some(2_100_000_000));
-    let decrypted_auth_config = decrypt_python_fernet_ciphertext(
-        DEVELOPMENT_ENCRYPTION_KEY,
-        persisted
-            .encrypted_auth_config
-            .as_deref()
-            .expect("auth config should be stored"),
-    )
-    .expect("auth config should decrypt");
+    let decrypted_auth_config = decrypt_persisted_provider_auth_config(persisted);
     let auth_config: serde_json::Value =
         serde_json::from_str(&decrypted_auth_config).expect("auth config json should parse");
     assert_eq!(auth_config["expires_at"], 2_100_000_000u64);
@@ -4676,23 +4819,9 @@ async fn gateway_imports_admin_provider_oauth_refresh_token_over_active_expired_
     );
     assert_eq!(persisted.oauth_invalid_at_unix_secs, None);
     assert_eq!(persisted.oauth_invalid_reason, None);
-    let decrypted_api_key = decrypt_python_fernet_ciphertext(
-        DEVELOPMENT_ENCRYPTION_KEY,
-        persisted
-            .encrypted_api_key
-            .as_deref()
-            .expect("api key should be present"),
-    )
-    .expect("api key should decrypt");
+    let decrypted_api_key = decrypt_persisted_provider_api_key(persisted);
     assert_eq!(decrypted_api_key, "imported-expired-codex-access-token");
-    let decrypted_auth_config = decrypt_python_fernet_ciphertext(
-        DEVELOPMENT_ENCRYPTION_KEY,
-        persisted
-            .encrypted_auth_config
-            .as_deref()
-            .expect("auth config should be stored"),
-    )
-    .expect("auth config should decrypt");
+    let decrypted_auth_config = decrypt_persisted_provider_auth_config(persisted);
     let auth_config: serde_json::Value =
         serde_json::from_str(&decrypted_auth_config).expect("auth config json should parse");
     assert_eq!(auth_config["provider_type"], "codex");
@@ -4827,7 +4956,6 @@ async fn gateway_import_invalidate_cached_oauth_entry_before_followup_resolution
             "key-codex-import-cache-duplicate",
             Some(1_700_000_000),
             Some("[OAUTH_EXPIRED] token invalidated"),
-            None,
             Some(1_700_000_000),
         )
         .await
@@ -5376,11 +5504,8 @@ async fn gateway_import_refresh_token_surfaces_execution_runtime_error_detail_im
     let status = response.status();
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
     assert_eq!(status, StatusCode::BAD_REQUEST, "payload={payload}");
-    assert!(
-        payload["detail"]
-            .as_str()
-            .expect("detail should be string")
-            .contains("execution runtime returned HTTP 500"),
+    assert_eq!(
+        payload["detail"], "Refresh Token 验证失败: token exchange 失败",
         "payload={payload}"
     );
 
@@ -5493,7 +5618,7 @@ async fn gateway_batch_imports_admin_provider_oauth_kiro_locally_with_trusted_ad
     assert_eq!(response.status(), StatusCode::OK);
     let payload: serde_json::Value = response.json().await.expect("payload should parse");
     assert_eq!(payload["total"], 1);
-    assert_eq!(payload["success"], 1);
+    assert_eq!(payload["success"], 1, "payload={payload}");
     assert_eq!(payload["failed"], 0);
     let results = payload["results"]
         .as_array()
@@ -5518,14 +5643,7 @@ async fn gateway_batch_imports_admin_provider_oauth_kiro_locally_with_trusted_ad
         stored_key.proxy,
         Some(json!({"node_id": "proxy-node-kiro-batch", "enabled": true}))
     );
-    let decrypted_auth_config = decrypt_python_fernet_ciphertext(
-        DEVELOPMENT_ENCRYPTION_KEY,
-        stored_key
-            .encrypted_auth_config
-            .as_deref()
-            .expect("auth config should exist"),
-    )
-    .expect("auth config should decrypt");
+    let decrypted_auth_config = decrypt_persisted_provider_auth_config(&stored_key);
     let auth_config: serde_json::Value =
         serde_json::from_str(&decrypted_auth_config).expect("auth config should parse");
     assert_eq!(auth_config["provider_type"], "kiro");
@@ -5644,7 +5762,7 @@ async fn gateway_batch_imports_admin_provider_oauth_kiro_over_active_expired_dup
     assert_eq!(response.status(), StatusCode::OK);
     let payload: serde_json::Value = response.json().await.expect("payload should parse");
     assert_eq!(payload["total"], 1);
-    assert_eq!(payload["success"], 1);
+    assert_eq!(payload["success"], 1, "payload={payload}");
     assert_eq!(payload["failed"], 0);
     let results = payload["results"]
         .as_array()
@@ -5671,14 +5789,7 @@ async fn gateway_batch_imports_admin_provider_oauth_kiro_over_active_expired_dup
     );
     assert_eq!(stored_key.oauth_invalid_at_unix_secs, None);
     assert_eq!(stored_key.oauth_invalid_reason, None);
-    let decrypted_auth_config = decrypt_python_fernet_ciphertext(
-        DEVELOPMENT_ENCRYPTION_KEY,
-        stored_key
-            .encrypted_auth_config
-            .as_deref()
-            .expect("auth config should exist"),
-    )
-    .expect("auth config should decrypt");
+    let decrypted_auth_config = decrypt_persisted_provider_auth_config(&stored_key);
     let auth_config: serde_json::Value =
         serde_json::from_str(&decrypted_auth_config).expect("auth config should parse");
     assert_eq!(auth_config["provider_type"], "kiro");
@@ -5875,14 +5986,7 @@ async fn gateway_batch_imports_admin_provider_oauth_kiro_via_execution_runtime_p
         stored_key.proxy,
         Some(json!({"node_id": "proxy-node-kiro-batch-runtime", "enabled": true}))
     );
-    let decrypted_auth_config = decrypt_python_fernet_ciphertext(
-        DEVELOPMENT_ENCRYPTION_KEY,
-        stored_key
-            .encrypted_auth_config
-            .as_deref()
-            .expect("auth config should exist"),
-    )
-    .expect("auth config should decrypt");
+    let decrypted_auth_config = decrypt_persisted_provider_auth_config(&stored_key);
     let auth_config: serde_json::Value =
         serde_json::from_str(&decrypted_auth_config).expect("auth config should parse");
     assert_eq!(auth_config["email"], "kiro-runtime@example.com");
@@ -6399,14 +6503,7 @@ async fn gateway_refreshes_admin_provider_oauth_key_locally_with_trusted_admin_p
         .into_iter()
         .next()
         .expect("refreshed key should exist");
-    let decrypted_api_key = decrypt_python_fernet_ciphertext(
-        DEVELOPMENT_ENCRYPTION_KEY,
-        stored_key
-            .encrypted_api_key
-            .as_deref()
-            .expect("api key should be present"),
-    )
-    .expect("refreshed api key should decrypt");
+    let decrypted_api_key = decrypt_persisted_provider_api_key(&stored_key);
     assert_eq!(decrypted_api_key, "refreshed-codex-access-token");
     if account_state_recheck_attempted
         && payload["account_state_recheck_error"] == "wham/usage API 返回状态码 401"
@@ -6429,14 +6526,7 @@ async fn gateway_refreshes_admin_provider_oauth_key_locally_with_trusted_admin_p
         assert_eq!(stored_key.oauth_invalid_reason, None);
     }
 
-    let decrypted_auth_config = decrypt_python_fernet_ciphertext(
-        DEVELOPMENT_ENCRYPTION_KEY,
-        stored_key
-            .encrypted_auth_config
-            .as_deref()
-            .expect("auth config should exist"),
-    )
-    .expect("refreshed auth config should decrypt");
+    let decrypted_auth_config = decrypt_persisted_provider_auth_config(&stored_key);
     let auth_config: serde_json::Value =
         serde_json::from_str(&decrypted_auth_config).expect("auth config should parse");
     assert_eq!(
@@ -6479,7 +6569,7 @@ async fn gateway_refreshes_admin_provider_oauth_key_locally_with_trusted_admin_p
         );
         assert_eq!(
             oauth_snapshot.get("reason"),
-            Some(&json!("Codex Token 已过期 (401)"))
+            Some(&json!("OAuth token has expired"))
         );
         assert_eq!(
             oauth_snapshot
@@ -6725,23 +6815,9 @@ async fn gateway_manual_codex_oauth_refresh_reconciles_missing_fixed_endpoint_im
         .into_iter()
         .next()
         .expect("refreshed key should exist");
-    let decrypted_api_key = decrypt_python_fernet_ciphertext(
-        DEVELOPMENT_ENCRYPTION_KEY,
-        stored_key
-            .encrypted_api_key
-            .as_deref()
-            .expect("api key should exist"),
-    )
-    .expect("api key should decrypt");
+    let decrypted_api_key = decrypt_persisted_provider_api_key(&stored_key);
     assert_eq!(decrypted_api_key, "refreshed-codex-access-token");
-    let decrypted_auth_config = decrypt_python_fernet_ciphertext(
-        DEVELOPMENT_ENCRYPTION_KEY,
-        stored_key
-            .encrypted_auth_config
-            .as_deref()
-            .expect("auth config should exist"),
-    )
-    .expect("auth config should decrypt");
+    let decrypted_auth_config = decrypt_persisted_provider_auth_config(&stored_key);
     let auth_config: serde_json::Value =
         serde_json::from_str(&decrypted_auth_config).expect("auth config should parse");
     assert_eq!(auth_config["provider_type"], "codex");
@@ -6968,23 +7044,9 @@ async fn run_gateway_manual_kiro_oauth_refresh_maintenance_endpoint_test(
         .into_iter()
         .next()
         .expect("refreshed key should exist");
-    let decrypted_api_key = decrypt_python_fernet_ciphertext(
-        DEVELOPMENT_ENCRYPTION_KEY,
-        stored_key
-            .encrypted_api_key
-            .as_deref()
-            .expect("api key should exist"),
-    )
-    .expect("api key should decrypt");
+    let decrypted_api_key = decrypt_persisted_provider_api_key(&stored_key);
     assert_eq!(decrypted_api_key, expected_access_token);
-    let decrypted_auth_config = decrypt_python_fernet_ciphertext(
-        DEVELOPMENT_ENCRYPTION_KEY,
-        stored_key
-            .encrypted_auth_config
-            .as_deref()
-            .expect("auth config should exist"),
-    )
-    .expect("auth config should decrypt");
+    let decrypted_auth_config = decrypt_persisted_provider_auth_config(&stored_key);
     let auth_config: serde_json::Value =
         serde_json::from_str(&decrypted_auth_config).expect("auth config should parse");
     assert_eq!(auth_config["provider_type"], "kiro");
@@ -7170,9 +7232,7 @@ async fn gateway_marks_manual_oauth_refresh_failures_as_invalid_in_pool_payload_
     assert_eq!(keys.len(), 1);
     assert_eq!(
         keys[0]["oauth_invalid_reason"],
-        json!(
-            "[REFRESH_FAILED] Token 续期失败 (401): refresh_token 已被使用并轮换，请重新登录授权"
-        )
+        json!("[REFRESH_FAILED] OAuth token refresh failed")
     );
     assert_eq!(
         keys[0]["status_snapshot"]["oauth"]["code"],
@@ -7180,7 +7240,7 @@ async fn gateway_marks_manual_oauth_refresh_failures_as_invalid_in_pool_payload_
     );
     assert_eq!(
         keys[0]["status_snapshot"]["oauth"]["reason"],
-        json!("Token 续期失败 (401): refresh_token 已被使用并轮换，请重新登录授权")
+        json!("OAuth token refresh failed")
     );
     assert_eq!(
         keys[0]["status_snapshot"]["oauth"]["source"],
@@ -7588,6 +7648,11 @@ async fn gateway_refreshes_admin_provider_oauth_key_tunnel_proxy_with_direct_ref
         vec![endpoint],
         vec![key],
     ));
+    let mut tunnel_node = sample_proxy_node("proxy-node-tunnel");
+    tunnel_node.status = "online".to_string();
+    tunnel_node.tunnel_mode = true;
+    tunnel_node.tunnel_connected = true;
+    let proxy_node_repository = Arc::new(InMemoryProxyNodeRepository::seed(vec![tunnel_node]));
 
     let oauth_refresh =
         crate::provider_transport::LocalOAuthRefreshCoordinator::with_adapters_for_tests(vec![
@@ -7604,6 +7669,17 @@ async fn gateway_refreshes_admin_provider_oauth_key_tunnel_proxy_with_direct_ref
                 GatewayDataState::with_provider_catalog_repository_for_tests(
                     provider_catalog_repository,
                 )
+                .attach_proxy_node_repository_for_tests(proxy_node_repository)
+                .with_system_config_values_for_tests(vec![(
+                    "tunnel.attachments.proxy-node-tunnel".to_string(),
+                    json!({
+                        "gateway_instance_id": "gateway-owner",
+                        "relay_base_url": "http://gateway-owner.internal",
+                        "tunnel_generation": "test-generation-1",
+                        "conn_count": 1,
+                        "observed_at_unix_secs": 4_102_444_800u64,
+                    }),
+                )])
                 .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
             )
             .with_oauth_refresh_coordinator_for_tests(oauth_refresh),
@@ -7841,14 +7917,7 @@ async fn gateway_consecutive_manual_oauth_refresh_uses_rotated_refresh_token_imp
         .into_iter()
         .next()
         .expect("refreshed key should exist");
-    let decrypted_auth_config = decrypt_python_fernet_ciphertext(
-        DEVELOPMENT_ENCRYPTION_KEY,
-        stored_key
-            .encrypted_auth_config
-            .as_deref()
-            .expect("auth config should exist"),
-    )
-    .expect("auth config should decrypt");
+    let decrypted_auth_config = decrypt_persisted_provider_auth_config(&stored_key);
     let auth_config: serde_json::Value =
         serde_json::from_str(&decrypted_auth_config).expect("auth config should parse");
     assert_eq!(
@@ -8075,14 +8144,7 @@ async fn gateway_concurrent_manual_oauth_refresh_reuses_winner_after_lock_wait_i
         .into_iter()
         .next()
         .expect("refreshed key should exist");
-    let decrypted_auth_config = decrypt_python_fernet_ciphertext(
-        DEVELOPMENT_ENCRYPTION_KEY,
-        stored_key
-            .encrypted_auth_config
-            .as_deref()
-            .expect("auth config should exist"),
-    )
-    .expect("auth config should decrypt");
+    let decrypted_auth_config = decrypt_persisted_provider_auth_config(&stored_key);
     let auth_config: serde_json::Value =
         serde_json::from_str(&decrypted_auth_config).expect("auth config should parse");
     assert_eq!(auth_config["refresh_token"], "rotated-codex-refresh-token");
@@ -8266,21 +8328,32 @@ async fn gateway_manual_oauth_refresh_prefers_fresher_transport_auth_config_over
         "Bearer cached-codex-access-token"
     );
 
-    let fresh_auth_config = encrypt_python_fernet_plaintext(
-        DEVELOPMENT_ENCRYPTION_KEY,
-        r#"{"provider_type":"codex","refresh_token":"fresh-codex-refresh-token","email":"alice@example.com","account_id":"acct-codex-123","plan_type":"plus","expires_at":1,"updated_at":4102444810}"#,
-    )
-    .expect("updated auth config ciphertext should build");
-    assert!(provider_catalog_repository
-        .update_key_oauth_runtime_state(
+    let fresh_auth_config = app_state
+        .seal_provider_catalog_key_auth_config(
+            "provider-codex",
             "key-codex-oauth-stale-cache",
-            None,
-            None,
-            Some(&fresh_auth_config),
-            Some(4_102_444_810),
+        r#"{"provider_type":"codex","refresh_token":"fresh-codex-refresh-token","email":"alice@example.com","account_id":"acct-codex-123","plan_type":"plus","expires_at":1,"updated_at":4102444810}"#,
         )
+        .expect("updated auth config ciphertext should build");
+    let remotely_updated_key = provider_catalog_repository
+        .list_keys_by_ids(&["key-codex-oauth-stale-cache".to_string()])
         .await
-        .expect("OAuth runtime state should update"));
+        .expect("provider key should reload")
+        .pop()
+        .expect("provider key should exist");
+    let expected_encrypted_api_key = remotely_updated_key.encrypted_api_key.clone();
+    let expected_encrypted_auth_config = remotely_updated_key.encrypted_auth_config.clone();
+    assert!(provider_catalog_repository
+        .compare_and_swap_key_credentials(&ProviderCatalogKeyCredentialsCasUpdate {
+            key_id: remotely_updated_key.id.clone(),
+            expected_provider_id: remotely_updated_key.provider_id.clone(),
+            expected_encrypted_api_key,
+            expected_encrypted_auth_config,
+            encrypted_api_key: remotely_updated_key.encrypted_api_key.clone(),
+            encrypted_auth_config: Some(fresh_auth_config),
+        })
+        .await
+        .expect("OAuth credential should update remotely"));
 
     let gateway = build_router_with_state(app_state);
     let (gateway_url, gateway_handle) = start_server(gateway).await;
@@ -8786,6 +8859,187 @@ async fn gateway_upserts_admin_oauth_provider_locally_with_trusted_admin_princip
 }
 
 #[test]
+fn gateway_requires_oauth_admin_management_token_to_configure_frontend_callback() {
+    run_admin_oauth_test(
+        "gateway_requires_oauth_admin_management_token_to_configure_frontend_callback",
+        gateway_requires_oauth_admin_management_token_to_configure_frontend_callback_impl,
+    );
+}
+
+async fn gateway_requires_oauth_admin_management_token_to_configure_frontend_callback_impl() {
+    let state = AppState::new().expect("gateway should build");
+    let admin_user = state
+        .create_local_auth_user_with_settings(
+            Some("oauth-callback-admin@example.com".to_string()),
+            true,
+            "oauth-callback-admin".to_string(),
+            "hash".to_string(),
+            "admin".to_string(),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("admin user should be created")
+        .expect("admin user should exist");
+
+    let write_raw_token = "ae-oauth-callback-write";
+    let mut write_token = sample_management_token(
+        "token-oauth-callback-write",
+        &admin_user.id,
+        "oauth-callback-write",
+        true,
+    );
+    write_token.token.allowed_ips = None;
+    write_token.token.permissions = Some(json!(["admin:oauth:write"]));
+
+    let admin_raw_token = "ae-oauth-callback-admin";
+    let mut oauth_admin_token = sample_management_token(
+        "token-oauth-callback-admin",
+        &admin_user.id,
+        "oauth-callback-admin",
+        true,
+    );
+    oauth_admin_token.token.allowed_ips = None;
+    oauth_admin_token.token.permissions = Some(json!(["admin:oauth:admin"]));
+
+    let management_tokens = Arc::new(InMemoryManagementTokenRepository::seed_with_hashes(
+        vec![write_token, oauth_admin_token],
+        vec![
+            (
+                hash_management_token(write_raw_token),
+                "token-oauth-callback-write".to_string(),
+            ),
+            (
+                hash_management_token(admin_raw_token),
+                "token-oauth-callback-admin".to_string(),
+            ),
+        ],
+    ));
+    let oauth_providers = Arc::new(InMemoryOAuthProviderRepository::default());
+    let data = GatewayDataState::with_management_token_repository_for_tests(management_tokens)
+        .attach_oauth_provider_repository_for_tests(Arc::clone(&oauth_providers));
+    let gateway = build_router_with_state(state.with_data_state_for_tests(data));
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+    let client = reqwest::Client::new();
+    let provider_payload = |frontend_callback_url: &str| {
+        json!({
+            "display_name": "Linux Do",
+            "client_id": "client-id",
+            "authorization_url_override": "https://connect.linux.do/oauth2/authorize",
+            "token_url_override": "https://connect.linux.do/oauth2/token",
+            "userinfo_url_override": "https://connect.linux.do/api/user",
+            "scopes": ["openid", "profile"],
+            "redirect_uri": "https://backend.example.com/oauth/callback",
+            "frontend_callback_url": frontend_callback_url,
+            "attribute_mapping": {"email": "email"},
+            "extra_config": {"team": true},
+            "is_enabled": true,
+            "force": false
+        })
+    };
+    let provider_url = format!("{gateway_url}/api/admin/oauth/providers/linuxdo");
+
+    let denied_create = client
+        .put(&provider_url)
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .bearer_auth(write_raw_token)
+        .json(&provider_payload("https://attacker.example/auth/callback"))
+        .send()
+        .await
+        .expect("write-token request should complete");
+    let denied_create_status = denied_create.status();
+    let denied_create_payload: Value = denied_create.json().await.expect("denial should be JSON");
+    assert_eq!(denied_create_status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        denied_create_payload["required_permission"],
+        "admin:oauth:admin"
+    );
+    assert!(oauth_providers
+        .get_oauth_provider_config("linuxdo")
+        .await
+        .expect("provider lookup should succeed")
+        .is_none());
+
+    let allowed_create = client
+        .put(&provider_url)
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .bearer_auth(admin_raw_token)
+        .json(&provider_payload(
+            "https://configured.example/auth/callback",
+        ))
+        .send()
+        .await
+        .expect("oauth-admin request should complete");
+    let allowed_create_status = allowed_create.status();
+    let allowed_create_body = allowed_create.text().await.expect("body should read");
+    assert_eq!(
+        allowed_create_status,
+        StatusCode::OK,
+        "body={allowed_create_body}"
+    );
+
+    let denied_change = client
+        .put(&provider_url)
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .bearer_auth(write_raw_token)
+        .json(&provider_payload(
+            "https://second-attacker.example/auth/callback",
+        ))
+        .send()
+        .await
+        .expect("write-token change request should complete");
+    assert_eq!(denied_change.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        oauth_providers
+            .get_oauth_provider_config("linuxdo")
+            .await
+            .expect("provider lookup should succeed")
+            .expect("provider should exist")
+            .frontend_callback_url,
+        "https://configured.example/auth/callback"
+    );
+
+    let allowed_session_change = client
+        .put(&provider_url)
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, admin_user.id.as_str())
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(
+            TRUSTED_ADMIN_SESSION_ID_HEADER,
+            "session-oauth-callback-admin",
+        )
+        .json(&provider_payload(
+            "https://frontend.example.com/auth/callback",
+        ))
+        .send()
+        .await
+        .expect("admin session request should complete");
+    let allowed_session_status = allowed_session_change.status();
+    let allowed_session_body = allowed_session_change
+        .text()
+        .await
+        .expect("body should read");
+    assert_eq!(
+        allowed_session_status,
+        StatusCode::OK,
+        "body={allowed_session_body}"
+    );
+    assert_eq!(
+        oauth_providers
+            .get_oauth_provider_config("linuxdo")
+            .await
+            .expect("provider lookup should succeed")
+            .expect("provider should exist")
+            .frontend_callback_url,
+        "https://frontend.example.com/auth/callback"
+    );
+
+    gateway_handle.abort();
+}
+
+#[test]
 fn gateway_rejects_custom_oidc_without_allowed_domains() {
     run_admin_oauth_test(
         "gateway_rejects_custom_oidc_without_allowed_domains",
@@ -9032,14 +9286,14 @@ async fn gateway_upserts_multiple_custom_oidc_configs_impl() {
 }
 
 #[test]
-fn gateway_tests_admin_oauth_linuxdo_endpoints_locally_with_configured_secret() {
+fn gateway_blocks_admin_oauth_test_ssrf_to_private_endpoints() {
     run_admin_oauth_test(
-        "gateway_tests_admin_oauth_linuxdo_endpoints_locally_with_configured_secret",
-        gateway_tests_admin_oauth_linuxdo_endpoints_locally_with_configured_secret_impl,
+        "gateway_blocks_admin_oauth_test_ssrf_to_private_endpoints",
+        gateway_blocks_admin_oauth_test_ssrf_to_private_endpoints_impl,
     );
 }
 
-async fn gateway_tests_admin_oauth_linuxdo_endpoints_locally_with_configured_secret_impl() {
+async fn gateway_blocks_admin_oauth_test_ssrf_to_private_endpoints_impl() {
     let upstream_hits = Arc::new(Mutex::new(0usize));
     let upstream_hits_clone = Arc::clone(&upstream_hits);
     let upstream = Router::new().route(
@@ -9116,11 +9370,11 @@ async fn gateway_tests_admin_oauth_linuxdo_endpoints_locally_with_configured_sec
 
     assert_eq!(response.status(), StatusCode::OK);
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
-    assert_eq!(payload["authorization_url_reachable"], true);
-    assert_eq!(payload["token_url_reachable"], true);
+    assert_eq!(payload["authorization_url_reachable"], false);
+    assert_eq!(payload["token_url_reachable"], false);
     assert_eq!(payload["secret_status"], "configured");
-    assert_eq!(*authorization_hits.lock().expect("mutex should lock"), 1);
-    assert_eq!(*token_hits.lock().expect("mutex should lock"), 1);
+    assert_eq!(*authorization_hits.lock().expect("mutex should lock"), 0);
+    assert_eq!(*token_hits.lock().expect("mutex should lock"), 0);
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();
@@ -9249,6 +9503,85 @@ async fn gateway_deletes_admin_oauth_provider_locally_with_trusted_admin_princip
 
     gateway_handle.abort();
     upstream_handle.abort();
+}
+
+#[test]
+fn gateway_rejects_deleting_disabled_oauth_provider_with_user_bindings() {
+    run_admin_oauth_test(
+        "gateway_rejects_deleting_disabled_oauth_provider_with_user_bindings",
+        gateway_rejects_deleting_disabled_oauth_provider_with_user_bindings_impl,
+    );
+}
+
+async fn gateway_rejects_deleting_disabled_oauth_provider_with_user_bindings_impl() {
+    let upstream_hits = Arc::new(Mutex::new(0usize));
+    let upstream_hits_clone = Arc::clone(&upstream_hits);
+    let upstream = Router::new().route(
+        "/api/admin/oauth/providers/linuxdo",
+        any(move |_request: Request| {
+            let upstream_hits_inner = Arc::clone(&upstream_hits_clone);
+            async move {
+                *upstream_hits_inner.lock().expect("mutex should lock") += 1;
+                (StatusCode::OK, Body::from("unexpected upstream hit"))
+            }
+        }),
+    );
+
+    let mut provider = sample_oauth_provider_config("linuxdo");
+    provider.is_enabled = false;
+    let provider_repository = Arc::new(InMemoryOAuthProviderRepository::seed([provider]));
+    let user_repository = Arc::new(InMemoryUserReadRepository::default());
+    let now = chrono::Utc::now();
+    let user = user_repository
+        .create_oauth_auth_user(
+            Some("bound@example.com".to_string()),
+            false,
+            "bound-user".to_string(),
+            now,
+        )
+        .await
+        .expect("OAuth user should create")
+        .expect("OAuth user should exist");
+    user_repository
+        .bind_user_oauth_link(&user.id, "linuxdo", "bound-subject", None, None, None, now)
+        .await
+        .expect("OAuth link should bind");
+
+    let data = GatewayDataState::with_oauth_provider_repository_for_tests(Arc::clone(
+        &provider_repository,
+    ))
+    .with_user_reader(user_repository);
+    let (upstream_url, upstream_handle) = start_server(upstream).await;
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(data),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .delete(format!("{gateway_url}/api/admin/oauth/providers/linuxdo"))
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["error"]["type"], "provider_has_bindings");
+    assert!(provider_repository
+        .get_oauth_provider_config("linuxdo")
+        .await
+        .expect("provider lookup should succeed")
+        .is_some());
+    assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
+
+    gateway_handle.abort();
+    upstream_handle.abort();
+    let _ = upstream_url;
 }
 
 #[test]
@@ -9497,7 +9830,11 @@ async fn gateway_allows_management_token_with_pool_write_for_provider_oauth_batc
         true,
     );
     management_token.token.allowed_ips = None;
-    management_token.token.permissions = Some(json!(["admin:pool:read", "admin:pool:write"]));
+    management_token.token.permissions = Some(json!([
+        "admin:pool:read",
+        "admin:pool:write",
+        "admin:provider_oauth:admin"
+    ]));
     let management_token_repository =
         Arc::new(InMemoryManagementTokenRepository::seed_with_hashes(
             vec![management_token],
@@ -9604,6 +9941,7 @@ async fn gateway_prevents_pool_write_token_from_importing_agent_identity_via_bat
     for path in [
         "/api/admin/provider-oauth/providers/provider-codex/batch-import",
         "/api/admin/provider-oauth/providers/provider-codex/batch-import/tasks",
+        "/api/admin/provider-oauth/providers/provider-codex/agent-identity-import/tasks",
     ] {
         let response = client
             .post(format!("{gateway_url}{path}"))
@@ -9618,39 +9956,12 @@ async fn gateway_prevents_pool_write_token_from_importing_agent_identity_via_bat
         let payload: serde_json::Value = response.json().await.expect("json body should parse");
         assert_eq!(
             status,
-            StatusCode::BAD_REQUEST,
+            StatusCode::FORBIDDEN,
             "path={path} payload={payload}"
         );
-        assert_eq!(
-            payload["detail"],
-            "Agent Identity JSON 必须使用专属导入接口"
-        );
+        assert_eq!(payload["detail"], "management token permission denied");
+        assert_eq!(payload["required_permission"], "admin:provider_oauth:admin");
     }
-
-    let dedicated_response = client
-        .post(format!(
-            "{gateway_url}/api/admin/provider-oauth/providers/provider-codex/agent-identity-import/tasks"
-        ))
-        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
-        .bearer_auth(raw_token)
-        .json(&json!({ "credentials": credentials }))
-        .send()
-        .await
-        .expect("request should succeed");
-    let dedicated_status = dedicated_response.status();
-    let dedicated_payload: serde_json::Value = dedicated_response
-        .json()
-        .await
-        .expect("json body should parse");
-    assert_eq!(
-        dedicated_status,
-        StatusCode::FORBIDDEN,
-        "payload={dedicated_payload}"
-    );
-    assert_eq!(
-        dedicated_payload["required_permission"],
-        "admin:provider_oauth:write"
-    );
 
     let keys = provider_catalog_repository
         .list_keys_by_provider_ids(&["provider-codex".to_string()])
@@ -9723,7 +10034,7 @@ async fn gateway_rejects_management_token_without_pool_write_for_provider_oauth_
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
     assert_eq!(payload["detail"], "management token permission denied");
-    assert_eq!(payload["required_permission"], "admin:pool:write");
+    assert_eq!(payload["required_permission"], "admin:provider_oauth:admin");
     assert_eq!(payload["route_family"], "provider_oauth_manage");
 
     gateway_handle.abort();

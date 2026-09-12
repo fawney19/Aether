@@ -11,7 +11,7 @@ use aether_contracts::ExecutionPlan;
 
 use crate::execution_runtime::acquire_upstream_execution_gate;
 use crate::provider_pool_demand::{
-    acquire_provider_pool_in_flight_guard, ProviderPoolInFlightGuard,
+    acquire_provider_pool_execution_guard, ProviderPoolInFlightAdmission, ProviderPoolInFlightGuard,
 };
 use crate::upstream_admission::UpstreamTargetAdmissionPermit;
 use crate::{AppState, GatewayError};
@@ -41,14 +41,17 @@ impl ResponsesWebSocketTurnAdmission {
                 return Err(error);
             }
         };
-        let provider_pool = acquire_provider_pool_in_flight_guard(
-            state.runtime_state.clone(),
-            &plan.provider_id,
-            &plan.request_id,
-            plan.candidate_id.as_deref(),
-            &plan.key_id,
-        )
-        .await;
+        let provider_pool = match acquire_provider_pool_execution_guard(state, plan).await? {
+            ProviderPoolInFlightAdmission::Acquired(guard) => guard,
+            ProviderPoolInFlightAdmission::Saturated { limit } => {
+                drop(upstream_target);
+                drop(upstream_execution);
+                return Err(GatewayError::Client {
+                    status: http::StatusCode::TOO_MANY_REQUESTS,
+                    message: format!("上游账号并发已达上限 ({limit})"),
+                });
+            }
+        };
 
         Ok(Self {
             upstream_execution,

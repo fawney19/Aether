@@ -1,3 +1,5 @@
+use sha2::{Digest, Sha256};
+
 const KIRO_DEVICE_AUTH_SESSION_PREFIX: &str = "device_auth_session:";
 const PROVIDER_OAUTH_BATCH_TASK_PREFIX: &str = "provider_oauth_batch_task:";
 const PROVIDER_OAUTH_STATE_PREFIX: &str = "provider_oauth_state:";
@@ -8,7 +10,11 @@ pub const PROVIDER_OAUTH_STATE_TTL_SECS: u64 = 600;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct StoredAdminProviderOAuthDeviceSession {
+    pub session_id: String,
     pub provider_id: String,
+    pub initiated_by_user_id: String,
+    pub initiated_by_session_id: Option<String>,
+    pub initiated_by_management_token_id: Option<String>,
     pub region: String,
     pub client_id: String,
     pub client_secret: String,
@@ -34,26 +40,52 @@ pub struct StoredAdminProviderOAuthDeviceSession {
     pub error_msg: Option<String>,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct StoredAdminProviderOAuthState {
+    pub nonce: String,
     pub key_id: String,
     pub provider_id: String,
     pub provider_type: String,
     pub pkce_verifier: Option<String>,
     #[serde(default)]
     pub expected_encrypted_auth_config: Option<String>,
+    pub initiated_by_user_id: String,
+    #[serde(default)]
+    pub initiated_by_session_id: Option<String>,
+    #[serde(default)]
+    pub initiated_by_management_token_id: Option<String>,
+    pub created_at: u64,
 }
 
 pub fn provider_oauth_device_session_storage_key(session_id: &str) -> String {
     format!("{KIRO_DEVICE_AUTH_SESSION_PREFIX}{session_id}")
 }
 
+pub fn provider_oauth_device_session_secret_purpose(session_id: &str) -> String {
+    let storage_key = provider_oauth_device_session_storage_key(session_id);
+    format!(
+        "provider-oauth-device-session:sha256:{:x}",
+        Sha256::digest(storage_key.as_bytes())
+    )
+}
+
 pub fn provider_oauth_state_storage_key(nonce: &str) -> String {
-    format!("{PROVIDER_OAUTH_STATE_PREFIX}{nonce}")
+    format!(
+        "{PROVIDER_OAUTH_STATE_PREFIX}sha256:{:x}",
+        Sha256::digest(nonce.as_bytes())
+    )
 }
 
 pub fn provider_oauth_batch_task_storage_key(task_id: &str) -> String {
     format!("{PROVIDER_OAUTH_BATCH_TASK_PREFIX}{task_id}")
+}
+
+pub fn provider_oauth_batch_task_secret_purpose(task_id: &str) -> String {
+    let storage_key = provider_oauth_batch_task_storage_key(task_id);
+    format!(
+        "provider-oauth-batch-task:sha256:{:x}",
+        Sha256::digest(storage_key.as_bytes())
+    )
 }
 
 pub fn build_provider_oauth_batch_task_status_payload(
@@ -142,7 +174,8 @@ pub fn build_provider_oauth_batch_task_status_payload(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_provider_oauth_batch_task_status_payload, provider_oauth_batch_task_storage_key,
+        build_provider_oauth_batch_task_status_payload, provider_oauth_batch_task_secret_purpose,
+        provider_oauth_batch_task_storage_key, provider_oauth_device_session_secret_purpose,
         provider_oauth_device_session_storage_key, provider_oauth_state_storage_key,
         KIRO_DEVICE_AUTH_SESSION_TTL_BUFFER_SECS, PROVIDER_OAUTH_BATCH_TASK_TTL_SECS,
         PROVIDER_OAUTH_STATE_TTL_SECS,
@@ -155,14 +188,23 @@ mod tests {
             provider_oauth_device_session_storage_key("session-123"),
             "device_auth_session:session-123"
         );
-        assert_eq!(
-            provider_oauth_state_storage_key("nonce-123"),
-            "provider_oauth_state:nonce-123"
-        );
+        let first_purpose = provider_oauth_device_session_secret_purpose("session-123");
+        let second_purpose = provider_oauth_device_session_secret_purpose("session-456");
+        assert!(first_purpose.starts_with("provider-oauth-device-session:sha256:"));
+        assert!(!first_purpose.contains("session-123"));
+        assert_ne!(first_purpose, second_purpose);
+        let state_key = provider_oauth_state_storage_key("nonce-123");
+        assert!(state_key.starts_with("provider_oauth_state:sha256:"));
+        assert!(!state_key.contains("nonce-123"));
         assert_eq!(
             provider_oauth_batch_task_storage_key("task-123"),
             "provider_oauth_batch_task:task-123"
         );
+        let first_task_purpose = provider_oauth_batch_task_secret_purpose("task-123");
+        let second_task_purpose = provider_oauth_batch_task_secret_purpose("task-456");
+        assert!(first_task_purpose.starts_with("provider-oauth-batch-task:sha256:"));
+        assert!(!first_task_purpose.contains("task-123"));
+        assert_ne!(first_task_purpose, second_task_purpose);
     }
 
     #[test]

@@ -16,18 +16,18 @@ const router = createRouter({
 })
 
 router.beforeEach(async (to, from, next) => {
-  const authStore = useAuthStore()
-  const moduleStore = useModuleStore()
+  const requiresAuth = to.matched.some(record => record.meta.requiresAuth !== false)
 
   try {
+    const authStore = useAuthStore()
+    const moduleStore = useModuleStore()
     const isAuthenticated = await ensureUserLoaded(authStore)
 
     // 首页重定向
     const homeRedirect = resolveHomeRedirect(to, from, authStore)
-    if (homeRedirect !== null) return next(homeRedirect === '' ? undefined : homeRedirect)
+    if (homeRedirect !== null) return homeRedirect === '' ? next() : next(homeRedirect)
 
     // 需要认证但未认证
-    const requiresAuth = to.matched.some(record => record.meta.requiresAuth !== false)
     if (requiresAuth && !isAuthenticated) {
       sessionStorage.setItem('redirectPath', to.fullPath)
       log.debug('No valid token found, redirecting to home')
@@ -50,7 +50,10 @@ router.beforeEach(async (to, from, next) => {
     next()
   } catch (error) {
     log.error('Router guard error', error)
-    // 发生错误时,直接放行,不要乱跳转
+    if (requiresAuth) {
+      sessionStorage.setItem('redirectPath', to.fullPath)
+      return next('/')
+    }
     next()
   }
 })

@@ -1,4 +1,7 @@
-use super::super::build_admin_users_bad_request_response;
+use super::super::{
+    build_admin_users_bad_request_response, build_admin_users_permission_denied_response,
+    management_token_may_administer_user_accounts,
+};
 use super::support::admin_user_id_from_detail_path;
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::handlers::admin::shared::attach_admin_audit_response;
@@ -26,7 +29,19 @@ pub(in super::super) async fn build_admin_delete_user_response(
             .into_response());
     };
 
-    if user.role.eq_ignore_ascii_case("admin") && state.count_active_admin_users().await? <= 1 {
+    if crate::roles::can_access_admin_console(&user.role)
+        && !management_token_may_administer_user_accounts(request_context)
+    {
+        return Ok(build_admin_users_permission_denied_response(
+            request_context,
+        ));
+    }
+
+    if user.is_active
+        && !user.is_deleted
+        && user.role.eq_ignore_ascii_case("admin")
+        && state.count_active_admin_users().await? <= 1
+    {
         return Ok((
             http::StatusCode::BAD_REQUEST,
             Json(json!({ "detail": "不能删除最后一个管理员账户" })),

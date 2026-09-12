@@ -283,4 +283,28 @@ mod tests {
         // 投递失败不是供应商的错误，摘要不该因此补 parser_error。
         assert_eq!(facts.forced_error(), None);
     }
+
+    #[test]
+    fn plan_permit_loss_is_gateway_cancellation_not_provider_failure() {
+        let facts = attempt_facts_for_outcome(
+            None,
+            AttemptClientDelivery::Complete,
+            ResponsesWebSocketTurnOutcome::connection_admission_lost(),
+        );
+
+        assert_eq!(
+            facts.provider,
+            aborted(
+                499,
+                "gateway WebSocket connection admission became unhealthy"
+            )
+        );
+        assert_eq!(
+            facts.delivery,
+            AttemptClientDelivery::Aborted {
+                reason: "gateway WebSocket connection admission became unhealthy"
+            }
+        );
+        assert_eq!(facts.forced_error(), None);
+    }
 }

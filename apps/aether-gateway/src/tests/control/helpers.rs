@@ -13,7 +13,96 @@ use super::{
     StoredProviderModelStats, StoredProviderQuotaSnapshot, StoredProxyNode,
     StoredPublicGlobalModel, StoredRequestCandidate,
 };
-use crate::AppState;
+use crate::{data::GatewayDataState, AppState};
+
+pub(super) const TUNNEL_CONTROL_PLANE_TEST_PSK: &str =
+    "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=";
+pub(super) const TUNNEL_CONTROL_PLANE_TEST_GENERATION: &str = "test-generation-1";
+
+pub(super) fn with_tunnel_control_plane_key(
+    mut node: StoredProxyNode,
+    key: &str,
+) -> StoredProxyNode {
+    let mut metadata = node.proxy_metadata.take().unwrap_or_else(|| json!({}));
+    let metadata = metadata
+        .as_object_mut()
+        .expect("sample proxy metadata should be an object");
+    metadata.insert(
+        "tunnel_security".to_string(),
+        json!({ "encryption_key": key }),
+    );
+    node.proxy_metadata = Some(serde_json::Value::Object(metadata.clone()));
+    node
+}
+
+pub(super) fn authenticated_tunnel_control_plane_request(
+    client: &reqwest::Client,
+    url: String,
+    path: &str,
+    node_id: &str,
+    body: &serde_json::Value,
+) -> reqwest::RequestBuilder {
+    authenticated_tunnel_control_plane_request_for_generation(
+        client,
+        url,
+        path,
+        node_id,
+        TUNNEL_CONTROL_PLANE_TEST_GENERATION,
+        body,
+    )
+}
+
+pub(super) fn authenticated_tunnel_control_plane_request_for_generation(
+    client: &reqwest::Client,
+    url: String,
+    path: &str,
+    node_id: &str,
+    tunnel_generation: &str,
+    body: &serde_json::Value,
+) -> reqwest::RequestBuilder {
+    let body = serde_json::to_vec(body).expect("control-plane payload should encode");
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .expect("system clock")
+        .as_secs();
+    let nonce = uuid::Uuid::new_v4().simple().to_string();
+    let signature =
+        aether_contracts::tunnel_security::sign_tunnel_control_plane_request_for_generation(
+            TUNNEL_CONTROL_PLANE_TEST_PSK,
+            "POST",
+            path,
+            node_id,
+            tunnel_generation,
+            timestamp,
+            &nonce,
+            &body,
+        )
+        .expect("control-plane request should sign");
+    client
+        .post(url)
+        .header("content-type", "application/json")
+        .header(
+            aether_contracts::tunnel_security::TUNNEL_CONTROL_PLANE_NODE_ID_HEADER,
+            node_id,
+        )
+        .header(
+            aether_contracts::tunnel_security::TUNNEL_CONTROL_PLANE_GENERATION_HEADER,
+            tunnel_generation,
+        )
+        .header(
+            aether_contracts::tunnel_security::TUNNEL_CONTROL_PLANE_TIMESTAMP_HEADER,
+            timestamp,
+        )
+        .header(
+            aether_contracts::tunnel_security::TUNNEL_CONTROL_PLANE_NONCE_HEADER,
+            nonce,
+        )
+        .header(
+            aether_contracts::tunnel_security::TUNNEL_CONTROL_PLANE_SIGNATURE_HEADER,
+            signature,
+        )
+        .body(body)
+}
 
 pub(super) fn sample_currently_usable_auth_snapshot(
     api_key_id: &str,
@@ -78,7 +167,7 @@ pub(super) fn test_auth_secret() -> String {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "aether-rust-dev-jwt-secret".to_string())
+        .unwrap_or_else(|| "aether-rust-test-jwt-secret-32-bytes-minimum".to_string())
 }
 
 pub(super) fn build_test_auth_token(
@@ -112,7 +201,7 @@ pub(super) fn build_test_auth_token(
     )
 }
 
-pub(super) async fn issue_test_admin_access_token(
+pub(in crate::tests) async fn issue_test_admin_access_token(
     state: &AppState,
     client_device_id: &str,
 ) -> String {
@@ -222,6 +311,7 @@ pub(super) fn sample_proxy_node(node_id: &str) -> StoredProxyNode {
         Some(1_709_000_000),
         Some(1_710_000_100),
     )
+    .with_tunnel_generation(TUNNEL_CONTROL_PLANE_TEST_GENERATION.to_string())
 }
 
 pub(super) fn sample_provider_quota(provider_id: &str) -> StoredProviderQuotaSnapshot {
@@ -499,6 +589,67 @@ pub(super) fn sample_key(
         None,
     )
     .expect("key transport should build")
+}
+
+/// Build a provider catalog key using the same provider/key-bound v2 envelope
+/// that production writes use.  Most control-plane tests intentionally mount
+/// a read-only catalog repository; using a legacy Fernet fixture there would
+/// force the reader to migrate the credential and fail closed when no writer
+/// is available.  Keep `sample_key` for tests that explicitly exercise the
+/// legacy migration path, and use this helper for ordinary catalog fixtures.
+pub(super) fn sample_bound_key(
+    id: &str,
+    provider_id: &str,
+    api_format: &str,
+    secret: &str,
+) -> StoredProviderCatalogKey {
+    let bootstrap = AppState::new()
+        .expect("bootstrap state should build")
+        .with_data_state_for_tests(
+            GatewayDataState::disabled().with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+        );
+    let mut key = sample_key(id, provider_id, api_format, secret);
+    key.encrypted_api_key = Some(
+        bootstrap
+            .seal_provider_catalog_key_api_key(provider_id, id, secret)
+            .expect("bound provider api key ciphertext should build"),
+    );
+    key
+}
+
+/// Build the provider-scoped proxy representation used by the catalog reader.
+/// Stored proxy credentials are record-bound before they are accepted by
+/// read-only repositories, so fixtures must use the same envelope.
+pub(super) fn sample_bound_provider_proxy(provider_id: &str, host: &str, password: &str) -> Value {
+    let bootstrap = AppState::new()
+        .expect("bootstrap state should build")
+        .with_data_state_for_tests(
+            GatewayDataState::disabled().with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+        );
+    let purpose = format!(
+        "provider-catalog-proxy-credential-v2\0scope=provider\0field=password\0record-id-bytes={}\0{provider_id}",
+        provider_id.len(),
+    );
+    let sealed =
+        crate::handlers::shared::seal_runtime_secret_payload(&bootstrap, &purpose, password)
+            .expect("provider proxy password should seal");
+    json!({
+        "host": host,
+        "password": format!("aether-provider-catalog-proxy-secret-v2:{sealed}"),
+    })
+}
+
+/// Seal an auth-config fixture with the provider/key-bound v2 envelope.
+/// Ordinary read-only catalog tests must not rely on the migration writer.
+pub(super) fn sample_bound_auth_config(provider_id: &str, key_id: &str, plaintext: &str) -> String {
+    let bootstrap = AppState::new()
+        .expect("bootstrap state should build")
+        .with_data_state_for_tests(
+            GatewayDataState::disabled().with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+        );
+    bootstrap
+        .seal_provider_catalog_key_auth_config(provider_id, key_id, plaintext)
+        .expect("bound provider auth config ciphertext should build")
 }
 
 pub(super) fn sample_request_candidate(

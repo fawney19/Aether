@@ -180,32 +180,40 @@ export const asyncTasksApi = {
 
     const query = searchParams.toString()
     const url = query ? `/api/admin/tasks?${query}` : '/api/admin/tasks'
-    const response = await apiClient.get(url)
+    const response = await apiClient.get<AsyncTaskListResponse>(url)
     return response.data
   },
 
   async getStats(): Promise<AsyncTaskStatsResponse> {
-    const response = await apiClient.get('/api/admin/tasks/stats')
+    const response = await apiClient.get<AsyncTaskStatsResponse>('/api/admin/tasks/stats')
     return response.data
   },
 
   async getDetail(taskId: string): Promise<AsyncTaskDetail> {
-    const response = await apiClient.get(`/api/admin/tasks/${taskId}`)
+    const response = await apiClient.get<AsyncTaskDetail>(`/api/admin/tasks/${taskId}`)
     return response.data
   },
 
   async getEvents(taskId: string): Promise<{ items: AsyncTaskEvent[] }> {
-    const response = await apiClient.get(`/api/admin/tasks/${taskId}/events`)
+    const response = await apiClient.get<{ items: AsyncTaskEvent[] }>(`/api/admin/tasks/${taskId}/events`)
     return response.data
   },
 
   async cancel(taskId: string): Promise<{ id: string; status: string; message: string }> {
-    const response = await apiClient.post(`/api/admin/tasks/${taskId}/cancel`)
+    const response = await apiClient.post<{ id: string; status: string; message: string }>(`/api/admin/tasks/${taskId}/cancel`)
+    return response.data
+  },
+
+  async getVideoBlob(taskId: string): Promise<Blob> {
+    const response = await apiClient.get<Blob>(
+      `/api/admin/video-tasks/${encodeURIComponent(taskId)}/video`,
+      { responseType: 'blob', timeout: 0 },
+    )
     return response.data
   },
 
   async trigger(taskKey: string, payload: Record<string, unknown> = {}): Promise<{ run_id: string; status: string }> {
-    const response = await apiClient.post(`/api/admin/tasks/${taskKey}/trigger`, payload)
+    const response = await apiClient.post<{ run_id: string; status: string }>(`/api/admin/tasks/${taskKey}/trigger`, payload)
     return response.data
   },
 }

@@ -88,43 +88,44 @@ pub(super) async fn execute_admin_provider_oauth_refresh(
                 response::oauth_refresh_failed_bad_request_response(&error_reason),
             ));
         }
-        Err(AdminLocalOAuthRefreshError::Transport { source, .. }) => {
+        Err(AdminLocalOAuthRefreshError::Transport { .. }) => {
             tracing::warn!(
                 trace_id = %trace_id,
                 key_id = %key_id,
                 provider_id = %provider.id,
                 provider_type = %provider_type,
-                error = %source,
                 "gateway manual provider oauth refresh transport failed"
             );
             return Ok(RefreshDispatch::Respond(
-                response::oauth_refresh_failed_service_unavailable_response(source.to_string()),
+                response::oauth_refresh_failed_service_unavailable_response(
+                    "Token 刷新网络请求失败",
+                ),
             ));
         }
-        Err(AdminLocalOAuthRefreshError::TransportMessage { message, .. }) => {
+        Err(AdminLocalOAuthRefreshError::TransportMessage { .. }) => {
             tracing::warn!(
                 trace_id = %trace_id,
                 key_id = %key_id,
                 provider_id = %provider.id,
                 provider_type = %provider_type,
-                error = %message,
                 "gateway manual provider oauth refresh transport failed"
             );
             return Ok(RefreshDispatch::Respond(
-                response::oauth_refresh_failed_service_unavailable_response(message),
+                response::oauth_refresh_failed_service_unavailable_response(
+                    "Token 刷新网络请求失败",
+                ),
             ));
         }
-        Err(AdminLocalOAuthRefreshError::InvalidResponse { message, .. }) => {
+        Err(AdminLocalOAuthRefreshError::InvalidResponse { .. }) => {
             tracing::warn!(
                 trace_id = %trace_id,
                 key_id = %key_id,
                 provider_id = %provider.id,
                 provider_type = %provider_type,
-                reason = %message,
                 "gateway manual provider oauth refresh returned invalid response"
             );
             return Ok(RefreshDispatch::Respond(
-                response::oauth_refresh_failed_bad_request_response(&message),
+                response::oauth_refresh_failed_bad_request_response("Token 刷新响应无效"),
             ));
         }
     };
@@ -140,12 +141,7 @@ pub(super) async fn execute_admin_provider_oauth_refresh(
         .and_then(|entry| entry.metadata.as_ref())
         .and_then(serde_json::Value::as_object)
         .cloned()
-        .unwrap_or_else(|| {
-            helpers::refreshed_auth_config_object(
-                state,
-                refreshed_key.encrypted_auth_config.as_deref(),
-            )
-        });
+        .unwrap_or_else(|| helpers::refreshed_auth_config_object(state, &refreshed_key));
     let refreshed_expires_at_unix_secs = refreshed_entry
         .as_ref()
         .and_then(|entry| entry.expires_at_unix_secs)

@@ -17,7 +17,13 @@ export async function toggleAdaptiveMode(
   rpm_limit: number | null
   effective_limit: number | null
 }> {
-  const response = await client.patch(`/api/admin/adaptive/keys/${keyId}/mode`, data)
+  const response = await client.patch<{
+  message: string
+  key_id: string
+  is_adaptive: boolean
+  rpm_limit: number | null
+  effective_limit: number | null
+}>(`/api/admin/adaptive/keys/${keyId}/mode`, data)
   return response.data
 }
 
@@ -34,7 +40,13 @@ export async function setRpmLimit(
   rpm_limit: number
   previous_mode: string
 }> {
-  const response = await client.patch(`/api/admin/adaptive/keys/${keyId}/limit`, null, {
+  const response = await client.patch<{
+  message: string
+  key_id: string
+  is_adaptive: boolean
+  rpm_limit: number
+  previous_mode: string
+}>(`/api/admin/adaptive/keys/${keyId}/limit`, null, {
     params: { limit }
   })
   return response.data
@@ -44,7 +56,7 @@ export async function setRpmLimit(
  * 获取 Key 的自适应统计
  */
 export async function getAdaptiveStats(keyId: string): Promise<AdaptiveStatsResponse> {
-  const response = await client.get(`/api/admin/adaptive/keys/${keyId}/stats`)
+  const response = await client.get<AdaptiveStatsResponse>(`/api/admin/adaptive/keys/${keyId}/stats`)
   return response.data
 }
 
@@ -52,6 +64,6 @@ export async function getAdaptiveStats(keyId: string): Promise<AdaptiveStatsResp
  * 重置 Key 的学习状态
  */
 export async function resetAdaptiveLearning(keyId: string): Promise<{ message: string; key_id: string }> {
-  const response = await client.delete(`/api/admin/adaptive/keys/${keyId}/learning`)
+  const response = await client.delete<{ message: string; key_id: string }>(`/api/admin/adaptive/keys/${keyId}/learning`)
   return response.data
 }

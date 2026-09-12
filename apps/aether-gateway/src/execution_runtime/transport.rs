@@ -1,23 +1,27 @@
 use std::borrow::Cow;
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::error::Error as _;
 use std::future::Future;
 use std::io::Read;
 use std::io::Write;
+use std::net::{IpAddr, SocketAddr};
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex as StdMutex, OnceLock, RwLock as StdRwLock};
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
+use aether_contracts::tunnel::MAX_TUNNEL_RELAY_META_LEN;
 use aether_contracts::{
     ExecutionPlan, ExecutionResponseBodyMode, ExecutionResponseObservation, ExecutionResult,
     ExecutionTelemetry, ProxySnapshot, ResolvedTransportProfile, ResponseBody,
-    EXECUTION_REQUEST_ACCEPT_INVALID_CERTS_HEADER, EXECUTION_REQUEST_FOLLOW_REDIRECTS_HEADER,
-    EXECUTION_REQUEST_HTTP1_ONLY_HEADER, EXECUTION_RESPONSE_BODY_MODE_HEADER,
+    EXECUTION_REQUEST_FOLLOW_REDIRECTS_HEADER, EXECUTION_REQUEST_HTTP1_ONLY_HEADER,
+    EXECUTION_RESPONSE_BODY_MODE_HEADER, PROXY_NODE_TUNNEL_GENERATION_EXTRA_KEY,
     TRANSPORT_BACKEND_BROWSER_WREQ, TRANSPORT_BACKEND_REQWEST_RUSTLS,
     TRANSPORT_HTTP_MODE_H2C_PRIOR_KNOWLEDGE, TRANSPORT_HTTP_MODE_HTTP1_ONLY,
 };
 use aether_data::repository::proxy_nodes::ProxyNodeTrafficMutation;
-use aether_http::{apply_http_client_config, HttpClientConfig};
+use aether_http::{apply_http_client_config, is_private_or_reserved_ip, HttpClientConfig};
 use aether_runtime::{MetricKind, MetricSample};
 use axum::body::Bytes;
 use base64::Engine as _;
@@ -32,7 +36,7 @@ use hyper::body::Incoming as HyperIncomingBody;
 use hyper::client::conn::http2::SendRequest as HyperH2cSendRequest;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client as HyperLegacyClient;
-use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::redirect::Policy;
 use serde::Serialize;
@@ -46,6 +50,7 @@ use tokio::sync::OnceCell as TokioOnceCell;
 use crate::ai_serving::api::extract_provider_private_stream_error_body;
 #[cfg(test)]
 use crate::execution_runtime::remote_compat::execute_sync_plan_via_remote_execution_runtime;
+use crate::execution_runtime::stream_read_timeout::resolve_stream_idle_timeout;
 use crate::execution_runtime::windsurf::maybe_execute_windsurf_sync;
 use crate::frontdoor_loop_guard::{
     configured_gateway_frontdoor_base_url, gateway_frontdoor_self_loop_guard_error,
@@ -57,16 +62,24 @@ use crate::{AppState, GatewayError};
 
 const HUB_RELAY_CONTENT_TYPE: &str = "application/vnd.aether.tunnel-envelope";
 const HUB_RELAY_ERROR_HEADER: &str = "x-aether-tunnel-error";
-const TUNNEL_RELAY_PATH_PREFIX: &str = "/api/internal/tunnel/relay";
+const MAX_SAFE_REDIRECTS: usize = 10;
+const MAX_UPSTREAM_ERROR_DETAIL_BYTES: usize = 2_048;
 const DEFAULT_TUNNEL_TIMEOUT_MS: u64 = 60_000;
 const DEFAULT_STREAM_FIRST_BYTE_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_NON_STREAM_TOTAL_TIMEOUT_MS: u64 = 300_000;
 const DEFAULT_CODEX_COMPACT_TOTAL_TIMEOUT_MS: u64 = 1_200_000;
 const MIN_TUNNEL_TIMEOUT_SECS: u64 = 1;
 const EXECUTION_RESPONSE_BODY_LIMIT_HEADER: &str = "x-aether-execution-response-body-limit-bytes";
+const LEGACY_EXECUTION_REQUEST_ACCEPT_INVALID_CERTS_HEADER: &str =
+    "x-aether-execution-accept-invalid-certs";
 const DEFAULT_SCOPED_RESPONSE_BODY_LIMIT_BYTES: usize = 8 * 1024 * 1024;
 const MIN_SCOPED_RESPONSE_BODY_LIMIT_BYTES: usize = 64 * 1024;
 const MAX_SCOPED_RESPONSE_BODY_LIMIT_BYTES: usize = 64 * 1024 * 1024;
+// A remote execution result is JSON and may carry both the parsed JSON body
+// and the original bytes.  Keep room for base64 expansion, the second body
+// representation, and bounded response metadata while retaining a hard cap.
+const MAX_EXECUTION_RESULT_ENVELOPE_BYTES: usize = 256 * 1024 * 1024;
+const EXECUTION_RESULT_ENVELOPE_METADATA_BYTES: usize = 8 * 1024 * 1024;
 const DIRECT_REQWEST_H2_CLIENT_SHARDS_ENV: &str = "AETHER_GATEWAY_DIRECT_REQWEST_H2_CLIENT_SHARDS";
 const DIRECT_REQWEST_CLIENT_SHARDS_ENV: &str = "AETHER_GATEWAY_DIRECT_REQWEST_CLIENT_SHARDS";
 const DIRECT_REQWEST_H2_TARGET_STREAMS_PER_CLIENT_ENV: &str =
@@ -75,6 +88,8 @@ const DIRECT_REQWEST_HTTP1_TARGET_STREAMS_PER_CLIENT_ENV: &str =
     "AETHER_GATEWAY_DIRECT_REQWEST_HTTP1_TARGET_STREAMS_PER_CLIENT";
 const DIRECT_REQWEST_STREAM_HTTP_MODE_ENV: &str = "AETHER_GATEWAY_DIRECT_REQWEST_STREAM_HTTP_MODE";
 const DIRECT_REQWEST_CACHE_PER_ORIGIN_ENV: &str = "AETHER_GATEWAY_DIRECT_REQWEST_CACHE_PER_ORIGIN";
+const DIRECT_REQWEST_CACHE_MAX_ENTRIES_ENV: &str =
+    "AETHER_GATEWAY_DIRECT_REQWEST_CACHE_MAX_ENTRIES";
 const DIRECT_H2C_FAST_PATH_ENV: &str = "AETHER_GATEWAY_DIRECT_H2C_FAST_PATH";
 const DIRECT_H2C_CLIENT_SHARDS_ENV: &str = "AETHER_GATEWAY_DIRECT_H2C_CLIENT_SHARDS";
 const DIRECT_H2C_POOL_MAX_IDLE_PER_HOST_ENV: &str =
@@ -95,7 +110,7 @@ const DIRECT_REQWEST_PREWARM_SYNC_CLIENTS_ENV: &str =
     "AETHER_GATEWAY_DIRECT_REQWEST_PREWARM_SYNC_CLIENTS";
 const DEFAULT_H2_TARGET_STREAMS_PER_CLIENT: usize = 8;
 const DEFAULT_HTTP1_TARGET_STREAMS_PER_CLIENT: usize = 512;
-const DEFAULT_DIRECT_H2C_POOL_MAX_IDLE_PER_HOST: usize = 512;
+const DEFAULT_DIRECT_H2C_POOL_MAX_IDLE_PER_HOST: usize = 32;
 const DEFAULT_DIRECT_H2C_TARGET_STREAMS_PER_CLIENT: usize = 128;
 const DEFAULT_DIRECT_H2C_SENDER_SELECT_WINDOW: usize = 4;
 const MAX_DIRECT_H2C_DRIVER_RUNTIME_THREADS: usize = 16;
@@ -106,9 +121,14 @@ const DEFAULT_DIRECT_REQWEST_SYNC_WARM_CLIENTS: usize = 4;
 const MAX_DIRECT_REQWEST_SYNC_WARM_CLIENTS: usize = 16;
 const MAX_DIRECT_H2C_CLIENT_SHARDS: usize = 512;
 const MAX_DIRECT_REQWEST_H2_CLIENT_SHARDS: usize = 2048;
+// This bounds distinct cached transport configurations, not request concurrency,
+// HTTP/2 streams, or the number of clients/shards within an active entry.
+const DEFAULT_DIRECT_REQWEST_CACHE_MAX_ENTRIES: usize = 1024;
+const MAX_DIRECT_REQWEST_CACHE_MAX_ENTRIES: usize = 16_384;
 
 type DirectHyperH2cRequestBody = Full<Bytes>;
-type DirectHyperH2cClient = HyperLegacyClient<HttpConnector, DirectHyperH2cRequestBody>;
+type DirectHyperH2cClient =
+    HyperLegacyClient<HttpConnector<ExecutionSafeHyperDnsResolver>, DirectHyperH2cRequestBody>;
 type DirectHyperH2cSender = HyperH2cSendRequest<DirectHyperH2cRequestBody>;
 type DirectHyperH2cSenderCacheCell = TokioOnceCell<Arc<DirectHyperH2cSenderCacheEntry>>;
 
@@ -117,10 +137,9 @@ struct DirectReqwestClientCacheKey {
     upstream_origin: Option<String>,
     pool_partition: Option<String>,
     connect_timeout_ms: Option<u64>,
-    proxy_url: Option<String>,
+    proxy_digest: Option<String>,
     follow_redirects: bool,
     http1_only: bool,
-    accept_invalid_certs: bool,
     transport_profile: Option<DirectReqwestTransportProfileCacheKey>,
 }
 
@@ -146,6 +165,7 @@ struct DirectReqwestClientCacheEntry {
     next: AtomicU64,
     target_len: usize,
     warming: bool,
+    last_used: u64,
 }
 
 impl DirectReqwestClientCacheEntry {
@@ -155,6 +175,7 @@ impl DirectReqwestClientCacheEntry {
             next: AtomicU64::new(0),
             target_len: target_len.max(1),
             warming,
+            last_used: next_direct_reqwest_client_cache_clock(),
         }
     }
 
@@ -176,6 +197,10 @@ impl DirectReqwestClientCacheEntry {
 
     fn should_warm(&self) -> bool {
         self.clients.len() < self.target_len && !self.warming
+    }
+
+    fn touch(&mut self) {
+        self.last_used = next_direct_reqwest_client_cache_clock();
     }
 }
 
@@ -345,6 +370,8 @@ static DIRECT_REQWEST_CLIENT_CACHE: LazyLock<
     StdMutex<HashMap<DirectReqwestClientCacheKey, DirectReqwestClientCacheEntry>>,
 > = LazyLock::new(|| StdMutex::new(HashMap::new()));
 
+static DIRECT_REQWEST_CLIENT_CACHE_CLOCK: AtomicU64 = AtomicU64::new(0);
+
 static DIRECT_H2C_CLIENT_CACHE: LazyLock<
     StdMutex<HashMap<DirectHyperH2cClientCacheKey, DirectHyperH2cClientCacheEntry>>,
 > = LazyLock::new(|| StdMutex::new(HashMap::new()));
@@ -356,6 +383,7 @@ static DIRECT_H2C_SENDER_CACHE: LazyLock<
 static DIRECT_H2C_POOL_MAX_IDLE_PER_HOST: LazyLock<usize> = LazyLock::new(|| {
     env_positive_usize(DIRECT_H2C_POOL_MAX_IDLE_PER_HOST_ENV)
         .unwrap_or(DEFAULT_DIRECT_H2C_POOL_MAX_IDLE_PER_HOST)
+        .min(1024)
 });
 
 static DIRECT_H2C_SENDER_SELECT_WINDOW: LazyLock<usize> = LazyLock::new(|| {
@@ -382,6 +410,7 @@ struct DirectReqwestClientCacheMetrics {
     http1_selections: AtomicU64,
     h2c_selections: AtomicU64,
     auto_selections: AtomicU64,
+    evictions: AtomicU64,
 }
 
 static DIRECT_REQWEST_CLIENT_CACHE_METRICS: LazyLock<DirectReqwestClientCacheMetrics> =
@@ -409,6 +438,108 @@ struct DirectHyperH2cSenderCacheMetrics {
 
 static DIRECT_H2C_SENDER_CACHE_METRICS: LazyLock<DirectHyperH2cSenderCacheMetrics> =
     LazyLock::new(DirectHyperH2cSenderCacheMetrics::default);
+
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct ExecutionSafeDnsResolver;
+
+#[derive(Debug, Clone, Copy, Default)]
+struct ExecutionSafeHyperDnsResolver;
+
+fn dns_host_explicitly_allows_loopback(host: &str) -> bool {
+    let host = host.trim_end_matches('.');
+    host.eq_ignore_ascii_case("localhost")
+        || aether_http::parse_ip_literal_host(host).is_some_and(|ip| ip.is_loopback())
+}
+
+fn validate_resolved_execution_addresses(
+    host: &str,
+    addresses: Vec<SocketAddr>,
+    provider_execution: bool,
+) -> Result<Vec<SocketAddr>, std::io::Error> {
+    if addresses.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "upstream DNS resolution returned no addresses",
+        ));
+    }
+    if provider_execution {
+        return Ok(addresses);
+    }
+    let allows_loopback = dns_host_explicitly_allows_loopback(host);
+    if addresses.iter().any(|address| {
+        if allows_loopback {
+            !address.ip().is_loopback()
+        } else {
+            is_private_or_reserved_ip(address.ip())
+        }
+    }) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "tunnel relay DNS resolution returned a private or reserved address",
+        ));
+    }
+    Ok(addresses)
+}
+
+async fn resolve_execution_dns_addresses(host: &str) -> Result<Vec<SocketAddr>, std::io::Error> {
+    resolve_execution_target_addresses_with_policy(host, 0, true).await
+}
+
+async fn resolve_execution_target_addresses_with_policy(
+    host: &str,
+    port: u16,
+    provider_execution: bool,
+) -> Result<Vec<SocketAddr>, std::io::Error> {
+    let addresses =
+        aether_http::lookup_host_with_limits(host, port, aether_http::DEFAULT_DNS_LOOKUP_TIMEOUT)
+            .await?;
+    validate_resolved_execution_addresses(host, addresses, provider_execution)
+}
+
+impl reqwest::dns::Resolve for ExecutionSafeDnsResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let host = name.as_str().to_owned();
+        Box::pin(async move {
+            let addresses = resolve_execution_dns_addresses(&host)
+                .await
+                .map_err(|error| Box::new(error) as Box<dyn std::error::Error + Send + Sync>)?;
+            Ok(Box::new(addresses.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
+}
+
+impl wreq::dns::Resolve for ExecutionSafeDnsResolver {
+    fn resolve(&self, name: wreq::dns::Name) -> wreq::dns::Resolving {
+        let host = name.as_str().to_owned();
+        Box::pin(async move {
+            let addresses = resolve_execution_dns_addresses(&host)
+                .await
+                .map_err(|error| Box::new(error) as Box<dyn std::error::Error + Send + Sync>)?;
+            Ok(Box::new(addresses.into_iter()) as wreq::dns::Addrs)
+        })
+    }
+}
+
+impl tower::Service<hyper_util::client::legacy::connect::dns::Name>
+    for ExecutionSafeHyperDnsResolver
+{
+    type Response = std::vec::IntoIter<SocketAddr>;
+    type Error = std::io::Error;
+    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, name: hyper_util::client::legacy::connect::dns::Name) -> Self::Future {
+        let host = name.as_str().to_owned();
+        Box::pin(async move {
+            resolve_execution_dns_addresses(&host)
+                .await
+                .map(|addrs| addrs.into_iter())
+        })
+    }
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct DirectH2cSenderPrewarmReport {
@@ -466,7 +597,7 @@ pub(crate) fn format_upstream_request_error(err: &reqwest::Error) -> String {
         detail.push(']');
     }
 
-    detail
+    sanitize_error_detail(&detail)
 }
 
 fn sanitize_upstream_request_error_detail(detail: &str, upstream_url: &str) -> (String, String) {
@@ -476,8 +607,21 @@ fn sanitize_upstream_request_error_detail(detail: &str, upstream_url: &str) -> (
 
 fn sanitize_upstream_url_text(upstream_url: &str) -> String {
     if let Ok(mut parsed_url) = reqwest::Url::parse(upstream_url) {
+        // URL userinfo can contain proxy or upstream credentials. reqwest's
+        // error chain may include the original URL, so remove it alongside
+        // query and fragment data before the error crosses a trust boundary.
+        let _ = parsed_url.set_username("");
+        let _ = parsed_url.set_password(None);
         parsed_url.set_query(None);
         parsed_url.set_fragment(None);
+        let private_literal = match parsed_url.host() {
+            Some(url::Host::Ipv4(address)) => is_private_or_reserved_ip(IpAddr::V4(address)),
+            Some(url::Host::Ipv6(address)) => is_private_or_reserved_ip(IpAddr::V6(address)),
+            _ => false,
+        };
+        if private_literal {
+            let _ = parsed_url.set_host(Some("redacted.invalid"));
+        }
         return parsed_url.to_string();
     }
 
@@ -485,7 +629,89 @@ fn sanitize_upstream_url_text(upstream_url: &str) -> String {
         .char_indices()
         .find_map(|(offset, character)| matches!(character, '?' | '#').then_some(offset))
         .unwrap_or(upstream_url.len());
-    upstream_url[..suffix_offset].to_string()
+    let mut sanitized = upstream_url[..suffix_offset].to_string();
+    // Keep malformed URL diagnostics useful without carrying userinfo across
+    // the boundary.  All indices here are ASCII delimiters discovered in a
+    // UTF-8 string, so the range boundaries remain valid.
+    if let Some(scheme_end) = sanitized.find("://") {
+        let authority_end = sanitized[scheme_end + 3..]
+            .find('/')
+            .map(|offset| scheme_end + 3 + offset)
+            .unwrap_or(sanitized.len());
+        if let Some(at) = sanitized[scheme_end + 3..authority_end].rfind('@') {
+            let at = scheme_end + 3 + at;
+            sanitized.replace_range(scheme_end + 3..=at, "");
+        }
+    }
+    sanitized
+}
+
+fn sanitize_error_detail(detail: &str) -> String {
+    let mut sanitized = String::with_capacity(detail.len().min(MAX_UPSTREAM_ERROR_DETAIL_BYTES));
+    for (index, token) in detail.split_whitespace().enumerate() {
+        if index > 0 {
+            sanitized.push(' ');
+        }
+        sanitized.push_str(&sanitize_error_token(token));
+    }
+    if sanitized.len() > MAX_UPSTREAM_ERROR_DETAIL_BYTES {
+        let mut end = MAX_UPSTREAM_ERROR_DETAIL_BYTES;
+        while !sanitized.is_char_boundary(end) {
+            end = end.saturating_sub(1);
+        }
+        sanitized.truncate(end);
+        sanitized.push_str("...");
+    }
+    sanitized
+}
+
+fn sanitize_error_token(token: &str) -> String {
+    let Some(scheme_offset) = token.find("://") else {
+        return token.to_string();
+    };
+    let mut start = scheme_offset;
+    while start > 0 {
+        let previous = token[..start]
+            .chars()
+            .next_back()
+            .expect("non-empty URL prefix should contain a character");
+        if matches!(
+            previous,
+            '(' | '[' | '{' | '"' | '\'' | '=' | ';' | ',' | ':'
+        ) {
+            break;
+        }
+        start -= previous.len_utf8();
+    }
+    let mut end = token.len();
+    while end > start {
+        let last = token.as_bytes()[end - 1] as char;
+        if matches!(last, ')' | ']' | '}' | '"' | '\'' | ',' | ';') {
+            end -= 1;
+        } else {
+            break;
+        }
+    }
+    let candidate = &token[start..end];
+    let Ok(parsed) = reqwest::Url::parse(candidate) else {
+        return token.to_string();
+    };
+    let sanitized = sanitize_upstream_url_text(parsed.as_str());
+    let mut result = String::with_capacity(token.len());
+    result.push_str(&token[..start]);
+    result.push_str(&sanitized);
+    result.push_str(&token[end..]);
+    result
+}
+
+/// Return a bounded diagnostic suitable for scheduler/usage records and
+/// structured logs.  `ExecutionRuntimeTransportError` keeps rich dynamic
+/// details for local control flow, but its `Display` implementation is also
+/// used by older call sites that persist the message.  Route those boundaries
+/// through the same URL/query/credential sanitizer as the custom `Debug`
+/// implementation so a future error constructor cannot leak request secrets.
+pub(crate) fn safe_transport_error_message(error: &ExecutionRuntimeTransportError) -> String {
+    sanitize_error_detail(&error.to_string())
 }
 
 pub(crate) fn format_wreq_upstream_request_error(err: &wreq::Error) -> String {
@@ -535,7 +761,7 @@ pub(crate) fn format_wreq_upstream_request_error(err: &wreq::Error) -> String {
         detail.push(']');
     }
 
-    detail
+    sanitize_error_detail(&detail)
 }
 
 pub(crate) fn format_hyper_error_chain(err: &dyn std::error::Error) -> String {
@@ -549,52 +775,155 @@ pub(crate) fn format_hyper_error_chain(err: &dyn std::error::Error) -> String {
         }
         source = cause.source();
     }
-    detail
+    sanitize_error_detail(&detail)
 }
 
-#[derive(Debug, Error)]
+#[derive(Error)]
 pub(crate) enum ExecutionRuntimeTransportError {
     #[error("request body must contain json_body or body_bytes_b64")]
     RequestBodyRequired,
+    #[error("request body must not contain both json_body and body_bytes_b64")]
+    RequestBodyAmbiguous,
     #[error("request body base64 is invalid: {0}")]
     BodyDecode(base64::DecodeError),
-    #[error("request content-encoding is not supported: {0}")]
+    #[error("request body exceeds {limit_bytes} decoded bytes")]
+    BodyTooLarge { limit_bytes: usize },
+    #[error("request content-encoding is not supported: {}", sanitize_error_detail(.0))]
     UnsupportedContentEncoding(String),
     #[error("proxy execution is not supported")]
     ProxyUnsupported,
-    #[error("invalid method: {0}")]
+    #[error("invalid method: {}", sanitize_error_detail(&.0.to_string()))]
     InvalidMethod(#[from] http::method::InvalidMethod),
-    #[error("invalid upstream header name: {0}")]
+    #[error("invalid upstream header name: {}", sanitize_error_detail(.0))]
     InvalidHeaderName(String),
-    #[error("invalid upstream header value for {0}")]
+    #[error("invalid upstream header value for {}", sanitize_error_detail(.0))]
     InvalidHeaderValue(String),
-    #[error("invalid proxy configuration: {0}")]
-    InvalidProxy(reqwest::Error),
-    #[error("unsupported transport profile backend: {0}")]
+    #[error("invalid proxy configuration")]
+    InvalidProxy(#[source] reqwest::Error),
+    #[error("unsupported transport profile backend: {}", sanitize_error_detail(.0))]
     UnsupportedTransportProfile(String),
-    #[error("failed to encode request body: {0}")]
-    BodyEncode(serde_json::Error),
-    #[error("failed to build HTTP client: {0}")]
-    ClientBuild(reqwest::Error),
-    #[error("failed to build browser impersonation HTTP client: {0}")]
-    BrowserClientBuild(wreq::Error),
-    #[error("browser impersonation response body failed: {0}")]
+    #[error("failed to encode request body")]
+    BodyEncode(#[source] serde_json::Error),
+    #[error("failed to build HTTP client")]
+    ClientBuild(#[source] reqwest::Error),
+    #[error("failed to build browser impersonation HTTP client")]
+    BrowserClientBuild(#[source] wreq::Error),
+    #[error("browser impersonation response body failed: {}", sanitize_error_detail(.0))]
     BrowserBody(String),
-    #[error("{message}")]
+    #[error("{}", sanitize_error_detail(message))]
     UpstreamHttpStatus { status_code: u16, message: String },
-    #[error("failed to execute upstream request: {0}")]
+    #[error("failed to execute upstream request: {}", sanitize_error_detail(.0))]
     UpstreamRequest(String),
     #[error("upstream response {phase} body exceeds {limit_bytes} bytes")]
     UpstreamResponseTooLarge {
         phase: UpstreamResponseBodyPhase,
         limit_bytes: usize,
     },
-    #[error("failed to decode upstream response body with content-encoding {encoding}: {message}")]
+    #[error(
+        "failed to decode upstream response body with content-encoding {}: {}",
+        sanitize_error_detail(encoding),
+        sanitize_error_detail(message)
+    )]
     UpstreamResponseDecode { encoding: String, message: String },
-    #[error("hub relay request failed: {0}")]
+    #[error("hub relay request failed: {}", sanitize_error_detail(.0))]
     RelayError(String),
     #[error("upstream response is not valid JSON: {0}")]
     InvalidJson(serde_json::Error),
+}
+
+// `reqwest::Error` and `wreq::Error` retain the URL associated with a failed
+// request.  Their derived `Debug` implementations therefore may include
+// proxy credentials or query-string tokens.  This error is logged with
+// structured `?error` fields in a few execution paths, so both `Debug` and
+// `Display` must be safe if a caller accidentally crosses that boundary.
+// Dynamic details are passed through the same URL-aware, bounded sanitizer
+// used by the upstream request formatters.
+impl std::fmt::Debug for ExecutionRuntimeTransportError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RequestBodyRequired => formatter.write_str("RequestBodyRequired"),
+            Self::RequestBodyAmbiguous => formatter.write_str("RequestBodyAmbiguous"),
+            Self::BodyDecode(error) => formatter
+                .debug_tuple("BodyDecode")
+                .field(&sanitize_error_detail(&error.to_string()))
+                .finish(),
+            Self::BodyTooLarge { limit_bytes } => formatter
+                .debug_struct("BodyTooLarge")
+                .field("limit_bytes", limit_bytes)
+                .finish(),
+            Self::UnsupportedContentEncoding(encoding) => formatter
+                .debug_tuple("UnsupportedContentEncoding")
+                .field(&sanitize_error_detail(encoding))
+                .finish(),
+            Self::ProxyUnsupported => formatter.write_str("ProxyUnsupported"),
+            Self::InvalidMethod(error) => formatter
+                .debug_tuple("InvalidMethod")
+                .field(&sanitize_error_detail(&error.to_string()))
+                .finish(),
+            Self::InvalidHeaderName(name) => formatter
+                .debug_tuple("InvalidHeaderName")
+                .field(&sanitize_error_detail(name))
+                .finish(),
+            Self::InvalidHeaderValue(name) => formatter
+                .debug_tuple("InvalidHeaderValue")
+                .field(&sanitize_error_detail(name))
+                .finish(),
+            Self::InvalidProxy(error) => formatter
+                .debug_tuple("InvalidProxy")
+                .field(&format_upstream_request_error(error))
+                .finish(),
+            Self::UnsupportedTransportProfile(profile) => formatter
+                .debug_tuple("UnsupportedTransportProfile")
+                .field(&sanitize_error_detail(profile))
+                .finish(),
+            Self::BodyEncode(error) => formatter
+                .debug_tuple("BodyEncode")
+                .field(&sanitize_error_detail(&error.to_string()))
+                .finish(),
+            Self::ClientBuild(error) => formatter
+                .debug_tuple("ClientBuild")
+                .field(&format_upstream_request_error(error))
+                .finish(),
+            Self::BrowserClientBuild(error) => formatter
+                .debug_tuple("BrowserClientBuild")
+                .field(&format_wreq_upstream_request_error(error))
+                .finish(),
+            Self::BrowserBody(detail) => formatter
+                .debug_tuple("BrowserBody")
+                .field(&sanitize_error_detail(detail))
+                .finish(),
+            Self::UpstreamHttpStatus {
+                status_code,
+                message,
+            } => formatter
+                .debug_struct("UpstreamHttpStatus")
+                .field("status_code", status_code)
+                .field("message", &sanitize_error_detail(message))
+                .finish(),
+            Self::UpstreamRequest(detail) => formatter
+                .debug_tuple("UpstreamRequest")
+                .field(&sanitize_error_detail(detail))
+                .finish(),
+            Self::UpstreamResponseTooLarge { phase, limit_bytes } => formatter
+                .debug_struct("UpstreamResponseTooLarge")
+                .field("phase", phase)
+                .field("limit_bytes", limit_bytes)
+                .finish(),
+            Self::UpstreamResponseDecode { encoding, message } => formatter
+                .debug_struct("UpstreamResponseDecode")
+                .field("encoding", &sanitize_error_detail(encoding))
+                .field("message", &sanitize_error_detail(message))
+                .finish(),
+            Self::RelayError(detail) => formatter
+                .debug_tuple("RelayError")
+                .field(&sanitize_error_detail(detail))
+                .finish(),
+            Self::InvalidJson(error) => formatter
+                .debug_tuple("InvalidJson")
+                .field(&sanitize_error_detail(&error.to_string()))
+                .finish(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -617,16 +946,19 @@ pub(crate) fn with_upstream_response_body_limit(
     limit_bytes: usize,
 ) -> ExecutionPlan {
     let mut bounded_plan = plan.clone();
+    apply_upstream_response_body_limit(&mut bounded_plan, limit_bytes);
     bounded_plan
-        .headers
+}
+
+pub(crate) fn apply_upstream_response_body_limit(plan: &mut ExecutionPlan, limit_bytes: usize) {
+    plan.headers
         .retain(|name, _| !name.eq_ignore_ascii_case(EXECUTION_RESPONSE_BODY_LIMIT_HEADER));
-    bounded_plan.headers.insert(
+    plan.headers.insert(
         EXECUTION_RESPONSE_BODY_LIMIT_HEADER.to_string(),
         normalize_scoped_response_body_limit(limit_bytes)
             .unwrap_or(DEFAULT_SCOPED_RESPONSE_BODY_LIMIT_BYTES)
             .to_string(),
     );
-    bounded_plan
 }
 
 pub(crate) fn execution_plan_response_body_limit_bytes(plan: &ExecutionPlan) -> usize {
@@ -688,6 +1020,140 @@ pub(crate) fn append_upstream_response_body_chunk_with_limit(
     Ok(())
 }
 
+/// Return the maximum base64 text length that can decode to at most
+/// `decoded_limit` bytes.  This is intentionally checked before invoking the
+/// base64 decoder, whose allocation is based on the input text length.
+pub(crate) fn maximum_base64_len_for_decoded_limit(decoded_limit: usize) -> usize {
+    decoded_limit
+        .checked_add(2)
+        .and_then(|value| value.checked_div(3))
+        .and_then(|value| value.checked_mul(4))
+        .unwrap_or(usize::MAX)
+}
+
+/// Decode a body carried in an execution plan/result only after enforcing a
+/// decoded-size bound.  Both representations are checked: the encoded check
+/// prevents an attacker-controlled allocation, while the decoded check covers
+/// padding and decoder edge cases.
+pub(crate) fn decode_base64_body_with_limit(
+    body_base64: &str,
+    decoded_limit: usize,
+) -> Result<Vec<u8>, ExecutionRuntimeTransportError> {
+    if body_base64.len() > maximum_base64_len_for_decoded_limit(decoded_limit) {
+        return Err(ExecutionRuntimeTransportError::BodyTooLarge {
+            limit_bytes: decoded_limit,
+        });
+    }
+
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(body_base64)
+        .map_err(ExecutionRuntimeTransportError::BodyDecode)?;
+    if bytes.len() > decoded_limit {
+        return Err(ExecutionRuntimeTransportError::BodyTooLarge {
+            limit_bytes: decoded_limit,
+        });
+    }
+    Ok(bytes)
+}
+
+struct JsonSerializedSizeLimiter {
+    remaining: usize,
+}
+
+impl Write for JsonSerializedSizeLimiter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if bytes.len() > self.remaining {
+            return Err(std::io::Error::other("serialized JSON exceeds limit"));
+        }
+        self.remaining -= bytes.len();
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+pub(crate) fn json_value_fits_serialized_limit(value: &Value, limit_bytes: usize) -> bool {
+    serde_json::to_writer(
+        JsonSerializedSizeLimiter {
+            remaining: limit_bytes,
+        },
+        value,
+    )
+    .is_ok()
+}
+
+/// Bound the JSON envelope used by the test/compatibility remote execution
+/// runtime.  A result can contain a raw JSON representation and a base64 wire
+/// representation at the same time, so the limit is larger than either body
+/// limit.  It remains capped even when the raw-body cap is explicitly
+/// disabled (`usize::MAX`).
+pub(crate) fn execution_result_envelope_limit_bytes(decoded_body_limit: usize) -> usize {
+    maximum_base64_len_for_decoded_limit(decoded_body_limit)
+        .saturating_add(decoded_body_limit)
+        .saturating_add(EXECUTION_RESULT_ENVELOPE_METADATA_BYTES)
+        .min(MAX_EXECUTION_RESULT_ENVELOPE_BYTES)
+}
+
+/// Serialize a JSON body without allowing serde_json to grow an unbounded
+/// temporary `Vec`.  The value itself is already owned by the execution plan;
+/// this bound covers the wire representation that will be sent upstream.
+pub(crate) fn serialize_json_body_with_limit(
+    body: &Value,
+    limit_bytes: usize,
+) -> Result<Vec<u8>, ExecutionRuntimeTransportError> {
+    serialize_serializable_with_limit(body, limit_bytes)
+}
+
+pub(crate) fn serialize_serializable_with_limit<T: Serialize>(
+    value: &T,
+    limit_bytes: usize,
+) -> Result<Vec<u8>, ExecutionRuntimeTransportError> {
+    let mut writer = LimitedJsonWriter::new(limit_bytes);
+    match serde_json::to_writer(&mut writer, value) {
+        Ok(()) => Ok(writer.bytes),
+        Err(_error) if writer.exceeded => {
+            Err(ExecutionRuntimeTransportError::BodyTooLarge { limit_bytes })
+        }
+        Err(error) => Err(ExecutionRuntimeTransportError::BodyEncode(error)),
+    }
+}
+
+struct LimitedJsonWriter {
+    bytes: Vec<u8>,
+    limit: usize,
+    exceeded: bool,
+}
+
+impl LimitedJsonWriter {
+    fn new(limit: usize) -> Self {
+        Self {
+            bytes: Vec::with_capacity(limit.min(16 * 1024)),
+            limit,
+            exceeded: false,
+        }
+    }
+}
+
+impl Write for LimitedJsonWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if bytes.len() > self.limit.saturating_sub(self.bytes.len()) {
+            self.exceeded = true;
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                "json body exceeds configured limit",
+            ));
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct RelayRequestMeta {
     provider_id: String,
@@ -718,7 +1184,6 @@ pub(crate) struct DirectSyncExecutionRuntime;
 pub(crate) struct ExecutionTransportControls {
     follow_redirects: Option<bool>,
     http1_only: bool,
-    accept_invalid_certs: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -735,11 +1200,50 @@ pub(crate) enum DirectUpstreamResponse {
     LocalTunnel(tunnel::DirectRelayResponse),
 }
 
+pub(crate) fn direct_upstream_response_byte_stream(
+    prefetched_body: VecDeque<Result<Bytes, String>>,
+    response: DirectUpstreamResponse,
+) -> futures_util::stream::BoxStream<'static, Result<Bytes, String>> {
+    let response_stream = match response {
+        DirectUpstreamResponse::Reqwest(response) => response
+            .bytes_stream()
+            .map(|item| item.map_err(|err| format_upstream_request_error(&err)))
+            .boxed(),
+        DirectUpstreamResponse::HyperH2c(response) => response
+            .into_body()
+            .into_data_stream()
+            .map(|item| item.map_err(|err| format_hyper_error_chain(&err)))
+            .boxed(),
+        DirectUpstreamResponse::BrowserWreq(response) => response
+            .bytes_stream()
+            .map(|item| item.map_err(|err| format_wreq_upstream_request_error(&err)))
+            .boxed(),
+        DirectUpstreamResponse::LocalTunnel(mut response) => async_stream::stream! {
+            loop {
+                match response.next_chunk().await {
+                    Ok(Some(chunk)) => yield Ok(chunk),
+                    Ok(None) => break,
+                    Err(err) => {
+                        yield Err(err);
+                        break;
+                    }
+                }
+            }
+        }
+        .boxed(),
+    };
+    let upstream = futures_util::stream::iter(prefetched_body).chain(response_stream);
+    crate::execution_runtime::stream_read_timeout::skip_empty_upstream_chunks(upstream).boxed()
+}
+
 pub(crate) struct DirectUpstreamStreamExecution {
     pub(crate) request_id: String,
     pub(crate) candidate_id: Option<String>,
     pub(crate) status_code: u16,
     pub(crate) headers: BTreeMap<String, String>,
+    /// The upstream length is retained for stream classification only.  The
+    /// hop-by-hop header itself remains filtered from the client-facing map.
+    pub(crate) upstream_content_length: Option<u64>,
     pub(crate) provider_api_format: String,
     pub(crate) stream_summary_report_context: Value,
     pub(crate) prefetched_body: VecDeque<Result<Bytes, String>>,
@@ -748,6 +1252,7 @@ pub(crate) struct DirectUpstreamStreamExecution {
     pub(crate) started_at: Instant,
     pub(crate) response_observation: ExecutionResponseObservation,
     pub(crate) stream_first_byte_timeout: Option<Duration>,
+    pub(crate) stream_idle_timeout: Option<Duration>,
     pub(crate) upstream_target_permit: Option<UpstreamTargetAdmissionPermit>,
 }
 
@@ -857,6 +1362,7 @@ impl DirectSyncExecutionRuntime {
             started_at.elapsed().as_millis() as u64,
         );
         let status_code = response.status_code();
+        let upstream_content_length = response.content_length();
         let headers = response.headers();
         let response_headers_observed_at_unix_ms = crate::clock::current_unix_ms();
 
@@ -867,6 +1373,7 @@ impl DirectSyncExecutionRuntime {
             candidate_id: plan.candidate_id.clone(),
             status_code,
             headers,
+            upstream_content_length,
             provider_api_format: plan.provider_api_format.clone(),
             stream_summary_report_context,
             prefetched_body: VecDeque::new(),
@@ -879,6 +1386,7 @@ impl DirectSyncExecutionRuntime {
                 request_order_id,
             },
             stream_first_byte_timeout: resolve_stream_first_byte_timeout(plan),
+            stream_idle_timeout: resolve_stream_idle_timeout(plan),
             upstream_target_permit: None,
         })
     }
@@ -917,7 +1425,7 @@ pub(crate) async fn execute_sync_plan_with_report_context(
     if resolve_local_tunnel_node_id(state, plan.proxy.as_ref()).is_some() {
         return execute_sync_plan_via_local_tunnel(state, plan, report_context)
             .await
-            .map_err(|err| GatewayError::Internal(err.to_string()));
+            .map_err(|err| GatewayError::Internal(safe_transport_error_message(&err)));
     }
 
     match super::grok::maybe_execute_grok_sync(plan, report_context).await {
@@ -928,7 +1436,7 @@ pub(crate) async fn execute_sync_plan_with_report_context(
         Ok(None) => {}
         Err(err) => {
             record_manual_proxy_request_failure(state, plan).await;
-            return Err(GatewayError::Internal(err.to_string()));
+            return Err(GatewayError::Internal(safe_transport_error_message(&err)));
         }
     }
 
@@ -936,7 +1444,7 @@ pub(crate) async fn execute_sync_plan_with_report_context(
     match maybe_execute_windsurf_sync(state, plan, None).await {
         Ok(Some(result)) => return Ok(result),
         Ok(None) => {}
-        Err(err) => return Err(GatewayError::Internal(err.to_string())),
+        Err(err) => return Err(GatewayError::Internal(safe_transport_error_message(&err))),
     }
     let state_for_response_started = state.clone();
     match DirectSyncExecutionRuntime::new()
@@ -962,7 +1470,7 @@ pub(crate) async fn execute_sync_plan_with_report_context(
         }
         Err(err) => {
             record_manual_proxy_request_failure(state, plan).await;
-            Err(GatewayError::Internal(err.to_string()))
+            Err(GatewayError::Internal(safe_transport_error_message(&err)))
         }
     }
 }
@@ -975,6 +1483,7 @@ pub(crate) async fn execute_stream_plan_via_local_tunnel(
         return Ok(None);
     };
 
+    validate_execution_upstream_url(plan.url.as_str())?;
     if let Some(detail) = gateway_frontdoor_self_loop_guard_error(plan.url.as_str()) {
         return Err(ExecutionRuntimeTransportError::UpstreamRequest(detail));
     }
@@ -999,6 +1508,11 @@ pub(crate) async fn execute_stream_plan_via_local_tunnel(
         .await
         .map_err(ExecutionRuntimeTransportError::RelayError)?;
     let status_code = response.status();
+    let upstream_content_length = response
+        .headers()
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+        .and_then(|(_, value)| value.trim().parse::<u64>().ok());
     let headers = collect_tunnel_response_headers(response.headers());
     let response_headers_observed_at_unix_ms = crate::clock::current_unix_ms();
 
@@ -1007,6 +1521,7 @@ pub(crate) async fn execute_stream_plan_via_local_tunnel(
         candidate_id: plan.candidate_id.clone(),
         status_code,
         headers,
+        upstream_content_length,
         provider_api_format: plan.provider_api_format.clone(),
         stream_summary_report_context: build_stream_summary_report_context(plan),
         prefetched_body: VecDeque::new(),
@@ -1019,6 +1534,7 @@ pub(crate) async fn execute_stream_plan_via_local_tunnel(
             request_order_id,
         },
         stream_first_byte_timeout: resolve_stream_first_byte_timeout(plan),
+        stream_idle_timeout: resolve_stream_idle_timeout(plan),
         upstream_target_permit: None,
     }))
 }
@@ -1061,11 +1577,14 @@ async fn record_manual_proxy_traffic(
     dns_failures_delta: i64,
     stream_errors_delta: i64,
 ) {
-    let Some(node_id) = manual_proxy_node_id(plan.proxy.as_ref()) else {
+    let Some((node_id, expected_tunnel_generation)) =
+        manual_proxy_node_binding(plan.proxy.as_ref())
+    else {
         return;
     };
     let mutation = ProxyNodeTrafficMutation {
         node_id: node_id.clone(),
+        expected_tunnel_generation: Some(expected_tunnel_generation),
         total_requests_delta,
         failed_requests_delta,
         dns_failures_delta,
@@ -1081,17 +1600,26 @@ async fn record_manual_proxy_traffic(
     }
 }
 
-fn manual_proxy_node_id(proxy: Option<&ProxySnapshot>) -> Option<String> {
+fn manual_proxy_node_binding(proxy: Option<&ProxySnapshot>) -> Option<(String, String)> {
     let proxy = proxy?;
     if proxy.enabled == Some(false) || resolve_tunnel_node_id(Some(proxy)).is_some() {
         return None;
     }
-    proxy
+    let node_id = proxy
         .node_id
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
+        .map(ToOwned::to_owned)?;
+    let expected_tunnel_generation = proxy
+        .extra
+        .as_ref()
+        .and_then(|extra| extra.get(PROXY_NODE_TUNNEL_GENERATION_EXTRA_KEY))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)?;
+    Some((node_id, expected_tunnel_generation))
 }
 
 async fn execute_sync_plan_via_local_tunnel(
@@ -1114,6 +1642,7 @@ async fn execute_sync_plan_via_local_tunnel_inner(
     let node_id = resolve_local_tunnel_node_id(state, plan.proxy.as_ref()).ok_or_else(|| {
         ExecutionRuntimeTransportError::RelayError("local tunnel node unavailable".to_string())
     })?;
+    validate_execution_upstream_url(plan.url.as_str())?;
     if let Some(detail) = gateway_frontdoor_self_loop_guard_error(plan.url.as_str()) {
         return Err(ExecutionRuntimeTransportError::UpstreamRequest(detail));
     }
@@ -1311,6 +1840,7 @@ async fn send_request_inner(
     body_bytes: Vec<u8>,
     apply_request_total_timeout: bool,
 ) -> Result<DirectHttpResponse, ExecutionRuntimeTransportError> {
+    validate_execution_upstream_url(plan.url.as_str())?;
     if let Some(detail) = gateway_frontdoor_self_loop_guard_error(plan.url.as_str()) {
         return Err(ExecutionRuntimeTransportError::UpstreamRequest(detail));
     }
@@ -1430,12 +1960,21 @@ impl DirectHttpResponse {
         }
     }
 
+    pub(crate) fn content_length(&self) -> Option<u64> {
+        let value = match self {
+            DirectHttpResponse::Reqwest(response) => response.headers().get("content-length"),
+            DirectHttpResponse::HyperH2c(response) => response.headers().get("content-length"),
+            DirectHttpResponse::BrowserWreq(response) => response.headers().get("content-length"),
+        }?;
+        value.to_str().ok()?.trim().parse::<u64>().ok()
+    }
+
     pub(crate) async fn bytes(self) -> Result<Bytes, ExecutionRuntimeTransportError> {
         self.bytes_with_limit(crate::headers::max_internal_buffered_body_bytes())
             .await
     }
 
-    async fn bytes_with_limit(
+    pub(crate) async fn bytes_with_limit(
         self,
         response_body_limit_bytes: usize,
     ) -> Result<Bytes, ExecutionRuntimeTransportError> {
@@ -1653,7 +2192,6 @@ fn direct_h2c_fast_path_applies(
     if !direct_h2c_fast_path_enabled()
         || !plan.stream
         || transport_controls.http1_only
-        || transport_controls.accept_invalid_certs
         || plan.proxy.is_some()
         || !transport_profile_h2c_prior_knowledge(plan.transport_profile.as_ref())
     {
@@ -1741,7 +2279,7 @@ async fn prewarm_direct_h2c_sender_cache_urls(
                     .prewarm_failed
                     .fetch_add(1, Ordering::Relaxed);
                 if first_error.is_none() {
-                    first_error = Some(err.to_string());
+                    first_error = Some(safe_transport_error_message(&err));
                 }
             }
         }
@@ -1899,10 +2437,14 @@ fn direct_h2c_client_cache_key(
     request_url: &str,
     timeouts: Option<&aether_contracts::ExecutionTimeouts>,
 ) -> Result<DirectHyperH2cClientCacheKey, ExecutionRuntimeTransportError> {
+    if reqwest::Url::parse(request_url).is_err() {
+        return Err(ExecutionRuntimeTransportError::UpstreamRequest(
+            "invalid h2c upstream origin".to_string(),
+        ));
+    }
+    validate_execution_upstream_url(request_url)?;
     let upstream_origin = direct_reqwest_upstream_origin(request_url).ok_or_else(|| {
-        ExecutionRuntimeTransportError::UpstreamRequest(format!(
-            "invalid h2c upstream origin: {request_url}"
-        ))
+        ExecutionRuntimeTransportError::UpstreamRequest("invalid h2c upstream origin".to_string())
     })?;
     Ok(DirectHyperH2cClientCacheKey {
         upstream_origin,
@@ -1961,52 +2503,56 @@ async fn connect_direct_h2c_sender_on_current_runtime(
     cache_key: &DirectHyperH2cClientCacheKey,
 ) -> Result<DirectHyperH2cSender, ExecutionRuntimeTransportError> {
     let upstream = reqwest::Url::parse(&cache_key.upstream_origin).map_err(|err| {
-        ExecutionRuntimeTransportError::UpstreamRequest(format!(
-            "invalid h2c upstream origin {}: {err}",
-            cache_key.upstream_origin
-        ))
+        tracing::debug!(error = %err, "invalid direct h2c upstream origin");
+        ExecutionRuntimeTransportError::UpstreamRequest("invalid h2c upstream origin".to_string())
     })?;
     let host = upstream.host_str().ok_or_else(|| {
-        ExecutionRuntimeTransportError::UpstreamRequest(format!(
-            "missing h2c upstream host: {}",
-            cache_key.upstream_origin
-        ))
+        ExecutionRuntimeTransportError::UpstreamRequest("missing h2c upstream host".to_string())
     })?;
     let port = upstream.port_or_known_default().ok_or_else(|| {
-        ExecutionRuntimeTransportError::UpstreamRequest(format!(
-            "missing h2c upstream port: {}",
-            cache_key.upstream_origin
-        ))
+        ExecutionRuntimeTransportError::UpstreamRequest("missing h2c upstream port".to_string())
     })?;
-    let connect = TcpStream::connect((host, port));
+    let addresses = resolve_execution_target_addresses_with_policy(host, port, true)
+        .await
+        .map_err(|error| {
+            let message = if error.kind() == std::io::ErrorKind::PermissionDenied {
+                "h2c upstream DNS resolution returned a private or reserved address"
+            } else {
+                "h2c upstream DNS resolution failed"
+            };
+            ExecutionRuntimeTransportError::UpstreamRequest(message.to_string())
+        })?;
+    // Passing concrete socket addresses prevents TcpStream from performing a
+    // second hostname lookup after the validated DNS answer.
+    let connect = TcpStream::connect(addresses.as_slice());
     let stream = if let Some(timeout_ms) = cache_key.connect_timeout_ms {
         let timeout = Duration::from_millis(timeout_ms);
         tokio::time::timeout(timeout, connect)
             .await
             .map_err(|_| {
-                ExecutionRuntimeTransportError::UpstreamRequest(stream_first_byte_timeout_message(
+                ExecutionRuntimeTransportError::UpstreamRequest(direct_h2c_connect_timeout_message(
                     timeout,
                 ))
             })?
             .map_err(|err| {
-                ExecutionRuntimeTransportError::UpstreamRequest(format!(
-                    "failed to connect h2c upstream {}: {err}",
-                    cache_key.upstream_origin
-                ))
+                tracing::debug!(error = %err, "failed to connect direct h2c upstream");
+                ExecutionRuntimeTransportError::UpstreamRequest(
+                    "failed to connect h2c upstream".to_string(),
+                )
             })?
     } else {
         connect.await.map_err(|err| {
-            ExecutionRuntimeTransportError::UpstreamRequest(format!(
-                "failed to connect h2c upstream {}: {err}",
-                cache_key.upstream_origin
-            ))
+            tracing::debug!(error = %err, "failed to connect direct h2c upstream");
+            ExecutionRuntimeTransportError::UpstreamRequest(
+                "failed to connect h2c upstream".to_string(),
+            )
         })?
     };
     stream.set_nodelay(true).map_err(|err| {
-        ExecutionRuntimeTransportError::UpstreamRequest(format!(
-            "failed to configure h2c upstream socket {}: {err}",
-            cache_key.upstream_origin
-        ))
+        tracing::debug!(error = %err, "failed to configure direct h2c upstream socket");
+        ExecutionRuntimeTransportError::UpstreamRequest(
+            "failed to configure h2c upstream socket".to_string(),
+        )
     })?;
     let io = TokioIo::new(stream);
     let mut builder = hyper::client::conn::http2::Builder::new(TokioExecutor::new());
@@ -2079,7 +2625,7 @@ fn cached_direct_h2c_client(
 fn build_direct_h2c_client_from_cache_key(
     cache_key: &DirectHyperH2cClientCacheKey,
 ) -> DirectHyperH2cClient {
-    let mut connector = HttpConnector::new();
+    let mut connector = HttpConnector::new_with_resolver(ExecutionSafeHyperDnsResolver);
     connector.enforce_http(true);
     connector.set_nodelay(true);
     connector.set_connect_timeout(cache_key.connect_timeout_ms.map(Duration::from_millis));
@@ -2088,6 +2634,8 @@ fn build_direct_h2c_client_from_cache_key(
     builder.http2_only(true);
     builder.http2_adaptive_window(true);
     builder.pool_max_idle_per_host(cache_key.pool_max_idle_per_host);
+    builder.pool_timer(TokioTimer::new());
+    builder.pool_idle_timeout(Duration::from_millis(upstream_pool_idle_timeout_ms()));
     builder.build(connector)
 }
 
@@ -2205,8 +2753,8 @@ async fn send_via_direct_h2c_fast_path(
     );
 
     let request_build_started_at = Instant::now();
-    let uri = plan.url.parse::<hyper::Uri>().map_err(|err| {
-        ExecutionRuntimeTransportError::UpstreamRequest(format!("invalid h2c upstream uri: {err}"))
+    let uri = plan.url.parse::<hyper::Uri>().map_err(|_| {
+        ExecutionRuntimeTransportError::UpstreamRequest("invalid h2c upstream uri".to_string())
     })?;
     let authority = uri
         .authority()
@@ -2329,6 +2877,13 @@ fn direct_h2c_remaining_timeout(deadline: Instant) -> Option<Duration> {
     deadline.checked_duration_since(Instant::now())
 }
 
+fn direct_h2c_connect_timeout_message(timeout: Duration) -> String {
+    format!(
+        "direct h2c upstream connect timeout after {} ms",
+        timeout.as_millis()
+    )
+}
+
 async fn send_via_browser_wreq_transport(
     plan: &ExecutionPlan,
     method: reqwest::Method,
@@ -2342,8 +2897,18 @@ async fn send_via_browser_wreq_transport(
     let profile = plan.transport_profile.as_ref().ok_or_else(|| {
         ExecutionRuntimeTransportError::UnsupportedTransportProfile(String::new())
     })?;
+    let mut client_timeouts = plan.timeouts.clone();
+    if plan.stream {
+        if let Some(timeouts) = client_timeouts.as_mut() {
+            // Streamed responses use the shared idle reader; sync collectors retain
+            // their existing client read timeout. Zero explicitly disables either.
+            if apply_request_total_timeout || timeouts.read_ms == Some(0) {
+                timeouts.read_ms = None;
+            }
+        }
+    }
     let client = build_browser_wreq_client(
-        plan.timeouts.as_ref(),
+        client_timeouts.as_ref(),
         plan.proxy.as_ref(),
         profile,
         transport_controls,
@@ -2373,8 +2938,12 @@ async fn send_via_tunnel_relay(
     stream_first_byte_timeout: Option<Duration>,
     transport_controls: ExecutionTransportControls,
 ) -> Result<reqwest::Response, ExecutionRuntimeTransportError> {
-    let client = build_relay_client(plan.timeouts.as_ref())?;
-    let relay_url = build_relay_url(plan.proxy.as_ref(), node_id);
+    let relay_url = build_relay_url(plan.proxy.as_ref(), node_id)?;
+    let (relay_host, relay_addresses) = resolve_relay_target_addresses(&relay_url).await?;
+    let client = build_relay_client_with_pinned_target(
+        plan.timeouts.as_ref(),
+        Some((&relay_host, &relay_addresses)),
+    )?;
     let timeout_metadata = resolve_tunnel_timeout_metadata(plan);
     let timeout_secs = timeout_metadata.legacy_timeout_secs;
     let envelope = build_relay_envelope(
@@ -2406,17 +2975,29 @@ async fn send_via_tunnel_relay(
         node_id,
         path = "tunnel_relay",
         body_bytes_len = body_bytes.len(),
-        envelope_bytes_len = envelope.len(),
+        envelope_bytes_len = envelope.body.len(),
         timeout_secs,
         follow_redirects = ?transport_controls.follow_redirects,
         http1_only = transport_controls.http1_only,
         "gateway execution runtime tunnel relay request prepared"
     );
 
-    let mut request = client
-        .request(reqwest::Method::POST, relay_url)
-        .header(reqwest::header::CONTENT_TYPE, HUB_RELAY_CONTENT_TYPE)
-        .body(envelope);
+    let relay_auth = resolve_tunnel_owner_instance_id(plan.proxy.as_ref())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(tunnel::resolve_tunnel_instance_id);
+    let relay_auth = tunnel::build_relay_auth_headers_from_environment(
+        &relay_auth,
+        node_id,
+        envelope.metadata_envelope(),
+        envelope.request_body(),
+    )
+    .map_err(ExecutionRuntimeTransportError::RelayError)?;
+    let mut request = relay_auth.apply(
+        client
+            .request(reqwest::Method::POST, relay_url)
+            .header(reqwest::header::CONTENT_TYPE, HUB_RELAY_CONTENT_TYPE)
+            .body(envelope.body),
+    );
     if !plan.stream {
         if let Some(timeout) = total_timeout {
             request = request.timeout(timeout);
@@ -2472,12 +3053,13 @@ async fn send_via_tunnel_relay(
         );
     }
 
-    if let Some(kind) = response
+    if let Some(raw_kind) = response
         .headers()
         .get(HUB_RELAY_ERROR_HEADER)
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned)
     {
+        let kind = sanitize_relay_error_kind(&raw_kind);
         tracing::warn!(
             request_id = %plan.request_id,
             provider_id = %plan.provider_id,
@@ -2492,35 +3074,59 @@ async fn send_via_tunnel_relay(
             error_kind = %kind,
             "gateway execution runtime tunnel relay returned relay error"
         );
-        let response_headers = collect_response_headers(response.headers());
         let response_body_limit_bytes = execution_plan_response_body_limit_bytes(plan);
-        let (wire_body, _) =
-            collect_reqwest_stream_body(response, Instant::now(), None, response_body_limit_bytes)
-                .await
-                .map_err(|error| {
-                    ExecutionRuntimeTransportError::RelayError(format!(
-                        "hub relay error: {kind}: bounded error body read failed: {error}"
-                    ))
-                })?;
-        let decoded_body = decode_response_body_bytes_with_limit(
-            &response_headers,
-            &wire_body,
-            response_body_limit_bytes,
-        )
-        .map_err(|error| {
-            ExecutionRuntimeTransportError::RelayError(format!(
-                "hub relay error: {kind}: bounded error body decode failed: {error}"
-            ))
-        })?;
-        let message = if decoded_body.is_empty() {
-            format!("hub relay error: {kind}")
+        let drain_timeout = stream_first_byte_timeout.or(total_timeout);
+        let drain =
+            collect_reqwest_stream_body(response, Instant::now(), None, response_body_limit_bytes);
+        let drain_result = if let Some(timeout) = drain_timeout {
+            match tokio::time::timeout(timeout, drain).await {
+                Ok(result) => result,
+                Err(_) => Err(ExecutionRuntimeTransportError::UpstreamRequest(
+                    "tunnel relay error body drain timeout".to_string(),
+                )),
+            }
         } else {
-            String::from_utf8_lossy(decoded_body.as_ref()).into_owned()
+            // There is no configured budget to drain an untrusted error body;
+            // dropping the response cancels the body stream instead of waiting
+            // indefinitely for a peer that never terminates it.
+            drop(drain);
+            Err(ExecutionRuntimeTransportError::UpstreamRequest(
+                "tunnel relay error body drain skipped".to_string(),
+            ))
         };
-        return Err(ExecutionRuntimeTransportError::RelayError(message));
+        match drain_result {
+            Ok((body, _)) => {
+                // Consume the bounded body so the connection can be reused,
+                // but never propagate relay/upstream text across the error
+                // boundary.  The body length is sufficient for diagnostics.
+                tracing::debug!(
+                    error_kind = %kind,
+                    error_body_bytes = body.len(),
+                    "discarded tunnel relay error body"
+                );
+            }
+            Err(error) => {
+                tracing::debug!(
+                    error_kind = %kind,
+                    drain_error_kind = %relay_body_drain_error_kind(&error),
+                    "failed to consume tunnel relay error body"
+                );
+            }
+        }
+        return Err(ExecutionRuntimeTransportError::RelayError(format!(
+            "hub relay error: {kind}"
+        )));
     }
 
     Ok(response)
+}
+
+fn relay_body_drain_error_kind(error: &ExecutionRuntimeTransportError) -> &'static str {
+    match error {
+        ExecutionRuntimeTransportError::UpstreamResponseTooLarge { .. } => "too_large",
+        ExecutionRuntimeTransportError::UpstreamRequest(_) => "request",
+        _ => "unknown",
+    }
 }
 
 async fn send_relay_request(
@@ -2530,23 +3136,60 @@ async fn send_relay_request(
     if let Some(timeout) = first_byte_timeout {
         return match tokio::time::timeout(timeout, request.send()).await {
             Ok(Ok(response)) => Ok(response),
-            Ok(Err(error)) => Err(error.to_string()),
+            Ok(Err(error)) => Err(format_relay_request_error(&error)),
             Err(_) => Err("tunnel relay first byte timeout".to_string()),
         };
     }
 
-    request.send().await.map_err(|err| err.to_string())
+    request
+        .send()
+        .await
+        .map_err(|error| format_relay_request_error(&error))
+}
+
+fn sanitize_relay_error_kind(raw_kind: &str) -> String {
+    // The relay is outside this process' trust boundary.  Do not merely strip
+    // punctuation: a value such as `https://user:secret@example.invalid`
+    // would still carry the secret after character filtering.  Relay errors
+    // are a small protocol enum, so only accept the categories emitted by the
+    // embedded relay and collapse everything else to a stable value.
+    let normalized = raw_kind.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "overloaded" | "forbidden" | "connect" | "relay" | "timeout" => normalized,
+        _ => "unknown".to_string(),
+    }
+}
+
+fn format_relay_request_error(error: &reqwest::Error) -> String {
+    let kind = if error.is_timeout() {
+        "timeout"
+    } else if error.is_connect() {
+        "connect"
+    } else if error.is_request() {
+        "request"
+    } else if error.is_redirect() {
+        "redirect"
+    } else if error.is_body() {
+        "body"
+    } else if error.is_decode() {
+        "decode"
+    } else {
+        "unknown"
+    };
+    format!("tunnel relay request failed [kind={kind}]")
 }
 
 pub(crate) fn build_request_body(
     plan: &ExecutionPlan,
 ) -> Result<Vec<u8>, ExecutionRuntimeTransportError> {
-    let mut body_bytes = if let Some(json_body) = plan.body.json_body.clone() {
-        serde_json::to_vec(&json_body).map_err(ExecutionRuntimeTransportError::BodyEncode)?
+    if plan.body.json_body.is_some() && plan.body.body_bytes_b64.is_some() {
+        return Err(ExecutionRuntimeTransportError::RequestBodyAmbiguous);
+    }
+    let body_limit = crate::headers::max_internal_buffered_body_bytes();
+    let mut body_bytes = if let Some(json_body) = plan.body.json_body.as_ref() {
+        serialize_json_body_with_limit(json_body, body_limit)?
     } else if let Some(body_b64) = plan.body.body_bytes_b64.as_deref() {
-        base64::engine::general_purpose::STANDARD
-            .decode(body_b64)
-            .map_err(ExecutionRuntimeTransportError::BodyDecode)?
+        decode_base64_body_with_limit(body_b64, body_limit)?
     } else {
         Vec::new()
     };
@@ -2587,43 +3230,164 @@ fn zstd_bytes(body_bytes: &[u8]) -> Result<Vec<u8>, ExecutionRuntimeTransportErr
 fn build_relay_client(
     timeouts: Option<&aether_contracts::ExecutionTimeouts>,
 ) -> Result<reqwest::Client, ExecutionRuntimeTransportError> {
+    build_relay_client_with_pinned_target(timeouts, None)
+}
+
+fn build_relay_client_with_pinned_target(
+    timeouts: Option<&aether_contracts::ExecutionTimeouts>,
+    pinned_target: Option<(&str, &[SocketAddr])>,
+) -> Result<reqwest::Client, ExecutionRuntimeTransportError> {
     let builder = apply_http_client_config(
-        reqwest::Client::builder(),
+        reqwest::Client::builder()
+            .no_proxy()
+            .redirect(Policy::none()),
         &HttpClientConfig {
             connect_timeout_ms: timeouts.and_then(|timeouts| timeouts.connect_ms),
             use_rustls_tls: false,
             ..HttpClientConfig::default()
         },
     );
+    let builder = if let Some((host, addresses)) = pinned_target {
+        builder.resolve_to_addrs(host, addresses)
+    } else {
+        builder
+    };
     builder
         .build()
         .map_err(ExecutionRuntimeTransportError::ClientBuild)
 }
 
+async fn resolve_relay_target_addresses(
+    relay_url: &str,
+) -> Result<(String, Vec<SocketAddr>), ExecutionRuntimeTransportError> {
+    let url = reqwest::Url::parse(relay_url).map_err(|_| {
+        ExecutionRuntimeTransportError::RelayError("invalid tunnel relay URL".to_string())
+    })?;
+    validate_relay_target_url(&url)?;
+    let host = url.host_str().ok_or_else(|| {
+        ExecutionRuntimeTransportError::RelayError("tunnel relay URL has no host".to_string())
+    })?;
+    let port = url.port_or_known_default().ok_or_else(|| {
+        ExecutionRuntimeTransportError::RelayError("tunnel relay URL has no port".to_string())
+    })?;
+    let addresses = resolve_execution_target_addresses_with_policy(host, port, false)
+        .await
+        .map_err(|error| match error.kind() {
+            std::io::ErrorKind::PermissionDenied => ExecutionRuntimeTransportError::RelayError(
+                "tunnel relay DNS resolution returned a private or reserved address".to_string(),
+            ),
+            std::io::ErrorKind::NotFound => ExecutionRuntimeTransportError::RelayError(
+                "tunnel relay DNS resolution returned no addresses".to_string(),
+            ),
+            _ => ExecutionRuntimeTransportError::RelayError(
+                "tunnel relay DNS resolution failed".to_string(),
+            ),
+        })?;
+    Ok((host.to_string(), addresses))
+}
+
+fn validate_relay_target_url(url: &url::Url) -> Result<(), ExecutionRuntimeTransportError> {
+    tunnel::validate_tunnel_relay_transport_url(url)
+        .map_err(ExecutionRuntimeTransportError::RelayError)?;
+    if url.query().is_some() || url.fragment().is_some() {
+        return Err(ExecutionRuntimeTransportError::RelayError(
+            "tunnel relay URL must not include a query or fragment".to_string(),
+        ));
+    }
+
+    let host = url.host_str().ok_or_else(|| {
+        ExecutionRuntimeTransportError::RelayError("tunnel relay URL has no host".to_string())
+    })?;
+    let explicit_loopback = dns_host_explicitly_allows_loopback(host);
+    // Relay credentials and envelopes must never be sent to a private target.
+    // Local relays are an explicit exception, and are intentionally plain HTTP
+    // so an operator cannot mistake a loopback TLS endpoint for a trusted peer.
+    if explicit_loopback && url.scheme() != "http" {
+        return Err(ExecutionRuntimeTransportError::RelayError(
+            "loopback tunnel relay URL must use HTTP".to_string(),
+        ));
+    }
+    if let Some(ip) = match url.host() {
+        Some(url::Host::Ipv4(address)) => Some(IpAddr::V4(address)),
+        Some(url::Host::Ipv6(address)) => Some(IpAddr::V6(address)),
+        _ => None,
+    } {
+        if is_private_or_reserved_ip(ip) && !(url.scheme() == "http" && ip.is_loopback()) {
+            return Err(ExecutionRuntimeTransportError::RelayError(
+                "tunnel relay URL must not target a private or reserved address".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+struct RelayEnvelope {
+    body: Vec<u8>,
+    metadata_len: usize,
+}
+
+impl RelayEnvelope {
+    fn metadata_envelope(&self) -> &[u8] {
+        &self.body[..self.metadata_len]
+    }
+
+    fn request_body(&self) -> &[u8] {
+        &self.body[self.metadata_len..]
+    }
+}
+
 fn build_relay_envelope(
     meta: RelayRequestMeta,
     body_bytes: &[u8],
-) -> Result<Vec<u8>, ExecutionRuntimeTransportError> {
+) -> Result<RelayEnvelope, ExecutionRuntimeTransportError> {
     let meta_bytes =
-        serde_json::to_vec(&meta).map_err(ExecutionRuntimeTransportError::BodyEncode)?;
-    let mut envelope = Vec::with_capacity(4 + meta_bytes.len() + body_bytes.len());
-    envelope.extend_from_slice(&(meta_bytes.len() as u32).to_be_bytes());
+        serialize_serializable_with_limit(&meta, MAX_TUNNEL_RELAY_META_LEN).map_err(|error| {
+            match error {
+                ExecutionRuntimeTransportError::BodyTooLarge { .. } => {
+                    ExecutionRuntimeTransportError::RelayError(
+                        "tunnel relay metadata exceeds configured limit".to_string(),
+                    )
+                }
+                other => other,
+            }
+        })?;
+    let metadata_len_u32 = u32::try_from(meta_bytes.len()).map_err(|_| {
+        ExecutionRuntimeTransportError::RelayError("tunnel relay metadata too large".to_string())
+    })?;
+    let envelope_capacity = 4usize
+        .checked_add(meta_bytes.len())
+        .and_then(|value| value.checked_add(body_bytes.len()))
+        .ok_or_else(|| {
+            ExecutionRuntimeTransportError::RelayError(
+                "tunnel relay envelope too large".to_string(),
+            )
+        })?;
+    let mut envelope = Vec::with_capacity(envelope_capacity);
+    envelope.extend_from_slice(&metadata_len_u32.to_be_bytes());
     envelope.extend_from_slice(&meta_bytes);
+    let metadata_len = envelope.len();
     envelope.extend_from_slice(body_bytes);
-    Ok(envelope)
+    Ok(RelayEnvelope {
+        body: envelope,
+        metadata_len,
+    })
 }
 
-fn build_relay_url(proxy: Option<&ProxySnapshot>, node_id: &str) -> String {
+fn build_relay_url(
+    proxy: Option<&ProxySnapshot>,
+    node_id: &str,
+) -> Result<String, ExecutionRuntimeTransportError> {
     let base_url = proxy
         .and_then(resolve_tunnel_base_url_from_proxy)
         .or_else(|| std::env::var("AETHER_TUNNEL_BASE_URL").ok())
         .unwrap_or_else(configured_gateway_frontdoor_base_url);
-    format!(
-        "{}{}/{}",
-        base_url.trim_end_matches('/'),
-        TUNNEL_RELAY_PATH_PREFIX,
-        node_id
-    )
+    let relay_url = tunnel::build_tunnel_owner_relay_url(&base_url, node_id)
+        .map_err(ExecutionRuntimeTransportError::RelayError)?;
+    let parsed = reqwest::Url::parse(&relay_url).map_err(|_| {
+        ExecutionRuntimeTransportError::RelayError("invalid tunnel relay URL".to_string())
+    })?;
+    validate_relay_target_url(&parsed)?;
+    Ok(relay_url)
 }
 
 fn resolve_tunnel_base_url_from_proxy(proxy: &ProxySnapshot) -> Option<String> {
@@ -2633,6 +3397,16 @@ fn resolve_tunnel_base_url_from_proxy(proxy: &ProxySnapshot) -> Option<String> {
         return Some(value.to_string());
     }
     None
+}
+
+fn resolve_tunnel_owner_instance_id(proxy: Option<&ProxySnapshot>) -> Option<&str> {
+    proxy?
+        .extra
+        .as_ref()?
+        .get("tunnel_owner_instance_id")?
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
 }
 
 fn resolve_relay_timeout_seconds(plan: &ExecutionPlan) -> u64 {
@@ -2860,11 +3634,11 @@ fn build_client(
         request_url,
         key_id,
         timeouts,
-        resolved_proxy_url,
+        resolved_proxy_url.clone(),
         transport_profile,
         transport_controls,
     );
-    cached_direct_reqwest_client(cache_key)
+    cached_direct_reqwest_client(cache_key, resolved_proxy_url)
 }
 
 fn direct_reqwest_effective_transport_controls(
@@ -2900,7 +3674,7 @@ pub(crate) fn prewarm_direct_reqwest_client_cache_for_plan(plan: &ExecutionPlan)
         Ok(false) => {}
         Err(err) => {
             tracing::debug!(
-                error = ?err,
+                error = %sanitize_error_detail(&err.to_string()),
                 request_id = %plan.request_id,
                 candidate_id = ?plan.candidate_id,
                 provider_id = %plan.provider_id,
@@ -2938,17 +3712,19 @@ fn try_prewarm_direct_reqwest_client_cache_for_plan(
         &plan.url,
         &plan.key_id,
         plan.timeouts.as_ref(),
-        resolved_proxy_url,
+        resolved_proxy_url.clone(),
         plan.transport_profile.as_ref(),
         transport_controls,
     );
-    prewarm_direct_reqwest_client_cache(cache_key)?;
+    prewarm_direct_reqwest_client_cache(cache_key, resolved_proxy_url)?;
     Ok(true)
 }
 
 fn prewarm_direct_reqwest_client_cache(
     cache_key: DirectReqwestClientCacheKey,
+    proxy_url: Option<String>,
 ) -> Result<(), ExecutionRuntimeTransportError> {
+    validate_direct_reqwest_proxy_material(&cache_key, proxy_url.as_deref())?;
     let mut warm_after_unlock = None;
     let cache_lock_started_at = Instant::now();
     if let Ok(mut cache) = DIRECT_REQWEST_CLIENT_CACHE.lock() {
@@ -2957,14 +3733,21 @@ fn prewarm_direct_reqwest_client_cache(
             cache_lock_started_at.elapsed().as_millis() as u64,
         );
         if let Some(entry) = cache.get_mut(&cache_key) {
+            entry.touch();
             if entry.should_warm() {
                 entry.warming = true;
-                warm_after_unlock = Some((cache_key.clone(), entry.len(), entry.target_len));
+                warm_after_unlock = Some((
+                    cache_key.clone(),
+                    proxy_url.clone(),
+                    entry.len(),
+                    entry.target_len,
+                ));
             }
             drop(cache);
-            if let Some((cache_key, existing_len, target_len)) = warm_after_unlock {
+            if let Some((cache_key, proxy_url, existing_len, target_len)) = warm_after_unlock {
                 let spawned = spawn_direct_reqwest_client_cache_warm(
                     cache_key.clone(),
+                    proxy_url,
                     existing_len,
                     target_len,
                 );
@@ -2979,7 +3762,10 @@ fn prewarm_direct_reqwest_client_cache(
         let initial_len = direct_reqwest_prewarm_client_shard_count(target_len);
         let mut clients = Vec::with_capacity(initial_len);
         for _ in 0..initial_len {
-            clients.push(build_direct_reqwest_client_from_cache_key(&cache_key)?);
+            clients.push(build_direct_reqwest_client_from_cache_key(
+                &cache_key,
+                proxy_url.as_deref(),
+            )?);
             DIRECT_REQWEST_CLIENT_CACHE_METRICS
                 .builds
                 .fetch_add(1, Ordering::Relaxed);
@@ -2987,14 +3773,19 @@ fn prewarm_direct_reqwest_client_cache(
         let entry =
             DirectReqwestClientCacheEntry::new(clients, target_len, target_len > initial_len);
         let warm_key = (target_len > initial_len).then(|| cache_key.clone());
+        evict_direct_reqwest_client_cache_for_insert(&mut cache, &cache_key);
         cache.insert(cache_key, entry);
         if let Some(warm_key) = warm_key {
-            warm_after_unlock = Some((warm_key, initial_len, target_len));
+            warm_after_unlock = Some((warm_key, proxy_url, initial_len, target_len));
         }
         drop(cache);
-        if let Some((cache_key, existing_len, target_len)) = warm_after_unlock {
-            let spawned =
-                spawn_direct_reqwest_client_cache_warm(cache_key.clone(), existing_len, target_len);
+        if let Some((cache_key, proxy_url, existing_len, target_len)) = warm_after_unlock {
+            let spawned = spawn_direct_reqwest_client_cache_warm(
+                cache_key.clone(),
+                proxy_url,
+                existing_len,
+                target_len,
+            );
             if !spawned {
                 mark_direct_reqwest_client_cache_not_warming(&cache_key);
             }
@@ -3010,7 +3801,9 @@ fn prewarm_direct_reqwest_client_cache(
 
 fn cached_direct_reqwest_client(
     cache_key: DirectReqwestClientCacheKey,
+    proxy_url: Option<String>,
 ) -> Result<reqwest::Client, ExecutionRuntimeTransportError> {
+    validate_direct_reqwest_proxy_material(&cache_key, proxy_url.as_deref())?;
     let mut warm_after_unlock = None;
     let cache_lock_started_at = Instant::now();
     if let Ok(mut cache) = DIRECT_REQWEST_CLIENT_CACHE.lock() {
@@ -3019,6 +3812,7 @@ fn cached_direct_reqwest_client(
             cache_lock_started_at.elapsed().as_millis() as u64,
         );
         if let Some(entry) = cache.get_mut(&cache_key) {
+            entry.touch();
             DIRECT_REQWEST_CLIENT_CACHE_METRICS
                 .hits
                 .fetch_add(1, Ordering::Relaxed);
@@ -3026,12 +3820,18 @@ fn cached_direct_reqwest_client(
             let client = entry.select();
             if entry.should_warm() {
                 entry.warming = true;
-                warm_after_unlock = Some((cache_key.clone(), entry.len(), entry.target_len));
+                warm_after_unlock = Some((
+                    cache_key.clone(),
+                    proxy_url.clone(),
+                    entry.len(),
+                    entry.target_len,
+                ));
             }
             drop(cache);
-            if let Some((cache_key, existing_len, target_len)) = warm_after_unlock {
+            if let Some((cache_key, proxy_url, existing_len, target_len)) = warm_after_unlock {
                 let spawned = spawn_direct_reqwest_client_cache_warm(
                     cache_key.clone(),
+                    proxy_url,
                     existing_len,
                     target_len,
                 );
@@ -3048,7 +3848,10 @@ fn cached_direct_reqwest_client(
         let initial_len = direct_reqwest_initial_client_shard_count(target_len);
         let mut clients = Vec::with_capacity(initial_len);
         for _ in 0..initial_len {
-            clients.push(build_direct_reqwest_client_from_cache_key(&cache_key)?);
+            clients.push(build_direct_reqwest_client_from_cache_key(
+                &cache_key,
+                proxy_url.as_deref(),
+            )?);
             DIRECT_REQWEST_CLIENT_CACHE_METRICS
                 .builds
                 .fetch_add(1, Ordering::Relaxed);
@@ -3058,14 +3861,19 @@ fn cached_direct_reqwest_client(
         record_direct_reqwest_client_protocol_selection(&cache_key);
         let client = entry.select();
         let warm_key = (target_len > initial_len).then(|| cache_key.clone());
+        evict_direct_reqwest_client_cache_for_insert(&mut cache, &cache_key);
         cache.insert(cache_key, entry);
         if let Some(warm_key) = warm_key {
-            warm_after_unlock = Some((warm_key, initial_len, target_len));
+            warm_after_unlock = Some((warm_key, proxy_url, initial_len, target_len));
         }
         drop(cache);
-        if let Some((cache_key, existing_len, target_len)) = warm_after_unlock {
-            let spawned =
-                spawn_direct_reqwest_client_cache_warm(cache_key.clone(), existing_len, target_len);
+        if let Some((cache_key, proxy_url, existing_len, target_len)) = warm_after_unlock {
+            let spawned = spawn_direct_reqwest_client_cache_warm(
+                cache_key.clone(),
+                proxy_url,
+                existing_len,
+                target_len,
+            );
             if !spawned {
                 mark_direct_reqwest_client_cache_not_warming(&cache_key);
             }
@@ -3081,7 +3889,7 @@ fn cached_direct_reqwest_client(
         .misses
         .fetch_add(1, Ordering::Relaxed);
     record_direct_reqwest_client_protocol_selection(&cache_key);
-    let client = build_direct_reqwest_client_from_cache_key(&cache_key)?;
+    let client = build_direct_reqwest_client_from_cache_key(&cache_key, proxy_url.as_deref())?;
     DIRECT_REQWEST_CLIENT_CACHE_METRICS
         .builds
         .fetch_add(1, Ordering::Relaxed);
@@ -3090,6 +3898,7 @@ fn cached_direct_reqwest_client(
 
 fn spawn_direct_reqwest_client_cache_warm(
     cache_key: DirectReqwestClientCacheKey,
+    proxy_url: Option<String>,
     existing_len: usize,
     target_len: usize,
 ) -> bool {
@@ -3111,7 +3920,7 @@ fn spawn_direct_reqwest_client_cache_warm(
     let enqueue_started_at = Instant::now();
     handle.spawn_blocking(move || {
         for _ in existing_len..target_len {
-            match build_direct_reqwest_client_from_cache_key(&cache_key) {
+            match build_direct_reqwest_client_from_cache_key(&cache_key, proxy_url.as_deref()) {
                 Ok(client) => {
                     DIRECT_REQWEST_CLIENT_CACHE_METRICS
                         .builds
@@ -3134,7 +3943,7 @@ fn spawn_direct_reqwest_client_cache_warm(
                 }
                 Err(err) => {
                     tracing::debug!(
-                        error = ?err,
+                        error = %sanitize_error_detail(&err.to_string()),
                         "gateway direct reqwest client cache warm failed"
                     );
                     mark_direct_reqwest_client_cache_not_warming(&cache_key);
@@ -3174,6 +3983,41 @@ fn mark_direct_reqwest_client_cache_not_warming(cache_key: &DirectReqwestClientC
     }
 }
 
+fn next_direct_reqwest_client_cache_clock() -> u64 {
+    DIRECT_REQWEST_CLIENT_CACHE_CLOCK
+        .fetch_add(1, Ordering::Relaxed)
+        .wrapping_add(1)
+}
+
+fn direct_reqwest_client_cache_max_entries() -> usize {
+    env_positive_usize(DIRECT_REQWEST_CACHE_MAX_ENTRIES_ENV)
+        .unwrap_or(DEFAULT_DIRECT_REQWEST_CACHE_MAX_ENTRIES)
+        .clamp(1, MAX_DIRECT_REQWEST_CACHE_MAX_ENTRIES)
+}
+
+fn evict_direct_reqwest_client_cache_for_insert(
+    cache: &mut HashMap<DirectReqwestClientCacheKey, DirectReqwestClientCacheEntry>,
+    incoming: &DirectReqwestClientCacheKey,
+) {
+    if cache.contains_key(incoming) {
+        return;
+    }
+    let max_entries = direct_reqwest_client_cache_max_entries();
+    while cache.len() >= max_entries {
+        let Some(oldest_key) = cache
+            .iter()
+            .min_by_key(|(_, entry)| entry.last_used)
+            .map(|(key, _)| key.clone())
+        else {
+            break;
+        };
+        cache.remove(&oldest_key);
+        DIRECT_REQWEST_CLIENT_CACHE_METRICS
+            .evictions
+            .fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 fn direct_reqwest_client_cache_key(
     request_url: &str,
     key_id: &str,
@@ -3188,11 +4032,25 @@ fn direct_reqwest_client_cache_key(
             .flatten(),
         pool_partition: direct_reqwest_pool_partition(transport_profile, key_id),
         connect_timeout_ms: timeouts.and_then(|timeouts| timeouts.connect_ms),
-        proxy_url,
+        proxy_digest: proxy_url.map(|proxy_url| direct_reqwest_proxy_digest(&proxy_url)),
         follow_redirects: transport_controls.follow_redirects == Some(true),
         http1_only: transport_controls.http1_only,
-        accept_invalid_certs: transport_controls.accept_invalid_certs,
         transport_profile: transport_profile.map(direct_reqwest_transport_profile_cache_key),
+    }
+}
+
+fn direct_reqwest_proxy_digest(proxy_url: &str) -> String {
+    format!("{:x}", sha2::Sha256::digest(proxy_url.as_bytes()))
+}
+
+fn validate_direct_reqwest_proxy_material(
+    cache_key: &DirectReqwestClientCacheKey,
+    proxy_url: Option<&str>,
+) -> Result<(), ExecutionRuntimeTransportError> {
+    if cache_key.proxy_digest.as_deref() == proxy_url.map(direct_reqwest_proxy_digest).as_deref() {
+        Ok(())
+    } else {
+        Err(ExecutionRuntimeTransportError::ProxyUnsupported)
     }
 }
 
@@ -3228,7 +4086,11 @@ fn direct_reqwest_upstream_origin(request_url: &str) -> Option<String> {
     }
     let host = url.host_str()?;
     let port = url.port_or_known_default()?;
-    Some(format!("{scheme}://{host}:{port}"))
+    let authority_host = match url.host() {
+        Some(url::Host::Ipv6(_)) if !host.starts_with('[') => format!("[{host}]"),
+        _ => host.to_string(),
+    };
+    Some(format!("{scheme}://{authority_host}:{port}"))
 }
 
 fn direct_reqwest_transport_profile_cache_key(
@@ -3250,11 +4112,14 @@ fn stable_json_cache_key(value: Option<&Value>) -> Option<String> {
 
 fn build_direct_reqwest_client_cache_entry_from_cache_key(
     cache_key: &DirectReqwestClientCacheKey,
+    proxy_url: Option<&str>,
 ) -> Result<DirectReqwestClientCacheEntry, ExecutionRuntimeTransportError> {
     let shard_count = direct_reqwest_client_shard_count(cache_key);
     let mut clients = Vec::with_capacity(shard_count);
     for _ in 0..shard_count {
-        clients.push(build_direct_reqwest_client_from_cache_key(cache_key)?);
+        clients.push(build_direct_reqwest_client_from_cache_key(
+            cache_key, proxy_url,
+        )?);
     }
     Ok(DirectReqwestClientCacheEntry::new(
         clients,
@@ -3368,11 +4233,21 @@ fn env_positive_usize(name: &str) -> Option<usize> {
 
 fn build_direct_reqwest_client_from_cache_key(
     cache_key: &DirectReqwestClientCacheKey,
+    proxy_url: Option<&str>,
 ) -> Result<reqwest::Client, ExecutionRuntimeTransportError> {
-    let mut builder = reqwest::Client::builder();
-    if !cache_key.follow_redirects {
-        builder = builder.redirect(Policy::none());
+    validate_direct_reqwest_proxy_material(cache_key, proxy_url)?;
+    if let Some(proxy_url) = proxy_url {
+        validate_execution_proxy_url(proxy_url)?;
     }
+    let mut builder = reqwest::Client::builder().no_proxy();
+    if proxy_url.is_none() {
+        builder = builder.dns_resolver(Arc::new(ExecutionSafeDnsResolver));
+    }
+    builder = builder.redirect(if cache_key.follow_redirects {
+        same_origin_reqwest_redirect_policy()
+    } else {
+        Policy::none()
+    });
     if cache_key.http1_only
         || cache_key
             .transport_profile
@@ -3392,6 +4267,7 @@ fn build_direct_reqwest_client_from_cache_key(
         &HttpClientConfig {
             connect_timeout_ms: cache_key.connect_timeout_ms,
             pool_max_idle_per_host: Some(direct_reqwest_pool_max_idle_per_host()),
+            pool_idle_timeout_ms: Some(upstream_pool_idle_timeout_ms()),
             ..HttpClientConfig::default()
         },
     );
@@ -3400,10 +4276,7 @@ fn build_direct_reqwest_client_from_cache_key(
         cache_key.transport_profile.as_ref(),
         cache_key.http1_only,
     );
-    if cache_key.accept_invalid_certs {
-        builder = builder.danger_accept_invalid_certs(true);
-    }
-    if let Some(proxy_url) = cache_key.proxy_url.as_deref() {
+    if let Some(proxy_url) = proxy_url {
         let proxy =
             reqwest::Proxy::all(proxy_url).map_err(ExecutionRuntimeTransportError::InvalidProxy)?;
         builder = builder.proxy(proxy);
@@ -3414,12 +4287,22 @@ fn build_direct_reqwest_client_from_cache_key(
 }
 
 fn direct_reqwest_pool_max_idle_per_host() -> usize {
-    const DEFAULT_MAX_IDLE_PER_HOST: usize = 1024;
+    const DEFAULT_MAX_IDLE_PER_HOST: usize = 32;
     std::env::var("AETHER_GATEWAY_UPSTREAM_POOL_MAX_IDLE_PER_HOST")
         .ok()
         .and_then(|value| value.trim().parse::<usize>().ok())
         .filter(|value| *value > 0)
         .unwrap_or(DEFAULT_MAX_IDLE_PER_HOST)
+        .min(1024)
+}
+
+fn upstream_pool_idle_timeout_ms() -> u64 {
+    std::env::var("AETHER_GATEWAY_UPSTREAM_POOL_IDLE_TIMEOUT_MS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(15_000)
+        .min(300_000)
 }
 
 pub(crate) fn direct_reqwest_client_cache_metric_samples() -> Vec<MetricSample> {
@@ -3592,6 +4475,14 @@ pub(crate) fn direct_reqwest_client_cache_metric_samples() -> Vec<MetricSample> 
                 .load(Ordering::Relaxed),
         ),
         MetricSample::new(
+            "direct_reqwest_client_cache_evictions_total",
+            "Number of least-recently-used direct reqwest client cache entries evicted at the configured capacity.",
+            MetricKind::Counter,
+            DIRECT_REQWEST_CLIENT_CACHE_METRICS
+                .evictions
+                .load(Ordering::Relaxed),
+        ),
+        MetricSample::new(
             "direct_reqwest_client_http1_select_total",
             "Number of direct reqwest client selections using forced HTTP/1.",
             MetricKind::Counter,
@@ -3757,15 +4648,22 @@ pub(crate) fn build_browser_wreq_client(
     apply_total_timeout: bool,
 ) -> Result<wreq::Client, ExecutionRuntimeTransportError> {
     let emulation = browser_wreq_emulation_from_profile(transport_profile)?;
-    let mut builder = wreq::Client::builder().emulation(emulation);
-    if transport_controls.follow_redirects == Some(true) {
-        builder = builder.redirect(wreq::redirect::Policy::limited(10));
+    let proxy_url = resolve_proxy_url(proxy)?;
+    let mut builder = wreq::Client::builder()
+        .no_proxy()
+        .emulation(emulation)
+        .pool_max_idle_per_host(direct_reqwest_pool_max_idle_per_host())
+        .pool_idle_timeout(Duration::from_millis(upstream_pool_idle_timeout_ms()));
+    if proxy_url.is_none() {
+        builder = builder.dns_resolver(ExecutionSafeDnsResolver);
     }
+    builder = builder.redirect(if transport_controls.follow_redirects == Some(true) {
+        same_origin_wreq_redirect_policy()
+    } else {
+        wreq::redirect::Policy::none()
+    });
     if transport_controls.http1_only || transport_profile_http1_only(Some(transport_profile)) {
         builder = builder.http1_only();
-    }
-    if transport_controls.accept_invalid_certs {
-        builder = builder.cert_verification(false).verify_hostname(false);
     }
     if let Some(connect_ms) = timeouts.and_then(|timeouts| timeouts.connect_ms) {
         builder = builder.connect_timeout(Duration::from_millis(connect_ms));
@@ -3778,7 +4676,7 @@ pub(crate) fn build_browser_wreq_client(
     if let Some(read_ms) = timeouts.and_then(|timeouts| timeouts.read_ms) {
         builder = builder.read_timeout(Duration::from_millis(read_ms));
     }
-    if let Some(proxy_url) = resolve_proxy_url(proxy)? {
+    if let Some(proxy_url) = proxy_url {
         let proxy = wreq::Proxy::all(proxy_url.as_str())
             .map_err(ExecutionRuntimeTransportError::BrowserClientBuild)?;
         builder = builder.proxy(proxy);
@@ -3786,6 +4684,85 @@ pub(crate) fn build_browser_wreq_client(
     builder
         .build()
         .map_err(ExecutionRuntimeTransportError::BrowserClientBuild)
+}
+
+fn same_origin_reqwest_redirect_policy() -> Policy {
+    Policy::custom(|attempt| {
+        let same_origin = attempt
+            .previous()
+            .last()
+            .is_some_and(|previous| reqwest_urls_have_same_origin(previous, attempt.url()));
+        match safe_redirect_decision(attempt.previous().len(), same_origin) {
+            SafeRedirectDecision::Follow => attempt.follow(),
+            SafeRedirectDecision::Stop => attempt.stop(),
+            SafeRedirectDecision::TooMany => attempt.error("too many redirects"),
+        }
+    })
+}
+
+fn same_origin_wreq_redirect_policy() -> wreq::redirect::Policy {
+    wreq::redirect::Policy::custom(|attempt| {
+        let same_origin = attempt
+            .previous
+            .last()
+            .is_some_and(|previous| http_uris_have_same_origin(previous, &attempt.uri));
+        match safe_redirect_decision(attempt.previous.len(), same_origin) {
+            SafeRedirectDecision::Follow => attempt.follow(),
+            SafeRedirectDecision::Stop => attempt.stop(),
+            SafeRedirectDecision::TooMany => attempt.error("too many redirects"),
+        }
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SafeRedirectDecision {
+    Follow,
+    Stop,
+    TooMany,
+}
+
+fn safe_redirect_decision(previous_len: usize, same_origin: bool) -> SafeRedirectDecision {
+    if previous_len > MAX_SAFE_REDIRECTS {
+        SafeRedirectDecision::TooMany
+    } else if same_origin {
+        SafeRedirectDecision::Follow
+    } else {
+        SafeRedirectDecision::Stop
+    }
+}
+
+fn reqwest_urls_have_same_origin(previous: &reqwest::Url, next: &reqwest::Url) -> bool {
+    previous.scheme().eq_ignore_ascii_case(next.scheme())
+        && previous
+            .host_str()
+            .zip(next.host_str())
+            .is_some_and(|(previous, next)| previous.eq_ignore_ascii_case(next))
+        && previous.port_or_known_default() == next.port_or_known_default()
+}
+
+fn http_uris_have_same_origin(previous: &http::Uri, next: &http::Uri) -> bool {
+    previous
+        .scheme_str()
+        .zip(next.scheme_str())
+        .is_some_and(|(previous, next)| previous.eq_ignore_ascii_case(next))
+        && previous
+            .host()
+            .zip(next.host())
+            .is_some_and(|(previous, next)| previous.eq_ignore_ascii_case(next))
+        && http_uri_effective_port(previous) == http_uri_effective_port(next)
+}
+
+fn http_uri_effective_port(uri: &http::Uri) -> Option<u16> {
+    uri.port_u16().or_else(|| {
+        let scheme = uri.scheme_str()?;
+        if scheme.eq_ignore_ascii_case("http") {
+            Some(80)
+        } else if scheme.eq_ignore_ascii_case("https") {
+            Some(443)
+        } else {
+            None
+        }
+    })
 }
 
 fn browser_wreq_emulation_from_profile(
@@ -4005,14 +4982,49 @@ fn resolve_proxy_url(
         .map(|url| url.trim())
         .filter(|url| !url.is_empty())
     {
-        return Ok(Some(proxy_url.to_string()));
+        return normalize_execution_proxy_url(proxy_url).map(Some);
     }
 
-    if proxy.node_id.is_some() || proxy.mode.as_deref() == Some("tunnel") {
+    Err(ExecutionRuntimeTransportError::ProxyUnsupported)
+}
+
+fn validate_execution_proxy_url(raw_url: &str) -> Result<(), ExecutionRuntimeTransportError> {
+    parse_execution_proxy_url(raw_url).map(|_| ())
+}
+
+/// Normalize a configured proxy URL before handing it to reqwest/wreq.
+///
+/// `socks5://` has a particularly dangerous ambiguity in a gateway: reqwest
+/// and wreq interpret it as *local* target-name resolution, while
+/// `socks5h://` delegates target resolution to the proxy.  Local resolution
+/// would bypass the execution DNS guard (and could turn a rebinding hostname
+/// into a private address).  Keep accepting the established `socks5` config
+/// syntax for compatibility, but make its runtime semantics the safe remote
+/// DNS variant.  HTTP/HTTPS and already-remote `socks5h` URLs are unchanged.
+pub(crate) fn normalize_execution_proxy_url(
+    raw_url: &str,
+) -> Result<String, ExecutionRuntimeTransportError> {
+    let mut parsed = parse_execution_proxy_url(raw_url)?;
+    if parsed.scheme().eq_ignore_ascii_case("socks5") {
+        parsed
+            .set_scheme("socks5h")
+            .map_err(|_| ExecutionRuntimeTransportError::ProxyUnsupported)?;
+    }
+    Ok(parsed.to_string())
+}
+
+fn parse_execution_proxy_url(raw_url: &str) -> Result<url::Url, ExecutionRuntimeTransportError> {
+    let parsed =
+        url::Url::parse(raw_url).map_err(|_| ExecutionRuntimeTransportError::ProxyUnsupported)?;
+    if !matches!(parsed.scheme(), "http" | "https" | "socks5" | "socks5h")
+        || parsed.host_str().is_none()
+        || !matches!(parsed.path(), "" | "/")
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
         return Err(ExecutionRuntimeTransportError::ProxyUnsupported);
     }
-
-    Ok(None)
+    Ok(parsed)
 }
 
 pub(crate) fn build_request_headers(
@@ -4021,6 +5033,12 @@ pub(crate) fn build_request_headers(
     allow_passthrough_content_encoding: bool,
 ) -> Result<HeaderMap, ExecutionRuntimeTransportError> {
     let mut out = HeaderMap::new();
+    let connection_declared = aether_http::connection_declared_header_names(
+        headers
+            .iter()
+            .filter(|(name, _)| name.eq_ignore_ascii_case(http::header::CONNECTION.as_str()))
+            .map(|(_, value)| value.as_str()),
+    );
     let normalized_content_encoding = normalize_content_encoding(content_encoding);
     if let Some(encoding) = normalized_content_encoding.as_deref() {
         if !matches!(encoding, "gzip" | "zstd") && !allow_passthrough_content_encoding {
@@ -4033,10 +5051,11 @@ pub(crate) fn build_request_headers(
         let normalized_key = key.trim().to_ascii_lowercase();
         if crate::headers::should_skip_request_header(&normalized_key)
             || is_hop_by_hop_header(&normalized_key)
+            || connection_declared.contains(&normalized_key)
             || normalized_key == "content-encoding"
             || normalized_key == EXECUTION_REQUEST_FOLLOW_REDIRECTS_HEADER
             || normalized_key == EXECUTION_REQUEST_HTTP1_ONLY_HEADER
-            || normalized_key == EXECUTION_REQUEST_ACCEPT_INVALID_CERTS_HEADER
+            || normalized_key == LEGACY_EXECUTION_REQUEST_ACCEPT_INVALID_CERTS_HEADER
             || normalized_key == EXECUTION_RESPONSE_BODY_MODE_HEADER
             || normalized_key == EXECUTION_RESPONSE_BODY_LIMIT_HEADER
         {
@@ -4072,12 +5091,6 @@ fn resolve_execution_transport_controls(
         http1_only: execution_transport_header_value(headers, EXECUTION_REQUEST_HTTP1_ONLY_HEADER)
             .and_then(|value| parse_execution_transport_bool(value))
             .unwrap_or(false),
-        accept_invalid_certs: execution_transport_header_value(
-            headers,
-            EXECUTION_REQUEST_ACCEPT_INVALID_CERTS_HEADER,
-        )
-        .and_then(|value| parse_execution_transport_bool(value))
-        .unwrap_or(false),
     }
 }
 
@@ -4149,12 +5162,34 @@ fn is_hop_by_hop_header(name: &str) -> bool {
 }
 
 pub(crate) fn collect_response_headers(headers: &HeaderMap) -> BTreeMap<String, String> {
+    let connection_declared = aether_http::connection_declared_header_names(
+        headers
+            .get_all(http::header::CONNECTION)
+            .iter()
+            .filter_map(|value| value.to_str().ok()),
+    );
     header_map_to_string_map(headers)
+        .into_iter()
+        .filter(|(name, _)| {
+            !crate::headers::should_skip_response_header(name)
+                && !connection_declared.contains(&name.to_ascii_lowercase())
+        })
+        .collect()
 }
 
 fn collect_tunnel_response_headers(headers: &[(String, String)]) -> BTreeMap<String, String> {
+    let connection_declared = aether_http::connection_declared_header_names(
+        headers
+            .iter()
+            .filter(|(name, _)| name.eq_ignore_ascii_case(http::header::CONNECTION.as_str()))
+            .map(|(_, value)| value.as_str()),
+    );
     headers
         .iter()
+        .filter(|(name, _)| {
+            !crate::headers::should_skip_response_header(name)
+                && !connection_declared.contains(&name.to_ascii_lowercase())
+        })
         .map(|(name, value)| (name.to_ascii_lowercase(), value.clone()))
         .collect()
 }
@@ -4174,6 +5209,42 @@ fn execution_log_url_host(url: &str) -> String {
         .ok()
         .and_then(|url| url.host_str().map(ToOwned::to_owned))
         .unwrap_or_else(|| "-".to_string())
+}
+
+pub(crate) fn validate_execution_upstream_url(
+    raw_url: &str,
+) -> Result<url::Url, ExecutionRuntimeTransportError> {
+    let url = url::Url::parse(raw_url).map_err(|_| {
+        ExecutionRuntimeTransportError::UpstreamRequest("invalid upstream URL".to_string())
+    })?;
+    if url.host().is_none() || !matches!(url.scheme(), "http" | "https") {
+        return Err(ExecutionRuntimeTransportError::UpstreamRequest(
+            "upstream URL must use HTTP or HTTPS and include a host".to_string(),
+        ));
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(ExecutionRuntimeTransportError::UpstreamRequest(
+            "upstream URL must not include credentials".to_string(),
+        ));
+    }
+    if url.fragment().is_some() {
+        return Err(ExecutionRuntimeTransportError::UpstreamRequest(
+            "upstream URL must not include a fragment".to_string(),
+        ));
+    }
+    let literal_ip = match url.host() {
+        Some(url::Host::Ipv4(address)) => Some(IpAddr::V4(address)),
+        Some(url::Host::Ipv6(address)) => Some(IpAddr::V6(address)),
+        _ => None,
+    };
+    if literal_ip.is_some_and(|ip| {
+        is_private_or_reserved_ip(ip) && !(url.scheme() == "http" && ip.is_loopback())
+    }) {
+        return Err(ExecutionRuntimeTransportError::UpstreamRequest(
+            "upstream URL must not target a private or reserved address".to_string(),
+        ));
+    }
+    Ok(url)
 }
 
 pub(crate) fn decode_response_body_bytes<'a>(
@@ -4307,15 +5378,23 @@ pub(crate) fn build_execution_response_body(
 mod tests {
     use std::collections::BTreeMap;
     use std::io::{Read, Write};
-    use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+    use std::sync::{Arc, Mutex};
 
+    use aether_contracts::tunnel::{
+        TUNNEL_RELAY_AUTH_NONCE_HEADER, TUNNEL_RELAY_AUTH_PAYLOAD_HEADER,
+        TUNNEL_RELAY_AUTH_SENDER_HEADER, TUNNEL_RELAY_AUTH_SIGNATURE_HEADER,
+        TUNNEL_RELAY_AUTH_TIMESTAMP_HEADER, TUNNEL_RELAY_OWNER_INSTANCE_HEADER,
+    };
+    use aether_contracts::tunnel_security::TUNNEL_SECURITY_NON_TLS_REQUIRED;
     use aether_contracts::{
         ExecutionPlan, ExecutionResponseBodyMode, ExecutionTimeouts, ProxySnapshot, RequestBody,
         ResolvedTransportProfile, EXECUTION_REQUEST_FOLLOW_REDIRECTS_HEADER,
         EXECUTION_REQUEST_HTTP1_ONLY_HEADER, EXECUTION_RESPONSE_BODY_MODE_HEADER,
-        TRANSPORT_BACKEND_BROWSER_WREQ, TRANSPORT_BACKEND_REQWEST_RUSTLS, TRANSPORT_HTTP_MODE_AUTO,
+        PROXY_NODE_TUNNEL_GENERATION_EXTRA_KEY, TRANSPORT_BACKEND_BROWSER_WREQ,
+        TRANSPORT_BACKEND_REQWEST_RUSTLS, TRANSPORT_HTTP_MODE_AUTO,
         TRANSPORT_HTTP_MODE_H2C_PRIOR_KNOWLEDGE, TRANSPORT_HTTP_MODE_HTTP1_ONLY,
     };
+    use aether_crypto::DEVELOPMENT_ENCRYPTION_KEY;
     use aether_data::repository::proxy_nodes::{
         InMemoryProxyNodeRepository, ProxyNodeReadRepository, StoredProxyNode,
     };
@@ -4332,16 +5411,22 @@ mod tests {
 
     use super::{
         append_upstream_response_body_chunk_with_limit, build_browser_wreq_client, build_client,
-        build_direct_tunnel_request_meta, build_execution_response_body, build_request_headers,
+        build_direct_tunnel_request_meta, build_execution_response_body, build_relay_client,
+        build_relay_url, build_request_headers, collect_response_headers,
+        collect_tunnel_response_headers, decode_base64_body_with_limit,
         decode_response_body_bytes_with_limit, effective_response_body_limit_bytes,
         execute_sync_plan, execution_plan_response_body_limit_bytes, execution_response_body_mode,
+        execution_result_envelope_limit_bytes, http_uris_have_same_origin,
+        json_value_fits_serialized_limit, maximum_base64_len_for_decoded_limit,
         record_manual_proxy_request_failure, record_manual_proxy_request_outcome,
         record_manual_proxy_request_success, record_manual_proxy_stream_error,
-        resolve_execution_transport_controls, resolve_non_stream_total_timeout,
-        resolve_stream_first_byte_timeout, response_body_is_json,
-        with_upstream_response_body_limit, DirectSyncExecutionRuntime,
-        ExecutionRuntimeTransportError, ExecutionTransportControls, UpstreamResponseBodyPhase,
-        DEFAULT_SCOPED_RESPONSE_BODY_LIMIT_BYTES, EXECUTION_RESPONSE_BODY_LIMIT_HEADER,
+        reqwest_urls_have_same_origin, resolve_execution_transport_controls,
+        resolve_non_stream_total_timeout, resolve_proxy_url, resolve_stream_first_byte_timeout,
+        response_body_is_json, safe_redirect_decision, validate_execution_upstream_url,
+        validate_relay_target_url, with_upstream_response_body_limit, DirectSyncExecutionRuntime,
+        ExecutionRuntimeTransportError, ExecutionTransportControls, RelayRequestMeta,
+        SafeRedirectDecision, UpstreamResponseBodyPhase, DEFAULT_SCOPED_RESPONSE_BODY_LIMIT_BYTES,
+        EXECUTION_RESPONSE_BODY_LIMIT_HEADER, MAX_SAFE_REDIRECTS,
         MAX_SCOPED_RESPONSE_BODY_LIMIT_BYTES, MIN_SCOPED_RESPONSE_BODY_LIMIT_BYTES,
     };
     use crate::constants::{
@@ -4355,11 +5440,362 @@ mod tests {
     use crate::AppState;
 
     const LOCAL_HTTP_SUCCESS_TIMEOUT_MS: u64 = 15_000;
+    const RELAY_TEST_SECRET: &str = "relay-test-secret-at-least-32-bytes";
+
+    #[test]
+    fn execution_upstream_url_accepts_http_and_https_with_safe_targets() {
+        for allowed in [
+            "https://api.example.test/v1/responses?api-version=1",
+            "http://api.example.test:8080/v1/responses?api-version=1",
+            "http://8.8.8.8:8080/v1/responses",
+            "https://8.8.8.8/v1/responses",
+            "http://[2606:4700:4700::1111]:8080/v1/responses",
+            "http://localhost:8080/v1/responses",
+            "http://127.42.0.1:8080/v1/responses",
+            "http://[::1]:8080/v1/responses",
+        ] {
+            assert!(
+                validate_execution_upstream_url(allowed).is_ok(),
+                "URL should be accepted: {allowed}"
+            );
+        }
+
+        for rejected in [
+            "http://10.0.0.1/v1/responses",
+            "http://0.0.0.0:8080/v1/responses",
+            "http://[::ffff:127.0.0.1]:8080/v1/responses",
+            "https://127.0.0.1:8443/v1/responses",
+            "https://10.0.0.1:8443/v1/responses",
+            "https://token@example.test/v1/responses",
+            "https://example.test/v1/responses#secret",
+            "http://token@example.test/v1/responses",
+            "http://example.test/v1/responses#secret",
+            "ftp://localhost/resource",
+        ] {
+            assert!(
+                validate_execution_upstream_url(rejected).is_err(),
+                "URL should be rejected: {rejected}"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_execution_upstream_url_error_does_not_echo_credentials() {
+        let error = validate_execution_upstream_url(
+            "https://sensitive-user:sensitive-password@example.test/v1/responses",
+        )
+        .expect_err("URL userinfo should be rejected")
+        .to_string();
+
+        assert!(!error.contains("sensitive-user"));
+        assert!(!error.contains("sensitive-password"));
+    }
+
+    #[test]
+    fn execution_dns_answers_allow_all_provider_hosts_without_address_filtering() {
+        let addresses = vec![
+            "198.18.78.41:443".parse().unwrap(),
+            "10.0.0.8:443".parse().unwrap(),
+            "127.0.0.1:443".parse().unwrap(),
+            "169.254.169.254:443".parse().unwrap(),
+            "[fd00::1]:443".parse().unwrap(),
+            "93.184.216.34:443".parse().unwrap(),
+        ];
+        for host in [
+            "chatgpt.com",
+            "api.openai.com",
+            "oauth2.googleapis.com",
+            "www.googleapis.com",
+            "custom.example.test",
+        ] {
+            assert_eq!(
+                super::validate_resolved_execution_addresses(host, addresses.clone(), true)
+                    .expect("provider DNS answers should pass through"),
+                addresses
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn execution_dns_handles_url_ipv6_without_weakening_relay_filtering() {
+        for provider_execution in [false, true] {
+            let addresses = super::resolve_execution_target_addresses_with_policy(
+                "[::1]",
+                8443,
+                provider_execution,
+            )
+            .await
+            .expect("literal IPv6 loopback should resolve without DNS");
+            assert_eq!(addresses, vec!["[::1]:8443".parse().unwrap()]);
+        }
+        let error = super::resolve_execution_target_addresses_with_policy("[fd00::1]", 443, false)
+            .await
+            .expect_err("private IPv6 must remain blocked for relay traffic");
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+    }
+
+    #[tokio::test]
+    async fn execution_dns_resolvers_preserve_provider_fake_ip_answers() {
+        for host in ["198.18.78.41", "198.19.1.2"] {
+            let expected = vec![format!("{host}:0").parse::<std::net::SocketAddr>().unwrap()];
+            let reqwest_addresses = reqwest::dns::Resolve::resolve(
+                &super::ExecutionSafeDnsResolver,
+                host.parse().unwrap(),
+            )
+            .await
+            .expect("HTTP provider DNS must accept Fake-IP answers")
+            .collect::<Vec<_>>();
+            let wreq_addresses =
+                wreq::dns::Resolve::resolve(&super::ExecutionSafeDnsResolver, host.into())
+                    .await
+                    .expect("WebSocket provider DNS must accept Fake-IP answers")
+                    .collect::<Vec<_>>();
+
+            assert_eq!(reqwest_addresses, expected);
+            assert_eq!(wreq_addresses, expected);
+        }
+    }
+
+    #[test]
+    fn execution_dns_answers_keep_relay_address_filtering() {
+        let public = "93.184.216.34:443".parse().unwrap();
+        for host in ["oauth2.googleapis.com", "custom.example.test"] {
+            assert!(
+                super::validate_resolved_execution_addresses(host, vec![public], false).is_ok()
+            );
+            for blocked in [
+                "198.18.78.41:443",
+                "10.0.0.8:443",
+                "127.0.0.1:443",
+                "169.254.169.254:443",
+                "[fd00::1]:443",
+            ] {
+                let blocked = blocked.parse().unwrap();
+                assert!(
+                    super::validate_resolved_execution_addresses(host, vec![blocked], false)
+                        .is_err()
+                );
+                assert!(super::validate_resolved_execution_addresses(
+                    host,
+                    vec![public, blocked],
+                    false
+                )
+                .is_err());
+            }
+        }
+        let loopback = vec![
+            "127.0.0.1:443".parse().unwrap(),
+            "[::1]:443".parse().unwrap(),
+        ];
+        assert!(super::validate_resolved_execution_addresses("localhost", loopback, false).is_ok());
+        assert!(
+            super::validate_resolved_execution_addresses("localhost", vec![public], false).is_err()
+        );
+        for provider_execution in [false, true] {
+            assert_eq!(
+                super::validate_resolved_execution_addresses(
+                    "custom.example.test",
+                    Vec::new(),
+                    provider_execution
+                )
+                .expect_err("empty DNS answers must fail")
+                .kind(),
+                std::io::ErrorKind::NotFound
+            );
+        }
+    }
+
+    #[test]
+    fn execution_proxy_url_policy_rejects_non_origin_components() {
+        for rejected in [
+            "mailto:proxy@example.test",
+            "http://proxy.example.test/path",
+            "http://proxy.example.test?token=secret",
+            "http://proxy.example.test#fragment",
+        ] {
+            assert!(
+                super::validate_execution_proxy_url(rejected).is_err(),
+                "proxy URL should be rejected: {rejected}"
+            );
+        }
+        assert!(super::validate_execution_proxy_url(
+            "http://alice:password@proxy.example.test:8080"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn execution_proxy_url_normalizes_local_socks_dns_to_remote_dns() {
+        assert_eq!(
+            super::normalize_execution_proxy_url("socks5://alice:password@proxy.example.test:1080")
+                .expect("socks5 URL should normalize"),
+            "socks5h://alice:password@proxy.example.test:1080"
+        );
+        assert_eq!(
+            super::normalize_execution_proxy_url("socks5h://proxy.example.test:1080")
+                .expect("socks5h URL should remain valid"),
+            "socks5h://proxy.example.test:1080"
+        );
+        assert_eq!(
+            super::normalize_execution_proxy_url("https://proxy.example.test:8443")
+                .expect("https URL should remain valid"),
+            "https://proxy.example.test:8443/"
+        );
+    }
+
+    #[test]
+    fn relay_error_kind_accepts_only_protocol_categories() {
+        assert_eq!(super::sanitize_relay_error_kind("TIMEOUT"), "timeout");
+        assert_eq!(super::sanitize_relay_error_kind("upstream"), "unknown");
+        assert_eq!(
+            super::sanitize_relay_error_kind("https://relay-user:secret@example.test"),
+            "unknown"
+        );
+    }
+
+    #[test]
+    fn enabled_proxy_without_a_usable_target_is_rejected() {
+        let proxy = ProxySnapshot {
+            enabled: Some(true),
+            mode: Some("unavailable".to_string()),
+            ..ProxySnapshot::default()
+        };
+
+        assert!(matches!(
+            resolve_proxy_url(Some(&proxy)),
+            Err(ExecutionRuntimeTransportError::ProxyUnsupported)
+        ));
+        assert_eq!(
+            resolve_proxy_url(Some(&ProxySnapshot {
+                enabled: Some(false),
+                ..ProxySnapshot::default()
+            }))
+            .expect("disabled proxy should be accepted"),
+            None
+        );
+    }
+
+    #[test]
+    fn redirect_origin_checks_scheme_host_and_effective_port() {
+        let reqwest_base =
+            reqwest::Url::parse("https://api.example.com/v1").expect("base URL should parse");
+        for same_origin in [
+            "https://api.example.com/v2",
+            "https://API.EXAMPLE.COM:443/v2",
+        ] {
+            let next = reqwest::Url::parse(same_origin).expect("same-origin URL should parse");
+            assert!(reqwest_urls_have_same_origin(&reqwest_base, &next));
+        }
+        for cross_origin in [
+            "http://api.example.com/v2",
+            "https://other.example.com/v2",
+            "https://api.example.com:444/v2",
+        ] {
+            let next = reqwest::Url::parse(cross_origin).expect("cross-origin URL should parse");
+            assert!(!reqwest_urls_have_same_origin(&reqwest_base, &next));
+        }
+
+        let wreq_base: http::Uri = "https://api.example.com/v1"
+            .parse()
+            .expect("base URI should parse");
+        for same_origin in [
+            "https://api.example.com/v2",
+            "https://API.EXAMPLE.COM:443/v2",
+        ] {
+            let next: http::Uri = same_origin.parse().expect("same-origin URI should parse");
+            assert!(http_uris_have_same_origin(&wreq_base, &next));
+        }
+        for cross_origin in [
+            "http://api.example.com/v2",
+            "https://other.example.com/v2",
+            "https://api.example.com:444/v2",
+        ] {
+            let next: http::Uri = cross_origin.parse().expect("cross-origin URI should parse");
+            assert!(!http_uris_have_same_origin(&wreq_base, &next));
+        }
+    }
+
+    #[test]
+    fn safe_redirect_decision_preserves_the_ten_hop_limit() {
+        assert_eq!(
+            safe_redirect_decision(MAX_SAFE_REDIRECTS, true),
+            SafeRedirectDecision::Follow
+        );
+        assert_eq!(
+            safe_redirect_decision(MAX_SAFE_REDIRECTS + 1, true),
+            SafeRedirectDecision::TooMany
+        );
+        assert_eq!(safe_redirect_decision(1, false), SafeRedirectDecision::Stop);
+    }
+
+    #[test]
+    fn direct_and_tunnel_response_collectors_strip_upstream_security_headers() {
+        let mut direct = reqwest::header::HeaderMap::new();
+        direct.insert(
+            reqwest::header::SET_COOKIE,
+            reqwest::header::HeaderValue::from_static("session=attacker"),
+        );
+        direct.insert(
+            "x-aether-future-control",
+            reqwest::header::HeaderValue::from_static("attacker"),
+        );
+        direct.insert(
+            reqwest::header::CONTENT_TYPE,
+            reqwest::header::HeaderValue::from_static("application/json"),
+        );
+        direct.append(
+            reqwest::header::CONNECTION,
+            reqwest::header::HeaderValue::from_static("x-first-hop"),
+        );
+        direct.append(
+            reqwest::header::CONNECTION,
+            reqwest::header::HeaderValue::from_static("x-second-hop"),
+        );
+        direct.insert(
+            "x-first-hop",
+            reqwest::header::HeaderValue::from_static("first-secret"),
+        );
+        direct.insert(
+            "x-second-hop",
+            reqwest::header::HeaderValue::from_static("second-secret"),
+        );
+
+        let direct = collect_response_headers(&direct);
+        assert!(!direct.contains_key("set-cookie"));
+        assert!(!direct.contains_key("x-aether-future-control"));
+        assert!(!direct.contains_key("x-first-hop"));
+        assert!(!direct.contains_key("x-second-hop"));
+        assert_eq!(
+            direct.get("content-type").map(String::as_str),
+            Some("application/json")
+        );
+
+        let tunnel = collect_tunnel_response_headers(&[
+            ("Set-Cookie".to_string(), "session=attacker".to_string()),
+            (
+                "X-Aether-Future-Control".to_string(),
+                "attacker".to_string(),
+            ),
+            ("Content-Type".to_string(), "application/json".to_string()),
+            ("Connection".to_string(), "x-first-hop".to_string()),
+            ("connection".to_string(), "x-second-hop".to_string()),
+            ("x-first-hop".to_string(), "first-secret".to_string()),
+            ("x-second-hop".to_string(), "second-secret".to_string()),
+        ]);
+        assert!(!tunnel.contains_key("set-cookie"));
+        assert!(!tunnel.contains_key("x-aether-future-control"));
+        assert!(!tunnel.contains_key("x-first-hop"));
+        assert!(!tunnel.contains_key("x-second-hop"));
+        assert_eq!(
+            tunnel.get("content-type").map(String::as_str),
+            Some("application/json")
+        );
+    }
 
     #[test]
     fn upstream_error_url_sanitization_removes_secrets_everywhere() {
         let upstream_url =
-            "https://api.example.test/v1/messages?key=query-secret&alt=sse#fragment-secret";
+            "https://upstream-user:upstream-password@api.example.test/v1/messages?key=query-secret&alt=sse#fragment-secret";
         let detail = format!(
             "error sending request for url ({upstream_url}); source repeated {upstream_url}"
         );
@@ -4374,6 +5810,100 @@ mod tests {
         );
         assert!(!sanitized_detail.contains("query-secret"));
         assert!(!sanitized_detail.contains("fragment-secret"));
+        assert!(!sanitized_detail.contains("upstream-user"));
+        assert!(!sanitized_detail.contains("upstream-password"));
+    }
+
+    #[test]
+    fn upstream_error_detail_redacts_embedded_proxy_urls_and_is_bounded() {
+        let detail = format!(
+            "proxy=https://proxy-user:proxy-password@10.0.0.8:8443/connect?token=secret#fragment {}",
+            "diagnostic ".repeat(400)
+        );
+        let sanitized = super::sanitize_error_detail(&detail);
+
+        assert!(!sanitized.contains("proxy-password"));
+        assert!(!sanitized.contains("token=secret"));
+        assert!(!sanitized.contains("10.0.0.8"));
+        assert!(sanitized.len() <= super::MAX_UPSTREAM_ERROR_DETAIL_BYTES + 3);
+    }
+
+    #[test]
+    fn transport_error_debug_sanitizes_dynamic_url_details() {
+        let secret_url = "https://upstream-user:upstream-password@127.0.0.1:8443/path?token=query-secret#fragment-secret";
+        let upstream = ExecutionRuntimeTransportError::UpstreamRequest(format!(
+            "request failed for url={secret_url}"
+        ));
+        let upstream_debug = format!("{upstream:?}");
+        assert!(!upstream_debug.contains("upstream-user"));
+        assert!(!upstream_debug.contains("upstream-password"));
+        assert!(!upstream_debug.contains("query-secret"));
+        assert!(!upstream_debug.contains("fragment-secret"));
+        assert!(!upstream_debug.contains("127.0.0.1"));
+        assert!(upstream_debug.contains("redacted.invalid"));
+        let upstream_message = super::safe_transport_error_message(&upstream);
+        assert!(!upstream_message.contains("upstream-user"));
+        assert!(!upstream_message.contains("upstream-password"));
+        assert!(!upstream_message.contains("query-secret"));
+        assert!(!upstream_message.contains("fragment-secret"));
+        assert!(!upstream_message.contains("127.0.0.1"));
+        assert!(upstream_message.contains("redacted.invalid"));
+        // Display is used by a few legacy error/logging boundaries.  Keep it
+        // safe as well, so a missed `?error`/`safe_transport_error_message`
+        // conversion cannot reintroduce URL credential leakage.
+        let upstream_display = format!("{upstream}");
+        assert!(!upstream_display.contains("upstream-user"));
+        assert!(!upstream_display.contains("upstream-password"));
+        assert!(!upstream_display.contains("query-secret"));
+        assert!(!upstream_display.contains("fragment-secret"));
+        assert!(!upstream_display.contains("127.0.0.1"));
+        assert!(upstream_display.contains("redacted.invalid"));
+
+        let status = ExecutionRuntimeTransportError::UpstreamHttpStatus {
+            status_code: 502,
+            message: secret_url.to_string(),
+        };
+        let status_debug = format!("{status:?}");
+        assert!(!status_debug.contains("upstream-password"));
+        assert!(!status_debug.contains("query-secret"));
+        assert!(!status_debug.contains("127.0.0.1"));
+        let status_display = format!("{status}");
+        assert!(!status_display.contains("upstream-user"));
+        assert!(!status_display.contains("upstream-password"));
+        assert!(!status_display.contains("query-secret"));
+        assert!(!status_display.contains("fragment-secret"));
+        assert!(!status_display.contains("127.0.0.1"));
+
+        let decode = ExecutionRuntimeTransportError::UpstreamResponseDecode {
+            encoding: "gzip".to_string(),
+            message: format!("decode failed for {secret_url}"),
+        };
+        let decode_display = format!("{decode}");
+        assert!(!decode_display.contains("upstream-user"));
+        assert!(!decode_display.contains("upstream-password"));
+        assert!(!decode_display.contains("query-secret"));
+        assert!(!decode_display.contains("fragment-secret"));
+        assert!(!decode_display.contains("127.0.0.1"));
+
+        let relay = ExecutionRuntimeTransportError::RelayError(format!(
+            "relay failed while contacting {secret_url}"
+        ));
+        let relay_display = format!("{relay}");
+        assert!(!relay_display.contains("upstream-user"));
+        assert!(!relay_display.contains("upstream-password"));
+        assert!(!relay_display.contains("query-secret"));
+        assert!(!relay_display.contains("fragment-secret"));
+        assert!(!relay_display.contains("127.0.0.1"));
+
+        let source = reqwest::Proxy::all("http://[")
+            .expect_err("malformed proxy should produce a reqwest error")
+            .with_url(reqwest::Url::parse(secret_url).expect("test URL should parse"));
+        let invalid_proxy = ExecutionRuntimeTransportError::InvalidProxy(source);
+        let invalid_proxy_debug = format!("{invalid_proxy:?}");
+        assert!(!invalid_proxy_debug.contains("upstream-user"));
+        assert!(!invalid_proxy_debug.contains("upstream-password"));
+        assert!(!invalid_proxy_debug.contains("query-secret"));
+        assert!(!invalid_proxy_debug.contains("127.0.0.1"));
     }
 
     #[test]
@@ -4500,6 +6030,70 @@ mod tests {
     }
 
     #[test]
+    fn bounded_execution_body_base64_checks_encoded_and_decoded_sizes() {
+        let exact = base64::engine::general_purpose::STANDARD.encode([1_u8, 2, 3]);
+        assert_eq!(
+            decode_base64_body_with_limit(&exact, 3).expect("exact decoded limit should pass"),
+            vec![1, 2, 3]
+        );
+
+        let encoded_too_large = base64::engine::general_purpose::STANDARD.encode([1_u8, 2, 3, 4]);
+        assert!(matches!(
+            decode_base64_body_with_limit(&encoded_too_large, 2),
+            Err(ExecutionRuntimeTransportError::BodyTooLarge { limit_bytes: 2 })
+        ));
+
+        // Eight encoded bytes are within the limit for a four-byte bound, but
+        // this valid value decodes to six bytes and must fail the second check.
+        let decoded_too_large = "YWJjZGVm";
+        assert!(matches!(
+            decode_base64_body_with_limit(decoded_too_large, 4),
+            Err(ExecutionRuntimeTransportError::BodyTooLarge { limit_bytes: 4 })
+        ));
+
+        assert!(matches!(
+            decode_base64_body_with_limit("!!!!", 3),
+            Err(ExecutionRuntimeTransportError::BodyDecode(_))
+        ));
+    }
+
+    #[test]
+    fn serialized_json_limit_is_inclusive_and_does_not_allocate_an_encoded_copy() {
+        let value = json!({"value": "abc"});
+        let encoded_len = serde_json::to_vec(&value).unwrap().len();
+
+        assert!(json_value_fits_serialized_limit(&value, encoded_len));
+        assert!(!json_value_fits_serialized_limit(&value, encoded_len - 1));
+    }
+
+    #[test]
+    fn request_body_rejects_ambiguous_json_and_base64_representations() {
+        let mut plan = tunnel_timeout_plan(false);
+        plan.body = RequestBody {
+            json_body: Some(json!({"json": true})),
+            body_bytes_b64: Some("e30=".to_string()),
+            body_ref: None,
+        };
+
+        assert!(matches!(
+            super::build_request_body(&plan),
+            Err(ExecutionRuntimeTransportError::RequestBodyAmbiguous)
+        ));
+    }
+
+    #[test]
+    fn execution_result_envelope_limit_accounts_for_base64_expansion() {
+        let raw_limit = 64 * 1024 * 1024;
+        let envelope_limit = execution_result_envelope_limit_bytes(raw_limit);
+        assert!(envelope_limit > maximum_base64_len_for_decoded_limit(raw_limit));
+        assert!(envelope_limit <= 256 * 1024 * 1024);
+        assert_eq!(
+            execution_result_envelope_limit_bytes(usize::MAX),
+            256 * 1024 * 1024
+        );
+    }
+
+    #[test]
     fn scoped_response_body_wire_limit_rejects_overflow() {
         let bounded_plan = with_upstream_response_body_limit(
             &tunnel_timeout_plan(false),
@@ -4620,7 +6214,19 @@ mod tests {
         ));
         assert!(gateway_frontdoor_self_loop_guard_matches_with_port(
             8084,
+            "http://127.42.0.1:8084/v1/messages"
+        ));
+        assert!(gateway_frontdoor_self_loop_guard_matches_with_port(
+            8084,
             "http://localhost:8084/v1/responses"
+        ));
+        assert!(gateway_frontdoor_self_loop_guard_matches_with_port(
+            8084,
+            "http://[::ffff:127.0.0.1]:8084/v1/responses"
+        ));
+        assert!(gateway_frontdoor_self_loop_guard_matches_with_port(
+            8084,
+            "http://0.0.0.0:8084/v1/responses"
         ));
         assert!(gateway_frontdoor_self_loop_guard_matches_with_port(
             8084,
@@ -4653,10 +6259,23 @@ mod tests {
                 "http://localhost:8084/v1/responses"
             ),
             Some(
-                "upstream execution target resolves back to the local aether-gateway frontdoor: http://localhost:8084/v1/responses"
+                "upstream execution target resolves back to the local aether-gateway frontdoor"
                     .to_string()
             )
         );
+    }
+
+    #[test]
+    fn gateway_frontdoor_self_loop_guard_does_not_echo_target_secrets() {
+        let error = gateway_frontdoor_self_loop_guard_error_with_port(
+            8084,
+            "http://user:password@localhost:8084/v1/responses?api_key=query-secret#fragment-secret",
+        )
+        .expect("frontdoor self-loop should be rejected");
+        assert!(!error.contains("password"));
+        assert!(!error.contains("query-secret"));
+        assert!(!error.contains("fragment-secret"));
+        assert!(!error.contains("localhost:8084"));
     }
 
     #[test]
@@ -4707,16 +6326,20 @@ mod tests {
         TestEnvVarGuard { key, previous }
     }
 
-    fn direct_reqwest_env_lock() -> MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .expect("direct reqwest env lock")
+    fn unset_test_env_var(key: &'static str) -> TestEnvVarGuard {
+        let previous = std::env::var(key).ok();
+        std::env::remove_var(key);
+        TestEnvVarGuard { key, previous }
+    }
+
+    fn direct_reqwest_env_lock() -> &'static tokio::sync::Mutex<()> {
+        static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+        &LOCK
     }
 
     #[test]
     fn direct_reqwest_client_cache_key_includes_transport_profile() {
-        let _guard = direct_reqwest_env_lock();
+        let _guard = direct_reqwest_env_lock().blocking_lock();
         let timeouts = ExecutionTimeouts {
             connect_ms: Some(5_000),
             ..ExecutionTimeouts::default()
@@ -4777,6 +6400,77 @@ mod tests {
         assert!(!super::direct_reqwest_client_cache_key_uses_http2(
             &different_mode
         ));
+    }
+
+    #[test]
+    fn direct_reqwest_proxy_cache_identity_is_digest_only() {
+        let proxy_url = "http://alice:proxy-password@proxy.example.test:8080";
+        let rotated_proxy_url = "http://alice:rotated-password@proxy.example.test:8080";
+        let cache_key = super::direct_reqwest_client_cache_key(
+            "https://api.example.test/v1/messages",
+            "key-1",
+            None,
+            Some(proxy_url.to_string()),
+            None,
+            ExecutionTransportControls::default(),
+        );
+        let rotated = super::direct_reqwest_client_cache_key(
+            "https://api.example.test/v1/messages",
+            "key-1",
+            None,
+            Some(rotated_proxy_url.to_string()),
+            None,
+            ExecutionTransportControls::default(),
+        );
+
+        assert_ne!(cache_key, rotated);
+        assert_eq!(cache_key.proxy_digest.as_deref().map(str::len), Some(64));
+        let debug = format!("{cache_key:?}");
+        assert!(!debug.contains("alice"));
+        assert!(!debug.contains("proxy-password"));
+        assert!(!debug.contains("proxy.example.test"));
+        super::build_direct_reqwest_client_from_cache_key(&cache_key, Some(proxy_url))
+            .expect("authenticated proxy client should build from transient URL material");
+    }
+
+    #[test]
+    fn direct_upstream_origin_brackets_ipv6_literals() {
+        assert_eq!(
+            super::direct_reqwest_upstream_origin("https://[::1]:8443/v1/messages").as_deref(),
+            Some("https://[::1]:8443")
+        );
+    }
+
+    #[test]
+    fn direct_reqwest_client_cache_evicts_least_recently_used_entry_at_capacity() {
+        let _guard = direct_reqwest_env_lock().blocking_lock();
+        let _capacity = set_test_env_var(super::DIRECT_REQWEST_CACHE_MAX_ENTRIES_ENV, "2");
+        let cache_key = |suffix| {
+            super::direct_reqwest_client_cache_key(
+                "https://api.example.test/v1/messages",
+                "key-1",
+                None,
+                Some(format!("http://proxy-{suffix}.example.test:8080")),
+                None,
+                ExecutionTransportControls::default(),
+            )
+        };
+        let oldest = cache_key("oldest");
+        let recent = cache_key("recent");
+        let incoming = cache_key("incoming");
+        let mut cache = std::collections::HashMap::new();
+        let mut oldest_entry = super::DirectReqwestClientCacheEntry::new(Vec::new(), 1, false);
+        oldest_entry.last_used = 1;
+        let mut recent_entry = super::DirectReqwestClientCacheEntry::new(Vec::new(), 1, false);
+        recent_entry.last_used = 2;
+        cache.insert(oldest.clone(), oldest_entry);
+        cache.insert(recent.clone(), recent_entry);
+
+        super::evict_direct_reqwest_client_cache_for_insert(&mut cache, &incoming);
+
+        assert_eq!(cache.len(), 1);
+        assert!(!cache.contains_key(&oldest));
+        assert!(cache.contains_key(&recent));
     }
 
     #[test]
@@ -4847,7 +6541,7 @@ mod tests {
 
     #[test]
     fn direct_reqwest_client_cache_key_splits_origin_only_when_enabled() {
-        let _guard = direct_reqwest_env_lock();
+        let _guard = direct_reqwest_env_lock().blocking_lock();
         let profile = ResolvedTransportProfile {
             profile_id: "mock-h2c-origin".into(),
             backend: TRANSPORT_BACKEND_REQWEST_RUSTLS.into(),
@@ -5034,14 +6728,14 @@ mod tests {
 
     #[test]
     fn direct_h2c_client_shards_respect_explicit_env() {
-        let _guard = direct_reqwest_env_lock();
+        let _guard = direct_reqwest_env_lock().blocking_lock();
         let _shards = set_test_env_var(super::DIRECT_H2C_CLIENT_SHARDS_ENV, "7");
         assert_eq!(super::direct_h2c_client_shard_count(), 7);
     }
 
     #[test]
     fn direct_h2c_adaptive_window_respects_explicit_env() {
-        let _guard = direct_reqwest_env_lock();
+        let _guard = direct_reqwest_env_lock().blocking_lock();
         {
             let _adaptive = set_test_env_var(super::DIRECT_H2C_ADAPTIVE_WINDOW_ENV, "0");
             assert!(!super::direct_h2c_adaptive_window_enabled());
@@ -5109,7 +6803,7 @@ mod tests {
 
     #[test]
     fn direct_h2c_prewarm_urls_parse_env_list() {
-        let _guard = direct_reqwest_env_lock();
+        let _guard = direct_reqwest_env_lock().blocking_lock();
         let _urls = set_test_env_var(
             super::DIRECT_H2C_PREWARM_URLS_ENV,
             " http://127.0.0.1:18184/v1/chat/completions,;http://127.0.0.1:18185/v1/chat/completions\nhttp://127.0.0.1:18186/v1/chat/completions ",
@@ -5127,7 +6821,7 @@ mod tests {
 
     #[test]
     fn direct_h2c_prewarm_cache_keys_dedup_by_origin() {
-        let _guard = direct_reqwest_env_lock();
+        let _guard = direct_reqwest_env_lock().blocking_lock();
         let urls = vec![
             "http://127.0.0.1:18184/v1/chat/completions".to_string(),
             "http://127.0.0.1:18184/v1/responses".to_string(),
@@ -5153,7 +6847,7 @@ mod tests {
 
     #[test]
     fn direct_h2c_client_cache_splits_by_origin_and_shards() {
-        let _guard = direct_reqwest_env_lock();
+        let _guard = direct_reqwest_env_lock().blocking_lock();
         let _shards = set_test_env_var(super::DIRECT_H2C_CLIENT_SHARDS_ENV, "3");
         super::DIRECT_H2C_CLIENT_CACHE
             .lock()
@@ -5178,7 +6872,7 @@ mod tests {
 
     #[test]
     fn direct_reqwest_initial_client_shards_are_bounded_by_target() {
-        let _guard = direct_reqwest_env_lock();
+        let _guard = direct_reqwest_env_lock().blocking_lock();
         assert_eq!(super::direct_reqwest_initial_client_shard_count(1), 1);
         assert_eq!(super::direct_reqwest_initial_client_shard_count(2), 2);
         assert_eq!(
@@ -5189,7 +6883,7 @@ mod tests {
 
     #[test]
     fn direct_reqwest_initial_client_shards_cap_large_sync_env() {
-        let _guard = direct_reqwest_env_lock();
+        let _guard = direct_reqwest_env_lock().blocking_lock();
         let _sync = set_test_env_var(super::DIRECT_REQWEST_SYNC_WARM_CLIENTS_ENV, "128");
         assert_eq!(
             super::direct_reqwest_initial_client_shard_count(128),
@@ -5199,7 +6893,7 @@ mod tests {
 
     #[test]
     fn direct_reqwest_prewarm_client_shards_default_to_initial() {
-        let _guard = direct_reqwest_env_lock();
+        let _guard = direct_reqwest_env_lock().blocking_lock();
         assert_eq!(super::direct_reqwest_prewarm_client_shard_count(1), 1);
         assert_eq!(
             super::direct_reqwest_prewarm_client_shard_count(96),
@@ -5209,7 +6903,7 @@ mod tests {
 
     #[test]
     fn direct_reqwest_prewarm_client_shards_do_not_exceed_request_path_cap() {
-        let _guard = direct_reqwest_env_lock();
+        let _guard = direct_reqwest_env_lock().blocking_lock();
         let _sync = set_test_env_var(super::DIRECT_REQWEST_SYNC_WARM_CLIENTS_ENV, "4");
         let _prewarm = set_test_env_var(super::DIRECT_REQWEST_PREWARM_SYNC_CLIENTS_ENV, "128");
 
@@ -5218,7 +6912,7 @@ mod tests {
 
     #[test]
     fn direct_reqwest_prewarm_populates_cache_for_plan() {
-        let _guard = direct_reqwest_env_lock();
+        let _guard = direct_reqwest_env_lock().blocking_lock();
         let _shards = set_test_env_var(super::DIRECT_REQWEST_H2_CLIENT_SHARDS_ENV, "4");
         let profile = ResolvedTransportProfile {
             profile_id: "mock-h2c-prewarm".into(),
@@ -5280,7 +6974,7 @@ mod tests {
 
     #[test]
     fn direct_reqwest_prewarm_plan_keeps_large_sync_env_off_request_path() {
-        let _guard = direct_reqwest_env_lock();
+        let _guard = direct_reqwest_env_lock().blocking_lock();
         let _shards = set_test_env_var(super::DIRECT_REQWEST_H2_CLIENT_SHARDS_ENV, "128");
         let _sync = set_test_env_var(super::DIRECT_REQWEST_SYNC_WARM_CLIENTS_ENV, "4");
         let _prewarm = set_test_env_var(super::DIRECT_REQWEST_PREWARM_SYNC_CLIENTS_ENV, "128");
@@ -5340,7 +7034,7 @@ mod tests {
 
     #[test]
     fn direct_reqwest_prewarm_skips_h2c_fast_path() {
-        let _guard = direct_reqwest_env_lock();
+        let _guard = direct_reqwest_env_lock().blocking_lock();
         let _fast_path = set_test_env_var(super::DIRECT_H2C_FAST_PATH_ENV, "1");
         let profile = ResolvedTransportProfile {
             profile_id: "mock-h2c-fast-path-prewarm-skip".into(),
@@ -5393,7 +7087,7 @@ mod tests {
 
     #[test]
     fn direct_reqwest_cache_metrics_expose_ready_state() {
-        let _guard = direct_reqwest_env_lock();
+        let _guard = direct_reqwest_env_lock().blocking_lock();
         let _shards = set_test_env_var(super::DIRECT_REQWEST_H2_CLIENT_SHARDS_ENV, "1");
         let profile = ResolvedTransportProfile {
             profile_id: "mock-h2c-ready-metrics".into(),
@@ -5488,7 +7182,7 @@ mod tests {
         ]);
 
         let controls = resolve_execution_transport_controls(&headers);
-        assert!(controls.accept_invalid_certs);
+        assert!(!controls.http1_only);
 
         let forwarded = build_request_headers(&headers, None, false)
             .expect("headers should build after stripping internal controls");
@@ -5736,6 +7430,163 @@ mod tests {
         }
     }
 
+    const LOCAL_TUNNEL_TEST_PSK: &str = "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=";
+    const LOCAL_TUNNEL_TEST_GENERATION: &str = "transport-test-generation-1";
+
+    fn authenticated_local_tunnel_test_state() -> AppState {
+        let node = StoredProxyNode::new(
+            "node-1".to_string(),
+            "Node 1".to_string(),
+            "127.0.0.1".to_string(),
+            0,
+            false,
+            "online".to_string(),
+            30,
+            1,
+            0,
+            0,
+            0,
+            0,
+            true,
+            true,
+            1,
+        )
+        .expect("tunnel node should build")
+        .with_runtime_fields(
+            None,
+            None,
+            None,
+            None,
+            Some(json!({
+                "tunnel_security": {
+                    "mode": TUNNEL_SECURITY_NON_TLS_REQUIRED,
+                    "encryption_key": LOCAL_TUNNEL_TEST_PSK,
+                }
+            })),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .with_tunnel_generation(LOCAL_TUNNEL_TEST_GENERATION.to_string());
+        let data = crate::data::GatewayDataState::with_proxy_node_repository_for_tests(Arc::new(
+            InMemoryProxyNodeRepository::seed([node]),
+        ))
+        .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY);
+        AppState::new()
+            .expect("app state should build")
+            .with_data_state_for_tests(data)
+    }
+
+    async fn recv_tunnel_test_frame(
+        proxy_rx: &mut aether_runtime::BoundedQueueReceiver<Message>,
+        description: &str,
+    ) -> Message {
+        tokio::time::timeout(std::time::Duration::from_secs(5), proxy_rx.recv())
+            .await
+            .unwrap_or_else(|_| panic!("timed out waiting for {description}"))
+            .unwrap_or_else(|| panic!("proxy channel closed before {description}"))
+    }
+
+    #[test]
+    fn execution_tunnel_relay_url_policy_allows_https_and_loopback_http() {
+        let https_proxy = tunnel_proxy_snapshot("https://gateway.example.com/base".to_string());
+        let https_url = build_relay_url(Some(&https_proxy), "node-1")
+            .expect("remote HTTPS relay should be allowed");
+        assert_eq!(
+            https_url,
+            "https://gateway.example.com/base/api/internal/tunnel/relay/node-1"
+        );
+
+        let loopback_proxy = tunnel_proxy_snapshot("http://127.0.0.1:8084".to_string());
+        let loopback_url = build_relay_url(Some(&loopback_proxy), "node-1")
+            .expect("loopback HTTP relay should be allowed");
+        assert_eq!(
+            loopback_url,
+            "http://127.0.0.1:8084/api/internal/tunnel/relay/node-1"
+        );
+    }
+
+    #[test]
+    fn execution_tunnel_relay_url_policy_rejects_remote_http() {
+        let proxy = tunnel_proxy_snapshot("http://gateway.example.com".to_string());
+        let error = build_relay_url(Some(&proxy), "node-1")
+            .expect_err("remote HTTP relay must be rejected");
+
+        assert!(matches!(
+            error,
+            ExecutionRuntimeTransportError::RelayError(message)
+                if message.contains("HTTPS") && message.contains("loopback")
+        ));
+    }
+
+    #[test]
+    fn relay_target_url_policy_rejects_ambiguous_or_private_targets() {
+        for rejected in [
+            "http://relay.example.test",
+            "https://10.0.0.8:8443",
+            "https://127.0.0.1:8443",
+            "http://localhost:8084?token=secret",
+            "http://localhost:8084#fragment",
+            "https://relay-user:relay-password@relay.example.test",
+            "file:///tmp/relay",
+        ] {
+            let url = reqwest::Url::parse(rejected).expect("test URL should parse");
+            assert!(
+                validate_relay_target_url(&url).is_err(),
+                "relay target should be rejected: {rejected}"
+            );
+        }
+
+        for accepted in [
+            "https://relay.example.test:8443/api/internal/tunnel/relay/node-1",
+            "http://localhost:8084/api/internal/tunnel/relay/node-1",
+            "http://127.0.0.1:8084/api/internal/tunnel/relay/node-1",
+        ] {
+            let url = reqwest::Url::parse(accepted).expect("test URL should parse");
+            validate_relay_target_url(&url)
+                .unwrap_or_else(|error| panic!("relay target should pass: {accepted}: {error}"));
+        }
+    }
+
+    #[test]
+    fn limited_json_body_serialization_rejects_before_growing_to_full_body() {
+        let body = json!({"payload": "x".repeat(1024)});
+        assert!(matches!(
+            super::serialize_json_body_with_limit(&body, 32),
+            Err(ExecutionRuntimeTransportError::BodyTooLarge { limit_bytes: 32 })
+        ));
+        let encoded = super::serialize_json_body_with_limit(&json!({"ok": true}), 32)
+            .expect("small JSON body should pass");
+        assert_eq!(encoded, br#"{"ok":true}"#);
+    }
+
+    #[test]
+    fn relay_envelope_rejects_oversized_metadata_before_length_cast() {
+        let meta = RelayRequestMeta {
+            provider_id: "provider".to_string(),
+            endpoint_id: "endpoint".to_string(),
+            key_id: "key".to_string(),
+            method: "POST".to_string(),
+            url: "https://relay.example.test".to_string(),
+            headers: BTreeMap::from([("x-large".to_string(), "x".repeat(300 * 1024))]),
+            stream: false,
+            request_timeout_ms: None,
+            stream_first_byte_timeout_ms: None,
+            timeout: 60,
+            follow_redirects: None,
+            http1_only: false,
+            transport_profile: None,
+        };
+        assert!(matches!(
+            super::build_relay_envelope(meta, &[]),
+            Err(ExecutionRuntimeTransportError::RelayError(message))
+                if message.contains("metadata")
+        ));
+    }
+
     fn manual_proxy_snapshot(node_id: &str) -> ProxySnapshot {
         ProxySnapshot {
             enabled: Some(true),
@@ -5743,7 +7594,9 @@ mod tests {
             node_id: Some(node_id.to_string()),
             label: Some("manual-proxy".into()),
             url: Some("http://127.0.0.1:1".into()),
-            extra: None,
+            extra: Some(json!({
+                PROXY_NODE_TUNNEL_GENERATION_EXTRA_KEY: "test-manual-generation"
+            })),
         }
     }
 
@@ -5766,7 +7619,21 @@ mod tests {
             0,
         )
         .expect("manual proxy node should build")
+        .with_tunnel_generation("test-manual-generation".into())
         .with_manual_proxy_fields(Some("http://127.0.0.1:1".into()), None, None)
+    }
+
+    #[test]
+    fn manual_proxy_binding_requires_incarnation_generation() {
+        let proxy = ProxySnapshot {
+            enabled: Some(true),
+            mode: Some("http".into()),
+            node_id: Some("manual-node".into()),
+            label: None,
+            url: Some("http://127.0.0.1:1".into()),
+            extra: None,
+        };
+        assert!(super::manual_proxy_node_binding(Some(&proxy)).is_none());
     }
 
     fn decode_relay_envelope(body: &[u8]) -> (serde_json::Value, Vec<u8>) {
@@ -6804,41 +8671,58 @@ mod tests {
 
     #[tokio::test]
     async fn direct_sync_execution_runtime_supports_tunnel_relay() {
+        let _env_lock = direct_reqwest_env_lock().lock().await;
+        let _relay_secret = set_test_env_var("AETHER_TUNNEL_RELAY_AUTH_SECRET", RELAY_TEST_SECRET);
         let listener = crate::test_support::bind_loopback_listener()
             .await
             .expect("listener should bind");
         let addr = listener.local_addr().expect("local addr should resolve");
         let app = Router::new().route(
             "/api/internal/tunnel/relay/{node_id}",
-            post(|Path(node_id): Path<String>, body: Bytes| async move {
-                let (meta, request_body) = decode_relay_envelope(&body);
-                assert_eq!(node_id, "node-1");
-                assert_eq!(meta["method"], "POST");
-                assert_eq!(meta["url"], "https://example.com/chat");
-                let headers = meta["headers"]
-                    .as_object()
-                    .expect("relay meta headers should be an object");
-                assert!(
-                    !headers.contains_key(EXECUTION_RUNTIME_LOOP_GUARD_HEADER),
-                    "tunnel relay metadata must not leak internal execution loop guard headers"
-                );
-                let via = headers
-                    .get("via")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or_default();
-                assert!(
+            post(
+                |Path(node_id): Path<String>, headers: AxumHeaderMap, body: Bytes| async move {
+                    let (meta, request_body) = decode_relay_envelope(&body);
+                    assert_eq!(node_id, "node-1");
+                    for name in [
+                        TUNNEL_RELAY_AUTH_SENDER_HEADER,
+                        TUNNEL_RELAY_OWNER_INSTANCE_HEADER,
+                        TUNNEL_RELAY_AUTH_TIMESTAMP_HEADER,
+                        TUNNEL_RELAY_AUTH_NONCE_HEADER,
+                        TUNNEL_RELAY_AUTH_PAYLOAD_HEADER,
+                        TUNNEL_RELAY_AUTH_SIGNATURE_HEADER,
+                    ] {
+                        assert!(
+                            headers.contains_key(name),
+                            "missing relay auth header {name}"
+                        );
+                    }
+                    assert_eq!(meta["method"], "POST");
+                    assert_eq!(meta["url"], "https://example.com/chat");
+                    let headers = meta["headers"]
+                        .as_object()
+                        .expect("relay meta headers should be an object");
+                    assert!(
+                        !headers.contains_key(EXECUTION_RUNTIME_LOOP_GUARD_HEADER),
+                        "tunnel relay metadata must not leak internal execution loop guard headers"
+                    );
+                    let via = headers
+                        .get("via")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default();
+                    assert!(
                     !via.to_ascii_lowercase()
                         .contains(EXECUTION_RUNTIME_LOOP_GUARD_VIA_TOKEN),
                     "tunnel relay metadata must not leak internal execution runtime Via markers"
                 );
-                let request_json: serde_json::Value =
-                    serde_json::from_slice(&request_body).expect("request body should be json");
-                assert_eq!(request_json["model"], "gpt-4.1");
-                (
-                    axum::http::StatusCode::OK,
-                    Json(json!({"tunnel": true, "node_id": node_id})),
-                )
-            }),
+                    let request_json: serde_json::Value =
+                        serde_json::from_slice(&request_body).expect("request body should be json");
+                    assert_eq!(request_json["model"], "gpt-4.1");
+                    (
+                        axum::http::StatusCode::OK,
+                        Json(json!({"tunnel": true, "node_id": node_id})),
+                    )
+                },
+            ),
         );
         let server = tokio::spawn(async move {
             axum::serve(listener, app)
@@ -6886,20 +8770,174 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tunnel_relay_client_never_forwards_signed_envelopes_across_redirects() {
+        let redirected_hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let redirected_hits_clone = Arc::clone(&redirected_hits);
+        let redirected_listener = crate::test_support::bind_loopback_listener()
+            .await
+            .expect("redirect target listener should bind");
+        let redirected_addr = redirected_listener
+            .local_addr()
+            .expect("redirect target address should resolve");
+        let redirected_app = Router::new().route(
+            "/captured",
+            post(move || {
+                let hits = Arc::clone(&redirected_hits_clone);
+                async move {
+                    hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    axum::http::StatusCode::OK
+                }
+            }),
+        );
+        let redirected_server = tokio::spawn(async move {
+            axum::serve(redirected_listener, redirected_app)
+                .await
+                .expect("redirect target server should run");
+        });
+
+        let redirect_listener = crate::test_support::bind_loopback_listener()
+            .await
+            .expect("redirect source listener should bind");
+        let redirect_addr = redirect_listener
+            .local_addr()
+            .expect("redirect source address should resolve");
+        let location = format!("http://{redirected_addr}/captured");
+        let redirect_app = Router::new().route(
+            "/relay",
+            post(move || {
+                let location = location.clone();
+                async move {
+                    (
+                        axum::http::StatusCode::TEMPORARY_REDIRECT,
+                        [(axum::http::header::LOCATION, location)],
+                    )
+                }
+            }),
+        );
+        let redirect_server = tokio::spawn(async move {
+            axum::serve(redirect_listener, redirect_app)
+                .await
+                .expect("redirect source server should run");
+        });
+
+        let response = build_relay_client(None)
+            .expect("relay client should build")
+            .post(format!("http://{redirect_addr}/relay"))
+            .header(TUNNEL_RELAY_AUTH_SIGNATURE_HEADER, "sensitive-signature")
+            .body("sensitive-relay-envelope")
+            .send()
+            .await
+            .expect("relay client should return the redirect response");
+
+        assert_eq!(response.status(), reqwest::StatusCode::TEMPORARY_REDIRECT);
+        assert_eq!(redirected_hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        redirect_server.abort();
+        redirected_server.abort();
+    }
+
+    #[tokio::test]
+    async fn direct_sync_execution_runtime_rejects_short_tunnel_relay_secret_before_send() {
+        let _env_lock = direct_reqwest_env_lock().lock().await;
+        let _relay_secret = set_test_env_var("AETHER_TUNNEL_RELAY_AUTH_SECRET", &"x".repeat(31));
+        let execution_runtime = DirectSyncExecutionRuntime::new();
+        let error = execution_runtime
+            .execute_sync(&ExecutionPlan {
+                request_id: "req-short-relay-secret".into(),
+                candidate_id: None,
+                provider_name: None,
+                provider_id: "prov-1".into(),
+                endpoint_id: "ep-1".into(),
+                key_id: "key-1".into(),
+                method: "POST".into(),
+                url: "https://example.com/chat".into(),
+                headers: BTreeMap::from([("content-type".into(), "application/json".into())]),
+                content_type: Some("application/json".into()),
+                content_encoding: None,
+                body: RequestBody::from_json(json!({"model": "gpt-4.1"})),
+                stream: false,
+                client_api_format: "openai:chat".into(),
+                provider_api_format: "openai:chat".into(),
+                model_name: Some("gpt-4.1".into()),
+                proxy: Some(tunnel_proxy_snapshot("http://127.0.0.1:1".to_string())),
+                transport_profile: None,
+                timeouts: Some(ExecutionTimeouts {
+                    connect_ms: Some(5_000),
+                    total_ms: Some(LOCAL_HTTP_SUCCESS_TIMEOUT_MS),
+                    ..ExecutionTimeouts::default()
+                }),
+            })
+            .await
+            .expect_err("short relay secret must fail closed");
+
+        assert!(matches!(
+            error,
+            ExecutionRuntimeTransportError::RelayError(message)
+                if message.contains("at least 32 bytes")
+        ));
+    }
+
+    #[tokio::test]
+    async fn direct_sync_execution_runtime_requires_tunnel_relay_secret_before_send() {
+        let _env_lock = direct_reqwest_env_lock().lock().await;
+        let _relay_secret = unset_test_env_var("AETHER_TUNNEL_RELAY_AUTH_SECRET");
+        let execution_runtime = DirectSyncExecutionRuntime::new();
+        let error = execution_runtime
+            .execute_sync(&ExecutionPlan {
+                request_id: "req-missing-relay-secret".into(),
+                candidate_id: None,
+                provider_name: None,
+                provider_id: "prov-1".into(),
+                endpoint_id: "ep-1".into(),
+                key_id: "key-1".into(),
+                method: "POST".into(),
+                url: "https://example.com/chat".into(),
+                headers: BTreeMap::from([("content-type".into(), "application/json".into())]),
+                content_type: Some("application/json".into()),
+                content_encoding: None,
+                body: RequestBody::from_json(json!({"model": "gpt-4.1"})),
+                stream: false,
+                client_api_format: "openai:chat".into(),
+                provider_api_format: "openai:chat".into(),
+                model_name: Some("gpt-4.1".into()),
+                proxy: Some(tunnel_proxy_snapshot("http://127.0.0.1:1".to_string())),
+                transport_profile: None,
+                timeouts: Some(ExecutionTimeouts {
+                    connect_ms: Some(5_000),
+                    total_ms: Some(LOCAL_HTTP_SUCCESS_TIMEOUT_MS),
+                    ..ExecutionTimeouts::default()
+                }),
+            })
+            .await
+            .expect_err("missing relay secret must fail closed");
+
+        assert!(matches!(
+            error,
+            ExecutionRuntimeTransportError::RelayError(message)
+                if message.contains("AETHER_TUNNEL_RELAY_AUTH_SECRET")
+                    && message.contains("required")
+        ));
+    }
+
+    #[tokio::test]
     async fn execute_sync_plan_prefers_local_tunnel_stream_over_http_relay_loopback() {
-        let state = AppState::new().expect("app state should build");
+        let state = authenticated_local_tunnel_test_state();
         let tunnel_app = state.tunnel.app_state();
         let (proxy_tx, mut proxy_rx) = aether_runtime::bounded_queue(8);
         let (proxy_close_tx, _) = watch::channel(false);
-        tunnel_app.hub.register_proxy(Arc::new(TunnelProxyConn::new(
-            701,
-            "node-1".to_string(),
-            "Node 1".to_string(),
-            proxy_tx,
-            proxy_close_tx,
-            16,
-            2,
-        )));
+        tunnel_app.hub.register_proxy(Arc::new(
+            TunnelProxyConn::new(
+                701,
+                "node-1".to_string(),
+                "Node 1".to_string(),
+                proxy_tx,
+                proxy_close_tx,
+                16,
+                2,
+            )
+            .with_tunnel_generation(LOCAL_TUNNEL_TEST_GENERATION.to_string())
+            .with_authenticated_key(LOCAL_TUNNEL_TEST_PSK.to_string()),
+        ));
 
         let plan = ExecutionPlan {
             request_id: "req-local-tunnel-1".into(),
@@ -6933,7 +8971,7 @@ mod tests {
             execute_sync_plan(&state_for_task, Some("trace-local-tunnel"), &plan_for_task).await
         });
 
-        let request_headers = match proxy_rx.recv().await.expect("headers frame should arrive") {
+        let request_headers = match recv_tunnel_test_frame(&mut proxy_rx, "headers frame").await {
             Message::Binary(data) => data,
             other => panic!("unexpected message: {other:?}"),
         };
@@ -6949,7 +8987,7 @@ mod tests {
         assert_eq!(request_meta.method, "POST");
         assert_eq!(request_meta.url, "https://example.com/chat");
 
-        let request_body = match proxy_rx.recv().await.expect("body frame should arrive") {
+        let request_body = match recv_tunnel_test_frame(&mut proxy_rx, "body frame").await {
             Message::Binary(data) => data,
             other => panic!("unexpected message: {other:?}"),
         };
@@ -7168,26 +9206,31 @@ mod tests {
 
     #[tokio::test]
     async fn direct_sync_execution_runtime_forwards_http1_only_control_to_tunnel_relay() {
+        let _env_lock = direct_reqwest_env_lock().lock().await;
+        let _relay_secret = set_test_env_var("AETHER_TUNNEL_RELAY_AUTH_SECRET", RELAY_TEST_SECRET);
         let listener = crate::test_support::bind_loopback_listener()
             .await
             .expect("listener should bind");
         let addr = listener.local_addr().expect("local addr should resolve");
         let app = Router::new().route(
             "/api/internal/tunnel/relay/{node_id}",
-            post(|Path(node_id): Path<String>, body: Bytes| async move {
-                let (meta, request_body) = decode_relay_envelope(&body);
-                assert_eq!(node_id, "node-1");
-                assert_eq!(meta["provider_id"], "prov-1");
-                assert_eq!(meta["endpoint_id"], "ep-1");
-                assert_eq!(meta["key_id"], "key-1");
-                assert_eq!(meta["http1_only"], true);
-                assert_eq!(meta["follow_redirects"], json!(false));
-                assert_eq!(meta["transport_profile"]["profile_id"], "relay-profile");
-                let request_json: serde_json::Value =
-                    serde_json::from_slice(&request_body).expect("request body should be json");
-                assert_eq!(request_json["model"], "gpt-4.1");
-                (axum::http::StatusCode::OK, Json(json!({"ok": true})))
-            }),
+            post(
+                |Path(node_id): Path<String>, headers: AxumHeaderMap, body: Bytes| async move {
+                    let (meta, request_body) = decode_relay_envelope(&body);
+                    assert_eq!(node_id, "node-1");
+                    assert!(headers.contains_key(TUNNEL_RELAY_AUTH_SIGNATURE_HEADER));
+                    assert_eq!(meta["provider_id"], "prov-1");
+                    assert_eq!(meta["endpoint_id"], "ep-1");
+                    assert_eq!(meta["key_id"], "key-1");
+                    assert_eq!(meta["http1_only"], true);
+                    assert_eq!(meta["follow_redirects"], json!(false));
+                    assert_eq!(meta["transport_profile"]["profile_id"], "relay-profile");
+                    let request_json: serde_json::Value =
+                        serde_json::from_slice(&request_body).expect("request body should be json");
+                    assert_eq!(request_json["model"], "gpt-4.1");
+                    (axum::http::StatusCode::OK, Json(json!({"ok": true})))
+                },
+            ),
         );
         let server = tokio::spawn(async move {
             axum::serve(listener, app)
@@ -7373,13 +9416,13 @@ mod tests {
                 .map(|profile| profile.http_mode.as_str()),
             Some(TRANSPORT_HTTP_MODE_H2C_PRIOR_KNOWLEDGE)
         );
-        super::build_direct_reqwest_client_from_cache_key(&cache_key)
+        super::build_direct_reqwest_client_from_cache_key(&cache_key, None)
             .expect("h2c prior-knowledge client should build");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn direct_sync_execution_runtime_uses_h2c_prior_knowledge_on_wire() {
-        let _guard = direct_reqwest_env_lock();
+        let _guard = direct_reqwest_env_lock().lock().await;
         let _shards = set_test_env_var(super::DIRECT_REQWEST_H2_CLIENT_SHARDS_ENV, "1");
         let listener = crate::test_support::bind_loopback_listener()
             .await

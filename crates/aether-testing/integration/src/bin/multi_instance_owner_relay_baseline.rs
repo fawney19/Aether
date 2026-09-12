@@ -5,13 +5,15 @@ use std::time::Duration;
 use aether_gateway::tunnel_protocol as protocol;
 use aether_gateway::GatewayDataConfig;
 use aether_testkit::{
-    init_test_runtime_for, prepare_aether_postgres_schema, reserve_local_port, run_http_load_probe,
-    wait_until, GatewayHarness, GatewayHarnessConfig, HttpLoadProbeConfig,
-    HttpLoadProbeResponseMode, HttpLoadProbeResult, ManagedPostgresServer, ManagedRedisServer,
+    init_test_runtime_for, insert_tunnel_harness_auth_headers, prepare_aether_postgres_schema,
+    reserve_local_port, run_http_load_probe, wait_until, GatewayHarness, GatewayHarnessConfig,
+    HttpLoadProbeConfig, HttpLoadProbeResponseMode, HttpLoadProbeResult, ManagedPostgresServer,
+    ManagedRedisServer, TUNNEL_HARNESS_GENERATION, TUNNEL_HARNESS_MANAGEMENT_TOKEN,
 };
 use futures_util::{SinkExt, StreamExt};
 use reqwest::Method;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -64,8 +66,13 @@ struct RelayOverheadSnapshot {
     mean_delta_ms: i64,
 }
 
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let _log_shutdown = aether_runtime::LogShutdownGuard::new();
+    run()
+}
+
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn run() -> Result<(), Box<dyn std::error::Error>> {
     init_test_runtime_for("multi-instance-owner-relay-baseline");
     let config = parse_args(std::env::args().skip(1).collect())?;
     let report = run_suite(&config).await?;
@@ -114,6 +121,7 @@ async fn run_suite(
         .expect("postgres url should be resolved");
 
     prepare_aether_postgres_schema(&postgres_url).await?;
+    seed_tunnel_auth(&postgres_url).await?;
 
     let key_prefix = format!("aether-owner-relay-baseline-{}", std::process::id());
     let shared_data = GatewayDataConfig::from_postgres_url(postgres_url.clone(), false)
@@ -287,9 +295,7 @@ async fn connect_protocol_peer(
     );
     let request = ws_url.into_client_request()?;
     let mut request = request;
-    request
-        .headers_mut()
-        .insert("x-node-id", http::HeaderValue::from_static(NODE_ID));
+    insert_tunnel_harness_auth_headers(request.headers_mut(), NODE_ID)?;
     request.headers_mut().insert(
         aether_contracts::tunnel::TUNNEL_PROTOCOL_VERSION_HEADER,
         http::HeaderValue::from_static(
@@ -331,6 +337,98 @@ async fn connect_protocol_peer(
         }
         let _ = sink.close().await;
     }))
+}
+
+async fn seed_tunnel_auth(postgres_url: &str) -> Result<(), Box<dyn std::error::Error>> {
+    const USER_ID: &str = "user-owner-relay-baseline";
+    const TOKEN_ID: &str = "token-owner-relay-baseline";
+
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(postgres_url)
+        .await?;
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        r#"
+INSERT INTO users (
+  id, email, username, role, auth_source, email_verified, is_active, is_deleted,
+  created_at, updated_at
+) VALUES ($1, $2, $3, 'admin', 'local', TRUE, TRUE, FALSE, 1, 1)
+ON CONFLICT (id) DO UPDATE SET
+  email = EXCLUDED.email,
+  username = EXCLUDED.username,
+  role = 'admin',
+  auth_source = 'local',
+  email_verified = TRUE,
+  is_active = TRUE,
+  is_deleted = FALSE,
+  updated_at = EXCLUDED.updated_at
+"#,
+    )
+    .bind(USER_ID)
+    .bind("owner-relay-baseline@example.com")
+    .bind("owner_relay_baseline_admin")
+    .execute(&mut *transaction)
+    .await?;
+
+    let token_hash = format!(
+        "{:x}",
+        Sha256::digest(TUNNEL_HARNESS_MANAGEMENT_TOKEN.as_bytes())
+    );
+    sqlx::query(
+        r#"
+INSERT INTO management_tokens (
+  id, user_id, name, token_hash, token_prefix, permissions, usage_count,
+  is_active, created_at, updated_at
+) VALUES ($1, $2, $3, $4, 'ae-tunnel-harness', $5, 0, TRUE, 1, 1)
+ON CONFLICT (id) DO UPDATE SET
+  user_id = EXCLUDED.user_id,
+  name = EXCLUDED.name,
+  token_hash = EXCLUDED.token_hash,
+  token_prefix = EXCLUDED.token_prefix,
+  permissions = EXCLUDED.permissions,
+  is_active = TRUE,
+  updated_at = EXCLUDED.updated_at
+"#,
+    )
+    .bind(TOKEN_ID)
+    .bind(USER_ID)
+    .bind("owner relay tunnel token")
+    .bind(token_hash)
+    .bind(serde_json::json!(["admin:proxy_nodes:admin"]))
+    .execute(&mut *transaction)
+    .await?;
+
+    sqlx::query(
+        r#"
+INSERT INTO proxy_nodes (
+  id, tunnel_generation, name, ip, port, status, heartbeat_interval,
+  active_connections, total_requests, is_manual, created_at, updated_at,
+  config_version, tunnel_mode, tunnel_connected, failed_requests, dns_failures,
+  stream_errors
+) VALUES (
+  $1, $2, 'owner relay baseline node', '127.0.0.1', 0, 'offline', 30,
+  0, 0, FALSE, 1, 1, 0, TRUE, FALSE, 0, 0, 0
+)
+ON CONFLICT (id) DO UPDATE SET
+  tunnel_generation = EXCLUDED.tunnel_generation,
+  name = EXCLUDED.name,
+  ip = EXCLUDED.ip,
+  port = EXCLUDED.port,
+  status = 'offline',
+  active_connections = 0,
+  tunnel_mode = TRUE,
+  tunnel_connected = FALSE,
+  updated_at = EXCLUDED.updated_at
+"#,
+    )
+    .bind(NODE_ID)
+    .bind(TUNNEL_HARNESS_GENERATION)
+    .execute(&mut *transaction)
+    .await?;
+
+    transaction.commit().await?;
+    Ok(())
 }
 
 async fn handle_binary_frame<S>(

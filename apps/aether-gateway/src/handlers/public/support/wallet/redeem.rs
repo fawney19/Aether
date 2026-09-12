@@ -8,6 +8,8 @@ use serde::Deserialize;
 use serde_json::json;
 use uuid::Uuid;
 
+use aether_data::repository::wallet::stored_timestamp_unix_secs;
+
 #[derive(Debug, Deserialize)]
 struct WalletRedeemRequest {
     code: String,
@@ -39,7 +41,7 @@ fn build_wallet_payment_order_payload(
         "gateway_order_id": record.gateway_order_id,
         "gateway_response": sanitize_wallet_gateway_response(record.gateway_response.clone()),
         "status": record.status,
-        "created_at": unix_secs_to_rfc3339(record.created_at_unix_ms),
+        "created_at": unix_secs_to_rfc3339(stored_timestamp_unix_secs(record.created_at_unix_ms)),
         "paid_at": record.paid_at_unix_secs.and_then(unix_secs_to_rfc3339),
         "credited_at": record.credited_at_unix_secs.and_then(unix_secs_to_rfc3339),
         "expires_at": record.expires_at_unix_secs.and_then(unix_secs_to_rfc3339),

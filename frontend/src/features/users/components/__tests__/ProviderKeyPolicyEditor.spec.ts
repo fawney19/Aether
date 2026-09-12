@@ -96,7 +96,7 @@ describe('ProviderKeyPolicyEditor', () => {
     checkbox?.click()
     await nextTick()
 
-    expect(mounted.updates.at(-1)).toEqual({
+    expect(mounted.updates[mounted.updates.length - 1]).toEqual({
       'provider-tiered': ['key-premium'],
     })
     mounted.unmount()
@@ -117,7 +117,7 @@ describe('ProviderKeyPolicyEditor', () => {
     removeButton?.click()
     await nextTick()
 
-    expect(mounted.updates.at(-1)).toEqual({})
+    expect(mounted.updates[mounted.updates.length - 1]).toEqual({})
     mounted.unmount()
   })
 })

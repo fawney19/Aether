@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::fmt;
 
 use serde_json::Value;
 
@@ -16,7 +17,7 @@ use crate::snapshot::GatewayProviderTransportSnapshot;
 use crate::url::{build_openai_chat_url, build_openai_responses_url};
 use crate::vertex::uses_vertex_api_key_query_auth;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 pub struct StandardProviderRequestHeadersInput<'a> {
     pub transport: &'a GatewayProviderTransportSnapshot,
     pub provider_api_format: &'a str,
@@ -31,11 +32,61 @@ pub struct StandardProviderRequestHeadersInput<'a> {
     pub upstream_is_stream: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+impl fmt::Debug for StandardProviderRequestHeadersInput<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("StandardProviderRequestHeadersInput")
+            .field("transport", &self.transport)
+            .field("provider_api_format", &self.provider_api_format)
+            .field("same_format", &self.same_format)
+            .field(
+                "request_header_names",
+                &self
+                    .headers
+                    .keys()
+                    .map(|name| name.as_str())
+                    .collect::<Vec<_>>(),
+            )
+            .field("auth_header", &self.auth_header)
+            .field("has_auth_value", &(!self.auth_value.is_empty()))
+            .field(
+                "extra_header_names",
+                &self.extra_headers.keys().collect::<Vec<_>>(),
+            )
+            .field("has_header_rules", &self.header_rules.is_some())
+            .field(
+                "provider_request_body_bytes",
+                &serde_json::to_vec(self.provider_request_body)
+                    .ok()
+                    .map(|bytes| bytes.len()),
+            )
+            .field(
+                "original_request_body_bytes",
+                &serde_json::to_vec(self.original_request_body)
+                    .ok()
+                    .map(|bytes| bytes.len()),
+            )
+            .field("upstream_is_stream", &self.upstream_is_stream)
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
 pub struct StandardProviderRequestHeaders {
     pub headers: BTreeMap<String, String>,
     pub auth_header: String,
     pub auth_value: String,
+}
+
+impl fmt::Debug for StandardProviderRequestHeaders {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("StandardProviderRequestHeaders")
+            .field("header_names", &self.headers.keys().collect::<Vec<_>>())
+            .field("auth_header", &self.auth_header)
+            .field("has_auth_value", &(!self.auth_value.is_empty()))
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,7 +98,7 @@ pub enum StandardPlanFallbackAcceptPolicy {
     ProviderEventStreamIfMissing,
 }
 
-#[derive(Debug)]
+#[derive(Clone)]
 pub struct StandardPlanFallbackHeadersInput<'a> {
     pub request_headers: &'a http::HeaderMap,
     pub existing_provider_request_headers: BTreeMap<String, String>,
@@ -60,6 +111,44 @@ pub struct StandardPlanFallbackHeadersInput<'a> {
     pub upstream_is_stream: bool,
     pub build_from_request_when_empty: bool,
     pub accept_policy: StandardPlanFallbackAcceptPolicy,
+}
+
+impl fmt::Debug for StandardPlanFallbackHeadersInput<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("StandardPlanFallbackHeadersInput")
+            .field(
+                "request_header_names",
+                &self
+                    .request_headers
+                    .keys()
+                    .map(|name| name.as_str())
+                    .collect::<Vec<_>>(),
+            )
+            .field(
+                "existing_provider_header_names",
+                &self
+                    .existing_provider_request_headers
+                    .keys()
+                    .collect::<Vec<_>>(),
+            )
+            .field("auth_header", &self.auth_header)
+            .field("has_auth_value", &self.auth_value.is_some())
+            .field(
+                "extra_header_names",
+                &self.extra_headers.keys().collect::<Vec<_>>(),
+            )
+            .field("content_type", &self.content_type)
+            .field("provider_api_format", &self.provider_api_format)
+            .field("client_api_format", &self.client_api_format)
+            .field("upstream_is_stream", &self.upstream_is_stream)
+            .field(
+                "build_from_request_when_empty",
+                &self.build_from_request_when_empty,
+            )
+            .field("accept_policy", &self.accept_policy)
+            .finish()
+    }
 }
 
 pub fn build_standard_plan_fallback_openai_chat_url(
@@ -151,6 +240,12 @@ pub fn build_standard_plan_fallback_headers(
     if input.upstream_is_stream {
         force_identity_accept_encoding(&mut headers);
     }
+
+    let declared_connection_headers = crate::headers::declared_connection_header_names(
+        input.request_headers,
+        input.extra_headers,
+    );
+    crate::headers::remove_declared_connection_headers(&mut headers, &declared_connection_headers);
 
     headers
 }
@@ -300,6 +395,10 @@ pub fn build_standard_provider_request_headers(
             .or_insert_with(|| "text/event-stream".to_string());
         force_identity_accept_encoding(&mut headers);
     }
+
+    let declared_connection_headers =
+        crate::headers::declared_connection_header_names(input.headers, input.extra_headers);
+    crate::headers::remove_declared_connection_headers(&mut headers, &declared_connection_headers);
 
     Some(StandardProviderRequestHeaders {
         headers,

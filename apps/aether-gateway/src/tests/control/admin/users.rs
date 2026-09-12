@@ -4,6 +4,7 @@ use aether_crypto::{encrypt_python_fernet_plaintext, DEVELOPMENT_ENCRYPTION_KEY}
 use aether_data::repository::auth::{
     InMemoryAuthApiKeySnapshotRepository, StoredAuthApiKeyExportRecord, StoredAuthApiKeySnapshot,
 };
+use aether_data::repository::management_tokens::InMemoryManagementTokenRepository;
 use aether_data::repository::usage::InMemoryUsageReadRepository;
 use aether_data::repository::users::{
     InMemoryUserReadRepository, StoredUserAuthRecord, StoredUserExportRow, UpsertUserGroupRecord,
@@ -20,7 +21,8 @@ use http::StatusCode;
 use serde_json::json;
 
 use super::super::{
-    build_router_with_state, hash_api_key, issue_test_admin_access_token, start_server, AppState,
+    build_router_with_state, hash_api_key, hash_management_token, issue_test_admin_access_token,
+    sample_management_token, start_server, AppState,
 };
 use crate::constants::{
     GATEWAY_HEADER, TRUSTED_ADMIN_SESSION_ID_HEADER, TRUSTED_ADMIN_USER_ID_HEADER,
@@ -214,6 +216,27 @@ fn sample_admin_api_key_snapshot(user_id: &str, api_key_id: &str) -> StoredAuthA
         Some(json!(["gpt-4.1"])),
     )
     .expect("api key snapshot should build")
+}
+
+/// Build an auth API-key fixture with the provider/user-bound envelope used by
+/// production writes.  Read-only test repositories cannot perform the legacy
+/// Fernet migration, so ordinary list/reveal fixtures must use this format.
+fn sample_bound_admin_api_key_secret(
+    user_id: &str,
+    api_key_id: &str,
+    plaintext: &str,
+) -> (String, String) {
+    let key_hash = hash_api_key(plaintext);
+    let state = AppState::new()
+        .expect("bootstrap state should build")
+        .with_data_state_for_tests(
+            GatewayDataState::disabled().with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+        );
+    let encrypted = crate::handlers::shared::seal_auth_api_key_secret(
+        &state, user_id, api_key_id, &key_hash, false, plaintext,
+    )
+    .expect("bound API-key ciphertext should build");
+    (key_hash, encrypted)
 }
 
 #[tokio::test]
@@ -1235,6 +1258,280 @@ async fn gateway_handles_admin_users_root_locally_with_bearer_admin_session() {
 }
 
 #[tokio::test]
+async fn gateway_rejects_users_write_management_token_for_administrator_account_mutations() {
+    let raw_token = "ae-users-write-cannot-escalate";
+    let token_owner = sample_admin_user_with_role(
+        "token-owner",
+        "admin",
+        "token-owner@example.com",
+        "token_owner",
+    );
+    let target_user =
+        sample_admin_user_with_role("target-user", "user", "target@example.com", "target_user");
+    let target_admin = sample_admin_user_with_role(
+        "target-admin",
+        "admin",
+        "target-admin@example.com",
+        "target_admin",
+    );
+    let user_repository = Arc::new(InMemoryUserReadRepository::seed_auth_users(vec![
+        token_owner.clone(),
+        target_user.clone(),
+        target_admin.clone(),
+    ]));
+    let mut token = sample_management_token(
+        "token-users-write-cannot-escalate",
+        &token_owner.id,
+        &token_owner.username,
+        true,
+    );
+    token.token.allowed_ips = None;
+    token.token.permissions = Some(json!(["admin:users:write"]));
+    let token_repository = Arc::new(InMemoryManagementTokenRepository::seed_with_hashes(
+        vec![token],
+        vec![(
+            hash_management_token(raw_token),
+            "token-users-write-cannot-escalate".to_string(),
+        )],
+    ));
+    let data = GatewayDataState::with_management_token_repository_for_tests(token_repository)
+        .with_user_reader(user_repository.clone());
+    let state = AppState::new()
+        .expect("gateway should build")
+        .with_data_state_for_tests(data)
+        .with_auth_users_for_tests([
+            token_owner.clone(),
+            target_user.clone(),
+            target_admin.clone(),
+        ]);
+    let inspection_state = state.clone();
+    let gateway = build_router_with_state(state);
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+    let client = reqwest::Client::new();
+    let cases = [
+        (
+            reqwest::Method::POST,
+            "/api/admin/users",
+            json!({
+                "email": "created-admin@example.com",
+                "username": "created_admin",
+                "password": "CreatedAdmin123!",
+                "role": "admin"
+            }),
+            "create_user",
+        ),
+        (
+            reqwest::Method::PUT,
+            "/api/admin/users/target-user",
+            json!({ "role": "admin" }),
+            "update_user",
+        ),
+        (
+            reqwest::Method::PUT,
+            "/api/admin/users/target-admin",
+            json!({ "password": "ResetAdmin123!" }),
+            "update_user",
+        ),
+        (
+            reqwest::Method::PUT,
+            "/api/admin/users/target-admin",
+            json!({ "role": "user" }),
+            "update_user",
+        ),
+        (
+            reqwest::Method::PUT,
+            "/api/admin/users/target-admin",
+            json!({ "is_active": false }),
+            "update_user",
+        ),
+        (
+            reqwest::Method::PUT,
+            "/api/admin/users/target-admin",
+            json!({ "email": "hijacked-admin@example.com" }),
+            "update_user",
+        ),
+        (
+            reqwest::Method::PUT,
+            "/api/admin/users/target-admin",
+            json!({ "group_ids": [] }),
+            "update_user",
+        ),
+        (
+            reqwest::Method::PUT,
+            "/api/admin/users/target-admin",
+            json!({ "unlimited": true }),
+            "update_user",
+        ),
+        (
+            reqwest::Method::DELETE,
+            "/api/admin/users/target-admin",
+            json!({}),
+            "delete_user",
+        ),
+        (
+            reqwest::Method::POST,
+            "/api/admin/users/batch-action",
+            json!({
+                "selection": { "user_ids": ["target-user"] },
+                "action": "update_role",
+                "payload": { "role": "admin" }
+            }),
+            "batch_action_users",
+        ),
+        (
+            reqwest::Method::POST,
+            "/api/admin/users/batch-action",
+            json!({
+                "selection": { "user_ids": ["target-admin"] },
+                "action": "update_role",
+                "payload": { "role": "user" }
+            }),
+            "batch_action_users",
+        ),
+        (
+            reqwest::Method::POST,
+            "/api/admin/users/batch-action",
+            json!({
+                "selection": { "user_ids": ["target-user", "target-admin"] },
+                "action": "disable"
+            }),
+            "batch_action_users",
+        ),
+    ];
+
+    for (method, path, body, route_kind) in cases {
+        let response = client
+            .request(method, format!("{gateway_url}{path}"))
+            .header(GATEWAY_HEADER, "rust-phase3b")
+            .bearer_auth(raw_token)
+            .json(&body)
+            .send()
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "path: {path}");
+        let payload: serde_json::Value = response.json().await.expect("json body should parse");
+        assert_eq!(payload["detail"], "management token permission denied");
+        assert_eq!(payload["required_permission"], "admin:users:admin");
+        assert_eq!(payload["route_kind"], route_kind);
+    }
+
+    let ordinary_create_response = client
+        .post(format!("{gateway_url}/api/admin/users"))
+        .header(GATEWAY_HEADER, "rust-phase3b")
+        .bearer_auth(raw_token)
+        .json(&json!({
+            "email": "delegated-user@example.com",
+            "username": "delegated_user",
+            "password": "DelegatedUser123!",
+            "role": "user"
+        }))
+        .send()
+        .await
+        .expect("ordinary user creation request should succeed");
+    assert_ne!(ordinary_create_response.status(), StatusCode::FORBIDDEN);
+
+    let ordinary_update_response = client
+        .put(format!("{gateway_url}/api/admin/users/target-user"))
+        .header(GATEWAY_HEADER, "rust-phase3b")
+        .bearer_auth(raw_token)
+        .json(&json!({ "is_active": false }))
+        .send()
+        .await
+        .expect("ordinary user update request should succeed");
+    assert_eq!(ordinary_update_response.status(), StatusCode::OK);
+
+    assert!(inspection_state
+        .find_user_auth_by_identifier("created_admin")
+        .await
+        .expect("created user lookup should succeed")
+        .is_none());
+    assert_eq!(
+        inspection_state
+            .find_user_auth_by_id("target-user")
+            .await
+            .expect("target user lookup should succeed")
+            .expect("target user should still exist")
+            .is_active,
+        false
+    );
+    let stored_target_admin = inspection_state
+        .find_user_auth_by_id("target-admin")
+        .await
+        .expect("target admin lookup should succeed")
+        .expect("target admin should still exist");
+    assert_eq!(stored_target_admin.role, "admin");
+    assert!(stored_target_admin.is_active);
+    assert_eq!(
+        stored_target_admin.password_hash,
+        target_admin.password_hash
+    );
+
+    gateway_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_requires_users_admin_to_revoke_privileged_user_sessions() {
+    for (role, suffix) in [("admin", "admin"), ("audit_admin", "audit-admin")] {
+        let raw_token = format!("ae-users-write-session-{suffix}");
+        let token_owner = sample_admin_user_with_role(
+            &format!("token-owner-{suffix}"),
+            "admin",
+            &format!("token-owner-{suffix}@example.com"),
+            &format!("token_owner_{suffix}"),
+        );
+        let target_id = format!("target-{suffix}");
+        let target = sample_admin_user_with_role(
+            &target_id,
+            role,
+            &format!("target-{suffix}@example.com"),
+            &format!("target_{suffix}"),
+        );
+        let user_repository = Arc::new(InMemoryUserReadRepository::seed_auth_users(vec![
+            token_owner.clone(),
+            target.clone(),
+        ]));
+        let token_id = format!("token-users-write-session-{suffix}");
+        let mut token =
+            sample_management_token(&token_id, &token_owner.id, &token_owner.username, true);
+        token.token.allowed_ips = None;
+        token.token.permissions = Some(json!(["admin:users:write"]));
+        let token_repository = Arc::new(InMemoryManagementTokenRepository::seed_with_hashes(
+            vec![token],
+            vec![(hash_management_token(&raw_token), token_id)],
+        ));
+        let data = GatewayDataState::with_management_token_repository_for_tests(token_repository)
+            .with_user_reader(user_repository);
+        let state = AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(data)
+            .with_auth_users_for_tests([token_owner, target])
+            .with_auth_session_for_tests(sample_admin_session(&target_id, "session-1"));
+        let gateway = build_router_with_state(state);
+        let (gateway_url, gateway_handle) = start_server(gateway).await;
+        let client = reqwest::Client::new();
+
+        for path in [
+            format!("/api/admin/users/{target_id}/sessions/session-1"),
+            format!("/api/admin/users/{target_id}/sessions"),
+        ] {
+            let response = client
+                .delete(format!("{gateway_url}{path}"))
+                .header(GATEWAY_HEADER, "rust-phase3b")
+                .bearer_auth(&raw_token)
+                .send()
+                .await
+                .expect("session revocation request should complete");
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "path: {path}");
+            let payload: serde_json::Value = response.json().await.expect("json body should parse");
+            assert_eq!(payload["required_permission"], "admin:users:admin");
+        }
+
+        gateway_handle.abort();
+    }
+}
+
+#[tokio::test]
 async fn gateway_handles_admin_user_detail_routes_locally_with_trusted_admin_principal() {
     let upstream_hits = Arc::new(Mutex::new(0usize));
     let upstream_hits_clone = Arc::clone(&upstream_hits);
@@ -1247,16 +1544,16 @@ async fn gateway_handles_admin_user_detail_routes_locally_with_trusted_admin_pri
     }));
 
     let (upstream_url, upstream_handle) = start_server(upstream).await;
-    let gateway = build_router_with_state(
-        AppState::new()
-            .expect("gateway should build")
-            .with_auth_users_for_tests([
-                sample_admin_user("user-1"),
-                sample_admin_user_with_role("admin-1", "admin", "admin1@example.com", "admin_one"),
-                sample_admin_user_with_role("admin-2", "admin", "admin2@example.com", "admin_two"),
-            ])
-            .with_auth_wallets_for_tests([sample_admin_wallet("user-1", "finite")]),
-    );
+    let state = AppState::new()
+        .expect("gateway should build")
+        .with_auth_users_for_tests([
+            sample_admin_user("user-1"),
+            sample_admin_user_with_role("admin-1", "admin", "admin1@example.com", "admin_one"),
+            sample_admin_user_with_role("admin-2", "admin", "admin2@example.com", "admin_two"),
+        ])
+        .with_auth_wallets_for_tests([sample_admin_wallet("user-1", "finite")]);
+    let inspection_state = state.clone();
+    let gateway = build_router_with_state(state);
     let (gateway_url, gateway_handle) = start_server(gateway).await;
 
     let client = reqwest::Client::new();
@@ -1288,6 +1585,17 @@ async fn gateway_handles_admin_user_detail_routes_locally_with_trusted_admin_pri
     assert_eq!(update_payload["rate_limit"], serde_json::Value::Null);
     assert_eq!(update_payload["unlimited"], true);
     assert_eq!(update_payload["is_active"], false);
+
+    let updated_user = inspection_state
+        .find_user_auth_by_id("user-1")
+        .await
+        .expect("updated user lookup should succeed")
+        .expect("updated user should exist");
+    assert_eq!(
+        updated_user.email.as_deref(),
+        Some("alice-updated@example.com")
+    );
+    assert!(!updated_user.email_verified);
 
     let hidden_update_response = client
         .put(format!("{gateway_url}/api/admin/users/user-1"))
@@ -1360,7 +1668,7 @@ async fn gateway_rejects_demoting_the_last_active_admin() {
             .expect("request should succeed");
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let payload: serde_json::Value = response.json().await.expect("json body should parse");
-        assert_eq!(payload["detail"], "不能降级最后一个管理员账户");
+        assert_eq!(payload["detail"], "不能降级或停用最后一个管理员账户");
     }
 
     gateway_handle.abort();
@@ -2399,17 +2707,16 @@ async fn gateway_lists_admin_user_api_keys_locally_with_trusted_admin_principal(
         }),
     );
 
-    let encrypted = encrypt_python_fernet_plaintext(DEVELOPMENT_ENCRYPTION_KEY, "sk-user-1")
-        .expect("ciphertext should build");
+    let (key_hash, encrypted) = sample_bound_admin_api_key_secret("user-1", "key-1", "sk-user-1");
     let auth_repository = Arc::new(
         InMemoryAuthApiKeySnapshotRepository::seed(vec![(
-            Some("hash-key-1".to_string()),
+            Some(key_hash.clone()),
             sample_admin_api_key_snapshot("user-1", "key-1"),
         )])
         .with_export_records(vec![StoredAuthApiKeyExportRecord::new(
             "user-1".to_string(),
             "key-1".to_string(),
-            "hash-key-1".to_string(),
+            key_hash,
             Some(encrypted),
             Some("default".to_string()),
             Some(json!(["openai"])),
@@ -2466,7 +2773,7 @@ async fn gateway_lists_admin_user_api_keys_locally_with_trusted_admin_principal(
     assert_eq!(payload["username"], "alice");
     assert_eq!(payload["api_keys"][0]["id"], "key-1");
     assert_eq!(payload["api_keys"][0]["name"], "default");
-    assert_eq!(payload["api_keys"][0]["key_display"], "sk-user-1...er-1");
+    assert_eq!(payload["api_keys"][0]["key_display"], "sk...-1");
     assert_eq!(payload["api_keys"][0]["is_active"], true);
     assert_eq!(payload["api_keys"][0]["is_locked"], false);
     assert_eq!(payload["api_keys"][0]["total_requests"], 9);
@@ -2604,17 +2911,16 @@ async fn gateway_reveals_admin_user_full_key_locally_with_trusted_admin_principa
         }),
     );
 
-    let encrypted = encrypt_python_fernet_plaintext(DEVELOPMENT_ENCRYPTION_KEY, "sk-user-1")
-        .expect("ciphertext should build");
+    let (key_hash, encrypted) = sample_bound_admin_api_key_secret("user-1", "key-1", "sk-user-1");
     let auth_repository = Arc::new(
         InMemoryAuthApiKeySnapshotRepository::seed(vec![(
-            Some("hash-key-1".to_string()),
+            Some(key_hash.clone()),
             sample_admin_api_key_snapshot("user-1", "key-1"),
         )])
         .with_export_records(vec![StoredAuthApiKeyExportRecord::new(
             "user-1".to_string(),
             "key-1".to_string(),
-            "hash-key-1".to_string(),
+            key_hash,
             Some(encrypted),
             Some("default".to_string()),
             Some(json!(["openai"])),

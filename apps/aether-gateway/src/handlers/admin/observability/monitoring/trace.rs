@@ -11,8 +11,9 @@ use aether_admin::observability::monitoring::{
 };
 use aether_data_contracts::repository::{
     candidates::{
-        DecisionTrace, DecisionTraceCandidate, RequestCandidateFinalStatus, RequestCandidateStatus,
-        StoredRequestCandidate,
+        sanitize_request_candidate_error_type, sanitize_request_candidate_extra_data,
+        sanitize_request_candidate_skip_reason, DecisionTrace, DecisionTraceCandidate,
+        RequestCandidateFinalStatus, RequestCandidateStatus, StoredRequestCandidate,
     },
     provider_catalog::StoredProviderCatalogKey,
     usage::StoredRequestUsageAudit,
@@ -28,25 +29,6 @@ use tracing::debug;
 struct ResolvedAdminMonitoringTrace {
     trace: DecisionTrace,
     usage: Option<StoredRequestUsageAudit>,
-}
-
-async fn hydrate_admin_monitoring_trace_response_body(
-    state: &AdminAppState<'_>,
-    mut usage: StoredRequestUsageAudit,
-) -> Result<StoredRequestUsageAudit, GatewayError> {
-    let is_error_node = !usage.status.eq_ignore_ascii_case("completed")
-        || usage
-            .status_code
-            .is_some_and(|status| !(200..300).contains(&status));
-    let response_body_ref = if is_error_node && usage.response_body.is_none() {
-        usage.response_body_ref.clone()
-    } else {
-        None
-    };
-    if let Some(body_ref) = response_body_ref.as_deref() {
-        usage.response_body = state.resolve_request_usage_body_ref(body_ref).await?;
-    }
-    Ok(usage)
 }
 
 pub(super) async fn build_admin_monitoring_trace_request_response(
@@ -85,13 +67,19 @@ pub(super) async fn build_admin_monitoring_trace_request_response(
     let key_accounts =
         build_admin_monitoring_key_account_display_map(admin_state, &resolved.trace).await?;
 
-    Ok(
-        build_admin_monitoring_trace_request_payload_response_with_key_accounts(
-            &resolved.trace,
-            resolved.usage.as_ref(),
-            &key_accounts,
-        ),
-    )
+    let mut response = build_admin_monitoring_trace_request_payload_response_with_key_accounts(
+        &resolved.trace,
+        resolved.usage.as_ref(),
+        &key_accounts,
+    );
+    if let Ok(version) = axum::http::HeaderValue::from_str(
+        option_env!("AETHER_BUILD_VERSION").unwrap_or(env!("CARGO_PKG_VERSION")),
+    ) {
+        response
+            .headers_mut()
+            .insert("x-aether-build-version", version);
+    }
+    Ok(response)
 }
 
 async fn resolve_admin_monitoring_trace(
@@ -111,10 +99,6 @@ async fn resolve_admin_monitoring_trace(
             .read_request_usage_audit_shallow(request_id)
             .await
             .map_err(|err| GatewayError::Internal(err.to_string()))?;
-        let usage = match usage {
-            Some(usage) => Some(hydrate_admin_monitoring_trace_response_body(state, usage).await?),
-            None => None,
-        };
         return Ok(Some(ResolvedAdminMonitoringTrace { trace, usage }));
     }
 
@@ -125,10 +109,9 @@ async fn resolve_admin_monitoring_trace(
         .await
         .map_err(|err| GatewayError::Internal(err.to_string()))?
     {
-        usage_candidates.push(hydrate_admin_monitoring_trace_response_body(state, usage).await?);
+        usage_candidates.push(usage);
     }
     if let Some(usage) = state.find_request_usage_by_id(request_id).await? {
-        let usage = hydrate_admin_monitoring_trace_response_body(state, usage).await?;
         if !usage_candidates.iter().any(|item| item.id == usage.id) {
             usage_candidates.push(usage);
         }
@@ -203,17 +186,23 @@ fn build_admin_monitoring_usage_routing_snapshot_trace(
         endpoint_id: usage.provider_endpoint_id.clone(),
         key_id: usage.provider_api_key_id.clone(),
         status,
-        skip_reason: usage.routing_candidate_skip_reason().map(ToOwned::to_owned),
+        skip_reason: sanitize_request_candidate_skip_reason(
+            usage.routing_candidate_skip_reason().map(ToOwned::to_owned),
+        ),
         is_cached: false,
         status_code: usage.status_code,
-        error_type: usage
-            .routing_local_execution_runtime_miss_reason()
-            .or(usage.error_category.as_deref())
-            .map(ToOwned::to_owned),
-        error_message: usage.error_message.clone(),
+        error_type: sanitize_request_candidate_error_type(
+            usage
+                .routing_local_execution_runtime_miss_reason()
+                .or(usage.error_category.as_deref())
+                .map(ToOwned::to_owned),
+        ),
+        error_message: None,
         latency_ms: usage.response_time_ms,
         concurrent_requests: None,
-        extra_data: build_admin_monitoring_usage_routing_snapshot_extra_data(usage),
+        extra_data: sanitize_request_candidate_extra_data(
+            build_admin_monitoring_usage_routing_snapshot_extra_data(usage),
+        ),
         required_capabilities: None,
         created_at_unix_ms: usage.created_at_unix_ms,
         started_at_unix_ms: Some(usage.created_at_unix_ms),
@@ -485,8 +474,12 @@ fn parse_admin_monitoring_key_auth_config(
     state: &AdminAppState<'_>,
     key: &StoredProviderCatalogKey,
 ) -> Option<Map<String, Value>> {
-    let ciphertext = key.encrypted_auth_config.as_deref()?;
-    let plaintext = state.decrypt_catalog_secret_with_fallbacks(ciphertext)?;
+    let _ciphertext = key.encrypted_auth_config.as_deref()?;
+    let plaintext = state
+        .app()
+        .decrypt_provider_catalog_key_auth_config(key)
+        .ok()
+        .flatten()?;
     serde_json::from_str::<Value>(&plaintext)
         .ok()?
         .as_object()

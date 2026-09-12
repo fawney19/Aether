@@ -1,13 +1,15 @@
 use super::shared::{
-    build_quota_snapshot_payload, execute_provider_quota_plan, extract_execution_error_message,
+    build_quota_snapshot_payload, execute_provider_quota_plan, extract_execution_error_message_ref,
     persist_provider_quota_refresh_state, quota_refresh_success_invalid_state,
     resolve_provider_quota_execution_timeouts, ProviderQuotaExecutionOutcome,
 };
+use crate::execution_runtime::transport::decode_base64_body_with_limit;
 use crate::handlers::admin::provider::shared::payloads::{
     OAUTH_ACCOUNT_BLOCK_PREFIX, OAUTH_EXPIRED_PREFIX, OAUTH_REFRESH_FAILED_PREFIX,
 };
 use crate::handlers::admin::request::{AdminAppState, AdminGatewayProviderTransportSnapshot};
 use crate::GatewayError;
+use aether_admin::provider::redaction::admin_provider_metadata_bucket_safe_json;
 use aether_contracts::{
     ExecutionPlan, ExecutionResult, ProxySnapshot, RequestBody, ResolvedTransportProfile,
 };
@@ -18,7 +20,6 @@ use aether_provider_pool::{
     grok_pool_tier_from_quota_bucket, grok_supported_quota_windows_for_tier,
 };
 use aether_provider_transport::grok_browser_profile_metadata_from_resolved_transport_profile;
-use base64::Engine as _;
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -288,14 +289,21 @@ async fn execute_grok_quota_plan(
 }
 
 fn grok_quota_error_detail(result: &ExecutionResult) -> Option<String> {
-    extract_execution_error_message(result).or_else(|| {
-        let body = result.body.as_ref()?.body_bytes_b64.as_deref()?;
-        let decoded = base64::engine::general_purpose::STANDARD
-            .decode(body)
-            .ok()?;
-        let text = String::from_utf8_lossy(&decoded).trim().to_string();
-        (!text.is_empty()).then_some(text)
-    })
+    extract_execution_error_message_ref(result)
+        .map(bound_quota_error_detail)
+        .or_else(|| {
+            let body = result.body.as_ref()?.body_bytes_b64.as_deref()?;
+            let decoded = decode_base64_body_with_limit(body, crate::MAX_ERROR_BODY_BYTES).ok()?;
+            let text = String::from_utf8_lossy(&decoded);
+            let text = text.trim();
+            (!text.is_empty()).then(|| bound_quota_error_detail(text))
+        })
+}
+
+fn bound_quota_error_detail(value: &str) -> String {
+    let value = value.trim();
+    let end = value.floor_char_boundary(value.len().min(crate::MAX_ERROR_BODY_BYTES));
+    value[..end].to_string()
 }
 
 fn grok_is_cloudflare_challenge(message: &str) -> bool {
@@ -313,14 +321,10 @@ fn grok_quota_invalid_reason(status_code: u16, upstream_message: Option<&str>) -
             "{OAUTH_REFRESH_FAILED_PREFIX}Grok Cloudflare 验证失败，请重新从同一浏览器复制最新 Cookie 和 User-Agent，或配置可通过 Cloudflare 的代理运行时"
         );
     }
-    let detail = if message.is_empty() {
-        match status_code {
-            401 => "Grok Token 无效或已过期",
-            403 => "Grok 账户访问受限",
-            _ => "Grok 请求失败",
-        }
-    } else {
-        message
+    let detail = match status_code {
+        401 => "Grok Token 无效或已过期",
+        403 => "Grok 账户访问受限",
+        _ => "Grok 请求失败",
     };
     match status_code {
         401 => format!("{OAUTH_EXPIRED_PREFIX}{detail}"),
@@ -406,8 +410,8 @@ pub(crate) async fn refresh_grok_provider_quota_locally(
             .await?
             {
                 ProviderQuotaExecutionOutcome::Response(result) => result,
-                ProviderQuotaExecutionOutcome::Failure(detail) => {
-                    last_error_message = Some(format!("rate-limits 请求执行失败: {detail}"));
+                ProviderQuotaExecutionOutcome::Failure(_) => {
+                    last_error_message = Some("rate-limits 请求执行失败".to_string());
                     continue;
                 }
             };
@@ -467,10 +471,8 @@ pub(crate) async fn refresh_grok_provider_quota_locally(
                 ));
                 last_error_message = invalid_reason.as_deref().map(grok_quota_result_message);
             } else {
-                let error_detail =
-                    grok_quota_error_detail(&result).unwrap_or_else(|| "Grok 请求失败".to_string());
                 last_error_message = Some(format!(
-                    "Grok rate-limits 请求失败({}): {error_detail}",
+                    "Grok rate-limits 请求失败 ({})",
                     result.status_code
                 ));
             }
@@ -544,8 +546,11 @@ pub(crate) async fn refresh_grok_provider_quota_locally(
             "status".to_string(),
             json!(if refreshed { "success" } else { "error" }),
         );
-        if let Some(metadata) = metadata_update.get("quota_by_model").cloned() {
-            payload.insert("metadata".to_string(), metadata);
+        if let Some(metadata) = metadata_update.get("quota_by_model") {
+            payload.insert(
+                "metadata".to_string(),
+                admin_provider_metadata_bucket_safe_json("grok", Some(metadata)),
+            );
         }
         if let Some(quota_snapshot) = build_quota_snapshot_payload(
             "grok",
@@ -814,6 +819,52 @@ mod tests {
     }
 
     #[test]
+    fn quota_error_detail_is_bounded_before_copying_json_message() {
+        let message = format!("{}界", "x".repeat(crate::MAX_ERROR_BODY_BYTES));
+        let result = ExecutionResult {
+            request_id: "grok-quota:oversized-json".to_string(),
+            candidate_id: None,
+            status_code: 500,
+            headers: BTreeMap::new(),
+            response_observation: None,
+            body: Some(ResponseBody {
+                json_body: Some(json!({"error": {"message": message}})),
+                body_bytes_b64: None,
+            }),
+            telemetry: None,
+            error: None,
+        };
+
+        let detail = grok_quota_error_detail(&result).expect("JSON error detail");
+
+        assert_eq!(detail.len(), crate::MAX_ERROR_BODY_BYTES);
+        assert!(detail.bytes().all(|byte| byte == b'x'));
+    }
+
+    #[test]
+    fn quota_error_detail_rejects_oversized_base64_before_decode() {
+        let encoded_limit =
+            crate::execution_runtime::transport::maximum_base64_len_for_decoded_limit(
+                crate::MAX_ERROR_BODY_BYTES,
+            );
+        let result = ExecutionResult {
+            request_id: "grok-quota:oversized-base64".to_string(),
+            candidate_id: None,
+            status_code: 500,
+            headers: BTreeMap::new(),
+            response_observation: None,
+            body: Some(ResponseBody {
+                json_body: None,
+                body_bytes_b64: Some("A".repeat(encoded_limit + 1)),
+            }),
+            telemetry: None,
+            error: None,
+        };
+
+        assert_eq!(grok_quota_error_detail(&result), None);
+    }
+
+    #[test]
     fn quota_result_message_removes_status_prefix() {
         let reason = format!("{OAUTH_REFRESH_FAILED_PREFIX}Grok Cloudflare 验证失败");
 
@@ -821,5 +872,17 @@ mod tests {
             grok_quota_result_message(&reason),
             "Grok Cloudflare 验证失败"
         );
+    }
+
+    #[test]
+    fn quota_invalid_reason_does_not_persist_upstream_credentials() {
+        let reason = grok_quota_invalid_reason(
+            401,
+            Some("authorization=Bearer upstream-secret https://user:pass@example.test?q=secret"),
+        );
+
+        assert_eq!(reason, "[OAUTH_EXPIRED] Grok Token 无效或已过期");
+        assert!(!reason.contains("upstream-secret"));
+        assert!(!reason.contains("user:pass"));
     }
 }

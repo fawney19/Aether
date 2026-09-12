@@ -123,12 +123,14 @@ impl ProviderPoolService {
         provider_type: &str,
         key: &StoredProviderCatalogKey,
         auth_config: Option<&Map<String, Value>>,
+        provider_model_name: Option<&str>,
     ) -> aether_pool_core::PoolMemberSignals {
         let adapter = self.adapter(provider_type);
         let input = ProviderPoolMemberInput {
             provider_type,
             key,
             auth_config,
+            provider_model_name,
         };
         adapter.member_signals(&input)
     }

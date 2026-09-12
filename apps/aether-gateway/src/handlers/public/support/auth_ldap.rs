@@ -1,9 +1,9 @@
 use super::{
-    decrypt_catalog_secret_with_fallbacks, ldap_config_is_enabled, module_available_from_env,
+    decrypt_or_migrate_ldap_bind_password, ldap_config_is_enabled, module_available_from_env,
     normalize_auth_login_identifier, system_config_bool, AppState, GatewayError,
 };
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(super) struct AuthLdapRuntimeConfig {
     server_url: String,
     bind_dn: String,
@@ -28,7 +28,7 @@ pub(super) struct AuthLdapAuthenticatedUser {
 
 pub(super) async fn auth_local_login_allowed_for_user(
     state: &AppState,
-    user: &aether_data::repository::users::StoredUserAuthRecord,
+    user: Option<&aether_data::repository::users::StoredUserAuthRecord>,
 ) -> Result<bool, GatewayError> {
     let ldap_enabled_config = state
         .read_system_config_json_value("module.ldap.enabled")
@@ -45,7 +45,9 @@ pub(super) async fn auth_local_login_allowed_for_user(
     if !ldap_exclusive {
         return Ok(true);
     }
-    Ok(user.role.eq_ignore_ascii_case("admin") && user.auth_source.eq_ignore_ascii_case("local"))
+    Ok(user.is_some_and(|user| {
+        user.role.eq_ignore_ascii_case("admin") && user.auth_source.eq_ignore_ascii_case("local")
+    }))
 }
 
 fn auth_ldap_default_search_filter(username_attr: &str) -> String {
@@ -85,31 +87,8 @@ fn auth_ldap_escape_filter(value: &str) -> Result<String, GatewayError> {
     Ok(escaped)
 }
 
-fn auth_ldap_normalize_server_url(server_url: &str) -> Option<String> {
-    let server_url = server_url.trim();
-    if server_url.is_empty() {
-        return None;
-    }
-    if server_url.contains("://") {
-        return Some(server_url.to_string());
-    }
-    Some(format!("ldap://{server_url}"))
-}
-
-fn auth_ldap_decrypt_bind_password(
-    state: &AppState,
-    config: &aether_data::repository::auth_modules::StoredLdapModuleConfig,
-) -> Option<String> {
-    config
-        .bind_password_encrypted
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|value| {
-            decrypt_catalog_secret_with_fallbacks(state.encryption_key(), value)
-                .unwrap_or_else(|| value.to_string())
-        })
-        .filter(|value| !value.trim().is_empty())
+fn auth_ldap_normalize_server_url(server_url: &str, use_starttls: bool) -> Option<String> {
+    crate::handlers::shared::normalize_ldap_transport_server_url(server_url, use_starttls)
 }
 
 async fn read_auth_ldap_runtime_config(
@@ -126,10 +105,11 @@ async fn read_auth_ldap_runtime_config(
     }) else {
         return Ok(None);
     };
-    let Some(server_url) = auth_ldap_normalize_server_url(&config.server_url) else {
+    let Some(server_url) = auth_ldap_normalize_server_url(&config.server_url, config.use_starttls)
+    else {
         return Ok(None);
     };
-    let Some(bind_password) = auth_ldap_decrypt_bind_password(state, &config) else {
+    let Some(bind_password) = decrypt_or_migrate_ldap_bind_password(state, &config).await? else {
         return Ok(None);
     };
 

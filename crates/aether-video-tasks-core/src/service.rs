@@ -29,10 +29,11 @@ impl VideoTaskService {
     pub fn with_file_store(
         mode: VideoTaskTruthSourceMode,
         path: impl Into<PathBuf>,
+        encryption_key: impl Into<String>,
     ) -> std::io::Result<Self> {
         Ok(Self::with_store(
             mode,
-            Arc::new(FileVideoTaskStore::new(path)?),
+            Arc::new(FileVideoTaskStore::new(path, encryption_key)?),
         ))
     }
 
@@ -113,6 +114,21 @@ impl VideoTaskService {
         }
     }
 
+    pub fn read_response_for_user(
+        &self,
+        route_family: Option<&str>,
+        request_path: &str,
+        user_id: &str,
+    ) -> Option<LocalVideoTaskReadResponse> {
+        if self.truth_source_mode != VideoTaskTruthSourceMode::RustAuthoritative {
+            return None;
+        }
+        let snapshot = self.snapshot_for_route(route_family, request_path)?;
+        snapshot
+            .belongs_to_user(user_id)
+            .then(|| snapshot.read_response())
+    }
+
     pub fn snapshot_for_route(
         &self,
         route_family: Option<&str>,
@@ -120,13 +136,27 @@ impl VideoTaskService {
     ) -> Option<LocalVideoTaskSnapshot> {
         match route_family {
             Some("openai") => extract_openai_task_id_from_path(request_path)
+                .or_else(|| extract_openai_task_id_from_cancel_path(request_path))
+                .or_else(|| extract_openai_task_id_from_remix_path(request_path))
+                .or_else(|| extract_openai_task_id_from_content_path(request_path))
                 .and_then(|task_id| self.store.clone_openai(task_id))
                 .map(LocalVideoTaskSnapshot::OpenAi),
             Some("gemini") => extract_gemini_short_id_from_path(request_path)
+                .or_else(|| extract_gemini_short_id_from_cancel_path(request_path))
                 .and_then(|short_id| self.store.clone_gemini(short_id))
                 .map(LocalVideoTaskSnapshot::Gemini),
             _ => None,
         }
+    }
+
+    pub fn route_belongs_to_user(
+        &self,
+        route_family: Option<&str>,
+        request_path: &str,
+        user_id: &str,
+    ) -> bool {
+        self.snapshot_for_route(route_family, request_path)
+            .is_some_and(|snapshot| snapshot.belongs_to_user(user_id))
     }
 
     pub fn prepare_openai_content_stream_action(
@@ -140,6 +170,25 @@ impl VideoTaskService {
         }
         let task_id = extract_openai_task_id_from_content_path(request_path)?;
         let seed = self.store.clone_openai(task_id)?;
+        seed.build_content_stream_action(query_string, trace_id)
+    }
+
+    pub fn prepare_openai_content_stream_action_for_user(
+        &self,
+        request_path: &str,
+        query_string: Option<&str>,
+        trace_id: &str,
+        user_id: &str,
+    ) -> Option<LocalVideoTaskContentAction> {
+        if self.truth_source_mode != VideoTaskTruthSourceMode::RustAuthoritative {
+            return None;
+        }
+        let task_id = extract_openai_task_id_from_content_path(request_path)?;
+        let seed = self.store.clone_openai(task_id)?;
+        let snapshot = LocalVideoTaskSnapshot::OpenAi(seed.clone());
+        if !snapshot.belongs_to_user(user_id) {
+            return None;
+        }
         seed.build_content_stream_action(query_string, trace_id)
     }
 
@@ -190,28 +239,60 @@ impl VideoTaskService {
         if self.truth_source_mode != VideoTaskTruthSourceMode::RustAuthoritative {
             return None;
         }
+        let snapshot = self.snapshot_for_read_refresh_route(route_family, request_path)?;
+        Self::build_read_refresh_sync_plan_from_snapshot(snapshot, trace_id)
+    }
+
+    pub fn prepare_read_refresh_sync_plan_for_user(
+        &self,
+        route_family: Option<&str>,
+        request_path: &str,
+        user_id: &str,
+        trace_id: &str,
+    ) -> Option<LocalVideoTaskReadRefreshPlan> {
+        if self.truth_source_mode != VideoTaskTruthSourceMode::RustAuthoritative {
+            return None;
+        }
+        let snapshot = self.snapshot_for_read_refresh_route(route_family, request_path)?;
+        if !snapshot.belongs_to_user(user_id) {
+            return None;
+        }
+        Self::build_read_refresh_sync_plan_from_snapshot(snapshot, trace_id)
+    }
+
+    fn snapshot_for_read_refresh_route(
+        &self,
+        route_family: Option<&str>,
+        request_path: &str,
+    ) -> Option<LocalVideoTaskSnapshot> {
         match route_family {
-            Some("openai") => {
-                let task_id = extract_openai_task_id_from_path(request_path)?;
-                let seed = self.store.clone_openai(task_id)?;
-                Some(LocalVideoTaskReadRefreshPlan {
-                    plan: seed.build_get_follow_up_plan(trace_id)?,
-                    projection_target: LocalVideoTaskProjectionTarget::OpenAi {
-                        task_id: task_id.to_string(),
-                    },
-                })
-            }
-            Some("gemini") => {
-                let short_id = extract_gemini_short_id_from_path(request_path)?;
-                let seed = self.store.clone_gemini(short_id)?;
-                Some(LocalVideoTaskReadRefreshPlan {
-                    plan: seed.build_get_follow_up_plan(trace_id)?,
-                    projection_target: LocalVideoTaskProjectionTarget::Gemini {
-                        short_id: short_id.to_string(),
-                    },
-                })
-            }
+            Some("openai") => extract_openai_task_id_from_path(request_path)
+                .and_then(|task_id| self.store.clone_openai(task_id))
+                .map(LocalVideoTaskSnapshot::OpenAi),
+            Some("gemini") => extract_gemini_short_id_from_path(request_path)
+                .and_then(|short_id| self.store.clone_gemini(short_id))
+                .map(LocalVideoTaskSnapshot::Gemini),
             _ => None,
+        }
+    }
+
+    fn build_read_refresh_sync_plan_from_snapshot(
+        snapshot: LocalVideoTaskSnapshot,
+        trace_id: &str,
+    ) -> Option<LocalVideoTaskReadRefreshPlan> {
+        match snapshot {
+            LocalVideoTaskSnapshot::OpenAi(seed) => Some(LocalVideoTaskReadRefreshPlan {
+                plan: seed.build_get_follow_up_plan(trace_id)?,
+                projection_target: LocalVideoTaskProjectionTarget::OpenAi {
+                    task_id: seed.local_task_id.clone(),
+                },
+            }),
+            LocalVideoTaskSnapshot::Gemini(seed) => Some(LocalVideoTaskReadRefreshPlan {
+                plan: seed.build_get_follow_up_plan(trace_id)?,
+                projection_target: LocalVideoTaskProjectionTarget::Gemini {
+                    short_id: seed.local_short_id.clone(),
+                },
+            }),
         }
     }
 
@@ -258,6 +339,18 @@ impl VideoTaskService {
         }
 
         let snapshot = LocalVideoTaskSnapshot::from_stored_task(task)?;
+        self.prepare_poll_refresh_plan_for_snapshot(snapshot, trace_id)
+    }
+
+    pub fn prepare_poll_refresh_plan_for_snapshot(
+        &self,
+        snapshot: LocalVideoTaskSnapshot,
+        trace_id: &str,
+    ) -> Option<LocalVideoTaskReadRefreshPlan> {
+        if self.truth_source_mode != VideoTaskTruthSourceMode::RustAuthoritative {
+            return None;
+        }
+
         match snapshot {
             LocalVideoTaskSnapshot::OpenAi(seed) => Some(LocalVideoTaskReadRefreshPlan {
                 plan: seed.build_get_follow_up_plan(trace_id)?,
@@ -298,32 +391,88 @@ impl VideoTaskService {
         fallback_api_key_id: Option<&str>,
         trace_id: &str,
     ) -> Option<LocalVideoTaskFollowUpPlan> {
-        match plan_kind {
-            "openai_video_remix_sync" => {
-                let task_id = extract_openai_task_id_from_remix_path(request_path)?;
-                let seed = self.store.clone_openai(task_id)?;
-                seed.build_remix_follow_up_plan(
+        let snapshot = self.snapshot_for_follow_up_route(plan_kind, request_path)?;
+        Self::build_follow_up_plan_from_snapshot(
+            snapshot,
+            plan_kind,
+            body_json,
+            fallback_user_id,
+            fallback_api_key_id,
+            trace_id,
+        )
+    }
+
+    fn build_follow_up_plan_from_snapshot(
+        snapshot: LocalVideoTaskSnapshot,
+        plan_kind: &str,
+        body_json: Option<&Value>,
+        fallback_user_id: Option<&str>,
+        fallback_api_key_id: Option<&str>,
+        trace_id: &str,
+    ) -> Option<LocalVideoTaskFollowUpPlan> {
+        match (plan_kind, snapshot) {
+            ("openai_video_remix_sync", LocalVideoTaskSnapshot::OpenAi(seed)) => seed
+                .build_remix_follow_up_plan(
                     body_json?,
                     fallback_user_id,
                     fallback_api_key_id,
                     trace_id,
-                )
-            }
-            "openai_video_delete_sync" => {
-                let task_id = extract_openai_task_id_from_path(request_path)?;
-                let seed = self.store.clone_openai(task_id)?;
+                ),
+            ("openai_video_delete_sync", LocalVideoTaskSnapshot::OpenAi(seed)) => {
                 seed.build_delete_follow_up_plan(fallback_user_id, fallback_api_key_id, trace_id)
             }
-            "openai_video_cancel_sync" => {
-                let task_id = extract_openai_task_id_from_cancel_path(request_path)?;
-                let seed = self.store.clone_openai(task_id)?;
+            ("openai_video_cancel_sync", LocalVideoTaskSnapshot::OpenAi(seed)) => {
                 seed.build_cancel_follow_up_plan(fallback_user_id, fallback_api_key_id, trace_id)
             }
-            "gemini_video_cancel_sync" => {
-                let short_id = extract_gemini_short_id_from_cancel_path(request_path)?;
-                let seed = self.store.clone_gemini(short_id)?;
+            ("gemini_video_cancel_sync", LocalVideoTaskSnapshot::Gemini(seed)) => {
                 seed.build_cancel_follow_up_plan(fallback_user_id, fallback_api_key_id, trace_id)
             }
+            _ => None,
+        }
+    }
+
+    pub fn prepare_follow_up_sync_plan_for_user(
+        &self,
+        plan_kind: &str,
+        request_path: &str,
+        body_json: Option<&Value>,
+        fallback_user_id: Option<&str>,
+        fallback_api_key_id: Option<&str>,
+        trace_id: &str,
+    ) -> Option<LocalVideoTaskFollowUpPlan> {
+        let snapshot = self.snapshot_for_follow_up_route(plan_kind, request_path)?;
+        let user_id = fallback_user_id?.trim();
+        if !snapshot.belongs_to_user(user_id) {
+            return None;
+        }
+        Self::build_follow_up_plan_from_snapshot(
+            snapshot,
+            plan_kind,
+            body_json,
+            Some(user_id),
+            fallback_api_key_id,
+            trace_id,
+        )
+    }
+
+    fn snapshot_for_follow_up_route(
+        &self,
+        plan_kind: &str,
+        request_path: &str,
+    ) -> Option<LocalVideoTaskSnapshot> {
+        match plan_kind {
+            "openai_video_remix_sync" => extract_openai_task_id_from_remix_path(request_path)
+                .and_then(|task_id| self.store.clone_openai(task_id))
+                .map(LocalVideoTaskSnapshot::OpenAi),
+            "openai_video_delete_sync" => extract_openai_task_id_from_path(request_path)
+                .and_then(|task_id| self.store.clone_openai(task_id))
+                .map(LocalVideoTaskSnapshot::OpenAi),
+            "openai_video_cancel_sync" => extract_openai_task_id_from_cancel_path(request_path)
+                .and_then(|task_id| self.store.clone_openai(task_id))
+                .map(LocalVideoTaskSnapshot::OpenAi),
+            "gemini_video_cancel_sync" => extract_gemini_short_id_from_cancel_path(request_path)
+                .and_then(|short_id| self.store.clone_gemini(short_id))
+                .map(LocalVideoTaskSnapshot::Gemini),
             _ => None,
         }
     }

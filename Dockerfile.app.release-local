@@ -11,6 +11,15 @@ FROM ${NODE_BASE_IMAGE} AS frontend-builder
 ARG AETHER_BUILD_VERSION
 ENV AETHER_BUILD_VERSION=${AETHER_BUILD_VERSION} \
     AETHER_VERSION=${AETHER_BUILD_VERSION}
+WORKDIR /app/aether-vscodex/web
+COPY aether-vscodex/web/package*.json ./
+RUN --mount=type=cache,id=aether-vscodex-npm-cache,target=/root/.npm,sharing=locked \
+    npm config set registry https://registry.npmmirror.com && \
+    npm ci --no-audit --no-fund
+COPY aether-vscodex/public /app/aether-vscodex/public
+COPY aether-vscodex/web/ ./
+RUN npm run build
+
 WORKDIR /app/frontend
 COPY frontend/package*.json ./
 RUN --mount=type=cache,id=aether-npm-cache,target=/root/.npm,sharing=locked \
@@ -147,4 +156,5 @@ EXPOSE 8084
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD ["/opt/aether/current/bin/aether-gateway", "--healthcheck"]
 
+USER 0:0
 ENTRYPOINT ["/opt/aether/current/bin/aether-gateway"]

@@ -2,8 +2,9 @@ use std::collections::BTreeMap;
 
 use url::form_urlencoded;
 
-use super::super::url::build_passthrough_path_url;
+use super::super::url::{build_passthrough_path_url, encode_url_path_segment};
 use super::auth::VertexServiceAccountAuthConfig;
+use super::context::is_valid_vertex_region;
 
 pub const VERTEX_API_KEY_BASE_URL: &str = "https://aiplatform.googleapis.com";
 
@@ -85,7 +86,8 @@ fn build_vertex_api_key_google_model_url(
         return None;
     }
 
-    let path = format!("/v1/publishers/google/models/{trimmed_model}:{trimmed_action}");
+    let encoded_model = encode_url_path_segment(trimmed_model);
+    let path = format!("/v1/publishers/google/models/{encoded_model}:{trimmed_action}");
     let merged_query = build_vertex_api_key_query(trimmed_api_key, request_query, stream);
     build_passthrough_path_url(VERTEX_API_KEY_BASE_URL, &path, merged_query.as_deref(), &[])
 }
@@ -110,8 +112,14 @@ fn build_vertex_service_account_google_model_url(
     } else {
         format!("https://{region}-aiplatform.googleapis.com")
     };
+    // URL parsers normalize dot-only segments even when the dots are percent-encoded.
+    if matches!(project_id, "." | "..") {
+        return None;
+    }
+    let encoded_project_id = encode_url_path_segment(project_id);
+    let encoded_model = encode_url_path_segment(trimmed_model);
     let path = format!(
-        "/v1/projects/{project_id}/locations/{region}/publishers/google/models/{trimmed_model}:{trimmed_action}"
+        "/v1/projects/{encoded_project_id}/locations/{region}/publishers/google/models/{encoded_model}:{trimmed_action}"
     );
     let merged_query = build_vertex_service_account_query(request_query, stream);
     build_passthrough_path_url(&base_url, &path, merged_query.as_deref(), &[])
@@ -127,7 +135,7 @@ pub fn resolve_vertex_service_account_region(
         .get(trimmed_model)
         .map(String::as_str)
         .map(str::trim)
-        .filter(|value| !value.is_empty())
+        .filter(|value| is_valid_vertex_region(value))
     {
         return region.to_string();
     }
@@ -138,7 +146,7 @@ pub fn resolve_vertex_service_account_region(
         .region
         .as_deref()
         .map(str::trim)
-        .filter(|value| !value.is_empty())
+        .filter(|value| is_valid_vertex_region(value))
     {
         return region.to_string();
     }
@@ -236,7 +244,7 @@ mod tests {
 
     use super::{
         build_vertex_api_key_gemini_content_url, build_vertex_api_key_imagen_content_url,
-        build_vertex_service_account_gemini_content_url,
+        build_vertex_service_account_gemini_content_url, resolve_vertex_service_account_region,
     };
     use crate::vertex::VertexServiceAccountAuthConfig;
 
@@ -322,6 +330,82 @@ mod tests {
             Some(
                 "https://us-central1-aiplatform.googleapis.com/v1/projects/demo-project/locations/us-central1/publishers/google/models/gemini-2.0-flash:streamGenerateContent?alt=sse&foo=bar"
             )
+        );
+    }
+
+    #[test]
+    fn service_account_region_override_cannot_escape_vertex_origin() {
+        let auth_config = VertexServiceAccountAuthConfig {
+            client_email: "svc@example.iam.gserviceaccount.com".to_string(),
+            private_key: "not-used".to_string(),
+            project_id: "demo-project".to_string(),
+            token_uri: "https://oauth2.googleapis.com/token".to_string(),
+            region: Some("attacker.example/".to_string()),
+            model_regions: BTreeMap::from([(
+                "custom-model".to_string(),
+                "attacker.example/".to_string(),
+            )]),
+        };
+
+        assert_eq!(
+            resolve_vertex_service_account_region("custom-model", &auth_config),
+            "global"
+        );
+        let url = build_vertex_service_account_gemini_content_url(
+            "custom-model",
+            false,
+            &auth_config,
+            None,
+        )
+        .expect("service account URL should be built");
+        assert!(url.starts_with("https://aiplatform.googleapis.com/"));
+        assert!(!url.contains("attacker.example"));
+    }
+
+    #[test]
+    fn vertex_resource_components_cannot_rewrite_the_request_path() {
+        let auth_config = VertexServiceAccountAuthConfig {
+            client_email: "svc@example.iam.gserviceaccount.com".to_string(),
+            private_key: "not-used".to_string(),
+            project_id: "project/../victim?key=attacker".to_string(),
+            token_uri: "https://oauth2.googleapis.com/token".to_string(),
+            region: None,
+            model_regions: BTreeMap::new(),
+        };
+
+        assert_eq!(
+            build_vertex_service_account_gemini_content_url(
+                "model/../../admin#fragment",
+                false,
+                &auth_config,
+                None,
+            )
+            .as_deref(),
+            Some(
+                "https://aiplatform.googleapis.com/v1/projects/project%2F..%2Fvictim%3Fkey=attacker/locations/global/publishers/google/models/model%2F..%2F..%2Fadmin%23fragment:generateContent"
+            )
+        );
+    }
+
+    #[test]
+    fn vertex_rejects_dot_only_project_path_segments() {
+        let auth_config = VertexServiceAccountAuthConfig {
+            client_email: "svc@example.iam.gserviceaccount.com".to_string(),
+            private_key: "not-used".to_string(),
+            project_id: "..".to_string(),
+            token_uri: "https://oauth2.googleapis.com/token".to_string(),
+            region: None,
+            model_regions: BTreeMap::new(),
+        };
+
+        assert_eq!(
+            build_vertex_service_account_gemini_content_url(
+                "gemini-2.5-pro",
+                false,
+                &auth_config,
+                None,
+            ),
+            None
         );
     }
 }

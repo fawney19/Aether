@@ -6,6 +6,7 @@ use super::super::shared::{
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::handlers::admin::shared::unix_secs_to_rfc3339;
 use crate::GatewayError;
+use aether_data::repository::wallet::stored_timestamp_unix_secs;
 use axum::{
     body::Body,
     response::{IntoResponse, Response},
@@ -81,7 +82,10 @@ pub(in super::super) async fn build_admin_wallet_transactions_response(
             "operator_name": operator_name,
             "operator_email": operator_email,
             "description": transaction.description,
-            "created_at": transaction.created_at_unix_ms.and_then(unix_secs_to_rfc3339),
+            "created_at": transaction
+                .created_at_unix_ms
+                .map(stored_timestamp_unix_secs)
+                .and_then(unix_secs_to_rfc3339),
         }));
     }
 

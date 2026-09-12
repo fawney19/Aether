@@ -246,8 +246,8 @@ const activeTierKey = ref('')
 const processingTierEntries = computed<ProcessingTierEntry[]>(() => {
   const processingTiers = props.pricing?.processing_tiers
   if (!isRecord(processingTiers)) return []
-  const labels = new Map(KNOWN_PROCESSING_TIERS.map(entry => [entry.key, entry.label]))
-  const order = new Map(KNOWN_PROCESSING_TIERS.map((entry, index) => [entry.key, index]))
+  const labels = new Map<string, string>(KNOWN_PROCESSING_TIERS.map(entry => [entry.key, entry.label]))
+  const order = new Map<string, number>(KNOWN_PROCESSING_TIERS.map((entry, index) => [entry.key, index]))
   return Object.entries(processingTiers)
     .filter((entry): entry is [string, ProcessingTierPricingConfig] => (
       isRecord(entry[1]) && processingPricingHasFacts(entry[1])

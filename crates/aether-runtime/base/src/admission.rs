@@ -2,6 +2,7 @@ use async_stream::stream;
 use axum::body::Body;
 use axum::http::Response;
 use futures_util::StreamExt;
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::concurrency::ConcurrencyPermit;
@@ -10,24 +11,31 @@ const ADMISSION_HEALTH_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 pub trait AdmissionPermitHealth: Send + Sync {
     fn is_healthy(&self) -> bool;
+
+    fn requires_health_poll(&self) -> bool {
+        true
+    }
 }
 
 impl AdmissionPermitHealth for ConcurrencyPermit {
     fn is_healthy(&self) -> bool {
         true
     }
+
+    fn requires_health_poll(&self) -> bool {
+        false
+    }
 }
 
+#[derive(Clone)]
 pub struct AdmissionPermit {
-    _local: Option<ConcurrencyPermit>,
-    _distributed: Option<Box<dyn AdmissionPermitHealth>>,
+    _permits: Vec<Arc<dyn AdmissionPermitHealth>>,
 }
 
 impl std::fmt::Debug for AdmissionPermit {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AdmissionPermit")
-            .field("has_local", &self._local.is_some())
-            .field("has_distributed", &self._distributed.is_some())
+            .field("permit_count", &self._permits.len())
             .finish()
     }
 }
@@ -37,34 +45,39 @@ impl AdmissionPermit {
         local: Option<ConcurrencyPermit>,
         distributed: Option<D>,
     ) -> Option<Self> {
-        if local.is_none() && distributed.is_none() {
-            None
-        } else {
-            Some(Self {
-                _local: local,
-                _distributed: distributed
-                    .map(|permit| Box::new(permit) as Box<dyn AdmissionPermitHealth>),
-            })
+        let mut permits = Vec::<Arc<dyn AdmissionPermitHealth>>::new();
+        if let Some(local) = local {
+            permits.push(Arc::new(local));
         }
+        if let Some(distributed) = distributed {
+            permits.push(Arc::new(distributed));
+        }
+        (!permits.is_empty()).then_some(Self { _permits: permits })
+    }
+
+    pub fn combine(permits: impl IntoIterator<Item = AdmissionPermit>) -> Option<Self> {
+        let permits = permits
+            .into_iter()
+            .flat_map(|permit| permit._permits)
+            .collect::<Vec<_>>();
+        (!permits.is_empty()).then_some(Self { _permits: permits })
     }
 
     pub fn is_healthy(&self) -> bool {
-        self._distributed
-            .as_ref()
-            .map(|permit| permit.is_healthy())
-            .unwrap_or(true)
+        self._permits.iter().all(|permit| permit.is_healthy())
     }
 
     fn requires_health_poll(&self) -> bool {
-        self._distributed.is_some()
+        self._permits
+            .iter()
+            .any(|permit| permit.requires_health_poll())
     }
 }
 
 impl From<ConcurrencyPermit> for AdmissionPermit {
     fn from(value: ConcurrencyPermit) -> Self {
         Self {
-            _local: Some(value),
-            _distributed: None,
+            _permits: vec![Arc::new(value)],
         }
     }
 }
@@ -208,6 +221,27 @@ mod tests {
             .expect("body should drain");
         assert_eq!(body.as_ref(), b"ok");
         assert_eq!(gate.snapshot().in_flight, 0);
+    }
+
+    #[test]
+    fn cloned_permit_releases_capacity_only_after_last_clone_drops() {
+        let gate = ConcurrencyGate::new("test", 1);
+        let permit = AdmissionPermit::from(gate.try_acquire().expect("first permit"));
+        let cloned = permit.clone();
+
+        drop(permit);
+        assert_eq!(gate.snapshot().in_flight, 1);
+        assert!(
+            gate.try_acquire().is_err(),
+            "capacity should remain held by the clone"
+        );
+
+        drop(cloned);
+        assert_eq!(gate.snapshot().in_flight, 0);
+        assert!(
+            gate.try_acquire().is_ok(),
+            "last clone should release capacity"
+        );
     }
 
     #[tokio::test]

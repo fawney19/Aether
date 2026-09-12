@@ -150,7 +150,7 @@ pub enum AdminBillingMutationOutcome<T> {
     Unavailable,
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PaymentGatewayConfigRecord {
     pub provider: String,
     pub enabled: bool,
@@ -166,7 +166,30 @@ pub struct PaymentGatewayConfigRecord {
     pub updated_at_unix_secs: u64,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+impl std::fmt::Debug for PaymentGatewayConfigRecord {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PaymentGatewayConfigRecord")
+            .field("provider", &self.provider)
+            .field("enabled", &self.enabled)
+            .field("endpoint_url", &"[REDACTED]")
+            .field(
+                "callback_base_url",
+                &self.callback_base_url.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("merchant_id", &self.merchant_id)
+            .field(
+                "merchant_key_encrypted",
+                &self.merchant_key_encrypted.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("channels_json", &"[REDACTED]")
+            .field("created_at_unix_secs", &self.created_at_unix_secs)
+            .field("updated_at_unix_secs", &self.updated_at_unix_secs)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Clone, PartialEq)]
 pub struct PaymentGatewayConfigWriteInput {
     pub provider: String,
     pub enabled: bool,
@@ -179,6 +202,113 @@ pub struct PaymentGatewayConfigWriteInput {
     pub usd_exchange_rate: f64,
     pub min_recharge_usd: f64,
     pub channels_json: Value,
+}
+
+impl std::fmt::Debug for PaymentGatewayConfigWriteInput {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PaymentGatewayConfigWriteInput")
+            .field("provider", &self.provider)
+            .field("enabled", &self.enabled)
+            .field("endpoint_url", &"[REDACTED]")
+            .field(
+                "callback_base_url",
+                &self.callback_base_url.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("merchant_id", &self.merchant_id)
+            .field(
+                "merchant_key_encrypted",
+                &self.merchant_key_encrypted.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("preserve_existing_secret", &self.preserve_existing_secret)
+            .field("channels_json", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Clone, PartialEq)]
+pub struct PaymentGatewaySecretCasUpdate {
+    pub provider: String,
+    pub expected_merchant_key_encrypted: String,
+    pub merchant_key_encrypted: String,
+}
+
+impl std::fmt::Debug for PaymentGatewaySecretCasUpdate {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PaymentGatewaySecretCasUpdate")
+            .field("provider", &self.provider)
+            .field("expected_merchant_key_encrypted", &"[REDACTED]")
+            .field("merchant_key_encrypted", &"[REDACTED]")
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq)]
+pub struct PaymentGatewayConfigCasWriteInput {
+    pub input: PaymentGatewayConfigWriteInput,
+    pub expected_existing: bool,
+    pub expected_merchant_key_encrypted: Option<String>,
+}
+
+impl std::fmt::Debug for PaymentGatewayConfigCasWriteInput {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PaymentGatewayConfigCasWriteInput")
+            .field("input", &self.input)
+            .field("expected_existing", &self.expected_existing)
+            .field(
+                "expected_merchant_key_encrypted",
+                &self
+                    .expected_merchant_key_encrypted
+                    .as_ref()
+                    .map(|_| "[REDACTED]"),
+            )
+            .finish()
+    }
+}
+
+#[cfg(test)]
+mod payment_gateway_debug_tests {
+    use super::{PaymentGatewayConfigCasWriteInput, PaymentGatewayConfigWriteInput};
+
+    #[test]
+    fn payment_gateway_config_debug_output_redacts_credential_material() {
+        let input = PaymentGatewayConfigCasWriteInput {
+            input: PaymentGatewayConfigWriteInput {
+                provider: "stripe".to_string(),
+                enabled: true,
+                endpoint_url: "https://endpoint.example/?key=endpoint-canary".to_string(),
+                callback_base_url: Some(
+                    "https://callback.example/?token=callback-canary".to_string(),
+                ),
+                merchant_id: "merchant".to_string(),
+                merchant_key_encrypted: Some("merchant-key-canary".to_string()),
+                preserve_existing_secret: false,
+                pay_currency: "USD".to_string(),
+                usd_exchange_rate: 1.0,
+                min_recharge_usd: 1.0,
+                channels_json: serde_json::json!({"secret": "channels-canary"}),
+            },
+            expected_existing: true,
+            expected_merchant_key_encrypted: Some("expected-merchant-key-canary".to_string()),
+        };
+
+        let debug = format!("{input:?}");
+        assert!(debug.contains("[REDACTED]"));
+        for secret in [
+            "endpoint-canary",
+            "callback-canary",
+            "merchant-key-canary",
+            "channels-canary",
+            "expected-merchant-key-canary",
+        ] {
+            assert!(
+                !debug.contains(secret),
+                "debug output leaked {secret}: {debug}"
+            );
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -212,6 +342,43 @@ pub struct BillingPlanWriteInput {
     pub max_active_per_user: i64,
     pub purchase_limit_scope: String,
     pub entitlements_json: Value,
+}
+
+/// Convert a plan duration into whole days without allowing integer or
+/// `chrono::TimeDelta` overflow. Plan snapshots are persisted and may later be
+/// fulfilled by any database adapter, so the accepted range must be portable
+/// across all of them.
+pub fn checked_plan_duration_days(duration_unit: &str, duration_value: i64) -> Result<i64, String> {
+    if duration_value <= 0 {
+        return Err("plan duration_value must be positive".to_string());
+    }
+    let days = match duration_unit.trim() {
+        "day" | "custom" => Some(duration_value),
+        "month" => duration_value.checked_mul(30),
+        "year" => duration_value.checked_mul(365),
+        _ => return Err("plan duration_unit is invalid".to_string()),
+    }
+    .ok_or_else(|| "plan duration exceeds the supported range".to_string())?;
+    chrono::TimeDelta::try_days(days)
+        .ok_or_else(|| "plan duration exceeds the supported range".to_string())?;
+    Ok(days)
+}
+
+/// Read a persisted plan snapshot using the historical month/one defaults,
+/// while rejecting malformed or unrepresentable explicit values.
+pub fn checked_plan_duration_days_from_snapshot(snapshot: &Value) -> Result<i64, String> {
+    let duration_unit = match snapshot.get("duration_unit") {
+        None => "month",
+        Some(Value::String(value)) => value.as_str(),
+        Some(_) => return Err("product_snapshot.duration_unit is invalid".to_string()),
+    };
+    let duration_value = match snapshot.get("duration_value") {
+        None => 1,
+        Some(value) => value
+            .as_i64()
+            .ok_or_else(|| "product_snapshot.duration_value must be an integer".to_string())?,
+    };
+    checked_plan_duration_days(duration_unit, duration_value)
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -369,6 +536,37 @@ pub trait BillingReadRepository: Send + Sync {
         Ok(None)
     }
 
+    /// Re-read a gateway configuration from the authoritative backing store.
+    /// Implementations without a read cache may delegate to the normal read.
+    async fn find_payment_gateway_config_strong(
+        &self,
+        provider: &str,
+    ) -> Result<Option<PaymentGatewayConfigRecord>, crate::DataLayerError> {
+        self.find_payment_gateway_config(provider).await
+    }
+
+    /// Replace only the encrypted merchant secret when the exact previously
+    /// observed ciphertext is still stored. Timestamps and all other fields
+    /// must remain unchanged.
+    async fn compare_and_swap_payment_gateway_secret(
+        &self,
+        update: &PaymentGatewaySecretCasUpdate,
+    ) -> Result<bool, crate::DataLayerError> {
+        let _ = update;
+        Ok(false)
+    }
+
+    /// Create a configuration only when absent, or update it only when the
+    /// exact nullable merchant-secret fence still matches.
+    async fn compare_and_swap_payment_gateway_config(
+        &self,
+        input: &PaymentGatewayConfigCasWriteInput,
+    ) -> Result<AdminBillingMutationOutcome<PaymentGatewayConfigRecord>, crate::DataLayerError>
+    {
+        let _ = input;
+        Ok(AdminBillingMutationOutcome::Unavailable)
+    }
+
     async fn upsert_payment_gateway_config(
         &self,
         input: &PaymentGatewayConfigWriteInput,
@@ -434,6 +632,15 @@ pub trait BillingReadRepository: Send + Sync {
     ) -> Result<Option<Vec<UserPlanEntitlementRecord>>, crate::DataLayerError> {
         let _ = user_id;
         Ok(None)
+    }
+
+    async fn revoke_user_plan_entitlement(
+        &self,
+        user_id: &str,
+        entitlement_id: &str,
+    ) -> Result<AdminBillingMutationOutcome<()>, crate::DataLayerError> {
+        let _ = (user_id, entitlement_id);
+        Ok(AdminBillingMutationOutcome::Unavailable)
     }
 
     async fn find_user_daily_quota_availability(

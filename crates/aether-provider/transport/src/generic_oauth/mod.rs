@@ -62,9 +62,26 @@ pub fn resolve_local_generic_oauth_transport_authorization(
         .map(|token| format!("Bearer {token}"))
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct GenericOAuthRefreshAdapter {
     token_url_overrides: BTreeMap<String, String>,
+    oauth_credentials_overrides: BTreeMap<String, (String, String)>,
+}
+
+impl std::fmt::Debug for GenericOAuthRefreshAdapter {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("GenericOAuthRefreshAdapter")
+            .field(
+                "token_url_override_provider_types",
+                &self.token_url_overrides.keys().collect::<Vec<_>>(),
+            )
+            .field(
+                "oauth_credentials_override_provider_types",
+                &self.oauth_credentials_overrides.keys().collect::<Vec<_>>(),
+            )
+            .finish()
+    }
 }
 
 impl GenericOAuthRefreshAdapter {
@@ -78,11 +95,29 @@ impl GenericOAuthRefreshAdapter {
         self
     }
 
+    pub fn with_oauth_credentials_for_tests(
+        mut self,
+        provider_type: &str,
+        client_id: impl Into<String>,
+        client_secret: impl Into<String>,
+    ) -> Self {
+        self.oauth_credentials_overrides.insert(
+            provider_type.trim().to_ascii_lowercase(),
+            (client_id.into(), client_secret.into()),
+        );
+        self
+    }
+
     fn adapter_for_provider_type(
         &self,
         provider_type: &'static str,
     ) -> Option<GenericProviderOAuthAdapter> {
-        let adapter = GenericProviderOAuthAdapter::for_provider_type(provider_type)?;
+        let mut adapter = GenericProviderOAuthAdapter::for_provider_type(provider_type)?;
+        if let Some((client_id, client_secret)) =
+            self.oauth_credentials_overrides.get(provider_type)
+        {
+            adapter = adapter.with_oauth_credentials_for_tests(client_id, client_secret);
+        }
         if let Some(token_url) = self.token_url_overrides.get(provider_type) {
             return Some(adapter.with_token_url_override(token_url.clone()));
         }
@@ -513,10 +548,10 @@ fn generic_provider_type(provider_type: &str) -> Option<&'static str> {
 }
 
 fn refresh_token_from_auth_config(auth_config: &Value) -> Option<String> {
-    auth_config
-        .as_object()
-        .and_then(|object| object.get("refresh_token"))
-        .and_then(non_empty_string)
+    let object = auth_config.as_object()?;
+    ["refresh_token", "refreshToken"]
+        .iter()
+        .find_map(|field| object.get(*field).and_then(non_empty_string))
 }
 
 fn access_token_from_auth_config(auth_config: &Value) -> Option<String> {
@@ -889,6 +924,54 @@ mod tests {
         assert_eq!(
             current_access_token(&transport, Some(&entry)).as_deref(),
             Some("refreshed-access-a")
+        );
+    }
+
+    #[tokio::test]
+    async fn antigravity_expired_legacy_credential_refreshes_and_normalizes_refresh_token() {
+        let mut transport = sample_transport();
+        transport.provider.name = "Antigravity".to_string();
+        transport.provider.provider_type = "antigravity".to_string();
+        transport.key.decrypted_api_key = "stale-access-token".to_string();
+        transport.key.expires_at_unix_secs = Some(1);
+        transport.key.decrypted_auth_config = Some(
+            json!({
+                "provider_type": "antigravity",
+                "refreshToken": "stable-refresh-token",
+                "expires_at": 1,
+            })
+            .to_string(),
+        );
+        let hits = Arc::new(AtomicUsize::new(0));
+        let executor = StaticTokenExecutor {
+            hits: Arc::clone(&hits),
+        };
+        let adapter = GenericOAuthRefreshAdapter::default()
+            .with_token_url_for_tests("antigravity", "https://oauth.example/token")
+            .with_oauth_credentials_for_tests(
+                "antigravity",
+                "test-client-id",
+                "test-client-secret",
+            );
+
+        assert!(adapter.supports(&transport));
+        assert!(adapter.should_refresh(&transport, None));
+
+        let refreshed = adapter
+            .refresh(&executor, &transport, None)
+            .await
+            .expect("antigravity refresh should succeed")
+            .expect("antigravity refresh should return a cache entry");
+
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        assert_eq!(refreshed.provider_type, "antigravity");
+        assert_eq!(refreshed.auth_header_value, "Bearer fresh-access-token");
+        assert_eq!(
+            refreshed
+                .metadata
+                .as_ref()
+                .map(|metadata| &metadata["refresh_token"]),
+            Some(&json!("stable-refresh-token"))
         );
     }
 

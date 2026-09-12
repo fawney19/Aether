@@ -35,4 +35,7 @@ pub use gateway::{GatewayHarness, GatewayHarnessConfig, GATEWAY_HARNESS_API_KEY}
 #[cfg(feature = "postgres")]
 pub use postgres::{prepare_aether_postgres_schema, ManagedPostgresServer};
 #[cfg(feature = "gateway")]
-pub use tunnel::{TunnelHarness, TunnelHarnessConfig};
+pub use tunnel::{
+    insert_tunnel_harness_auth_headers, TunnelHarness, TunnelHarnessConfig,
+    TUNNEL_HARNESS_GENERATION, TUNNEL_HARNESS_MANAGEMENT_TOKEN, TUNNEL_HARNESS_NODE_ID,
+};

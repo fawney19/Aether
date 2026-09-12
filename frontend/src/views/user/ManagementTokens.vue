@@ -672,6 +672,7 @@
 </template>
 
 <script setup lang="ts">
+import { getI18nLocale } from '@/i18n'
 import { ref, computed, onMounted, reactive, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import {
@@ -1177,7 +1178,7 @@ async function copyToken(text: string) {
 
 // 格式化
 function formatNumber(num: number): string {
-  return num.toLocaleString('zh-CN')
+  return num.toLocaleString(getI18nLocale())
 }
 
 function toLocalDatetimeString(date: Date): string {
@@ -1191,7 +1192,7 @@ function toLocalDatetimeString(date: Date): string {
 
 function formatDate(dateString: string): string {
   const date = new Date(dateString)
-  return date.toLocaleDateString('zh-CN', {
+  return date.toLocaleDateString(getI18nLocale(), {
     year: 'numeric',
     month: '2-digit',
     day: '2-digit'

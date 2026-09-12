@@ -22,6 +22,7 @@ SELECT
   description,
   enabled,
   is_system_default,
+  sort_order,
   config_json,
   version,
   created_at,
@@ -68,7 +69,9 @@ impl PostgresRoutingGroupRepository {
 #[async_trait]
 impl RoutingGroupReadRepository for PostgresRoutingGroupRepository {
     async fn list_routing_groups(&self) -> Result<Vec<StoredRoutingGroup>, DataLayerError> {
-        let sql = format!("{ROUTING_GROUP_SELECT} ORDER BY name ASC, id ASC");
+        let sql = format!(
+            "{ROUTING_GROUP_SELECT} ORDER BY enabled DESC, sort_order ASC, name ASC, id ASC"
+        );
         let mut rows = sqlx::query(&sql).fetch(&self.pool);
         let mut groups = Vec::new();
         while let Some(row) = rows.try_next().await.map_postgres_err()? {
@@ -178,10 +181,10 @@ impl RoutingGroupWriteRepository for PostgresRoutingGroupRepository {
         sqlx::query(
             r#"
 INSERT INTO routing_groups (
-  id, name, description, enabled, is_system_default, config_json,
+  id, name, description, enabled, is_system_default, sort_order, config_json,
   version, created_at, updated_at, published_at
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 "#,
         )
         .bind(&group.id)
@@ -189,6 +192,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
         .bind(&group.description)
         .bind(group.enabled)
         .bind(group.is_system_default)
+        .bind(group.sort_order)
         .bind(&group.config_json)
         .bind(group.version)
         .bind(group.created_at)
@@ -238,10 +242,11 @@ SET name = $2,
     description = $3,
     enabled = $4,
     is_system_default = $5,
-    config_json = $6,
-    version = $7,
-    updated_at = $8,
-    published_at = $9
+    sort_order = $6,
+    config_json = $7,
+    version = $8,
+    updated_at = $9,
+    published_at = $10
 WHERE id = $1
 "#,
         )
@@ -250,6 +255,7 @@ WHERE id = $1
         .bind(&group.description)
         .bind(group.enabled)
         .bind(group.is_system_default)
+        .bind(group.sort_order)
         .bind(&group.config_json)
         .bind(group.version)
         .bind(group.updated_at)
@@ -441,6 +447,7 @@ fn map_group_row(row: &PgRow) -> Result<StoredRoutingGroup, DataLayerError> {
         description: row.try_get("description").map_postgres_err()?,
         enabled: row.try_get("enabled").map_postgres_err()?,
         is_system_default: row.try_get("is_system_default").map_postgres_err()?,
+        sort_order: row.try_get("sort_order").map_postgres_err()?,
         config_json: row.try_get("config_json").map_postgres_err()?,
         version: row.try_get("version").map_postgres_err()?,
         created_at: row.try_get("created_at").map_postgres_err()?,

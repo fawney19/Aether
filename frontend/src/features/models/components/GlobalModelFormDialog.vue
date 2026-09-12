@@ -31,9 +31,61 @@
         <div class="flex-1 min-h-0 overflow-hidden border rounded-lg flex flex-col">
           <div
             v-if="loading"
-            class="flex items-center justify-center flex-1"
+            class="flex flex-col items-center justify-center gap-3 flex-1"
           >
             <Loader2 class="w-5 h-5 animate-spin text-muted-foreground" />
+            <p class="text-xs text-muted-foreground">
+              正在加载在线目录；也可以先手动填写模型
+            </p>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              class="h-8"
+              data-testid="models-catalog-manual-entry-loading"
+              @click="enterManualEntryMode"
+            >
+              手动填写
+            </Button>
+          </div>
+          <div
+            v-else-if="catalogLoadError"
+            class="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center"
+            role="alert"
+            data-testid="models-catalog-load-error"
+          >
+            <div class="flex h-9 w-9 items-center justify-center rounded-md border bg-muted/40 text-destructive">
+              <TriangleAlert class="h-4 w-4" />
+            </div>
+            <div class="max-w-md space-y-1">
+              <p class="text-sm font-medium">
+                外部模型目录加载失败
+              </p>
+              <p class="break-words text-xs text-muted-foreground">
+                {{ catalogLoadError }}
+              </p>
+            </div>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              class="h-8 gap-1.5"
+              data-testid="models-catalog-retry"
+              @click="retryModelsCatalog"
+            >
+              <RefreshCw class="h-3.5 w-3.5" />
+              重试
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              class="h-8"
+              data-testid="models-catalog-manual-entry"
+              @click="enterManualEntryMode"
+            >
+              直接手动填写
+            </Button>
           </div>
           <template v-else>
             <!-- 提供商 Logo 横向选择 -->
@@ -408,10 +460,14 @@
                   <Button
                     type="button"
                     variant="outline"
-                    size="icon"
-                    class="h-8 w-8 shrink-0"
+                    size="sm"
+                    class="h-8 min-w-0 max-w-56 shrink-0 gap-1.5 px-2.5"
                     :disabled="syncingOnlinePricing || submitting"
-                    :title="syncingOnlinePricing ? '正在同步在线价格' : '同步最新在线价格'"
+                    :title="syncingOnlinePricing
+                      ? t('models.pricingSource.syncingTitle')
+                      : currentOnlinePricingSource
+                        ? t('models.pricingSource.editCurrentTitle', { provider: currentOnlinePricingSource.provider_name })
+                        : t('models.pricingSource.editChooseTitle')"
                     aria-label="同步最新在线价格"
                     data-testid="sync-online-pricing"
                     @click="syncOnlinePricing"
@@ -420,6 +476,11 @@
                       class="h-4 w-4"
                       :class="syncingOnlinePricing ? 'animate-spin' : ''"
                     />
+                    <span class="truncate text-xs">
+                      {{ currentOnlinePricingSource
+                        ? t('models.pricingSource.buttonCurrent', { provider: currentOnlinePricingSource.provider_name })
+                        : t('models.pricingSource.choose') }}
+                    </span>
                   </Button>
                 </PopoverTrigger>
                 <PopoverContent
@@ -762,7 +823,7 @@ import { ref, computed, nextTick, watch } from 'vue'
 import {
   Loader2, Layers, SquarePen,
   Search, ChevronLeft, ChevronRight, Plus, Trash2, Check,
-  BrainCircuit, Eye, Wrench, Braces, Database, PackageOpen, RefreshCw
+  BrainCircuit, Eye, Wrench, Braces, Database, PackageOpen, RefreshCw, TriangleAlert
 } from 'lucide-vue-next'
 import {
   Dialog, Button, Input, Label, Checkbox,
@@ -771,6 +832,7 @@ import {
 } from '@/components/ui'
 import { useToast } from '@/composables/useToast'
 import { useFormDialog } from '@/composables/useFormDialog'
+import { useI18n } from '@/i18n'
 import { parseNumberInput, sortResolutionEntries } from '@/utils/form'
 import { log } from '@/utils/logger'
 import { parseApiError } from '@/utils/errorParser'
@@ -797,7 +859,12 @@ import {
   tieredPricingConfigsEqual,
 } from './global-model-form-helpers'
 import { tieredPricingHasImageOutputPricing } from '../utils/tiered-pricing'
-import { useModelsDevPricingSources } from '../composables/useModelsDevPricingSources'
+import {
+  getModelsDevPricingSourceFromConfig,
+  modelsDevPricingSourcesEqual,
+  useModelsDevPricingSources,
+  withModelsDevPricingSource,
+} from '../composables/useModelsDevPricingSources'
 
 const props = defineProps<{
   open: boolean
@@ -812,6 +879,7 @@ const emit = defineEmits<{
 }>()
 
 const { success, error: showError } = useToast()
+const { t } = useI18n()
 const { getSource, setSource } = useModelsDevPricingSources()
 const submitting = ref(false)
 const syncingOnlinePricing = ref(false)
@@ -820,6 +888,7 @@ const basicInfoSection = ref<HTMLElement | null>(null)
 
 // 模型列表相关
 const loading = ref(false)
+const catalogLoadError = ref<string | null>(null)
 const searchQuery = ref('')
 const allModelsCache = ref<ModelsDevModelItem[]>([]) // 全部模型（缓存）
 const existingModelsCache = ref<GlobalModelResponse[]>([])
@@ -841,6 +910,9 @@ const selectedOnlinePricingCandidate = computed(() => (
   onlinePricingCandidates.value.find(candidate => (
     candidate.providerId === selectedOnlinePricingProviderId.value
   )) ?? null
+))
+const currentOnlinePricingSource = computed(() => (
+  props.model ? getSource(props.model.id, props.model.config) : null
 ))
 const firstSyncableOnlinePricingProviderId = computed(() => (
   onlinePricingCandidates.value.find(isOnlinePricingCandidateSyncable)?.providerId ?? ''
@@ -1117,7 +1189,7 @@ function setEmbeddingEnabled(enabled: boolean) {
     setConfigField('embedding', undefined)
     if (form.value.config?.model_type === 'embedding') setConfigField('model_type', undefined)
     if (Array.isArray(form.value.config?.api_formats)
-      && form.value.config.api_formats.every((format) => embeddingApiFormats.includes(String(format)))) {
+      && form.value.config.api_formats.every((format) => embeddingApiFormats.some((supportedFormat) => supportedFormat === String(format)))) {
       setConfigField('api_formats', undefined)
     }
   }
@@ -1281,19 +1353,44 @@ async function loadExistingModels() {
   existingModelsCache.value = models
 }
 
+async function loadModelsCatalog() {
+  catalogLoadError.value = null
+  try {
+    allModelsCache.value = await getModelsDevList(false)
+  } catch (err: unknown) {
+    allModelsCache.value = []
+    catalogLoadError.value = parseApiError(err, '外部模型目录暂时不可用')
+    log.error('Failed to load online models:', err)
+  }
+}
+
+async function retryModelsCatalog() {
+  if (loading.value) return
+  loading.value = true
+  try {
+    await loadModelsCatalog()
+    if (!expandedProvider.value) {
+      expandedProvider.value = getDefaultProviderId(groupedModels.value)
+    }
+  } finally {
+    loading.value = false
+  }
+}
+
 // 加载在线目录和已有模型列表
 async function loadModels() {
   loading.value = true
-  await Promise.all([
-    allModelsCache.value.length > 0
-      ? Promise.resolve()
-      : getModelsDevList(false)
-          .then(models => { allModelsCache.value = models })
-          .catch(err => log.error('Failed to load online models:', err)),
-    loadExistingModels()
-      .catch(err => log.error('Failed to load existing models:', err)),
-  ])
-  loading.value = false
+  const shouldLoadCatalog = allModelsCache.value.length === 0
+  if (!shouldLoadCatalog) catalogLoadError.value = null
+  try {
+    await Promise.all([
+      shouldLoadCatalog ? loadModelsCatalog() : Promise.resolve(),
+      loadExistingModels()
+        .catch(err => log.error('Failed to load existing models:', err)),
+    ])
+  } finally {
+    loading.value = false
+  }
 }
 
 // 打开对话框时加载数据
@@ -1407,7 +1504,7 @@ function resolveOnlinePricingModel(
 ): ModelsDevModelItem | null {
   const modelId = normalizeModelId(model.name)
   const transientSource = editingOnlinePricingSource.value
-  const storedSource = getSource(model.id)
+  const storedSource = getSource(model.id, model.config)
   const preferredProviderId = transientSource?.model_id && normalizeModelId(transientSource.model_id) === modelId
     ? transientSource.provider_id
     : storedSource?.provider_id
@@ -1530,28 +1627,44 @@ async function applyOnlinePricingModel(onlineModel: ModelsDevModelItem) {
     props.model.default_tiered_pricing,
     pricing,
   )
+  const pricingSource = {
+    provider_id: onlineModel.providerId,
+    provider_name: onlineModel.providerName,
+  }
+  const sourceChanged = !modelsDevPricingSourcesEqual(
+    getModelsDevPricingSourceFromConfig(props.model.config),
+    pricingSource,
+  )
+  const nextConfig = withModelsDevPricingSource(props.model.config, pricingSource)
   let syncedModel: GlobalModelResponse
-  if (pricingChanged) {
-    syncedModel = await updateGlobalModel(props.model.id, {
+  if (pricingChanged || sourceChanged) {
+    const updatedModel = await updateGlobalModel(props.model.id, {
       default_tiered_pricing: pricing,
+      config: nextConfig,
     })
+    syncedModel = {
+      ...updatedModel,
+      default_tiered_pricing: pricing,
+      config: nextConfig,
+    }
   } else {
     syncedModel = {
       ...props.model,
       default_tiered_pricing: pricing,
+      config: nextConfig,
     }
   }
   tieredPricing.value = cloneTieredPricingConfig(pricing)
+  form.value.config = { ...nextConfig }
   billingMode.value = 'token'
-  setSource(props.model.id, {
-    provider_id: onlineModel.providerId,
-    provider_name: onlineModel.providerName,
-  })
+  setSource(props.model.id, pricingSource)
   emit('pricingSynced', syncedModel)
   success(
     pricingChanged
       ? `已同步 ${onlineModel.providerName} 的最新价格`
-      : `当前价格已是 ${onlineModel.providerName} 的最新价格`,
+      : sourceChanged
+        ? t('models.pricingSource.savedNoPriceChange', { provider: onlineModel.providerName })
+        : `当前价格已是 ${onlineModel.providerName} 的最新价格`,
   )
 }
 
@@ -1725,6 +1838,12 @@ async function handleSubmit() {
       success('模型更新成功')
     } else {
       const createData = buildGlobalModelCreatePayload(form.value, finalTieredPricing)
+      if (selectedModel.value) {
+        createData.config = withModelsDevPricingSource(createData.config, {
+          provider_id: selectedModel.value.providerId,
+          provider_name: selectedModel.value.providerName,
+        })
+      }
       const createdModel = await createGlobalModel(createData)
       existingModelsCache.value.unshift(createdModel)
       if (selectedModel.value) {

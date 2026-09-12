@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::fmt;
 use std::sync::OnceLock;
 
 use aether_ai_formats::ApiOperation;
@@ -19,8 +20,8 @@ use crate::url::{
     build_claude_count_tokens_url as build_default_claude_count_tokens_url,
     build_claude_messages_url, build_gemini_content_url, build_openai_chat_url,
     build_openai_responses_url, build_openai_search_url, build_passthrough_path_url,
-    normalize_gemini_content_action_path, strip_gateway_credential_query_parameters,
-    GATEWAY_CREDENTIAL_QUERY_KEYS,
+    encode_url_path_segment, normalize_gemini_content_action_path,
+    strip_gateway_credential_query_parameters, GATEWAY_CREDENTIAL_QUERY_KEYS,
 };
 use crate::vertex::{
     build_vertex_api_key_gemini_content_url, build_vertex_api_key_gemini_embedding_url,
@@ -28,7 +29,7 @@ use crate::vertex::{
     build_vertex_service_account_gemini_embedding_url, resolve_local_vertex_api_key_query_auth,
     resolve_local_vertex_service_account_auth_config,
 };
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 pub struct TransportRequestUrlParams<'a> {
     pub provider_api_format: &'a str,
     pub mapped_model: Option<&'a str>,
@@ -36,6 +37,21 @@ pub struct TransportRequestUrlParams<'a> {
     pub request_query: Option<&'a str>,
     pub kiro_api_region: Option<&'a str>,
     pub api_operation: Option<aether_ai_formats::ApiOperation>,
+}
+
+impl fmt::Debug for TransportRequestUrlParams<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TransportRequestUrlParams")
+            .field("provider_api_format", &self.provider_api_format)
+            .field("mapped_model", &self.mapped_model)
+            .field("upstream_is_stream", &self.upstream_is_stream)
+            .field("has_request_query", &self.request_query.is_some())
+            .field("request_query_len", &self.request_query.map(str::len))
+            .field("kiro_api_region", &self.kiro_api_region)
+            .field("api_operation", &self.api_operation)
+            .finish()
+    }
 }
 
 pub fn build_transport_request_url(
@@ -112,9 +128,13 @@ fn build_transport_request_url_inner(
         .filter(|value| !value.is_empty());
     let custom_path_handles_operation =
         custom_path_template.is_some_and(|path| path.contains("{operation}"));
-    let custom_path = custom_path_template.map(|path| {
-        expand_custom_path_template(path, build_path_params(params, gemini_embedding_batch))
-    });
+    let custom_path = match custom_path_template {
+        Some(path) => Some(expand_custom_path_template(
+            path,
+            build_path_params(params, gemini_embedding_batch),
+        )?),
+        None => None,
+    };
 
     if let Some(path) = custom_path.as_deref() {
         let custom_path_is_complete_claude_count_tokens = normalized_provider_api_format
@@ -670,22 +690,24 @@ fn build_gemini_embedding_url(
     } else {
         "embedContent"
     };
+    let encoded_model = encode_url_path_segment(trimmed_model);
     let path = if trimmed_base_url.ends_with("/v1beta") {
-        format!("/models/{trimmed_model}:{action}")
+        format!("/models/{encoded_model}:{action}")
     } else if trimmed_base_url.contains("/v1beta/models/") {
         format!(":{action}")
     } else {
-        format!("/v1beta/models/{trimmed_model}:{action}")
+        format!("/v1beta/models/{encoded_model}:{action}")
     };
     build_passthrough_path_url(upstream_base_url, &path, query, &["key"])
 }
 
-fn expand_custom_path_template(path: &str, params: BTreeMap<&'static str, &str>) -> String {
+fn expand_custom_path_template(path: &str, params: BTreeMap<&'static str, &str>) -> Option<String> {
     if params.is_empty() {
-        return path.to_string();
+        return Some(path.to_string());
     }
 
     let regex = custom_path_template_regex();
+    let query_start = path.find('?');
     let mut missing_key = false;
     let replaced = regex.replace_all(path, |captures: &regex::Captures<'_>| {
         let key = captures
@@ -693,7 +715,14 @@ fn expand_custom_path_template(path: &str, params: BTreeMap<&'static str, &str>)
             .map(|value| value.as_str())
             .unwrap_or_default();
         match params.get(key).copied() {
-            Some(value) => value.to_string(),
+            Some(value) => {
+                let capture_start = captures.get(0).map_or(0, |value| value.start());
+                if query_start.is_some_and(|query_start| capture_start > query_start) {
+                    url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
+                } else {
+                    encode_url_path_segment(value)
+                }
+            }
             None => {
                 missing_key = true;
                 captures
@@ -705,10 +734,29 @@ fn expand_custom_path_template(path: &str, params: BTreeMap<&'static str, &str>)
     });
 
     if missing_key {
-        path.to_string()
+        Some(path.to_string())
     } else {
-        replaced.into_owned()
+        let replaced = replaced.into_owned();
+        if dynamic_template_value_created_dot_path_segment(path, &replaced, regex) {
+            None
+        } else {
+            Some(replaced)
+        }
     }
+}
+
+fn dynamic_template_value_created_dot_path_segment(
+    template: &str,
+    expanded: &str,
+    regex: &Regex,
+) -> bool {
+    let template_path = template.split_once('?').map_or(template, |(path, _)| path);
+    let expanded_path = expanded.split_once('?').map_or(expanded, |(path, _)| path);
+    template_path.split('/').zip(expanded_path.split('/')).any(
+        |(template_segment, expanded_segment)| {
+            matches!(expanded_segment, "." | "..") && regex.is_match(template_segment)
+        },
+    )
 }
 
 fn maybe_add_gemini_stream_alt_sse(
@@ -2286,6 +2334,87 @@ mod tests {
         assert_eq!(
             url,
             "https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent?foo=bar"
+        );
+    }
+
+    #[test]
+    fn custom_path_template_encodes_dynamic_model_as_one_path_segment() {
+        let transport = sample_transport(
+            "custom",
+            "gemini:generate_content",
+            "https://generativelanguage.googleapis.com",
+            Some("/v1beta/models/{model}:{action}"),
+        );
+
+        let url = build_transport_request_url(
+            &transport,
+            TransportRequestUrlParams {
+                provider_api_format: "gemini:generate_content",
+                mapped_model: Some("model/../../admin?key=attacker#fragment"),
+                upstream_is_stream: false,
+                request_query: None,
+                kiro_api_region: None,
+                api_operation: None,
+            },
+        )
+        .expect("custom path should remain on the configured origin");
+
+        assert_eq!(
+            url,
+            "https://generativelanguage.googleapis.com/v1beta/models/model%2F..%2F..%2Fadmin%3Fkey=attacker%23fragment:generateContent"
+        );
+    }
+
+    #[test]
+    fn custom_path_template_rejects_dot_only_dynamic_path_segments() {
+        let transport = sample_transport(
+            "custom",
+            "claude:messages",
+            "https://api.example.com",
+            Some("/v1/messages/{model}/invoke"),
+        );
+
+        assert_eq!(
+            build_transport_request_url(
+                &transport,
+                TransportRequestUrlParams {
+                    provider_api_format: "claude:messages",
+                    mapped_model: Some(".."),
+                    upstream_is_stream: false,
+                    request_query: None,
+                    kiro_api_region: None,
+                    api_operation: None,
+                },
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn custom_path_template_query_values_cannot_inject_parameters() {
+        let transport = sample_transport(
+            "custom",
+            "claude:messages",
+            "https://api.example.com",
+            Some("/v1/messages?model={model}"),
+        );
+
+        let url = build_transport_request_url(
+            &transport,
+            TransportRequestUrlParams {
+                provider_api_format: "claude:messages",
+                mapped_model: Some("claude&admin=true#fragment"),
+                upstream_is_stream: false,
+                request_query: None,
+                kiro_api_region: None,
+                api_operation: None,
+            },
+        )
+        .expect("query template should build");
+
+        assert_eq!(
+            url,
+            "https://api.example.com/v1/messages?model=claude%26admin%3Dtrue%23fragment"
         );
     }
 }

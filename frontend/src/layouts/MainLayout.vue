@@ -6,10 +6,10 @@
     :content-class="contentClasses"
   >
     <template #notice>
-      <div class="flex w-full max-w-3xl items-center justify-between rounded-3xl bg-orange-500 px-6 py-3 text-white shadow-2xl ring-1 ring-white/30">
-        <div class="flex items-center gap-3">
-          <AlertTriangle class="h-5 w-5" />
-          <span>{{ t('auth.expired') }}</span>
+      <div class="flex w-full max-w-3xl flex-wrap items-center justify-between gap-3 rounded-3xl bg-orange-500 px-6 py-3 text-white shadow-2xl ring-1 ring-white/30">
+        <div class="flex min-w-0 items-center gap-3">
+          <AlertTriangle class="h-5 w-5 shrink-0" />
+          <span class="break-words">{{ t('auth.expired') }}</span>
         </div>
         <Button
           variant="outline"
@@ -149,20 +149,20 @@
               </div>
 
               <div
-                class="flex items-center gap-1"
+                class="flex shrink-0 items-center gap-1"
                 :class="sidebarCollapsed ? 'flex-col' : ''"
               >
                 <RouterLink
                   to="/dashboard/settings"
                   class="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground"
-                  :aria-label="sidebarCollapsed ? t('common.settings') : undefined"
+                  :aria-label="t('common.settings')"
                   :title="t('common.settings')"
                 >
                   <Settings class="h-4 w-4" />
                 </RouterLink>
                 <button
                   class="rounded-md p-1.5 text-muted-foreground transition-colors hover:text-red-500"
-                  :aria-label="sidebarCollapsed ? t('common.logout') : undefined"
+                  :aria-label="t('common.logout')"
                   :title="t('common.logout')"
                   @click="handleLogout"
                 >
@@ -178,27 +178,27 @@
     <template #header>
       <!-- Mobile Header (matches Home page style) -->
       <header class="lg:hidden fixed top-0 left-0 right-0 z-50 border-b border-[var(--shell-border)] bg-[var(--shell-glass)] backdrop-blur-xl transition-all">
-        <div class="mx-auto max-w-7xl px-6 py-4">
-          <div class="flex items-center justify-between">
+        <div class="mx-auto max-w-7xl px-4 py-4 sm:px-6">
+          <div class="flex min-w-0 items-center justify-between gap-2">
             <!-- Logo & Brand -->
             <RouterLink
               to="/"
-              class="flex items-center gap-3 group"
+              class="group flex min-w-0 items-center gap-2 sm:gap-3"
             >
               <HeaderLogo
                 size="h-9 w-9"
-                class-name="text-[#191919] dark:text-white"
+                class-name="shrink-0 text-[#191919] dark:text-white"
               />
-              <div class="flex flex-col justify-center">
-                <h1 class="text-lg font-bold text-[#191919] dark:text-white leading-none">
+              <div class="flex min-w-0 flex-col justify-center">
+                <h1 class="truncate text-lg font-bold text-[#191919] dark:text-white leading-none">
                   {{ siteName }}
                 </h1>
-                <span class="text-[10px] text-[#91918d] dark:text-muted-foreground leading-none mt-1.5 font-medium tracking-wide">{{ siteSubtitle }}</span>
+                <span class="mt-1.5 truncate text-[10px] font-medium leading-none tracking-normal text-[#91918d] dark:text-muted-foreground">{{ siteSubtitle }}</span>
               </div>
             </RouterLink>
 
             <!-- Right Actions -->
-            <div class="flex items-center gap-3">
+            <div class="flex shrink-0 items-center gap-0.5 sm:gap-3">
               <VersionButton
                 v-if="isAdmin"
                 :status="versionStatus"
@@ -219,7 +219,10 @@
               <LanguageSwitcher />
               <ThemeModeButton />
               <button
-                class="flex h-9 w-9 items-center justify-center rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted/50 transition"
+                class="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted/50 transition"
+                :aria-label="mobileMenuOpen ? t('common.closeMenu') : t('common.openMenu')"
+                :aria-expanded="mobileMenuOpen"
+                aria-controls="mobile-navigation"
                 @click="mobileMenuOpen = !mobileMenuOpen"
               >
                 <div class="relative w-5 h-5">
@@ -258,6 +261,7 @@
         >
           <div
             v-if="mobileMenuOpen"
+            id="mobile-navigation"
             class="absolute inset-x-0 top-full max-h-[calc(100dvh-73px)] overflow-y-auto overscroll-contain border-t border-[var(--shell-border)] bg-background shadow-xl [-webkit-overflow-scrolling:touch] touch-pan-y"
           >
             <div class="mx-auto max-w-7xl px-6 py-4 pb-28">
@@ -278,7 +282,7 @@
                       v-for="item in group.items"
                       :key="item.href"
                       :to="item.href"
-                      class="flex items-center gap-2.5 px-3 py-2.5 rounded-xl text-sm font-medium transition-all"
+                      class="flex min-w-0 items-center gap-2.5 px-3 py-2.5 rounded-xl text-sm font-medium transition-all"
                       :class="isNavActive(item.href)
                         ? 'bg-[#cc785c]/10 dark:bg-[#cc785c]/20 text-[#cc785c] dark:text-[#d4a27f]'
                         : 'text-[#666663] dark:text-muted-foreground hover:bg-black/5 dark:hover:bg-white/5 hover:text-[#191919] dark:hover:text-white'"
@@ -291,7 +295,7 @@
                         :is="item.icon"
                         class="h-4 w-4 shrink-0"
                       />
-                      <span class="truncate">{{ item.name }}</span>
+                      <span class="min-w-0 break-words leading-5">{{ item.name }}</span>
                     </RouterLink>
                   </div>
                 </div>
@@ -309,11 +313,12 @@
                       <span class="text-[10px] text-[#91918d] dark:text-muted-foreground leading-none mt-1">{{ currentRoleLabel }}</span>
                     </div>
                   </div>
-                  <div class="flex items-center gap-1">
+                  <div class="flex shrink-0 items-center gap-1">
                     <RouterLink
                       to="/dashboard/settings"
                       class="p-2 hover:bg-muted/50 rounded-lg text-muted-foreground hover:text-foreground transition-colors"
                       :title="t('common.settings')"
+                      :aria-label="t('common.settings')"
                       @click="mobileMenuOpen = false"
                     >
                       <Settings class="w-4 h-4" />
@@ -321,6 +326,7 @@
                     <button
                       class="p-2 rounded-lg text-muted-foreground hover:text-red-500 transition-colors"
                       :title="t('common.logout')"
+                      :aria-label="t('common.logout')"
                       @click="handleLogout"
                     >
                       <LogOut class="w-4 h-4" />
@@ -334,25 +340,26 @@
       </header>
 
       <!-- Desktop Page Header -->
-      <header class="hidden lg:flex h-16 px-8 items-center justify-between shrink-0 border-b border-[#3d3929]/5 dark:border-white/5 sticky top-0 z-40 backdrop-blur-md bg-[#faf9f5]/90 dark:bg-[#191714]/90">
-        <div class="flex flex-col gap-0.5">
-          <div class="flex items-center gap-2 text-sm text-muted-foreground">
+      <header class="hidden lg:flex min-h-16 gap-4 px-8 py-3 items-center justify-between shrink-0 border-b border-[#3d3929]/5 dark:border-white/5 sticky top-0 z-40 backdrop-blur-md bg-[#faf9f5]/90 dark:bg-[#191714]/90">
+        <div class="flex min-w-0 flex-col gap-0.5">
+          <div class="flex min-w-0 flex-wrap items-center gap-2 text-sm text-muted-foreground">
             <template
               v-for="(crumb, index) in breadcrumbs"
               :key="index"
             >
               <template v-if="index > 0">
-                <ChevronRight class="w-3 h-3 opacity-50" />
+                <ChevronRight class="w-3 h-3 shrink-0 opacity-50" />
               </template>
               <RouterLink
                 v-if="crumb.href && index < breadcrumbs.length - 1"
                 :to="crumb.href"
-                class="hover:text-foreground transition-colors"
+                class="min-w-0 break-words hover:text-foreground transition-colors"
               >
                 {{ crumb.label }}
               </RouterLink>
               <span
                 v-else
+                class="min-w-0 break-words"
                 :class="index === breadcrumbs.length - 1 ? 'text-foreground font-medium' : ''"
               >
                 {{ crumb.label }}
@@ -366,13 +373,13 @@
         <!-- Demo Mode Badge (center) -->
         <div
           v-if="isDemo"
-          class="flex items-center gap-2 px-3 py-1.5 rounded-full bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 text-xs font-medium"
+          class="flex shrink-0 items-center gap-2 px-3 py-1.5 rounded-full bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 text-xs font-medium"
         >
           <AlertTriangle class="w-3.5 h-3.5" />
           <span>{{ t('demo.mode') }}</span>
         </div>
 
-        <div class="flex items-center gap-2">
+        <div class="flex shrink-0 items-center gap-2">
           <!-- Page-level header actions (right side) -->
           <div
             id="header-actions-right"
@@ -405,6 +412,7 @@
             rel="noopener noreferrer"
             class="flex h-9 w-9 items-center justify-center rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted/50 transition"
             :title="t('common.githubRepository')"
+            :aria-label="t('common.githubRepository')"
           >
             <GithubIcon class="h-4 w-4" />
           </a>
@@ -504,6 +512,7 @@ import ThemeModeButton from '@/components/common/ThemeModeButton.vue'
 import UpdateDialog from '@/components/common/UpdateDialog.vue'
 import VersionButton from '@/components/common/VersionButton.vue'
 import { buildUpdateErrorStatus } from '@/utils/updateStatus'
+import { safeExternalHttpsUrl } from '@/utils/navigationSecurity'
 import {
   Settings,
   AlertTriangle,
@@ -842,8 +851,9 @@ function handleVersionRefresh() {
 }
 
 function openVersionReleasePage() {
-  if (versionStatus.value?.release_url) {
-    window.open(versionStatus.value.release_url, '_blank', 'noopener,noreferrer')
+  const releaseUrl = safeExternalHttpsUrl(versionStatus.value?.release_url)
+  if (releaseUrl) {
+    window.open(releaseUrl, '_blank', 'noopener,noreferrer')
   }
 }
 
@@ -1086,12 +1096,6 @@ function syncAuthNotice() {
   showAuthError.value = !!authStore.user && !authStore.token
 }
 
-function handleStorageChange(event: StorageEvent) {
-  if (event.key === null || event.key === 'access_token') {
-    syncAuthNotice()
-  }
-}
-
 function handleVisibilityChange() {
   if (!document.hidden) {
     syncAuthNotice()
@@ -1150,7 +1154,6 @@ async function acknowledgeRequiredAnnouncement() {
 }
 
 onMounted(() => {
-  window.addEventListener('storage', handleStorageChange)
   document.addEventListener('visibilitychange', handleVisibilityChange)
   syncAuthNotice()
   applyCachedVersionStatus()
@@ -1176,7 +1179,6 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
-  window.removeEventListener('storage', handleStorageChange)
   document.removeEventListener('visibilitychange', handleVisibilityChange)
   if (updateCheckTimer !== null) {
     window.clearTimeout(updateCheckTimer)

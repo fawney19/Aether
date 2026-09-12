@@ -1,38 +1,38 @@
 mod memory;
-#[cfg(feature = "mysql")]
-mod mysql;
 
 #[allow(unused_imports)]
 pub(crate) use aether_data_contracts::repository::usage::{
     api_key_usage_contribution, incoming_usage_can_recover_terminal_failure,
     model_usage_contribution, provider_api_key_usage_contribution, provider_api_key_usage_is_error,
-    provider_api_key_usage_is_success, strip_deprecated_usage_display_fields,
-    usage_can_recover_terminal_failure, usage_request_metadata_client_family, ApiKeyLastUsedDelta,
-    ApiKeyUsageContribution, ApiKeyUsageDelta, ManagementTokenCounterDelta, ModelUsageContribution,
-    ModelUsageDelta, PendingUsageCleanupSummary, ProviderApiKeyUsageContribution,
-    ProviderApiKeyUsageDelta, ProviderApiKeyWindowUsageRequest, ProxyNodeCounterDelta,
-    StoredProviderApiKeyUsageSummary, StoredProviderApiKeyWindowUsageSummary,
-    StoredProviderUsageSummary, StoredProviderUsageWindow, StoredRequestUsageAudit,
-    StoredUsageAuditAggregation, StoredUsageAuditSummary, StoredUsageBreakdownSummaryRow,
-    StoredUsageCacheAffinityHitSummary, StoredUsageCacheAffinityIntervalRow,
-    StoredUsageCacheHitSummary, StoredUsageCostSavingsSummary, StoredUsageDailySummary,
-    StoredUsageDashboardDailyBreakdownRow, StoredUsageDashboardProviderCount,
-    StoredUsageDashboardStatsSummary, StoredUsageDashboardSummary, StoredUsageErrorDistributionRow,
-    StoredUsageLeaderboardSummary, StoredUsagePerformancePercentilesRow,
-    StoredUsageProviderPerformance, StoredUsageProviderPerformanceProviderRow,
-    StoredUsageProviderPerformanceSummary, StoredUsageProviderPerformanceTimelineRow,
-    StoredUsageSettledCostSummary, StoredUsageTimeSeriesBucket, StoredUsageUserTotals,
-    UpsertUsageRecord, UsageAuditAggregationGroupBy, UsageAuditAggregationQuery,
-    UsageAuditKeywordSearchQuery, UsageAuditListQuery, UsageAuditSummaryQuery,
-    UsageBreakdownGroupBy, UsageBreakdownSummaryQuery, UsageCacheAffinityHitSummaryQuery,
-    UsageCacheAffinityIntervalGroupBy, UsageCacheAffinityIntervalQuery, UsageCacheHitSummaryQuery,
-    UsageCleanupPreviewCounts, UsageCleanupSummary, UsageCleanupWindow,
-    UsageCostSavingsSummaryQuery, UsageCounterFlushSummary, UsageCounterHealthSnapshot,
-    UsageCounterPendingHealthSnapshot, UsageDailyHeatmapQuery, UsageDashboardDailyBreakdownQuery,
-    UsageDashboardProviderCountsQuery, UsageDashboardSummaryQuery, UsageErrorDistributionQuery,
-    UsageLeaderboardGroupBy, UsageLeaderboardQuery, UsageMonitoringErrorCountQuery,
-    UsageMonitoringErrorListQuery, UsagePerformancePercentilesQuery, UsageProviderPerformanceQuery,
-    UsageReadRepository, UsageRepository, UsageSettledCostSummaryQuery, UsageTimeSeriesGranularity,
+    provider_api_key_usage_is_success, sanitize_usage_capture_controls_for_persistence,
+    sanitize_usage_for_persistence, strip_deprecated_usage_display_fields,
+    usage_can_recover_terminal_failure, usage_lifecycle_update_allowed,
+    usage_request_metadata_client_family, ApiKeyLastUsedDelta, ApiKeyUsageContribution,
+    ApiKeyUsageDelta, ManagementTokenCounterDelta, ModelUsageContribution, ModelUsageDelta,
+    PendingUsageCleanupSummary, ProviderApiKeyUsageContribution, ProviderApiKeyUsageDelta,
+    ProviderApiKeyWindowUsageRequest, ProxyNodeCounterDelta, StoredProviderApiKeyUsageSummary,
+    StoredProviderApiKeyWindowUsageSummary, StoredProviderUsageSummary, StoredProviderUsageWindow,
+    StoredRequestUsageAudit, StoredUsageAuditAggregation, StoredUsageAuditSummary,
+    StoredUsageBreakdownSummaryRow, StoredUsageCacheAffinityHitSummary,
+    StoredUsageCacheAffinityIntervalRow, StoredUsageCacheHitSummary, StoredUsageCostSavingsSummary,
+    StoredUsageDailySummary, StoredUsageDashboardDailyBreakdownRow,
+    StoredUsageDashboardProviderCount, StoredUsageDashboardStatsSummary,
+    StoredUsageDashboardSummary, StoredUsageErrorDistributionRow, StoredUsageLeaderboardSummary,
+    StoredUsagePerformancePercentilesRow, StoredUsageProviderPerformance,
+    StoredUsageProviderPerformanceProviderRow, StoredUsageProviderPerformanceSummary,
+    StoredUsageProviderPerformanceTimelineRow, StoredUsageSettledCostSummary,
+    StoredUsageTimeSeriesBucket, StoredUsageUserTotals, UpsertUsageRecord,
+    UsageAuditAggregationGroupBy, UsageAuditAggregationQuery, UsageAuditKeywordSearchQuery,
+    UsageAuditListQuery, UsageAuditSummaryQuery, UsageBreakdownGroupBy, UsageBreakdownSummaryQuery,
+    UsageCacheAffinityHitSummaryQuery, UsageCacheAffinityIntervalGroupBy,
+    UsageCacheAffinityIntervalQuery, UsageCacheHitSummaryQuery, UsageCleanupPreviewCounts,
+    UsageCleanupSummary, UsageCleanupWindow, UsageCostSavingsSummaryQuery,
+    UsageCounterFlushSummary, UsageCounterHealthSnapshot, UsageCounterPendingHealthSnapshot,
+    UsageDailyHeatmapQuery, UsageDashboardDailyBreakdownQuery, UsageDashboardProviderCountsQuery,
+    UsageDashboardSummaryQuery, UsageErrorDistributionQuery, UsageLeaderboardGroupBy,
+    UsageLeaderboardQuery, UsageMonitoringErrorCountQuery, UsageMonitoringErrorListQuery,
+    UsagePerformancePercentilesQuery, UsageProviderPerformanceQuery, UsageReadRepository,
+    UsageRepository, UsageSettledCostSummaryQuery, UsageTimeSeriesGranularity,
     UsageTimeSeriesQuery, UsageWriteRepository,
 };
 #[cfg(feature = "postgres")]
@@ -41,11 +41,7 @@ pub mod cleanup {
 }
 #[cfg(feature = "postgres")]
 pub use aether_data_postgres::SqlxUsageReadRepository;
-#[cfg(feature = "sqlite")]
-pub use aether_data_sqlite::{SqliteUsageReadRepository, SqliteUsageWriteRepository};
 pub use memory::InMemoryUsageReadRepository;
-#[cfg(feature = "mysql")]
-pub use mysql::{MysqlUsageReadRepository, MysqlUsageWriteRepository};
 
 #[cfg(test)]
 mod tests {
@@ -61,6 +57,7 @@ mod tests {
     #[test]
     fn strip_deprecated_usage_display_fields_clears_legacy_display_columns() {
         let usage = strip_deprecated_usage_display_fields(UpsertUsageRecord {
+            capture_retention: Default::default(),
             request_id: "req-1".to_string(),
             user_id: Some("user-1".to_string()),
             api_key_id: Some("key-1".to_string()),

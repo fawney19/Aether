@@ -8,11 +8,13 @@ use crate::handlers::admin::provider::write::normalize::{
 };
 use crate::handlers::admin::request::AdminAppState;
 use crate::handlers::admin::shared::{
-    decrypt_catalog_secret_with_fallbacks, encrypt_catalog_secret_with_fallbacks, json_string_list,
-    normalize_json_object, normalize_string_list, parse_catalog_auth_config_json,
+    json_string_list, normalize_json_object, normalize_string_list, parse_catalog_auth_config_json,
 };
 use crate::handlers::shared::normalize_optional_api_key_concurrent_limit;
 use crate::provider_key_auth::provider_key_is_oauth_managed;
+use aether_admin::provider::redaction::{
+    admin_restore_secret_safe_json, admin_restore_secret_safe_proxy,
+};
 use aether_data_contracts::repository::provider_catalog::{
     ProviderCatalogKeyAdminCasUpdate, ProviderCatalogKeyOAuthCredentialFence,
     StoredProviderCatalogKey, StoredProviderCatalogProvider,
@@ -50,6 +52,27 @@ pub(crate) fn build_admin_update_provider_key_record_with_existing_keys(
 ) -> Result<StoredProviderCatalogKey, String> {
     let state = state.as_ref();
     let mut updated = existing.clone();
+    if provider.id != existing.provider_id {
+        updated.encrypted_api_key = state
+            .decrypt_provider_catalog_key_api_key(existing)
+            .map_err(|_| "无法验证现有 provider API Key".to_string())?
+            .map(|plaintext| {
+                state
+                    .seal_provider_catalog_key_api_key(&provider.id, &existing.id, &plaintext)
+                    .map_err(|_| "gateway 未配置 provider key 加密密钥".to_string())
+            })
+            .transpose()?;
+        updated.encrypted_auth_config = state
+            .decrypt_provider_catalog_key_auth_config(existing)
+            .map_err(|_| "无法验证现有 provider auth_config".to_string())?
+            .map(|plaintext| {
+                state
+                    .seal_provider_catalog_key_auth_config(&provider.id, &existing.id, &plaintext)
+                    .map_err(|_| "gateway 未配置 provider key 加密密钥".to_string())
+            })
+            .transpose()?;
+        updated.provider_id = provider.id.clone();
+    }
     let (fields, payload) = patch.into_parts();
     let auto_fetch_disabled =
         existing.auto_fetch_models && matches!(payload.auto_fetch_models, Some(false));
@@ -101,16 +124,10 @@ pub(crate) fn build_admin_update_provider_key_record_with_existing_keys(
                     .iter()
                     .filter(|key| key.id != existing.id && raw_secret_auth_type(&key.auth_type))
                 {
-                    let Some(decrypted) =
-                        existing_key
-                            .encrypted_api_key
-                            .as_deref()
-                            .and_then(|ciphertext| {
-                                decrypt_catalog_secret_with_fallbacks(
-                                    state.encryption_key(),
-                                    ciphertext,
-                                )
-                            })
+                    let Some(decrypted) = state
+                        .decrypt_provider_catalog_key_api_key(existing_key)
+                        .ok()
+                        .flatten()
                     else {
                         continue;
                     };
@@ -122,8 +139,9 @@ pub(crate) fn build_admin_update_provider_key_record_with_existing_keys(
                     }
                 }
                 updated.encrypted_api_key = Some(
-                    encrypt_catalog_secret_with_fallbacks(state, api_key)
-                        .ok_or_else(|| "gateway 未配置 provider key 加密密钥".to_string())?,
+                    state
+                        .seal_provider_catalog_key_api_key(&provider.id, &existing.id, api_key)
+                        .map_err(|_| "gateway 未配置 provider key 加密密钥".to_string())?,
                 );
             } else if api_key_present {
                 updated.encrypted_api_key = None;
@@ -188,8 +206,13 @@ pub(crate) fn build_admin_update_provider_key_record_with_existing_keys(
                     .transpose()
                     .map_err(|err| err.to_string())?
                     .map(|plaintext| {
-                        encrypt_catalog_secret_with_fallbacks(state, &plaintext)
-                            .ok_or_else(|| "gateway 未配置 provider key 加密密钥".to_string())
+                        state
+                            .seal_provider_catalog_key_auth_config(
+                                &provider.id,
+                                &existing.id,
+                                &plaintext,
+                            )
+                            .map_err(|_| "gateway 未配置 provider key 加密密钥".to_string())
                     })
                     .transpose()?;
             }
@@ -348,10 +371,12 @@ pub(crate) fn build_admin_update_provider_key_record_with_existing_keys(
             normalize_string_list(payload.model_exclude_patterns).map(|value| json!(value));
     }
     if fields.contains("proxy") {
-        updated.proxy = normalize_json_object(payload.proxy, "proxy")?;
+        updated.proxy = normalize_json_object(payload.proxy, "proxy")?
+            .map(|value| admin_restore_secret_safe_proxy(existing.proxy.as_ref(), &value));
     }
     if fields.contains("fingerprint") {
-        updated.fingerprint = normalize_json_object(payload.fingerprint, "fingerprint")?;
+        updated.fingerprint = normalize_json_object(payload.fingerprint, "fingerprint")?
+            .map(|value| admin_restore_secret_safe_json(existing.fingerprint.as_ref(), &value));
     }
     if auth_config_present && !auth_type_switch && !raw_secret_auth_type(&updated.auth_type) {
         updated.encrypted_auth_config = auth_config
@@ -360,8 +385,9 @@ pub(crate) fn build_admin_update_provider_key_record_with_existing_keys(
             .transpose()
             .map_err(|err| err.to_string())?
             .map(|plaintext| {
-                encrypt_catalog_secret_with_fallbacks(state, &plaintext)
-                    .ok_or_else(|| "gateway 未配置 provider key 加密密钥".to_string())
+                state
+                    .seal_provider_catalog_key_auth_config(&provider.id, &existing.id, &plaintext)
+                    .map_err(|_| "gateway 未配置 provider key 加密密钥".to_string())
             })
             .transpose()?;
     }

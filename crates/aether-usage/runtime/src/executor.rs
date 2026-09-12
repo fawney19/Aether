@@ -1,5 +1,13 @@
 use std::future::Future;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
+
+struct UsageBackgroundRuntime {
+    owner: Mutex<Option<tokio::runtime::Runtime>>,
+    handle: tokio::runtime::Handle,
+}
+
+static RUNTIME: OnceLock<UsageBackgroundRuntime> = OnceLock::new();
 
 const DEFAULT_USAGE_BACKGROUND_RUNTIME_THREADS: usize = 8;
 const MAX_USAGE_BACKGROUND_RUNTIME_THREADS: usize = 64;
@@ -18,12 +26,10 @@ where
     F: Future + Send + 'static,
     F::Output: Send + 'static,
 {
-    usage_background_runtime().handle().spawn(task)
+    usage_background_runtime().handle.spawn(task)
 }
 
-fn usage_background_runtime() -> &'static tokio::runtime::Runtime {
-    static RUNTIME: OnceLock<&'static tokio::runtime::Runtime> = OnceLock::new();
-
+fn usage_background_runtime() -> &'static UsageBackgroundRuntime {
     RUNTIME.get_or_init(|| {
         let worker_threads = usage_background_runtime_threads();
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -36,8 +42,26 @@ fn usage_background_runtime() -> &'static tokio::runtime::Runtime {
             .thread_stack_size(USAGE_BACKGROUND_RUNTIME_STACK_BYTES)
             .build()
             .expect("usage background runtime should build");
-        Box::leak(Box::new(runtime))
+        UsageBackgroundRuntime {
+            handle: runtime.handle().clone(),
+            owner: Mutex::new(Some(runtime)),
+        }
     })
+}
+
+/// Call outside Tokio after every UsageRuntime has drained. Does not start an unused runtime.
+pub fn shutdown_usage_background_runtime(timeout: Duration) {
+    let Some(runtime) = RUNTIME.get() else {
+        return;
+    };
+    let owner = runtime
+        .owner
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .take();
+    if let Some(owner) = owner {
+        owner.shutdown_timeout(timeout);
+    }
 }
 
 fn usage_background_runtime_threads() -> usize {

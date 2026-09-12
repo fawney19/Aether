@@ -1,3 +1,5 @@
+import { getI18nLocale } from '@/i18n'
+
 export type HealthBadgeVariant =
   | 'default'
   | 'secondary'
@@ -127,7 +129,7 @@ export function formatMs(value?: number | null) {
 }
 
 function formatDurationNumber(value: number) {
-  return new Intl.NumberFormat('zh-CN', {
+  return new Intl.NumberFormat(getI18nLocale(), {
     maximumFractionDigits: Math.abs(value) < 10 ? 2 : 1
   }).format(value)
 }
@@ -144,7 +146,7 @@ export function formatAvailability(item: HealthMonitorAvailability) {
 
 export function formatTps(value?: number | null) {
   if (typeof value !== 'number' || Number.isNaN(value)) return '-'
-  return `${new Intl.NumberFormat('zh-CN', {
+  return `${new Intl.NumberFormat(getI18nLocale(), {
     maximumFractionDigits: value < 10 ? 2 : value < 100 ? 1 : 0
   }).format(value)} tps`
 }
@@ -202,7 +204,7 @@ function formatTimelineRequestBreakdown(
 
 function formatTimelineCount(value?: number | null) {
   if (typeof value !== 'number' || Number.isNaN(value)) return '-'
-  return `${new Intl.NumberFormat('zh-CN').format(value)} 次`
+  return `${new Intl.NumberFormat(getI18nLocale()).format(value)} 次`
 }
 
 function formatTimelineMetricAvailability(metrics?: HealthTimelineTooltipMetrics | null) {
@@ -213,7 +215,7 @@ function formatTimelineMetricAvailability(metrics?: HealthTimelineTooltipMetrics
 }
 
 export function formatCompactNumber(value: number) {
-  return new Intl.NumberFormat('zh-CN', {
+  return new Intl.NumberFormat(getI18nLocale(), {
     notation: 'compact',
     maximumFractionDigits: 1
   }).format(value)
@@ -223,7 +225,7 @@ export function formatTimestamp(timestamp?: string | null) {
   if (!timestamp) return '未知时间'
   const date = new Date(timestamp)
   if (Number.isNaN(date.getTime())) return '未知时间'
-  return date.toLocaleString('zh-CN', {
+  return date.toLocaleString(getI18nLocale(), {
     month: '2-digit',
     day: '2-digit',
     hour: '2-digit',

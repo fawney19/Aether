@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 use crate::formats::{
     context::FormatContext,
     openai::responses::{
-        openai_responses_synthetic_reasoning_item_id,
+        openai_responses_message_item_id, openai_responses_synthetic_reasoning_item_id,
         response::ensure_modern_openai_responses_response_fields,
     },
     registry,
@@ -218,7 +218,7 @@ pub fn build_openai_responses_response_with_content(
     if !content.is_empty() {
         output.push(json!({
             "type": "message",
-            "id": format!("{response_id}_msg"),
+            "id": openai_responses_message_item_id(response_id, 0),
             "role": "assistant",
             "status": "completed",
             "content": content

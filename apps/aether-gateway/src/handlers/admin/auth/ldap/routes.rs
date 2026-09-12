@@ -6,6 +6,7 @@ use super::shared::*;
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::handlers::admin::shared::attach_admin_audit_response;
 use crate::GatewayError;
+use aether_data::repository::auth_modules::CompareAndSwapLdapConfigResult;
 use axum::{
     body::{Body, Bytes},
     http,
@@ -61,9 +62,20 @@ pub(super) async fn maybe_build_local_admin_ldap_response(
                 Ok(config) => config,
                 Err(detail) => return Ok(Some(admin_ldap_bad_request_response(detail))),
             };
-            let saved = state.upsert_ldap_module_config(&update).await?;
-            if saved.is_none() {
+            let saved = state
+                .compare_and_swap_ldap_module_config(
+                    update.expected.as_ref(),
+                    &update.replacement,
+                    &update.bind_password_update,
+                )
+                .await?;
+            let Some(saved) = saved else {
                 return Ok(Some(admin_ldap_unavailable_response()));
+            };
+            if saved == CompareAndSwapLdapConfigResult::Conflict {
+                return Ok(Some(admin_ldap_conflict_response(
+                    "LDAP 配置已被其他请求更新，请重新加载后重试",
+                )));
             }
             return Ok(Some(
                 Json(json!({ "message": "LDAP配置更新成功" })).into_response(),

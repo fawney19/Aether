@@ -18,6 +18,7 @@ use crate::ai_serving::api::{
 use crate::api::response::build_client_response_from_parts;
 use crate::control::GatewayControlDecision;
 use crate::stage_metrics::observe_gateway_stage_ms;
+use crate::state::VideoTaskRouteAccess;
 use crate::{AppState, GatewayError, GatewayFallbackReason};
 
 use super::{
@@ -101,7 +102,7 @@ pub(crate) async fn maybe_execute_via_stream_decision_path(
     if skip_direct_plan {
         return Ok(LocalExecutionRequestOutcome::NoPath);
     }
-    let transfer_tracker = ProviderTransferTracker::default();
+    let transfer_tracker = ProviderTransferTracker::for_request(parts);
 
     if plan_kind == OPENAI_CHAT_STREAM_PLAN_KIND
         && supports_stream_execution_decision_kind(plan_kind)
@@ -490,29 +491,73 @@ async fn maybe_execute_local_video_task_content_stream(
         return Ok(LocalExecutionRequestOutcome::NoPath);
     }
 
-    let _ = state
-        .hydrate_video_task_for_route(decision.route_family.as_deref(), parts.uri.path())
-        .await?;
+    let Some(user_id) = decision
+        .auth_context
+        .as_ref()
+        .filter(|auth_context| auth_context.access_allowed)
+        .map(|auth_context| auth_context.user_id.trim())
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(LocalExecutionRequestOutcome::Responded(
+            build_json_response(
+                trace_id,
+                decision,
+                404,
+                &crate::video_tasks::not_found_body(),
+            )?,
+        ));
+    };
+
+    if state
+        .hydrate_video_task_for_route_for_user(
+            decision.route_family.as_deref(),
+            parts.uri.path(),
+            user_id,
+        )
+        .await?
+        != VideoTaskRouteAccess::Allowed
+    {
+        return Ok(LocalExecutionRequestOutcome::Responded(
+            build_json_response(
+                trace_id,
+                decision,
+                404,
+                &crate::video_tasks::not_found_body(),
+            )?,
+        ));
+    }
 
     if let Some(task_id) =
         crate::video_tasks::extract_openai_task_id_from_content_path(parts.uri.path())
     {
         let refresh_path = format!("/v1/videos/{task_id}");
-        if let Some(refresh_plan) = state.video_tasks.prepare_read_refresh_sync_plan(
+        if let Some(refresh_plan) = state.video_tasks.prepare_read_refresh_sync_plan_for_user(
             Some("openai"),
             &refresh_path,
+            user_id,
             trace_id,
         ) {
             state.execute_video_task_refresh_plan(&refresh_plan).await?;
         }
     }
 
-    let Some(action) = state.video_tasks.prepare_openai_content_stream_action(
-        parts.uri.path(),
-        parts.uri.query(),
-        trace_id,
-    ) else {
-        return Ok(LocalExecutionRequestOutcome::NoPath);
+    let Some(action) = state
+        .video_tasks
+        .prepare_openai_content_stream_action_for_user(
+            parts.uri.path(),
+            parts.uri.query(),
+            trace_id,
+            user_id,
+        )
+    else {
+        return Ok(LocalExecutionRequestOutcome::Responded(
+            build_json_response(
+                trace_id,
+                decision,
+                404,
+                &crate::video_tasks::not_found_body(),
+            )?,
+        ));
     };
 
     match action {

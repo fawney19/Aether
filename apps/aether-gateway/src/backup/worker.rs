@@ -29,8 +29,11 @@ pub(crate) fn spawn_s3_backup_worker(app: AppState) -> Option<JoinHandle<()>> {
             interval.tick().await;
             loop {
                 interval.tick().await;
-                if let Err(error) = run_s3_backup_schedule_tick(&app, Utc::now()).await {
-                    warn!(error = ?error, "S3 backup schedule tick failed");
+                if run_s3_backup_schedule_tick(&app, Utc::now()).await.is_err() {
+                    warn!(
+                        error_category = "schedule_tick_failed",
+                        "S3 backup schedule tick failed"
+                    );
                 }
             }
         },
@@ -43,15 +46,21 @@ async fn run_s3_backup_schedule_tick(
 ) -> Result<(), GatewayError> {
     let values = match super::task::load_s3_backup_config_values(app).await {
         Ok(values) => values,
-        Err(error) => {
-            warn!(error = %error, "S3 backup schedule config load failed");
+        Err(_) => {
+            warn!(
+                error_category = "config_load_failed",
+                "S3 backup schedule config load failed"
+            );
             return Ok(());
         }
     };
     let config = match S3BackupConfig::from_json_map(&values) {
         Ok(config) => config,
-        Err(error) => {
-            warn!(error = %error, "S3 backup schedule config is invalid");
+        Err(_) => {
+            warn!(
+                error_category = "config_invalid",
+                "S3 backup schedule config is invalid"
+            );
             return Ok(());
         }
     };
@@ -68,8 +77,11 @@ async fn run_s3_backup_schedule_tick(
 
     match super::task::start_s3_backup_task_for_schedule(app.clone(), slot).await {
         Ok(_) => {}
-        Err(error) => {
-            warn!(error = %error, "S3 backup scheduled task submission failed");
+        Err(_) => {
+            warn!(
+                error_category = "task_submission_failed",
+                "S3 backup scheduled task submission failed"
+            );
         }
     }
     Ok(())

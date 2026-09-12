@@ -1,4 +1,4 @@
-use crate::core::{current_unix_secs, OAuthError};
+use crate::core::{current_unix_secs, redacted_oauth_error_body_excerpt, OAuthError};
 use crate::network::{OAuthHttpExecutor, OAuthHttpRequest};
 use crate::provider::ProviderOAuthAdapter;
 use crate::provider::{
@@ -18,7 +18,7 @@ pub const DEFAULT_SYSTEM_VERSION: &str = "other#unknown";
 const IDC_AMZ_USER_AGENT: &str =
     "aws-sdk-js/3.738.0 ua/2.1 os/other lang/js md/browser#unknown_unknown api/sso-oidc#3.738.0 m/E KiroIDE";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct KiroAuthConfig {
     pub auth_method: Option<String>,
     pub refresh_token: Option<String>,
@@ -34,6 +34,75 @@ pub struct KiroAuthConfig {
     pub system_version: Option<String>,
     pub node_version: Option<String>,
     pub access_token: Option<String>,
+}
+
+impl std::fmt::Debug for KiroAuthConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("KiroAuthConfig")
+            .field("auth_method", &self.auth_method)
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("expires_at", &self.expires_at)
+            .field(
+                "profile_arn",
+                &self.profile_arn.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("region", &self.region)
+            .field("auth_region", &self.auth_region)
+            .field("api_region", &self.api_region)
+            .field("client_id", &self.client_id.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "client_secret",
+                &self.client_secret.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "machine_id",
+                &self.machine_id.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("kiro_version", &self.kiro_version)
+            .field("system_version", &self.system_version)
+            .field("node_version", &self.node_version)
+            .field(
+                "access_token",
+                &self.access_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish()
+    }
+}
+
+/// Returns whether a value is safe to interpolate as one DNS label in a Kiro
+/// service hostname.
+///
+/// Region values are persisted in the encrypted auth configuration and can
+/// also come from an upstream OAuth response.  They must never be treated as
+/// URL syntax: accepting `/`, `.`, `?`, `#`, `@`, or control characters here
+/// would let a crafted region redirect a token-bearing request to another
+/// origin.  AWS region names are DNS labels, so an ASCII alphanumeric/hyphen
+/// allow-list is both stricter and forward-compatible with future regions.
+pub fn is_valid_kiro_region(value: &str) -> bool {
+    let value = value.trim();
+    !value.is_empty()
+        && value.len() <= 63
+        && !value.starts_with('-')
+        && !value.ends_with('-')
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+}
+
+/// Trims a region and falls back to the known-safe default when it is not a
+/// single DNS label.  The returned value is suitable for URL and `Host`
+/// header interpolation.
+pub fn normalize_kiro_region(value: &str) -> &str {
+    let value = value.trim();
+    if is_valid_kiro_region(value) {
+        value
+    } else {
+        DEFAULT_REGION
+    }
 }
 
 impl KiroAuthConfig {
@@ -93,19 +162,22 @@ impl KiroAuthConfig {
     }
 
     pub fn effective_auth_region(&self) -> &str {
-        self.auth_region
-            .as_deref()
-            .or(self.region.as_deref())
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .unwrap_or(DEFAULT_REGION)
+        for candidate in [self.auth_region.as_deref(), self.region.as_deref()] {
+            let Some(candidate) = candidate else {
+                continue;
+            };
+            let candidate = candidate.trim();
+            if is_valid_kiro_region(candidate) {
+                return candidate;
+            }
+        }
+        DEFAULT_REGION
     }
 
     pub fn effective_api_region(&self) -> &str {
         self.api_region
             .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
+            .map(normalize_kiro_region)
             .unwrap_or(DEFAULT_REGION)
     }
 
@@ -304,7 +376,7 @@ impl KiroProviderOAuthAdapter {
         if !(200..300).contains(&response.status_code) {
             return Err(OAuthError::HttpStatus {
                 status_code: response.status_code,
-                body_excerpt: response.body_text.chars().take(500).collect(),
+                body_excerpt: redacted_oauth_error_body_excerpt(&response.body_text),
             });
         }
         let payload = response
@@ -383,7 +455,7 @@ impl KiroProviderOAuthAdapter {
         if !(200..300).contains(&response.status_code) {
             return Err(OAuthError::HttpStatus {
                 status_code: response.status_code,
-                body_excerpt: response.body_text.chars().take(500).collect(),
+                body_excerpt: redacted_oauth_error_body_excerpt(&response.body_text),
             });
         }
         let payload = response
@@ -648,7 +720,8 @@ fn secret_fingerprint(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        generate_kiro_machine_id, KiroAuthConfig, KiroProviderOAuthAdapter, IDC_AMZ_USER_AGENT,
+        generate_kiro_machine_id, is_valid_kiro_region, normalize_kiro_region, KiroAuthConfig,
+        KiroProviderOAuthAdapter, IDC_AMZ_USER_AGENT,
     };
     use crate::network::{OAuthHttpExecutor, OAuthHttpRequest, OAuthHttpResponse};
     use crate::provider::ProviderOAuthTransportContext;
@@ -660,6 +733,39 @@ mod tests {
     struct StaticExecutor {
         seen_request: Arc<Mutex<Option<OAuthHttpRequest>>>,
         response: serde_json::Value,
+    }
+
+    #[test]
+    fn kiro_auth_config_debug_output_redacts_all_token_material() {
+        let config = KiroAuthConfig {
+            auth_method: Some("idc".to_string()),
+            refresh_token: Some("kiro-refresh-canary".to_string()),
+            expires_at: Some(123),
+            profile_arn: Some("kiro-profile-arn-canary".to_string()),
+            region: Some("us-east-1".to_string()),
+            auth_region: None,
+            api_region: None,
+            client_id: Some("kiro-client-id-canary".to_string()),
+            client_secret: Some("kiro-client-secret-canary".to_string()),
+            machine_id: Some("kiro-machine-id-canary".to_string()),
+            kiro_version: None,
+            system_version: None,
+            node_version: None,
+            access_token: Some("kiro-access-canary".to_string()),
+        };
+
+        let debug = format!("{config:?}");
+        for secret in [
+            "kiro-refresh-canary",
+            "kiro-client-id-canary",
+            "kiro-client-secret-canary",
+            "kiro-access-canary",
+            "kiro-profile-arn-canary",
+            "kiro-machine-id-canary",
+        ] {
+            assert!(!debug.contains(secret), "debug leaked {secret}");
+        }
+        assert!(debug.contains("[REDACTED]"));
     }
 
     #[async_trait]
@@ -715,6 +821,106 @@ mod tests {
             generate_kiro_machine_id(&auth_config, None).as_deref(),
             Some("123e4567e89b12d3a456426614174000123e4567e89b12d3a456426614174000")
         );
+    }
+
+    #[test]
+    fn rejects_region_values_that_can_escape_a_hostname() {
+        for value in [
+            "evil.example/",
+            "evil.example\\",
+            "evil.example?next=1",
+            "evil.example#fragment",
+            "evil@example",
+            "us-east-1\r\nX-Injected: yes",
+            "us.east.1",
+        ] {
+            assert!(
+                !is_valid_kiro_region(value),
+                "region should be rejected: {value:?}"
+            );
+            assert_eq!(normalize_kiro_region(value), super::DEFAULT_REGION);
+        }
+
+        for value in [
+            "us-east-1",
+            "us-gov-west-1",
+            "us-iso-east-1",
+            "eu-central-1",
+        ] {
+            assert!(
+                is_valid_kiro_region(value),
+                "region should be accepted: {value}"
+            );
+            assert_eq!(normalize_kiro_region(value), value);
+        }
+    }
+
+    #[test]
+    fn effective_regions_fall_back_when_auth_config_is_malicious() {
+        let auth_config = KiroAuthConfig {
+            auth_method: None,
+            refresh_token: None,
+            expires_at: None,
+            profile_arn: None,
+            region: Some("eu-west-1".to_string()),
+            auth_region: Some("evil.example/".to_string()),
+            api_region: Some("evil.example/".to_string()),
+            client_id: None,
+            client_secret: None,
+            machine_id: None,
+            kiro_version: None,
+            system_version: None,
+            node_version: None,
+            access_token: None,
+        };
+
+        assert_eq!(auth_config.effective_auth_region(), "eu-west-1");
+        assert_eq!(auth_config.effective_api_region(), super::DEFAULT_REGION);
+    }
+
+    #[tokio::test]
+    async fn refresh_urls_use_safe_default_for_malicious_auth_region() {
+        let seen_request = Arc::new(Mutex::new(None));
+        let executor = StaticExecutor {
+            seen_request: Arc::clone(&seen_request),
+            response: json!({
+                "accessToken": "new-access-token",
+                "refreshToken": "r".repeat(120),
+                "expiresIn": 3600
+            }),
+        };
+        let auth_config = KiroAuthConfig {
+            auth_method: Some("social".to_string()),
+            refresh_token: Some("r".repeat(120)),
+            expires_at: Some(1),
+            profile_arn: None,
+            region: None,
+            auth_region: Some("attacker.example/".to_string()),
+            api_region: None,
+            client_id: None,
+            client_secret: None,
+            machine_id: Some("machine".to_string()),
+            kiro_version: None,
+            system_version: None,
+            node_version: None,
+            access_token: None,
+        };
+
+        KiroProviderOAuthAdapter::default()
+            .refresh_auth_config(&executor, &test_ctx(), &auth_config)
+            .await
+            .expect("refresh should succeed");
+
+        let seen = seen_request
+            .lock()
+            .expect("mutex should lock")
+            .clone()
+            .expect("request should be captured");
+        assert_eq!(
+            seen.url,
+            "https://prod.us-east-1.auth.desktop.kiro.dev/refreshToken"
+        );
+        assert!(!seen.url.contains("attacker.example"));
     }
 
     #[tokio::test]

@@ -7,6 +7,9 @@ use http::{HeaderMap, HeaderValue, StatusCode};
 use http_body_util::BodyExt;
 use serde_json::json;
 
+use aether_runtime_state::{RedisClientConfig, RuntimeState};
+use aether_test_support::ManagedRedisServer;
+
 use super::super::super::send_request;
 use super::super::{build_router_with_state, start_server, AppState};
 use crate::admin_api::{
@@ -106,6 +109,59 @@ async fn gateway_blocks_forwarded_ip_from_trusted_proxy() {
     let response = send_request(gateway, request).await;
 
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn gateway_fails_closed_when_ip_blacklist_state_is_unavailable() {
+    let mut redis = match ManagedRedisServer::start().await {
+        Ok(redis) => redis,
+        Err(error) if error.to_string().contains("No such file or directory") => {
+            eprintln!("skipping IP blacklist Redis outage test: {error}");
+            return;
+        }
+        Err(error) => panic!("Redis test server should start: {error}"),
+    };
+    let runtime_state = Arc::new(
+        RuntimeState::redis(
+            RedisClientConfig {
+                url: redis.redis_url().to_string(),
+                key_prefix: Some(format!("blacklist-outage-{}", std::process::id())),
+            },
+            Some(250),
+        )
+        .await
+        .expect("Redis runtime state should build"),
+    );
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_runtime_state(runtime_state),
+    );
+    redis.stop().expect("Redis test server should stop");
+
+    let request = Request::builder()
+        .uri("/api/public/system")
+        .body(Body::empty())
+        .expect("request should build");
+    let response = send_request(gateway, request).await;
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        response
+            .headers()
+            .get(crate::constants::EXECUTION_PATH_HEADER)
+            .and_then(|value| value.to_str().ok()),
+        Some(crate::constants::EXECUTION_PATH_LOCAL_AUTH_DENIED)
+    );
+    let payload = response
+        .into_body()
+        .collect()
+        .await
+        .expect("body should collect")
+        .to_bytes();
+    let payload: serde_json::Value =
+        serde_json::from_slice(&payload).expect("response should be json");
+    assert_eq!(payload["error"]["message"], "IP 访问控制暂时不可用");
 }
 
 #[tokio::test]

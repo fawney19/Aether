@@ -279,11 +279,19 @@ mod tests {
 
         assert_eq!(metadata["transport_diagnostics"]["provider_type"], "codex");
         assert_eq!(
-            metadata["transport_diagnostics"]["fingerprint"]["transport_profile"]["profile_id"],
-            "chrome_136"
+            metadata["transport_diagnostics"]["key_fingerprint_configured"],
+            Value::Bool(true)
+        );
+        assert_eq!(
+            metadata["transport_diagnostics"]["key_transport_profile_configured"],
+            Value::Bool(true)
         );
         assert_eq!(
             metadata["transport_diagnostics"]["resolved_transport_profile_id"],
+            "chrome_136"
+        );
+        assert_eq!(
+            metadata["transport_diagnostics"]["resolved_transport_profile"]["profile_id"],
             "chrome_136"
         );
         assert_eq!(

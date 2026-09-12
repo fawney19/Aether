@@ -1,5 +1,5 @@
 use super::ADMIN_AWS_REGIONS;
-use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
+use crate::handlers::admin::request::{AdminAppState, AdminRequestContext, SystemExportMode};
 use crate::handlers::admin::shared::attach_admin_audit_response;
 use crate::handlers::admin::shared::build_proxy_error_response;
 use crate::handlers::admin::system::shared::configs::{
@@ -23,10 +23,15 @@ use crate::handlers::admin::system::shared::update::{
     prepare_admin_system_update_task, read_update_history, read_update_task_status,
     self_update_supported, start_admin_system_rollback_task, start_admin_system_update_task,
 };
+use crate::handlers::admin::system::{
+    execute_admin_system_import_exclusively, release_admin_system_import_lease,
+    try_acquire_admin_system_import_lease, AdminSystemImportLockError,
+};
 use crate::important_notification::build_important_notification_test_payload;
 use crate::maintenance::{ManualUsageCleanupMode, ManualUsageCleanupOptions};
 use crate::GatewayError;
 use aether_data_contracts::repository::usage::UsageCleanupTargets;
+use aether_runtime_state::RuntimeLockLease;
 use axum::{
     body::{Body, Bytes},
     http,
@@ -34,6 +39,7 @@ use axum::{
     Json,
 };
 use serde_json::json;
+use std::future::Future;
 use std::time::Instant;
 use url::form_urlencoded;
 
@@ -233,12 +239,21 @@ pub(super) async fn maybe_build_local_admin_core_system_response(
         && request_method == http::Method::GET
         && request_path == "/api/admin/system/config/export"
     {
-        return Ok(Some(attach_admin_audit_response(
-            Json(state.build_admin_system_config_export_payload().await?).into_response(),
-            "admin_system_config_exported",
-            "export_system_config",
-            "system_config_export",
-            "global",
+        return Ok(Some(sensitive_system_export_response(
+            attach_admin_audit_response(
+                Json(
+                    state
+                        .build_admin_system_config_export_payload(
+                            SystemExportMode::InteractiveDownload,
+                        )
+                        .await?,
+                )
+                .into_response(),
+                "admin_system_config_exported",
+                "export_system_config",
+                "system_config_export",
+                "global",
+            ),
         )));
     }
 
@@ -255,30 +270,46 @@ pub(super) async fn maybe_build_local_admin_core_system_response(
                     .into_response(),
             ));
         };
-        return Ok(Some(
-            match state.import_admin_system_config(request_body).await? {
-                Ok(payload) => attach_admin_audit_response(
-                    Json(payload).into_response(),
-                    "admin_system_config_imported",
-                    "import_system_config",
-                    "system_config_import",
-                    "global",
-                ),
-                Err((status, payload)) => (status, Json(payload)).into_response(),
-            },
-        ));
+        let import_result = match execute_admin_system_import_with_lock(
+            state,
+            state.import_admin_system_config(request_body),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(response) => return Ok(Some(response)),
+        };
+        return Ok(Some(match import_result? {
+            Ok(payload) => attach_admin_audit_response(
+                Json(payload).into_response(),
+                "admin_system_config_imported",
+                "import_system_config",
+                "system_config_import",
+                "global",
+            ),
+            Err((status, payload)) => (status, Json(payload)).into_response(),
+        }));
     }
 
     if decision.route_kind.as_deref() == Some("users_export")
         && request_method == http::Method::GET
         && request_path == "/api/admin/system/users/export"
     {
-        return Ok(Some(attach_admin_audit_response(
-            Json(state.build_admin_system_users_export_payload().await?).into_response(),
-            "admin_system_users_exported",
-            "export_system_users",
-            "user_export",
-            "all_users",
+        return Ok(Some(sensitive_system_export_response(
+            attach_admin_audit_response(
+                Json(
+                    state
+                        .build_admin_system_users_export_payload(
+                            SystemExportMode::InteractiveDownload,
+                        )
+                        .await?,
+                )
+                .into_response(),
+                "admin_system_users_exported",
+                "export_system_users",
+                "user_export",
+                "all_users",
+            ),
         )));
     }
 
@@ -295,39 +326,52 @@ pub(super) async fn maybe_build_local_admin_core_system_response(
                     .into_response(),
             ));
         };
-        return Ok(Some(
-            match state
-                .import_admin_system_users(
-                    request_body,
-                    decision
-                        .admin_principal
-                        .as_ref()
-                        .map(|principal| principal.user_id.as_str()),
-                )
-                .await?
-            {
-                Ok(payload) => attach_admin_audit_response(
-                    Json(payload).into_response(),
-                    "admin_system_users_imported",
-                    "import_system_users",
-                    "system_users_import",
-                    "global",
-                ),
-                Err((status, payload)) => (status, Json(payload)).into_response(),
-            },
-        ));
+        let import_result = match execute_admin_system_import_with_lock(
+            state,
+            state.import_admin_system_users(
+                request_body,
+                decision
+                    .admin_principal
+                    .as_ref()
+                    .map(|principal| principal.user_id.as_str()),
+            ),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(response) => return Ok(Some(response)),
+        };
+        return Ok(Some(match import_result? {
+            Ok(payload) => attach_admin_audit_response(
+                Json(payload).into_response(),
+                "admin_system_users_imported",
+                "import_system_users",
+                "system_users_import",
+                "global",
+            ),
+            Err((status, payload)) => (status, Json(payload)).into_response(),
+        }));
     }
 
     if decision.route_kind.as_deref() == Some("data_export")
         && request_method == http::Method::GET
         && request_path == "/api/admin/system/data/export"
     {
-        return Ok(Some(attach_admin_audit_response(
-            Json(state.build_admin_system_data_export_payload().await?).into_response(),
-            "admin_system_data_exported",
-            "export_system_data",
-            "system_data_export",
-            "global",
+        return Ok(Some(sensitive_system_export_response(
+            attach_admin_audit_response(
+                Json(
+                    state
+                        .build_admin_system_data_export_payload(
+                            SystemExportMode::InteractiveDownload,
+                        )
+                        .await?,
+                )
+                .into_response(),
+                "admin_system_data_exported",
+                "export_system_data",
+                "system_data_export",
+                "global",
+            ),
         )));
     }
 
@@ -344,27 +388,31 @@ pub(super) async fn maybe_build_local_admin_core_system_response(
                     .into_response(),
             ));
         };
-        return Ok(Some(
-            match state
-                .import_admin_system_data(
-                    request_body,
-                    decision
-                        .admin_principal
-                        .as_ref()
-                        .map(|principal| principal.user_id.as_str()),
-                )
-                .await?
-            {
-                Ok(payload) => attach_admin_audit_response(
-                    Json(payload).into_response(),
-                    "admin_system_data_imported",
-                    "import_system_data",
-                    "system_data_import",
-                    "global",
-                ),
-                Err((status, payload)) => (status, Json(payload)).into_response(),
-            },
-        ));
+        let import_result = match execute_admin_system_import_with_lock(
+            state,
+            state.import_admin_system_data(
+                request_body,
+                decision
+                    .admin_principal
+                    .as_ref()
+                    .map(|principal| principal.user_id.as_str()),
+            ),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(response) => return Ok(Some(response)),
+        };
+        return Ok(Some(match import_result? {
+            Ok(payload) => attach_admin_audit_response(
+                Json(payload).into_response(),
+                "admin_system_data_imported",
+                "import_system_data",
+                "system_data_import",
+                "global",
+            ),
+            Err((status, payload)) => (status, Json(payload)).into_response(),
+        }));
     }
 
     if decision.route_kind.as_deref() == Some("s3_backup_run")
@@ -1103,6 +1151,62 @@ fn bad_manual_cleanup_request(detail: impl Into<String>) -> Response<Body> {
         .into_response()
 }
 
+fn sensitive_system_export_response(mut response: Response<Body>) -> Response<Body> {
+    response.headers_mut().insert(
+        http::header::CACHE_CONTROL,
+        http::HeaderValue::from_static("no-store"),
+    );
+    response
+}
+
+async fn acquire_admin_system_import_lock(
+    state: &AdminAppState<'_>,
+) -> Result<RuntimeLockLease, Response<Body>> {
+    try_acquire_admin_system_import_lease(state.app())
+        .await
+        .map_err(admin_system_import_lock_error_response)
+}
+
+async fn execute_admin_system_import_with_lock<F, T>(
+    state: &AdminAppState<'_>,
+    operation: F,
+) -> Result<T, Response<Body>>
+where
+    F: Future<Output = T>,
+{
+    execute_admin_system_import_exclusively(state.app(), operation)
+        .await
+        .map_err(admin_system_import_lock_error_response)
+}
+
+fn admin_system_import_lock_error_response(error: AdminSystemImportLockError) -> Response<Body> {
+    match error {
+        AdminSystemImportLockError::Conflict => (
+            http::StatusCode::CONFLICT,
+            Json(json!({
+                "detail": "已有系统数据导入正在执行，请等待当前导入完成后再试"
+            })),
+        )
+            .into_response(),
+        AdminSystemImportLockError::Unavailable => (
+            http::StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "detail": "系统数据导入服务暂时不可用" })),
+        )
+            .into_response(),
+        AdminSystemImportLockError::Lost => (
+            http::StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "detail": "系统数据导入锁已丢失，操作已停止；可能存在部分已提交变更，请检查运行状态后重试"
+            })),
+        )
+            .into_response(),
+    }
+}
+
+async fn release_admin_system_import_lock(state: &AdminAppState<'_>, lock: &RuntimeLockLease) {
+    release_admin_system_import_lease(state.app(), lock).await;
+}
+
 fn query_param(query_string: Option<&str>, name: &str) -> Option<String> {
     let query = query_string.filter(|value| !value.is_empty())?;
     form_urlencoded::parse(query.as_bytes())
@@ -1141,6 +1245,26 @@ fn parse_older_than_days_query(query_string: Option<&str>) -> Result<Option<u32>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn admin_system_import_lock_serializes_and_releases_imports() {
+        let app = crate::AppState::new().expect("app state should build");
+        let state = AdminAppState::new(&app);
+
+        let first = acquire_admin_system_import_lock(&state)
+            .await
+            .expect("first import should acquire the lock");
+        let conflict = acquire_admin_system_import_lock(&state)
+            .await
+            .expect_err("concurrent import must be rejected");
+        assert_eq!(conflict.status(), http::StatusCode::CONFLICT);
+
+        release_admin_system_import_lock(&state, &first).await;
+        let second = acquire_admin_system_import_lock(&state)
+            .await
+            .expect("lock should be reusable after release");
+        release_admin_system_import_lock(&state, &second).await;
+    }
 
     #[test]
     fn manual_cleanup_request_defaults_to_policy_targets() {
@@ -1187,5 +1311,15 @@ mod tests {
         let body = Bytes::from_static(br#"[]"#);
 
         assert!(parse_manual_usage_cleanup_request(Some(&body)).is_err());
+    }
+
+    #[test]
+    fn sensitive_system_exports_are_never_cacheable() {
+        let response = sensitive_system_export_response(Json(json!({})).into_response());
+
+        assert_eq!(
+            response.headers().get(http::header::CACHE_CONTROL),
+            Some(&http::HeaderValue::from_static("no-store"))
+        );
     }
 }

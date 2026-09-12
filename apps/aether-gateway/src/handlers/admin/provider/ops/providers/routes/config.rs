@@ -3,6 +3,7 @@ use super::super::config::build_admin_provider_ops_saved_config_value;
 use super::super::support::AdminProviderOpsSaveConfigRequest;
 use crate::handlers::admin::request::AdminAppState;
 use crate::GatewayError;
+use aether_data_contracts::repository::provider_catalog::ProviderCatalogProviderConfigCasUpdate;
 use axum::{
     body::{Body, Bytes},
     http,
@@ -10,7 +11,8 @@ use axum::{
     Json,
 };
 use serde_json::json;
-use std::time::{SystemTime, UNIX_EPOCH};
+
+const ADMIN_PROVIDER_OPS_CONFIG_SAVE_RETRIES: usize = 8;
 
 pub(super) async fn handle_admin_provider_ops_save_config(
     state: &AdminAppState<'_>,
@@ -23,7 +25,7 @@ pub(super) async fn handle_admin_provider_ops_save_config(
         Err(response) => return Ok(Some(response)),
     };
     let provider_ids = [provider_id.to_string()];
-    let Some(existing_provider) = state
+    let Some(mut existing_provider) = state
         .read_provider_catalog_providers_by_ids(&provider_ids)
         .await?
         .into_iter()
@@ -32,31 +34,57 @@ pub(super) async fn handle_admin_provider_ops_save_config(
         return Ok(Some(provider_not_found_response()));
     };
 
-    let provider_ops_config =
-        match build_admin_provider_ops_saved_config_value(state, &existing_provider, payload) {
-            Ok(config) => config,
+    let mut saved = false;
+    for _ in 0..ADMIN_PROVIDER_OPS_CONFIG_SAVE_RETRIES {
+        let snapshot = match build_admin_provider_ops_saved_config_value(
+            state,
+            &existing_provider,
+            payload.clone(),
+        )
+        .await
+        {
+            Ok(snapshot) => snapshot,
             Err(detail) => return Ok(Some(bad_request_detail_response(&detail))),
         };
-
-    let mut updated_provider = existing_provider.clone();
-    let mut provider_config = updated_provider
-        .config
-        .as_ref()
-        .and_then(serde_json::Value::as_object)
-        .cloned()
-        .unwrap_or_default();
-    provider_config.insert("provider_ops".to_string(), provider_ops_config);
-    updated_provider.config = Some(serde_json::Value::Object(provider_config));
-    updated_provider.updated_at_unix_secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .map(|duration| duration.as_secs());
-    let Some(_updated) = state
-        .update_provider_catalog_provider(&updated_provider)
-        .await?
-    else {
-        return Ok(None);
-    };
+        let mut provider_config = snapshot
+            .provider
+            .config
+            .as_ref()
+            .and_then(serde_json::Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        provider_config.insert("provider_ops".to_string(), snapshot.provider_ops_config);
+        let update = ProviderCatalogProviderConfigCasUpdate {
+            provider_id: snapshot.provider.id.clone(),
+            expected_config: snapshot.provider.config.clone(),
+            config: Some(serde_json::Value::Object(provider_config)),
+        };
+        if state
+            .compare_and_swap_provider_catalog_provider_config(&update)
+            .await?
+        {
+            saved = true;
+            break;
+        }
+        let Some(current) = state
+            .read_provider_catalog_providers_by_ids(&provider_ids)
+            .await?
+            .into_iter()
+            .next()
+        else {
+            return Ok(Some(provider_not_found_response()));
+        };
+        existing_provider = current;
+    }
+    if !saved {
+        return Ok(Some(
+            (
+                http::StatusCode::CONFLICT,
+                Json(json!({ "detail": "Provider Ops 配置并发更新冲突，请重试" })),
+            )
+                .into_response(),
+        ));
+    }
     clear_admin_provider_ops_balance_cache(state, provider_id).await;
 
     Ok(Some(
@@ -73,7 +101,7 @@ pub(super) async fn handle_admin_provider_ops_delete_config(
     provider_id: &str,
 ) -> Result<Option<Response<Body>>, GatewayError> {
     let provider_ids = [provider_id.to_string()];
-    let Some(existing_provider) = state
+    let Some(mut existing_provider) = state
         .read_provider_catalog_providers_by_ids(&provider_ids)
         .await?
         .into_iter()
@@ -82,25 +110,49 @@ pub(super) async fn handle_admin_provider_ops_delete_config(
         return Ok(Some(provider_not_found_response()));
     };
 
-    let mut updated_provider = existing_provider.clone();
-    let mut provider_config = updated_provider
-        .config
-        .as_ref()
-        .and_then(serde_json::Value::as_object)
-        .cloned()
-        .unwrap_or_default();
-    if provider_config.remove("provider_ops").is_some() {
-        updated_provider.config = Some(serde_json::Value::Object(provider_config));
-        updated_provider.updated_at_unix_secs = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .ok()
-            .map(|duration| duration.as_secs());
-        let Some(_updated) = state
-            .update_provider_catalog_provider(&updated_provider)
-            .await?
-        else {
-            return Ok(None);
+    let mut removed = false;
+    for _ in 0..ADMIN_PROVIDER_OPS_CONFIG_SAVE_RETRIES {
+        let mut provider_config = existing_provider
+            .config
+            .as_ref()
+            .and_then(serde_json::Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        if provider_config.remove("provider_ops").is_none() {
+            break;
+        }
+        let update = ProviderCatalogProviderConfigCasUpdate {
+            provider_id: existing_provider.id.clone(),
+            expected_config: existing_provider.config.clone(),
+            config: Some(serde_json::Value::Object(provider_config)),
         };
+        if state
+            .compare_and_swap_provider_catalog_provider_config(&update)
+            .await?
+        {
+            removed = true;
+            break;
+        }
+        let Some(current) = state
+            .read_provider_catalog_providers_by_ids(&provider_ids)
+            .await?
+            .into_iter()
+            .next()
+        else {
+            return Ok(Some(provider_not_found_response()));
+        };
+        existing_provider = current;
+    }
+    if admin_provider_ops_config_still_exists(&existing_provider) && !removed {
+        return Ok(Some(
+            (
+                http::StatusCode::CONFLICT,
+                Json(json!({ "detail": "Provider Ops 配置并发更新冲突，请重试" })),
+            )
+                .into_response(),
+        ));
+    }
+    if removed {
         clear_admin_provider_ops_balance_cache(state, provider_id).await;
     }
 
@@ -111,6 +163,16 @@ pub(super) async fn handle_admin_provider_ops_delete_config(
         }))
         .into_response(),
     ))
+}
+
+fn admin_provider_ops_config_still_exists(
+    provider: &aether_data_contracts::repository::provider_catalog::StoredProviderCatalogProvider,
+) -> bool {
+    provider
+        .config
+        .as_ref()
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|config| config.contains_key("provider_ops"))
 }
 
 fn parse_json_object_payload<T>(request_body: Option<&Bytes>) -> Result<T, Response<Body>>

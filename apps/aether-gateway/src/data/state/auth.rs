@@ -1,18 +1,37 @@
 use super::{
-    AuthApiKeyLookupKey, CreateManagementTokenRecord, DataLayerError, GatewayAuthApiKeySnapshot,
-    GatewayDataState, ManagementTokenCounterDelta, ManagementTokenListQuery, ProxyNodeCounterDelta,
-    ProxyNodeHeartbeatMutation, ProxyNodeManualCreateMutation, ProxyNodeManualUpdateMutation,
-    ProxyNodeRegistrationMutation, ProxyNodeRemoteConfigMutation, ProxyNodeTrafficMutation,
-    ProxyNodeTunnelStatusMutation, RegenerateManagementTokenSecret, StoredAuthApiKeyExportRecord,
-    StoredAuthApiKeySnapshot, StoredLdapModuleConfig, StoredManagementToken,
-    StoredManagementTokenListPage, StoredManagementTokenWithUser, StoredOAuthProviderConfig,
-    StoredOAuthProviderModuleConfig, StoredProxyFleetMetricsBucket, StoredProxyNode,
-    StoredProxyNodeEvent, StoredProxyNodeMetricsBucket, StoredUserAuthRecord,
-    StoredUserOAuthLinkSummary, StoredUserPreferenceRecord, StoredUserSessionRecord,
-    StoredWalletSnapshot, UpdateManagementTokenRecord, UpsertOAuthProviderConfigRecord,
+    ActivateManagementTokenIfMatches, AuthApiKeyLookupKey, CompareAndSwapLdapConfigResult,
+    CreateManagementTokenRecord, DataLayerError, GatewayAuthApiKeySnapshot, GatewayDataState,
+    InitializeAuthWalletOutcome, LdapBindPasswordUpdate, ManagementTokenCounterDelta,
+    ManagementTokenListQuery, ProxyNodeCounterDelta, ProxyNodeHeartbeatMutation,
+    ProxyNodeManualCreateMutation, ProxyNodeManualUpdateMutation, ProxyNodeRegistrationMutation,
+    ProxyNodeRemoteConfigMutation, ProxyNodeTrafficMutation, ProxyNodeTunnelStatusMutation,
+    RegenerateManagementTokenSecret, StoredAuthApiKeyExportRecord, StoredAuthApiKeySnapshot,
+    StoredLdapModuleConfig, StoredManagementToken, StoredManagementTokenListPage,
+    StoredManagementTokenWithUser, StoredOAuthProviderConfig, StoredOAuthProviderModuleConfig,
+    StoredProxyFleetMetricsBucket, StoredProxyNode, StoredProxyNodeEvent,
+    StoredProxyNodeMetricsBucket, StoredUserAuthRecord, StoredUserOAuthLinkSummary,
+    StoredUserPreferenceRecord, StoredUserSessionRecord, StoredWalletSnapshot,
+    UpdateManagementTokenRecord, UpsertOAuthProviderConfigRecord,
 };
 use crate::LocalMutationOutcome;
 use aether_data::repository::auth::ResolvedAuthApiKeySnapshotReader;
+
+/// Result of synchronizing an LDAP identity and, when applicable, creating its
+/// first wallet.  The wallet id is only exposed when this invocation created
+/// the row, which gives callers a safe compensation token without exposing an
+/// existing wallet as their own work.
+pub(crate) struct LdapAuthProvisioningResult {
+    pub(crate) user: StoredUserAuthRecord,
+    pub(crate) owned_wallet_id: Option<String>,
+}
+
+fn auth_user_wallet_matches(wallet: &StoredWalletSnapshot, user_id: &str) -> bool {
+    wallet.user_id.as_deref() == Some(user_id) && wallet.api_key_id.is_none()
+}
+use aether_data::repository::users::ResolveOAuthLinkedUserOutcome;
+use aether_data::repository::users::{
+    BindUserOAuthLinkOutcome, BindUserOAuthLinkSessionExpectation, DeleteUserOAuthLinkOutcome,
+};
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct GatewayUserEffectiveListPolicies {
@@ -141,6 +160,21 @@ impl GatewayDataState {
         }
     }
 
+    pub(crate) async fn restore_user_group_if_matches(
+        &self,
+        expected: &aether_data::repository::users::StoredUserGroup,
+        restored: &aether_data::repository::users::StoredUserGroup,
+    ) -> Result<bool, DataLayerError> {
+        match &self.user_reader {
+            Some(repository) => {
+                repository
+                    .restore_user_group_if_matches(expected, restored)
+                    .await
+            }
+            None => Ok(false),
+        }
+    }
+
     pub(crate) async fn delete_user_group(&self, group_id: &str) -> Result<bool, DataLayerError> {
         match &self.user_reader {
             Some(repository) => repository.delete_user_group(group_id).await,
@@ -213,6 +247,22 @@ impl GatewayDataState {
         }
     }
 
+    pub(crate) async fn restore_user_groups_if_matches(
+        &self,
+        user_id: &str,
+        expected_group_ids: &[String],
+        restored_group_ids: &[String],
+    ) -> Result<bool, DataLayerError> {
+        match &self.user_reader {
+            Some(repository) => {
+                repository
+                    .restore_user_groups_if_matches(user_id, expected_group_ids, restored_group_ids)
+                    .await
+            }
+            None => Ok(false),
+        }
+    }
+
     pub(crate) async fn add_user_to_group(
         &self,
         group_id: &str,
@@ -247,6 +297,35 @@ impl GatewayDataState {
             .await
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn resolve_enabled_oauth_linked_user(
+        &self,
+        provider_type: &str,
+        provider_user_id: &str,
+        provider_username: Option<&str>,
+        provider_email: Option<&str>,
+        extra_data: Option<serde_json::Value>,
+        verified_email: Option<&str>,
+        touched_at: chrono::DateTime<chrono::Utc>,
+        provider_enabled_snapshot: bool,
+    ) -> Result<ResolveOAuthLinkedUserOutcome, DataLayerError> {
+        let Some(repository) = self.user_reader.as_ref() else {
+            return Ok(ResolveOAuthLinkedUserOutcome::ProviderUnavailable);
+        };
+        repository
+            .resolve_enabled_oauth_linked_user(
+                provider_type,
+                provider_user_id,
+                provider_username,
+                provider_email,
+                extra_data,
+                verified_email,
+                touched_at,
+                provider_enabled_snapshot,
+            )
+            .await
+    }
+
     pub(crate) async fn touch_oauth_link(
         &self,
         provider_type: &str,
@@ -274,6 +353,7 @@ impl GatewayDataState {
     pub(crate) async fn create_oauth_auth_user(
         &self,
         email: Option<String>,
+        email_verified: bool,
         username: String,
         created_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<Option<StoredUserAuthRecord>, DataLayerError> {
@@ -281,7 +361,7 @@ impl GatewayDataState {
             return Ok(None);
         };
         repository
-            .create_oauth_auth_user(email, username, created_at)
+            .create_oauth_auth_user(email, email_verified, username, created_at)
             .await
     }
 
@@ -321,8 +401,18 @@ impl GatewayDataState {
         repository.count_user_oauth_links(user_id).await
     }
 
+    pub(crate) async fn has_oauth_links_for_provider(
+        &self,
+        provider_type: &str,
+    ) -> Result<bool, DataLayerError> {
+        let Some(repository) = self.user_reader.as_ref() else {
+            return Ok(false);
+        };
+        repository.has_oauth_links_for_provider(provider_type).await
+    }
+
     #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn upsert_user_oauth_link(
+    pub(crate) async fn bind_user_oauth_link(
         &self,
         user_id: &str,
         provider_type: &str,
@@ -331,12 +421,14 @@ impl GatewayDataState {
         provider_email: Option<&str>,
         extra_data: Option<serde_json::Value>,
         linked_at: chrono::DateTime<chrono::Utc>,
-    ) -> Result<(), DataLayerError> {
+        provider_enabled_snapshot: bool,
+        session_expectation: Option<&BindUserOAuthLinkSessionExpectation>,
+    ) -> Result<BindUserOAuthLinkOutcome, DataLayerError> {
         let Some(repository) = self.user_reader.as_ref() else {
-            return Ok(());
+            return Ok(BindUserOAuthLinkOutcome::UserNotFound);
         };
         repository
-            .upsert_user_oauth_link(
+            .bind_user_oauth_link_if_provider_enabled(
                 user_id,
                 provider_type,
                 provider_user_id,
@@ -344,7 +436,23 @@ impl GatewayDataState {
                 provider_email,
                 extra_data,
                 linked_at,
+                provider_enabled_snapshot,
+                session_expectation,
             )
+            .await
+    }
+
+    pub(crate) async fn upgrade_oauth_email_verification_if_matches(
+        &self,
+        user_id: &str,
+        verified_email: &str,
+        verified_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, DataLayerError> {
+        let Some(repository) = self.user_reader.as_ref() else {
+            return Ok(false);
+        };
+        repository
+            .upgrade_oauth_email_verification_if_matches(user_id, verified_email, verified_at)
             .await
     }
 
@@ -352,12 +460,19 @@ impl GatewayDataState {
         &self,
         user_id: &str,
         provider_type: &str,
-    ) -> Result<bool, DataLayerError> {
+        local_password_login_allowed: bool,
+        enabled_provider_types_snapshot: &[String],
+    ) -> Result<DeleteUserOAuthLinkOutcome, DataLayerError> {
         let Some(repository) = self.user_reader.as_ref() else {
-            return Ok(false);
+            return Ok(DeleteUserOAuthLinkOutcome::NotFound);
         };
         repository
-            .delete_user_oauth_link(user_id, provider_type)
+            .delete_user_oauth_link(
+                user_id,
+                provider_type,
+                local_password_login_allowed,
+                enabled_provider_types_snapshot,
+            )
             .await
     }
 
@@ -439,6 +554,19 @@ impl GatewayDataState {
         repository.create_user_session(session).await
     }
 
+    pub(crate) async fn create_user_session_if_password_matches(
+        &self,
+        session: &StoredUserSessionRecord,
+        expected_password_hash: &str,
+    ) -> Result<Option<StoredUserSessionRecord>, DataLayerError> {
+        let Some(repository) = self.user_reader.as_ref() else {
+            return Ok(None);
+        };
+        repository
+            .create_user_session_if_password_matches(session, expected_password_hash)
+            .await
+    }
+
     pub(crate) async fn update_user_model_capability_settings(
         &self,
         user_id: &str,
@@ -468,14 +596,45 @@ impl GatewayDataState {
     pub(crate) async fn update_local_auth_user_profile(
         &self,
         user_id: &str,
+        email_present: bool,
         email: Option<String>,
+        email_verified: Option<bool>,
         username: Option<String>,
     ) -> Result<Option<StoredUserAuthRecord>, DataLayerError> {
         let Some(repository) = self.user_reader.as_ref() else {
             return Ok(None);
         };
         repository
-            .update_local_auth_user_profile(user_id, email, username)
+            .update_local_auth_user_profile(user_id, email_present, email, email_verified, username)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn restore_local_auth_user_state_if_matches(
+        &self,
+        expected_auth: &aether_data::repository::users::StoredUserAuthRecord,
+        restored_auth: &aether_data::repository::users::StoredUserAuthRecord,
+        expected_export: &aether_data::repository::users::StoredUserExportRow,
+        restored_export: &aether_data::repository::users::StoredUserExportRow,
+        expected_model_capability_settings: Option<&serde_json::Value>,
+        restored_model_capability_settings: Option<serde_json::Value>,
+        expected_feature_settings: Option<&serde_json::Value>,
+        restored_feature_settings: Option<serde_json::Value>,
+    ) -> Result<bool, DataLayerError> {
+        let Some(repository) = self.user_reader.as_ref() else {
+            return Ok(false);
+        };
+        repository
+            .restore_local_auth_user_state_if_matches(
+                expected_auth,
+                restored_auth,
+                expected_export,
+                restored_export,
+                expected_model_capability_settings,
+                restored_model_capability_settings,
+                expected_feature_settings,
+                restored_feature_settings,
+            )
             .await
     }
 
@@ -490,6 +649,62 @@ impl GatewayDataState {
         };
         repository
             .update_local_auth_user_password_hash(user_id, password_hash, updated_at)
+            .await
+    }
+
+    pub(crate) async fn restore_local_auth_user_password_hash_if_matches(
+        &self,
+        user_id: &str,
+        expected_password_hash: Option<&str>,
+        password_hash: Option<String>,
+        updated_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, DataLayerError> {
+        let Some(repository) = self.user_reader.as_ref() else {
+            return Ok(false);
+        };
+        repository
+            .restore_local_auth_user_password_hash_if_matches(
+                user_id,
+                expected_password_hash,
+                password_hash,
+                updated_at,
+            )
+            .await
+    }
+
+    pub(crate) async fn reset_local_auth_user_password_and_revoke_sessions(
+        &self,
+        user_id: &str,
+        password_hash: String,
+        changed_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, DataLayerError> {
+        let Some(repository) = self.user_reader.as_ref() else {
+            return Ok(false);
+        };
+        repository
+            .reset_local_auth_user_password_and_revoke_sessions(user_id, password_hash, changed_at)
+            .await
+    }
+
+    pub(crate) async fn change_local_auth_password_and_revoke_sessions(
+        &self,
+        user_id: &str,
+        current_session_id: &str,
+        expected_password_hash: Option<&str>,
+        next_password_hash: String,
+        changed_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, DataLayerError> {
+        let Some(repository) = self.user_reader.as_ref() else {
+            return Ok(false);
+        };
+        repository
+            .change_local_auth_password_and_revoke_sessions(
+                user_id,
+                current_session_id,
+                expected_password_hash,
+                next_password_hash,
+                changed_at,
+            )
             .await
     }
 
@@ -621,6 +836,30 @@ impl GatewayDataState {
         initial_gift_usd: f64,
         unlimited: bool,
     ) -> Result<Option<StoredUserAuthRecord>, DataLayerError> {
+        Ok(self
+            .get_or_create_ldap_auth_user_with_wallet_outcome(
+                email,
+                username,
+                ldap_dn,
+                ldap_username,
+                logged_in_at,
+                initial_gift_usd,
+                unlimited,
+            )
+            .await?
+            .map(|result| result.user))
+    }
+
+    pub(crate) async fn get_or_create_ldap_auth_user_with_wallet_outcome(
+        &self,
+        email: String,
+        username: String,
+        ldap_dn: Option<String>,
+        ldap_username: Option<String>,
+        logged_in_at: chrono::DateTime<chrono::Utc>,
+        initial_gift_usd: f64,
+        unlimited: bool,
+    ) -> Result<Option<LdapAuthProvisioningResult>, DataLayerError> {
         let Some(repository) = self.user_reader.as_ref() else {
             return Ok(None);
         };
@@ -630,23 +869,54 @@ impl GatewayDataState {
         else {
             return Ok(None);
         };
-        if outcome.created {
-            match self
-                .initialize_auth_user_wallet(&outcome.user.id, initial_gift_usd, unlimited)
-                .await
-            {
-                Ok(Some(_wallet)) => {}
-                Ok(None) => {
-                    let _ = self.delete_local_auth_user(&outcome.user.id).await;
-                    return Ok(None);
-                }
-                Err(err) => {
-                    let _ = self.delete_local_auth_user(&outcome.user.id).await;
-                    return Err(err);
-                }
-            }
+        if !outcome.created {
+            return Ok(Some(LdapAuthProvisioningResult {
+                user: outcome.user,
+                owned_wallet_id: None,
+            }));
         }
-        Ok(Some(outcome.user))
+
+        let initialized = match self
+            .initialize_auth_user_wallet_with_outcome(&outcome.user.id, initial_gift_usd, unlimited)
+            .await
+        {
+            Ok(Some(initialized)) => initialized,
+            Ok(None) => {
+                let _ = self
+                    .rollback_provisional_auth_user_with_wallet(&outcome.user.id, None)
+                    .await;
+                return Ok(None);
+            }
+            Err(err) => {
+                let _ = self
+                    .rollback_provisional_auth_user_with_wallet(&outcome.user.id, None)
+                    .await;
+                return Err(err);
+            }
+        };
+
+        // A user wallet initializer must return a user-owned wallet. If a
+        // custom/legacy backend violates that contract, only remove the wallet
+        // when this invocation actually created it; an existing wallet must be
+        // preserved and the user rollback must fail closed.
+        let wallet_is_user_owned = auth_user_wallet_matches(&initialized.wallet, &outcome.user.id);
+        if !wallet_is_user_owned {
+            let owned_wallet_id = initialized.created.then(|| initialized.wallet.id.clone());
+            let _ = self
+                .rollback_provisional_auth_user_with_wallet(
+                    &outcome.user.id,
+                    owned_wallet_id.as_deref(),
+                )
+                .await;
+            return Err(DataLayerError::UnexpectedValue(
+                "LDAP user wallet owner does not match the provisioned user".to_string(),
+            ));
+        }
+
+        Ok(Some(LdapAuthProvisioningResult {
+            user: outcome.user,
+            owned_wallet_id: initialized.created.then_some(initialized.wallet.id),
+        }))
     }
 
     #[allow(dead_code)]
@@ -664,6 +934,20 @@ impl GatewayDataState {
             .await
     }
 
+    pub(crate) async fn initialize_auth_user_wallet_with_outcome(
+        &self,
+        user_id: &str,
+        initial_gift_usd: f64,
+        unlimited: bool,
+    ) -> Result<Option<InitializeAuthWalletOutcome>, DataLayerError> {
+        let Some(repository) = self.wallet_reader.as_ref() else {
+            return Ok(None);
+        };
+        repository
+            .initialize_auth_user_wallet_with_outcome(user_id, initial_gift_usd, unlimited)
+            .await
+    }
+
     pub(crate) async fn initialize_auth_api_key_wallet(
         &self,
         api_key_id: &str,
@@ -676,6 +960,81 @@ impl GatewayDataState {
         repository
             .initialize_auth_api_key_wallet(api_key_id, initial_gift_usd, unlimited)
             .await
+    }
+
+    pub(crate) async fn initialize_auth_api_key_wallet_with_outcome(
+        &self,
+        api_key_id: &str,
+        initial_gift_usd: f64,
+        unlimited: bool,
+    ) -> Result<Option<InitializeAuthWalletOutcome>, DataLayerError> {
+        let Some(repository) = self.wallet_reader.as_ref() else {
+            return Ok(None);
+        };
+        repository
+            .initialize_auth_api_key_wallet_with_outcome(api_key_id, initial_gift_usd, unlimited)
+            .await
+    }
+
+    pub(crate) async fn delete_provisional_auth_user_wallet(
+        &self,
+        wallet_id: &str,
+        user_id: &str,
+    ) -> Result<bool, DataLayerError> {
+        match &self.wallet_writer {
+            Some(repository) => {
+                repository
+                    .delete_provisional_auth_user_wallet(wallet_id, user_id)
+                    .await
+            }
+            None => Ok(false),
+        }
+    }
+
+    pub(crate) async fn delete_wallet_if_unreferenced(
+        &self,
+        wallet_id: &str,
+        owner: aether_data::repository::wallet::WalletLookupKey<'_>,
+    ) -> Result<bool, DataLayerError> {
+        match &self.wallet_writer {
+            Some(repository) => {
+                repository
+                    .delete_wallet_if_unreferenced(wallet_id, owner)
+                    .await
+            }
+            None => Ok(false),
+        }
+    }
+
+    pub(crate) async fn delete_wallet_if_snapshot_matches_and_unreferenced(
+        &self,
+        expected: &StoredWalletSnapshot,
+        owner: aether_data::repository::wallet::WalletLookupKey<'_>,
+    ) -> Result<bool, DataLayerError> {
+        match &self.wallet_writer {
+            Some(repository) => {
+                repository
+                    .delete_wallet_if_snapshot_matches_and_unreferenced(expected, owner)
+                    .await
+            }
+            None => Ok(false),
+        }
+    }
+
+    pub(crate) async fn restore_wallet_if_snapshot_matches(
+        &self,
+        before: &StoredWalletSnapshot,
+        after: &StoredWalletSnapshot,
+        owner: aether_data::repository::wallet::WalletLookupKey<'_>,
+    ) -> Result<bool, DataLayerError> {
+        match &self.wallet_writer {
+            Some(repository) => {
+                repository
+                    .restore_wallet_if_snapshot_matches(before, after, owner)
+                    .await
+            }
+            None => Ok(false),
+        }
     }
 
     pub(crate) async fn update_auth_user_wallet_limit_mode(
@@ -824,6 +1183,222 @@ impl GatewayDataState {
         repository.delete_local_auth_user(user_id).await
     }
 
+    pub(crate) async fn delete_local_auth_user_if_wallet_absent(
+        &self,
+        user_id: &str,
+    ) -> Result<bool, DataLayerError> {
+        let Some(repository) = self.user_reader.as_ref() else {
+            return Ok(false);
+        };
+        repository
+            .delete_local_auth_user_if_wallet_absent(user_id)
+            .await
+    }
+
+    pub(crate) async fn rollback_provisional_auth_user(
+        &self,
+        user_id: &str,
+    ) -> Result<bool, DataLayerError> {
+        self.rollback_provisional_auth_user_with_wallet(user_id, None)
+            .await
+    }
+
+    /// Check for every wallet that can still keep a user-owned account alive.
+    ///
+    /// API-key wallets do not carry the owning user id themselves, so a direct
+    /// `find(UserId(..))` is insufficient.  When an auth-key reader is
+    /// available we resolve the user's non-standalone key ids first.  A
+    /// reader-less in-memory repository cannot distinguish those keys from
+    /// standalone keys; in that case any API-key wallet is treated as a
+    /// blocking reference (fail closed).
+    async fn wallet_exists_for_user_or_api_key(
+        &self,
+        user_id: &str,
+    ) -> Result<bool, DataLayerError> {
+        let Some(repository) = self.wallet_reader.as_ref() else {
+            // A writer without a reader cannot prove wallet absence. Preserve
+            // the existing conservative behavior used by rollback callers.
+            return Ok(self.wallet_writer.is_some());
+        };
+
+        if repository
+            .find(aether_data::repository::wallet::WalletLookupKey::UserId(
+                user_id,
+            ))
+            .await?
+            .is_some()
+        {
+            return Ok(true);
+        }
+
+        if self.has_auth_api_key_reader() {
+            let user_ids = vec![user_id.to_string()];
+            let api_key_ids = self
+                .list_auth_api_key_export_records_by_user_ids(&user_ids)
+                .await?
+                .into_iter()
+                .map(|record| record.api_key_id)
+                .collect::<Vec<_>>();
+            if api_key_ids.is_empty() {
+                return Ok(false);
+            }
+            return Ok(!repository
+                .list_wallets_by_api_key_ids(&api_key_ids)
+                .await?
+                .is_empty());
+        }
+
+        // Without an auth-key reader, inspect the wallet owner type directly.
+        // A single-row page is enough to establish that an API-key wallet
+        // exists while avoiding an unbounded read during error compensation.
+        let page = repository
+            .list_admin_wallets(&aether_data::repository::wallet::AdminWalletListQuery {
+                status: None,
+                owner_type: Some("api_key".to_string()),
+                limit: 1,
+                offset: 0,
+            })
+            .await?;
+        Ok(page.total > 0)
+    }
+
+    /// Compensate a user provision only when the caller can prove ownership of the wallet it
+    /// created.  A missing wallet id is intentionally fail-closed: a concurrent initializer may
+    /// have created a valid wallet after this operation started, and an owner-only structural
+    /// lookup would then be able to delete that wallet.
+    pub(crate) async fn rollback_provisional_auth_user_with_wallet(
+        &self,
+        user_id: &str,
+        wallet_id: Option<&str>,
+    ) -> Result<bool, DataLayerError> {
+        if user_id.trim().is_empty() {
+            return Ok(false);
+        }
+        if wallet_id.is_some_and(|wallet_id| wallet_id.trim().is_empty()) {
+            return Err(DataLayerError::InvalidInput(
+                "wallet compensation wallet id cannot be empty".to_string(),
+            ));
+        }
+
+        let database_backend_has_atomic_guard = self.backends.is_some();
+        let wallet_removed = if let Some(wallet_id) = wallet_id {
+            let removed = self
+                .delete_provisional_auth_user_wallet(wallet_id, user_id)
+                .await?;
+            if !removed {
+                // The caller supplied an ownership token for a specific
+                // wallet. If that row still exists, an owner-only lookup is
+                // not enough to justify deleting the user: the row may be
+                // funded, attached to another owner, or simply ineligible
+                // for provisional cleanup.
+                let exact_wallet_exists = match &self.wallet_reader {
+                    Some(repository) => repository
+                        .find(aether_data::repository::wallet::WalletLookupKey::WalletId(
+                            wallet_id,
+                        ))
+                        .await?
+                        .is_some(),
+                    None => self.wallet_writer.is_some(),
+                };
+                if exact_wallet_exists {
+                    return Err(DataLayerError::UnexpectedValue(format!(
+                        "refusing to delete provisional auth user {user_id}: supplied wallet still exists"
+                    )));
+                }
+                let wallet_exists = self.wallet_exists_for_user_or_api_key(user_id).await?;
+                if wallet_exists {
+                    return Err(DataLayerError::UnexpectedValue(format!(
+                        "refusing to delete provisional auth user {user_id}: wallet is not eligible for rollback"
+                    )));
+                }
+            }
+            // Removing the supplied wallet does not prove that it was the
+            // user's only financial reference. Check again before falling
+            // through to the user deletion path when no SQL atomic guard is
+            // available (notably in-memory/test repositories).
+            if removed && !database_backend_has_atomic_guard {
+                if self.wallet_exists_for_user_or_api_key(user_id).await? {
+                    return Err(DataLayerError::UnexpectedValue(format!(
+                        "refusing to delete provisional auth user {user_id}: another wallet reference exists"
+                    )));
+                }
+            }
+            removed
+        } else if database_backend_has_atomic_guard {
+            // The SQL user repository performs the wallet-absence check in the
+            // same transaction as deletion.  A separate read here would
+            // reintroduce the provisioning TOCTOU race.
+            false
+        } else {
+            let wallet_exists = self.wallet_exists_for_user_or_api_key(user_id).await?;
+            if wallet_exists {
+                return Err(DataLayerError::UnexpectedValue(format!(
+                    "refusing to delete provisional auth user {user_id}: wallet ownership is unknown"
+                )));
+            }
+            false
+        };
+        let _ = wallet_removed;
+        if database_backend_has_atomic_guard {
+            self.delete_local_auth_user_if_wallet_absent(user_id).await
+        } else {
+            self.delete_local_auth_user(user_id).await
+        }
+    }
+
+    pub(crate) async fn register_local_auth_user_with_wallet_outcome(
+        &self,
+        email: Option<String>,
+        email_verified: bool,
+        username: String,
+        password_hash: String,
+        initial_gift_usd: f64,
+        unlimited: bool,
+    ) -> Result<Option<(StoredUserAuthRecord, StoredWalletSnapshot, bool)>, DataLayerError> {
+        let Some(user) = self
+            .create_local_auth_user(email, email_verified, username, password_hash)
+            .await?
+        else {
+            return Ok(None);
+        };
+
+        let initialized = match self
+            .initialize_auth_user_wallet_with_outcome(&user.id, initial_gift_usd, unlimited)
+            .await
+        {
+            Ok(Some(initialized)) => initialized,
+            Ok(None) => {
+                let _ = self
+                    .rollback_provisional_auth_user_with_wallet(&user.id, None)
+                    .await;
+                return Ok(None);
+            }
+            Err(err) => {
+                let _ = self
+                    .rollback_provisional_auth_user_with_wallet(&user.id, None)
+                    .await;
+                return Err(err);
+            }
+        };
+
+        // A local account may only be paired with a user-owned wallet. Keep
+        // this contract check at the data boundary as well as in the LDAP
+        // path: custom or legacy repositories must not be able to hand a
+        // caller an API-key wallet (or another user's wallet) as its new
+        // account balance.
+        let wallet_is_user_owned = auth_user_wallet_matches(&initialized.wallet, &user.id);
+        if !wallet_is_user_owned {
+            let owned_wallet_id = initialized.created.then(|| initialized.wallet.id.clone());
+            let _ = self
+                .rollback_provisional_auth_user_with_wallet(&user.id, owned_wallet_id.as_deref())
+                .await;
+            return Err(DataLayerError::UnexpectedValue(
+                "local user wallet owner does not match the provisioned user".to_string(),
+            ));
+        }
+        Ok(Some((user, initialized.wallet, initialized.created)))
+    }
+
     pub(crate) async fn register_local_auth_user(
         &self,
         email: Option<String>,
@@ -833,27 +1408,17 @@ impl GatewayDataState {
         initial_gift_usd: f64,
         unlimited: bool,
     ) -> Result<Option<(StoredUserAuthRecord, StoredWalletSnapshot)>, DataLayerError> {
-        let Some(user) = self
-            .create_local_auth_user(email, email_verified, username, password_hash)
+        Ok(self
+            .register_local_auth_user_with_wallet_outcome(
+                email,
+                email_verified,
+                username,
+                password_hash,
+                initial_gift_usd,
+                unlimited,
+            )
             .await?
-        else {
-            return Ok(None);
-        };
-
-        match self
-            .initialize_auth_user_wallet(&user.id, initial_gift_usd, unlimited)
-            .await
-        {
-            Ok(Some(wallet)) => Ok(Some((user, wallet))),
-            Ok(None) => {
-                let _ = self.delete_local_auth_user(&user.id).await;
-                Ok(None)
-            }
-            Err(err) => {
-                let _ = self.delete_local_auth_user(&user.id).await;
-                Err(err)
-            }
-        }
+            .map(|(user, wallet, _created)| (user, wallet)))
     }
 
     pub(crate) async fn touch_user_session(
@@ -892,7 +1457,7 @@ impl GatewayDataState {
         &self,
         user_id: &str,
         session_id: &str,
-        previous_refresh_token_hash: &str,
+        expected_refresh_token_hash: &str,
         next_refresh_token_hash: &str,
         rotated_at: chrono::DateTime<chrono::Utc>,
         expires_at: chrono::DateTime<chrono::Utc>,
@@ -906,7 +1471,7 @@ impl GatewayDataState {
             .rotate_user_session_refresh_token(
                 user_id,
                 session_id,
-                previous_refresh_token_hash,
+                expected_refresh_token_hash,
                 next_refresh_token_hash,
                 rotated_at,
                 expires_at,
@@ -963,13 +1528,43 @@ impl GatewayDataState {
         }
     }
 
-    pub(crate) async fn upsert_ldap_module_config(
+    pub(crate) async fn compare_and_swap_ldap_module_config(
         &self,
-        config: &StoredLdapModuleConfig,
-    ) -> Result<Option<StoredLdapModuleConfig>, DataLayerError> {
+        expected: Option<&StoredLdapModuleConfig>,
+        replacement: &StoredLdapModuleConfig,
+        bind_password_update: &LdapBindPasswordUpdate,
+    ) -> Result<Option<CompareAndSwapLdapConfigResult>, DataLayerError> {
         match &self.auth_module_writer {
-            Some(repository) => repository.upsert_ldap_config(config).await,
+            Some(repository) => repository
+                .compare_and_swap_ldap_config(expected, replacement, bind_password_update)
+                .await
+                .map(Some),
             None => Ok(None),
+        }
+    }
+
+    pub(crate) async fn delete_ldap_module_config_if_matches(
+        &self,
+        expected: &StoredLdapModuleConfig,
+    ) -> Result<bool, DataLayerError> {
+        match &self.auth_module_writer {
+            Some(repository) => repository.delete_ldap_config_if_matches(expected).await,
+            None => Ok(false),
+        }
+    }
+
+    pub(crate) async fn compare_and_swap_ldap_bind_password(
+        &self,
+        expected: &str,
+        replacement: &str,
+    ) -> Result<bool, DataLayerError> {
+        match &self.auth_module_writer {
+            Some(repository) => {
+                repository
+                    .compare_and_swap_ldap_bind_password(expected, replacement)
+                    .await
+            }
+            None => Ok(false),
         }
     }
 
@@ -992,40 +1587,99 @@ impl GatewayDataState {
         }
     }
 
+    pub(crate) async fn compare_and_swap_oauth_provider_client_secret(
+        &self,
+        provider_type: &str,
+        expected: &str,
+        replacement: &str,
+    ) -> Result<bool, DataLayerError> {
+        match &self.oauth_provider_writer {
+            Some(repository) => {
+                repository
+                    .compare_and_swap_oauth_provider_client_secret(
+                        provider_type,
+                        expected,
+                        replacement,
+                    )
+                    .await
+            }
+            None => Ok(false),
+        }
+    }
+
     pub(crate) async fn count_locked_users_if_oauth_provider_disabled(
         &self,
         provider_type: &str,
         ldap_exclusive: bool,
     ) -> Result<usize, DataLayerError> {
-        match &self.oauth_provider_reader {
+        let repository_count = match &self.oauth_provider_reader {
             Some(repository) => {
                 repository
                     .count_locked_users_if_provider_disabled(provider_type, ldap_exclusive)
                     .await
             }
             None => Ok(0),
-        }
+        }?;
+        let enabled_provider_types = match &self.oauth_provider_reader {
+            Some(repository) => repository
+                .list_oauth_provider_configs()
+                .await?
+                .into_iter()
+                .filter(|provider| provider.is_enabled)
+                .map(|provider| provider.provider_type)
+                .collect::<Vec<_>>(),
+            None => Vec::new(),
+        };
+        let user_count = match &self.user_reader {
+            Some(repository) => {
+                repository
+                    .count_locked_users_if_oauth_provider_disabled(
+                        provider_type,
+                        &enabled_provider_types,
+                        ldap_exclusive,
+                    )
+                    .await?
+            }
+            None => 0,
+        };
+        Ok(repository_count.max(user_count))
     }
 
     pub(crate) async fn upsert_oauth_provider_config(
         &self,
         record: &UpsertOAuthProviderConfigRecord,
-    ) -> Result<Option<StoredOAuthProviderConfig>, DataLayerError> {
+        ldap_exclusive: bool,
+        force_disable: bool,
+        locked_users_snapshot: usize,
+    ) -> Result<
+        Option<aether_data::repository::oauth_providers::UpsertOAuthProviderConfigOutcome>,
+        DataLayerError,
+    > {
         match &self.oauth_provider_writer {
             Some(repository) => repository
-                .upsert_oauth_provider_config(record)
+                .upsert_oauth_provider_config_guarded(
+                    record,
+                    ldap_exclusive,
+                    force_disable,
+                    locked_users_snapshot,
+                )
                 .await
                 .map(Some),
             None => Ok(None),
         }
     }
 
-    pub(crate) async fn delete_oauth_provider_config(
+    pub(crate) async fn delete_oauth_provider_config_if_unlinked(
         &self,
         provider_type: &str,
     ) -> Result<bool, DataLayerError> {
+        let has_links_snapshot = self.has_oauth_links_for_provider(provider_type).await?;
         match &self.oauth_provider_writer {
-            Some(repository) => repository.delete_oauth_provider_config(provider_type).await,
+            Some(repository) => {
+                repository
+                    .delete_oauth_provider_config_if_unlinked(provider_type, has_links_snapshot)
+                    .await
+            }
             None => Ok(false),
         }
     }
@@ -1100,12 +1754,48 @@ impl GatewayDataState {
         }
     }
 
+    pub(crate) async fn update_management_token_for_user(
+        &self,
+        record: &UpdateManagementTokenRecord,
+        user_id: &str,
+    ) -> Result<LocalMutationOutcome<StoredManagementToken>, DataLayerError> {
+        match &self.management_token_writer {
+            Some(repository) => match repository
+                .update_management_token_for_user(record, user_id)
+                .await
+            {
+                Ok(Some(token)) => Ok(LocalMutationOutcome::Applied(token)),
+                Ok(None) => Ok(LocalMutationOutcome::NotFound),
+                Err(DataLayerError::InvalidInput(detail)) => {
+                    Ok(LocalMutationOutcome::Invalid(detail))
+                }
+                Err(err) => Err(err),
+            },
+            None => Ok(LocalMutationOutcome::Unavailable),
+        }
+    }
+
     pub(crate) async fn delete_management_token(
         &self,
         token_id: &str,
     ) -> Result<bool, DataLayerError> {
         match &self.management_token_writer {
             Some(repository) => repository.delete_management_token(token_id).await,
+            None => Ok(false),
+        }
+    }
+
+    pub(crate) async fn delete_management_token_for_user(
+        &self,
+        token_id: &str,
+        user_id: &str,
+    ) -> Result<bool, DataLayerError> {
+        match &self.management_token_writer {
+            Some(repository) => {
+                repository
+                    .delete_management_token_for_user(token_id, user_id)
+                    .await
+            }
             None => Ok(false),
         }
     }
@@ -1227,6 +1917,38 @@ impl GatewayDataState {
         }
     }
 
+    pub(crate) async fn compare_and_set_proxy_node_password(
+        &self,
+        node_id: &str,
+        expected: &str,
+        replacement: &str,
+    ) -> Result<bool, DataLayerError> {
+        match &self.proxy_node_writer {
+            Some(repository) => {
+                repository
+                    .compare_and_set_proxy_password(node_id, expected, replacement)
+                    .await
+            }
+            None => Ok(false),
+        }
+    }
+
+    pub(crate) async fn compare_and_set_proxy_node_metadata(
+        &self,
+        node_id: &str,
+        expected: &serde_json::Value,
+        replacement: &serde_json::Value,
+    ) -> Result<bool, DataLayerError> {
+        match &self.proxy_node_writer {
+            Some(repository) => {
+                repository
+                    .compare_and_set_proxy_metadata(node_id, expected, replacement)
+                    .await
+            }
+            None => Ok(false),
+        }
+    }
+
     pub(crate) async fn create_manual_proxy_node(
         &self,
         mutation: &ProxyNodeManualCreateMutation,
@@ -1294,6 +2016,7 @@ impl GatewayDataState {
             let enqueued = repository
                 .enqueue_proxy_node_counter_delta(ProxyNodeCounterDelta {
                     node_id: mutation.node_id.clone(),
+                    expected_tunnel_generation: mutation.expected_tunnel_generation.clone(),
                     total_requests_delta: mutation.total_requests_delta,
                     failed_requests_delta: mutation.failed_requests_delta,
                     dns_failures_delta: mutation.dns_failures_delta,
@@ -1366,6 +2089,50 @@ impl GatewayDataState {
         }
     }
 
+    pub(crate) async fn set_management_token_active_for_user(
+        &self,
+        token_id: &str,
+        user_id: &str,
+        is_active: bool,
+    ) -> Result<Option<StoredManagementToken>, DataLayerError> {
+        match &self.management_token_writer {
+            Some(repository) => {
+                repository
+                    .set_management_token_active_for_user(token_id, user_id, is_active)
+                    .await
+            }
+            None => Ok(None),
+        }
+    }
+
+    pub(crate) async fn activate_management_token_if_matches(
+        &self,
+        mutation: &ActivateManagementTokenIfMatches,
+    ) -> Result<bool, DataLayerError> {
+        match &self.management_token_writer {
+            Some(repository) => {
+                repository
+                    .activate_management_token_if_matches(mutation)
+                    .await
+            }
+            None => Ok(false),
+        }
+    }
+
+    pub(crate) async fn delete_inactive_management_token_if_matches(
+        &self,
+        mutation: &ActivateManagementTokenIfMatches,
+    ) -> Result<bool, DataLayerError> {
+        match &self.management_token_writer {
+            Some(repository) => {
+                repository
+                    .delete_inactive_management_token_if_matches(mutation)
+                    .await
+            }
+            None => Ok(false),
+        }
+    }
+
     pub(crate) async fn regenerate_management_token_secret(
         &self,
         mutation: &RegenerateManagementTokenSecret,
@@ -1373,6 +2140,27 @@ impl GatewayDataState {
         match &self.management_token_writer {
             Some(repository) => match repository
                 .regenerate_management_token_secret(mutation)
+                .await
+            {
+                Ok(Some(token)) => Ok(LocalMutationOutcome::Applied(token)),
+                Ok(None) => Ok(LocalMutationOutcome::NotFound),
+                Err(DataLayerError::InvalidInput(detail)) => {
+                    Ok(LocalMutationOutcome::Invalid(detail))
+                }
+                Err(err) => Err(err),
+            },
+            None => Ok(LocalMutationOutcome::Unavailable),
+        }
+    }
+
+    pub(crate) async fn regenerate_management_token_secret_for_user(
+        &self,
+        mutation: &RegenerateManagementTokenSecret,
+        user_id: &str,
+    ) -> Result<LocalMutationOutcome<StoredManagementToken>, DataLayerError> {
+        match &self.management_token_writer {
+            Some(repository) => match repository
+                .regenerate_management_token_secret_for_user(mutation, user_id)
                 .await
             {
                 Ok(Some(token)) => Ok(LocalMutationOutcome::Applied(token)),
@@ -1557,6 +2345,21 @@ impl GatewayDataState {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) async fn synchronize_user_api_key_owner_for_tests(
+        &self,
+        user: &StoredUserAuthRecord,
+    ) -> Result<(), DataLayerError> {
+        match &self.auth_api_key_writer {
+            Some(repository) => {
+                repository
+                    .synchronize_user_api_key_owner_for_tests(user)
+                    .await
+            }
+            None => Ok(()),
+        }
+    }
+
     pub(crate) async fn create_standalone_api_key(
         &self,
         record: aether_data::repository::auth::CreateStandaloneApiKeyRecord,
@@ -1577,6 +2380,34 @@ impl GatewayDataState {
         }
     }
 
+    pub(crate) async fn compare_and_swap_api_key_ciphertext(
+        &self,
+        mutation: &aether_data::repository::auth::CompareAndSwapAuthApiKeyCiphertext,
+    ) -> Result<bool, DataLayerError> {
+        match &self.auth_api_key_writer {
+            Some(repository) => {
+                repository
+                    .compare_and_swap_api_key_ciphertext(mutation)
+                    .await
+            }
+            None => Ok(false),
+        }
+    }
+
+    pub(crate) async fn update_user_api_key_basic_if_unlocked(
+        &self,
+        record: aether_data::repository::auth::UpdateUserApiKeyBasicRecord,
+    ) -> Result<Option<StoredAuthApiKeyExportRecord>, DataLayerError> {
+        match &self.auth_api_key_writer {
+            Some(repository) => {
+                repository
+                    .update_user_api_key_basic_if_unlocked(record)
+                    .await
+            }
+            None => Ok(None),
+        }
+    }
+
     pub(crate) async fn update_standalone_api_key_basic(
         &self,
         record: aether_data::repository::auth::UpdateStandaloneApiKeyBasicRecord,
@@ -1584,6 +2415,21 @@ impl GatewayDataState {
         match &self.auth_api_key_writer {
             Some(repository) => repository.update_standalone_api_key_basic(record).await,
             None => Ok(None),
+        }
+    }
+
+    pub(crate) async fn restore_api_key_if_matches(
+        &self,
+        expected: &StoredAuthApiKeyExportRecord,
+        restored: &StoredAuthApiKeyExportRecord,
+    ) -> Result<bool, DataLayerError> {
+        match &self.auth_api_key_writer {
+            Some(repository) => {
+                repository
+                    .restore_api_key_if_matches(expected, restored)
+                    .await
+            }
+            None => Ok(false),
         }
     }
 
@@ -1597,6 +2443,22 @@ impl GatewayDataState {
             Some(repository) => {
                 repository
                     .set_user_api_key_active(user_id, api_key_id, is_active)
+                    .await
+            }
+            None => Ok(None),
+        }
+    }
+
+    pub(crate) async fn set_user_api_key_active_if_unlocked(
+        &self,
+        user_id: &str,
+        api_key_id: &str,
+        is_active: bool,
+    ) -> Result<Option<StoredAuthApiKeyExportRecord>, DataLayerError> {
+        match &self.auth_api_key_writer {
+            Some(repository) => {
+                repository
+                    .set_user_api_key_active_if_unlocked(user_id, api_key_id, is_active)
                     .await
             }
             None => Ok(None),
@@ -1650,6 +2512,26 @@ impl GatewayDataState {
         }
     }
 
+    pub(crate) async fn set_user_api_key_allowed_providers_if_unlocked(
+        &self,
+        user_id: &str,
+        api_key_id: &str,
+        allowed_providers: Option<Vec<String>>,
+    ) -> Result<Option<StoredAuthApiKeyExportRecord>, DataLayerError> {
+        match &self.auth_api_key_writer {
+            Some(repository) => {
+                repository
+                    .set_user_api_key_allowed_providers_if_unlocked(
+                        user_id,
+                        api_key_id,
+                        allowed_providers,
+                    )
+                    .await
+            }
+            None => Ok(None),
+        }
+    }
+
     pub(crate) async fn set_user_api_key_force_capabilities(
         &self,
         user_id: &str,
@@ -1666,6 +2548,26 @@ impl GatewayDataState {
         }
     }
 
+    pub(crate) async fn set_user_api_key_force_capabilities_if_unlocked(
+        &self,
+        user_id: &str,
+        api_key_id: &str,
+        force_capabilities: Option<serde_json::Value>,
+    ) -> Result<Option<StoredAuthApiKeyExportRecord>, DataLayerError> {
+        match &self.auth_api_key_writer {
+            Some(repository) => {
+                repository
+                    .set_user_api_key_force_capabilities_if_unlocked(
+                        user_id,
+                        api_key_id,
+                        force_capabilities,
+                    )
+                    .await
+            }
+            None => Ok(None),
+        }
+    }
+
     pub(crate) async fn set_user_api_key_feature_settings(
         &self,
         user_id: &str,
@@ -1676,6 +2578,26 @@ impl GatewayDataState {
             Some(repository) => {
                 repository
                     .set_user_api_key_feature_settings(user_id, api_key_id, feature_settings)
+                    .await
+            }
+            None => Ok(None),
+        }
+    }
+
+    pub(crate) async fn set_user_api_key_feature_settings_if_unlocked(
+        &self,
+        user_id: &str,
+        api_key_id: &str,
+        feature_settings: Option<serde_json::Value>,
+    ) -> Result<Option<StoredAuthApiKeyExportRecord>, DataLayerError> {
+        match &self.auth_api_key_writer {
+            Some(repository) => {
+                repository
+                    .set_user_api_key_feature_settings_if_unlocked(
+                        user_id,
+                        api_key_id,
+                        feature_settings,
+                    )
                     .await
             }
             None => Ok(None),
@@ -1726,6 +2648,21 @@ impl GatewayDataState {
     ) -> Result<bool, DataLayerError> {
         match &self.auth_api_key_writer {
             Some(repository) => repository.delete_user_api_key(user_id, api_key_id).await,
+            None => Ok(false),
+        }
+    }
+
+    pub(crate) async fn delete_user_api_key_if_unlocked(
+        &self,
+        user_id: &str,
+        api_key_id: &str,
+    ) -> Result<bool, DataLayerError> {
+        match &self.auth_api_key_writer {
+            Some(repository) => {
+                repository
+                    .delete_user_api_key_if_unlocked(user_id, api_key_id)
+                    .await
+            }
             None => Ok(false),
         }
     }
@@ -2180,11 +3117,340 @@ mod tests {
         InMemoryUserReadRepository, StoredUserAuthRecord, StoredUserGroup, UpsertUserGroupRecord,
         UserReadRepository,
     };
+    use aether_data::repository::wallet::{
+        InMemoryWalletRepository, WalletLookupKey, WalletReadRepository,
+    };
 
     use crate::data::GatewayDataState;
 
     fn sample_snapshot(api_key_id: &str, user_id: &str) -> StoredAuthApiKeySnapshot {
         sample_snapshot_with_role(api_key_id, user_id, "user")
+    }
+
+    #[test]
+    fn auth_user_wallet_owner_contract_rejects_cross_owner_rows() {
+        let user_wallet = StoredWalletSnapshot::new(
+            "user-wallet".to_string(),
+            Some("user-1".to_string()),
+            None,
+            0.0,
+            0.0,
+            "finite".to_string(),
+            "USD".to_string(),
+            "active".to_string(),
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1,
+        )
+        .expect("wallet should build");
+        let api_key_wallet = StoredWalletSnapshot::new(
+            "api-key-wallet".to_string(),
+            None,
+            Some("key-1".to_string()),
+            0.0,
+            0.0,
+            "finite".to_string(),
+            "USD".to_string(),
+            "active".to_string(),
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1,
+        )
+        .expect("wallet should build");
+        let other_user_wallet = StoredWalletSnapshot::new(
+            "other-user-wallet".to_string(),
+            Some("user-2".to_string()),
+            None,
+            0.0,
+            0.0,
+            "finite".to_string(),
+            "USD".to_string(),
+            "active".to_string(),
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1,
+        )
+        .expect("wallet should build");
+
+        assert!(auth_user_wallet_matches(&user_wallet, "user-1"));
+        assert!(!auth_user_wallet_matches(&user_wallet, "user-2"));
+        assert!(!auth_user_wallet_matches(&api_key_wallet, "user-1"));
+        assert!(!auth_user_wallet_matches(&other_user_wallet, "user-1"));
+    }
+
+    #[tokio::test]
+    async fn provisioning_rollback_removes_initial_wallet_before_user() {
+        let now = chrono::Utc::now();
+        let user = StoredUserAuthRecord::new(
+            "provisional-user".to_string(),
+            Some("provisional@example.com".to_string()),
+            true,
+            "provisional".to_string(),
+            Some("$2b$12$4qL4tdcsFwVaDTw5Ck3xzu8GpNdre56DiNR6Dnw7t6gCXaEnqAe7G".to_string()),
+            "user".to_string(),
+            "local".to_string(),
+            None,
+            None,
+            None,
+            true,
+            false,
+            Some(now),
+            None,
+        )
+        .expect("user should build");
+        let user_repository = Arc::new(InMemoryUserReadRepository::seed_auth_users([user]));
+        let wallet_repository = Arc::new(InMemoryWalletRepository::default());
+        let wallet = wallet_repository
+            .initialize_auth_user_wallet("provisional-user", 10.0, false)
+            .await
+            .expect("wallet should initialize")
+            .expect("wallet should exist");
+        let state = GatewayDataState::with_user_and_wallet_for_tests(
+            user_repository.clone(),
+            wallet_repository.clone(),
+        );
+
+        assert!(state
+            .rollback_provisional_auth_user_with_wallet(
+                "provisional-user",
+                Some(wallet.id.as_str()),
+            )
+            .await
+            .expect("rollback should succeed"));
+        assert!(user_repository
+            .find_user_auth_by_id("provisional-user")
+            .await
+            .expect("user lookup should succeed")
+            .is_none());
+        assert!(wallet_repository
+            .find(WalletLookupKey::UserId("provisional-user"))
+            .await
+            .expect("wallet lookup should succeed")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn provisioning_rollback_preserves_user_when_wallet_has_financial_activity() {
+        let now = chrono::Utc::now();
+        let user = StoredUserAuthRecord::new(
+            "active-user".to_string(),
+            Some("active@example.com".to_string()),
+            true,
+            "active-user".to_string(),
+            Some("$2b$12$4qL4tdcsFwVaDTw5Ck3xzu8GpNdre56DiNR6Dnw7t6gCXaEnqAe7G".to_string()),
+            "user".to_string(),
+            "local".to_string(),
+            None,
+            None,
+            None,
+            true,
+            false,
+            Some(now),
+            None,
+        )
+        .expect("user should build");
+        let wallet = StoredWalletSnapshot::new(
+            "active-wallet".to_string(),
+            Some("active-user".to_string()),
+            None,
+            1.0,
+            0.0,
+            "finite".to_string(),
+            "USD".to_string(),
+            "active".to_string(),
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            now.timestamp(),
+        )
+        .expect("wallet should build");
+        let user_repository = Arc::new(InMemoryUserReadRepository::seed_auth_users([user]));
+        let wallet_repository = Arc::new(InMemoryWalletRepository::seed([wallet]));
+        let state = GatewayDataState::with_user_and_wallet_for_tests(
+            user_repository.clone(),
+            wallet_repository.clone(),
+        );
+
+        let error = state
+            .rollback_provisional_auth_user_with_wallet("active-user", Some("active-wallet"))
+            .await
+            .expect_err("financial activity must block provisioning rollback");
+        assert!(matches!(error, DataLayerError::UnexpectedValue(_)));
+        assert!(user_repository
+            .find_user_auth_by_id("active-user")
+            .await
+            .expect("user lookup should succeed")
+            .is_some());
+        assert!(wallet_repository
+            .find(WalletLookupKey::UserId("active-user"))
+            .await
+            .expect("wallet lookup should succeed")
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn provisioning_rollback_removes_user_when_wallet_is_confirmed_absent() {
+        let now = chrono::Utc::now();
+        let user = StoredUserAuthRecord::new(
+            "no-wallet-user".to_string(),
+            Some("no-wallet@example.com".to_string()),
+            true,
+            "no-wallet-user".to_string(),
+            Some("$2b$12$4qL4tdcsFwVaDTw5Ck3xzu8GpNdre56DiNR6Dnw7t6gCXaEnqAe7G".to_string()),
+            "user".to_string(),
+            "local".to_string(),
+            None,
+            None,
+            None,
+            true,
+            false,
+            Some(now),
+            None,
+        )
+        .expect("user should build");
+        let user_repository = Arc::new(InMemoryUserReadRepository::seed_auth_users([user]));
+        let wallet_repository = Arc::new(InMemoryWalletRepository::default());
+        let state = GatewayDataState::with_user_and_wallet_for_tests(
+            user_repository.clone(),
+            wallet_repository,
+        );
+
+        assert!(state
+            .rollback_provisional_auth_user("no-wallet-user")
+            .await
+            .expect("confirmed wallet absence should allow rollback"));
+        assert!(user_repository
+            .find_user_auth_by_id("no-wallet-user")
+            .await
+            .expect("user lookup should succeed")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn provisioning_rollback_preserves_user_when_api_key_wallet_exists() {
+        let now = chrono::Utc::now();
+        let user = StoredUserAuthRecord::new(
+            "api-key-wallet-user".to_string(),
+            Some("api-key-wallet@example.com".to_string()),
+            true,
+            "api-key-wallet-user".to_string(),
+            Some("$2b$12$4qL4tdcsFwVaDTw5Ck3xzu8GpNdre56DiNR6Dnw7t6gCXaEnqAe7G".to_string()),
+            "user".to_string(),
+            "local".to_string(),
+            None,
+            None,
+            None,
+            true,
+            false,
+            Some(now),
+            None,
+        )
+        .expect("user should build");
+        let api_key_wallet = StoredWalletSnapshot::new(
+            "api-key-wallet-row".to_string(),
+            None,
+            Some("api-key-wallet-id".to_string()),
+            0.0,
+            0.0,
+            "finite".to_string(),
+            "USD".to_string(),
+            "active".to_string(),
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            now.timestamp(),
+        )
+        .expect("wallet should build");
+        let user_repository = Arc::new(InMemoryUserReadRepository::seed_auth_users([user]));
+        let wallet_repository = Arc::new(InMemoryWalletRepository::seed([api_key_wallet]));
+        let state = GatewayDataState::with_user_and_wallet_for_tests(
+            user_repository.clone(),
+            wallet_repository.clone(),
+        );
+
+        let error = state
+            .rollback_provisional_auth_user_with_wallet("api-key-wallet-user", None)
+            .await
+            .expect_err("an API-key wallet must block user rollback");
+        assert!(matches!(error, DataLayerError::UnexpectedValue(_)));
+        assert!(user_repository
+            .find_user_auth_by_id("api-key-wallet-user")
+            .await
+            .expect("user lookup should succeed")
+            .is_some());
+        assert!(wallet_repository
+            .find(WalletLookupKey::ApiKeyId("api-key-wallet-id"))
+            .await
+            .expect("wallet lookup should succeed")
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn provisioning_rollback_rejects_a_wallet_id_owned_by_another_user() {
+        let now = chrono::Utc::now();
+        let target_user = StoredUserAuthRecord::new(
+            "target-user".to_string(),
+            Some("target@example.com".to_string()),
+            true,
+            "target-user".to_string(),
+            Some("$2b$12$4qL4tdcsFwVaDTw5Ck3xzu8GpNdre56DiNR6Dnw7t6gCXaEnqAe7G".to_string()),
+            "user".to_string(),
+            "local".to_string(),
+            None,
+            None,
+            None,
+            true,
+            false,
+            Some(now),
+            None,
+        )
+        .expect("target user should build");
+        let other_user_wallet = StoredWalletSnapshot::new(
+            "other-user-wallet".to_string(),
+            Some("other-user".to_string()),
+            None,
+            0.0,
+            0.0,
+            "finite".to_string(),
+            "USD".to_string(),
+            "active".to_string(),
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            now.timestamp(),
+        )
+        .expect("wallet should build");
+        let user_repository = Arc::new(InMemoryUserReadRepository::seed_auth_users([target_user]));
+        let wallet_repository = Arc::new(InMemoryWalletRepository::seed([other_user_wallet]));
+        let state = GatewayDataState::with_user_and_wallet_for_tests(
+            user_repository.clone(),
+            wallet_repository.clone(),
+        );
+
+        let error = state
+            .rollback_provisional_auth_user_with_wallet("target-user", Some("other-user-wallet"))
+            .await
+            .expect_err("a live supplied wallet id must block user deletion");
+        assert!(matches!(error, DataLayerError::UnexpectedValue(_)));
+        assert!(user_repository
+            .find_user_auth_by_id("target-user")
+            .await
+            .expect("user lookup should succeed")
+            .is_some());
+        assert!(wallet_repository
+            .find(WalletLookupKey::WalletId("other-user-wallet"))
+            .await
+            .expect("wallet lookup should succeed")
+            .is_some());
     }
 
     fn sample_snapshot_with_role(

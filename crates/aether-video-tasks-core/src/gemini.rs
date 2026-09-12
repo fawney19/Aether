@@ -4,11 +4,13 @@ use aether_data_contracts::repository::video_tasks::{
 };
 use serde_json::{json, Map, Value};
 
+use crate::transport::{gemini_response_video_url, gemini_video_metadata};
+use crate::types::sanitize_video_task_error_code;
 use crate::{
     build_video_follow_up_report_context, current_unix_timestamp_secs, gemini_metadata_video_url,
     request_body_string, request_body_u32, resolve_follow_up_auth, GeminiVideoTaskSeed,
-    LocalVideoTaskFollowUpPlan, LocalVideoTaskReadResponse, LocalVideoTaskSnapshot,
-    LocalVideoTaskStatus, VideoFollowUpReportContextInput, DEFAULT_VIDEO_TASK_MAX_POLL_COUNT,
+    LocalVideoTaskFollowUpPlan, LocalVideoTaskReadResponse, LocalVideoTaskStatus,
+    VideoFollowUpReportContextInput, DEFAULT_VIDEO_TASK_MAX_POLL_COUNT,
     DEFAULT_VIDEO_TASK_POLL_INTERVAL_SECONDS,
 };
 
@@ -66,10 +68,9 @@ fn build_gemini_failed_body(task: StoredVideoTask) -> Value {
         "name": stored_task_operation_name(&task),
         "done": true,
         "error": {
-            "code": task.error_code.unwrap_or_else(|| "UNKNOWN".to_string()),
-            "message": task
-                .error_message
-                .unwrap_or_else(|| "Video generation failed".to_string()),
+            "code": sanitize_video_task_error_code(task.error_code)
+                .unwrap_or_else(|| "unknown".to_string()),
+            "message": "Video generation failed",
         }
     })
 }
@@ -99,21 +100,29 @@ impl GeminiVideoTaskSeed {
             if let Some(error) = error {
                 self.status = LocalVideoTaskStatus::Failed;
                 self.progress_percent = 100;
-                self.error_code = error
-                    .get("code")
-                    .and_then(Value::as_str)
-                    .map(str::to_string);
-                self.error_message = error
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .map(str::to_string);
+                self.error_code = sanitize_video_task_error_code(
+                    error
+                        .get("code")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                );
+                self.error_message = None;
             } else {
                 self.status = LocalVideoTaskStatus::Completed;
                 self.progress_percent = 100;
                 self.error_code = None;
                 self.error_message = None;
             }
-            self.metadata = json!({});
+            self.metadata = if error.is_none() {
+                gemini_video_metadata(
+                    provider_body
+                        .get("response")
+                        .and_then(gemini_response_video_url)
+                        .as_deref(),
+                )
+            } else {
+                json!({})
+            };
             return;
         }
 
@@ -121,10 +130,7 @@ impl GeminiVideoTaskSeed {
         self.progress_percent = 50;
         self.error_code = None;
         self.error_message = None;
-        self.metadata = provider_body
-            .get("metadata")
-            .cloned()
-            .unwrap_or_else(|| json!({}));
+        self.metadata = json!({});
     }
 
     pub fn build_get_follow_up_plan(&self, trace_id: &str) -> Option<ExecutionPlan> {
@@ -273,17 +279,15 @@ impl GeminiVideoTaskSeed {
                 "name": operation_name,
                 "done": true,
                 "error": {
-                    "code": self.error_code.clone().unwrap_or_else(|| "UNKNOWN".to_string()),
-                    "message": self
-                        .error_message
-                        .clone()
-                        .unwrap_or_else(|| "Video generation failed".to_string()),
+                    "code": sanitize_video_task_error_code(self.error_code.clone())
+                        .unwrap_or_else(|| "unknown".to_string()),
+                    "message": "Video generation failed",
                 }
             }),
             _ => json!({
                 "name": operation_name,
                 "done": false,
-                "metadata": self.metadata.clone(),
+                "metadata": {},
             }),
         }
     }
@@ -298,7 +302,7 @@ impl GeminiVideoTaskSeed {
             ),
             _ => None,
         };
-        UpsertVideoTask {
+        let mut record = UpsertVideoTask {
             id: self.local_short_id.clone(),
             short_id: Some(self.local_short_id.clone()),
             request_id: self.persistence.request_id.clone(),
@@ -316,7 +320,7 @@ impl GeminiVideoTaskSeed {
             model: Some(self.model.clone()),
             prompt: request_body_string(&self.persistence.original_request_body, "prompt")
                 .or_else(|| Some(String::new())),
-            original_request_body: Some(self.persistence.original_request_body.clone()),
+            original_request_body: None,
             duration_seconds: request_body_u32(&self.persistence.original_request_body, "seconds")
                 .or_else(|| {
                     request_body_u32(&self.persistence.original_request_body, "duration_seconds")
@@ -340,13 +344,12 @@ impl GeminiVideoTaskSeed {
             completed_at_unix_secs: None,
             updated_at_unix_secs: now_unix_secs,
             error_code: self.error_code.clone(),
-            error_message: self.error_message.clone(),
+            error_message: None,
             video_url: gemini_metadata_video_url(&self.metadata),
-            request_metadata: Some(json!({
-                "rust_owner": "async_task",
-                "rust_local_snapshot": LocalVideoTaskSnapshot::Gemini(self.clone()),
-            })),
-        }
+            request_metadata: None,
+        };
+        record.sanitize_for_persistence();
+        record
     }
 
     fn resolve_operation_path(&self) -> Option<String> {
@@ -366,7 +369,15 @@ impl GeminiVideoTaskSeed {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use aether_data_contracts::repository::video_tasks::{StoredVideoTask, VideoTaskStatus};
+    use serde_json::json;
+
+    use crate::{
+        GeminiVideoTaskSeed, LocalVideoTaskPersistence, LocalVideoTaskSnapshot,
+        LocalVideoTaskStatus, LocalVideoTaskTransport,
+    };
 
     use super::map_gemini_stored_task_to_read_response;
 
@@ -419,5 +430,118 @@ mod tests {
 
         assert_eq!(response.status_code, 404);
         assert_eq!(response.body_json["detail"], "Video task was cancelled");
+    }
+
+    #[test]
+    fn builds_minimal_gemini_persistence_record_and_strips_signed_url_query() {
+        let seed = GeminiVideoTaskSeed {
+            local_short_id: "gemini-sensitive".to_string(),
+            upstream_operation_name: "operations/upstream-sensitive".to_string(),
+            user_id: Some("user-1".to_string()),
+            api_key_id: Some("api-key-1".to_string()),
+            model: "veo-3".to_string(),
+            status: LocalVideoTaskStatus::Completed,
+            progress_percent: 100,
+            error_code: Some("provider-secret-diagnostic".to_string()),
+            error_message: Some("provider response contained secret".to_string()),
+            metadata: json!({
+                "response": {
+                    "generateVideoResponse": {
+                        "generatedSamples": [{
+                            "video": {
+                                "uri": "https://files.example/video.mp4?alt=media&token=sensitive#fragment"
+                            }
+                        }]
+                    }
+                }
+            }),
+            persistence: LocalVideoTaskPersistence {
+                request_id: "request-gemini-sensitive".to_string(),
+                username: Some("alice".to_string()),
+                api_key_name: Some("primary".to_string()),
+                client_api_format: "gemini:video".to_string(),
+                provider_api_format: "gemini:video".to_string(),
+                original_request_body: json!({
+                    "prompt": "business prompt",
+                    "provider_token": "sensitive"
+                }),
+                format_converted: false,
+            },
+            transport: LocalVideoTaskTransport {
+                upstream_base_url: "https://generativelanguage.example".to_string(),
+                provider_name: Some("gemini".to_string()),
+                provider_id: "provider-1".to_string(),
+                endpoint_id: "endpoint-1".to_string(),
+                key_id: "provider-key-1".to_string(),
+                headers: BTreeMap::from([(
+                    "x-goog-api-key".to_string(),
+                    "sensitive-api-key".to_string(),
+                )]),
+                content_type: Some("application/json".to_string()),
+                model_name: Some("veo-3".to_string()),
+                proxy: None,
+                transport_profile: None,
+                timeouts: None,
+            },
+        };
+
+        let record = seed.to_upsert_record();
+
+        assert_eq!(record.error_code.as_deref(), Some("provider_error"));
+        assert!(record.original_request_body.is_none());
+        assert!(record.progress_message.is_none());
+        assert!(record.error_message.is_none());
+        assert!(record.request_metadata.is_none());
+        assert_eq!(
+            record.video_url.as_deref(),
+            Some("https://files.example/video.mp4?alt=media&token=sensitive")
+        );
+        assert_eq!(record.prompt.as_deref(), Some("business prompt"));
+
+        let transport = seed.transport.clone();
+        let mut snapshot = LocalVideoTaskSnapshot::Gemini(seed);
+        snapshot.apply_provider_body(json!({
+            "done": true,
+            "debug": "private-provider-debug",
+            "response": {
+                "provider_token": "private-provider-token",
+                "generateVideoResponse": {
+                    "generatedSamples": [{
+                        "video": {
+                            "uri": "https://files.example/video.mp4?alt=media&token=signed%2Bvalue",
+                            "debug": "private-video-debug"
+                        }
+                    }]
+                }
+            }
+        }).as_object().expect("provider body"));
+        assert!(!serde_json::to_string(&snapshot)
+            .expect("serialize snapshot")
+            .contains("private-"));
+        snapshot.sanitize_persisted_diagnostics();
+        let stored = snapshot.to_upsert_record().into_stored();
+        assert_eq!(stored.status, VideoTaskStatus::Completed);
+        assert_eq!(stored.prompt.as_deref(), Some("business prompt"));
+        assert_eq!(
+            stored.video_url.as_deref(),
+            Some("https://files.example/video.mp4?alt=media&token=signed%2Bvalue")
+        );
+        assert!(stored.request_metadata.is_none());
+        assert!(stored.original_request_body.is_none());
+
+        let mut restored =
+            LocalVideoTaskSnapshot::from_stored_task_with_transport(&stored, transport)
+                .expect("stored Gemini task should reconstruct");
+        restored.sanitize_persisted_diagnostics();
+        let restored_record = restored.to_upsert_record();
+        assert_eq!(restored_record.video_url, stored.video_url);
+        assert_eq!(restored_record.prompt, stored.prompt);
+        let response = restored.read_response();
+        assert_eq!(response.body_json["done"], true);
+        assert!(response
+            .body_json
+            .to_string()
+            .contains("/v1beta/files/aev_"));
+        assert!(!response.body_json.to_string().contains("signed%2Bvalue"));
     }
 }

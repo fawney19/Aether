@@ -3,6 +3,9 @@ mod request;
 mod sub2api;
 
 use crate::handlers::admin::request::AdminAppState;
+use crate::handlers::shared::{
+    canonicalize_provider_ops_base_url, resolve_provider_ops_same_origin_url,
+};
 use aether_admin::provider::ops::{
     admin_provider_ops_verify_failure, build_headers, get_architecture, normalize_architecture_id,
     parse_verify_payload, ProviderOpsVerifyMode,
@@ -68,7 +71,15 @@ pub(super) async fn admin_provider_ops_local_verify_response(
         Ok(headers) => headers,
         Err(message) => return admin_provider_ops_verify_failure(message),
     };
-    let verify_url = format!("{base_url}{}", architecture.verify_endpoint);
+    let destination = match canonicalize_provider_ops_base_url(base_url) {
+        Ok(destination) => destination,
+        Err(message) => return admin_provider_ops_verify_failure(message),
+    };
+    let verify_url =
+        match resolve_provider_ops_same_origin_url(&destination, architecture.verify_endpoint) {
+            Ok(url) => url,
+            Err(message) => return admin_provider_ops_verify_failure(message),
+        };
     let (status, response_json) = match request::admin_provider_ops_execute_get_json(
         state,
         &format!("provider-ops-verify:{}", architecture.architecture_id),

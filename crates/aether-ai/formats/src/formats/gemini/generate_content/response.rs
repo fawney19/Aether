@@ -26,6 +26,7 @@ pub fn from_raw(body_json: &Value) -> Option<CanonicalResponse> {
     }
 
     let candidates = body.get("candidates")?.as_array()?;
+    let usage = gemini_usage_to_canonical(body.get("usageMetadata"));
     let mut outputs = Vec::new();
     for (fallback_index, candidate) in candidates.iter().enumerate() {
         let candidate_object = candidate.as_object()?;
@@ -79,7 +80,10 @@ pub fn from_raw(body_json: &Value) -> Option<CanonicalResponse> {
             extensions,
         });
     }
-    outputs.retain(gemini_response_output_has_visible_content);
+    outputs.retain(|output| {
+        gemini_response_output_has_visible_content(output)
+            || gemini_response_output_is_reasoning_exhausted_terminal(output, usage.as_ref())
+    });
     if outputs.is_empty() {
         return None;
     }
@@ -106,7 +110,7 @@ pub fn from_raw(body_json: &Value) -> Option<CanonicalResponse> {
         outputs,
         content,
         stop_reason,
-        usage: gemini_usage_to_canonical(body.get("usageMetadata")),
+        usage,
         extensions: gemini_extensions(
             body,
             &[
@@ -127,14 +131,34 @@ pub fn from_raw(body_json: &Value) -> Option<CanonicalResponse> {
 
 fn gemini_response_output_has_visible_content(output: &CanonicalResponseOutput) -> bool {
     output.content.iter().any(|block| match block {
-        CanonicalContentBlock::Text { text, .. } => !text.trim().is_empty(),
+        CanonicalContentBlock::Text { text, .. } | CanonicalContentBlock::Thinking { text, .. } => {
+            !text.trim().is_empty()
+        }
         CanonicalContentBlock::ToolUse { .. }
         | CanonicalContentBlock::ToolResult { .. }
         | CanonicalContentBlock::Image { .. }
         | CanonicalContentBlock::File { .. }
         | CanonicalContentBlock::Audio { .. } => true,
-        CanonicalContentBlock::Thinking { .. } | CanonicalContentBlock::Unknown { .. } => false,
+        CanonicalContentBlock::Unknown { .. } => false,
     })
+}
+
+fn gemini_response_output_is_reasoning_exhausted_terminal(
+    output: &CanonicalResponseOutput,
+    usage: Option<&CanonicalUsage>,
+) -> bool {
+    matches!(output.stop_reason, Some(CanonicalStopReason::MaxTokens))
+        && usage.is_some_and(|usage| usage.reasoning_tokens > 0)
+        && output.content.iter().any(|block| {
+            matches!(
+                block,
+                CanonicalContentBlock::Thinking {
+                    text,
+                    signature: Some(signature),
+                    ..
+                } if text.trim().is_empty() && !signature.trim().is_empty()
+            )
+        })
 }
 
 pub fn to_raw(canonical: &CanonicalResponse, report_context: &Value) -> Option<Value> {
@@ -430,7 +454,7 @@ mod tests {
     }
 
     #[test]
-    fn gemini_response_with_only_thought_parts_is_not_success() {
+    fn gemini_response_with_only_thought_parts_is_success() {
         let body = json!({
             "candidates": [{
                 "content": {
@@ -441,6 +465,92 @@ mod tests {
             }],
             "modelVersion": "gemini-3-flash-preview",
             "responseId": "resp-thought-only"
+        });
+
+        let canonical = from_raw(&body).expect("thought text is representable output");
+        assert!(matches!(
+            canonical.content.first(),
+            Some(CanonicalContentBlock::Thinking { text, .. }) if text == "hidden plan"
+        ));
+        assert!(matches!(
+            canonical.stop_reason,
+            Some(CanonicalStopReason::MaxTokens)
+        ));
+
+        let openai = crate::canonical_to_openai_chat_response(&canonical);
+        assert_eq!(
+            openai["choices"][0]["message"]["reasoning_content"],
+            "hidden plan"
+        );
+        assert_eq!(openai["choices"][0]["finish_reason"], "length");
+    }
+
+    #[test]
+    fn gemini_response_with_signature_only_reasoning_exhaustion_is_success() {
+        let body = json!({
+            "candidates": [{
+                "content": {
+                    "role": "model",
+                    "parts": [{
+                        "text": "",
+                        "thoughtSignature": "opaque-thought-signature"
+                    }]
+                },
+                "finishReason": "MAX_TOKENS"
+            }],
+            "usageMetadata": {
+                "promptTokenCount": 22,
+                "thoughtsTokenCount": 29,
+                "totalTokenCount": 51
+            },
+            "modelVersion": "gemini-3.7-flash-tiered",
+            "responseId": "resp-signature-only"
+        });
+
+        let canonical = from_raw(&body).expect("reasoning exhaustion is a valid terminal");
+        assert!(matches!(
+            canonical.content.first(),
+            Some(CanonicalContentBlock::Thinking {
+                text,
+                signature: Some(signature),
+                ..
+            }) if text.is_empty() && signature == "opaque-thought-signature"
+        ));
+        assert!(matches!(
+            canonical.stop_reason,
+            Some(CanonicalStopReason::MaxTokens)
+        ));
+        assert_eq!(
+            canonical.usage.as_ref().map(|usage| usage.reasoning_tokens),
+            Some(29)
+        );
+
+        let openai = crate::canonical_to_openai_chat_response(&canonical);
+        assert_eq!(openai["choices"][0]["finish_reason"], "length");
+        assert_eq!(
+            openai["usage"]["completion_tokens_details"]["reasoning_tokens"],
+            29
+        );
+    }
+
+    #[test]
+    fn gemini_signature_only_terminal_without_reasoning_usage_is_not_success() {
+        let body = json!({
+            "candidates": [{
+                "content": {
+                    "role": "model",
+                    "parts": [{
+                        "text": "",
+                        "thoughtSignature": "opaque-thought-signature"
+                    }]
+                },
+                "finishReason": "MAX_TOKENS"
+            }],
+            "usageMetadata": {
+                "promptTokenCount": 22,
+                "thoughtsTokenCount": 0,
+                "totalTokenCount": 22
+            }
         });
 
         assert!(from_raw(&body).is_none());

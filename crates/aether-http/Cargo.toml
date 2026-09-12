@@ -9,3 +9,5 @@ description = "Shared HTTP client config and retry helpers for Aether Rust servi
 [dependencies]
 reqwest.workspace = true
 serde.workspace = true
+tokio.workspace = true
+url.workspace = true

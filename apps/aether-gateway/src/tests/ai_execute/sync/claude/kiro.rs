@@ -529,6 +529,11 @@ async fn gateway_executes_kiro_claude_cli_sync_via_local_provider_catalog_candid
             Arc::clone(&request_candidate_repository),
             Arc::clone(&usage_repository),
             DEVELOPMENT_ENCRYPTION_KEY,
+        )
+        .attach_proxy_node_repository_for_tests(
+            crate::tests::ai_execute::ai_execute_proxy_node_repository([
+                "proxy-node-kiro-cli-local-sync",
+            ]),
         ),
     )
     .with_usage_runtime_for_tests(UsageRuntimeConfig {
@@ -1147,6 +1152,11 @@ async fn gateway_executes_kiro_claude_cli_sync_via_local_provider_catalog_candid
             provider_catalog_repository,
             Arc::clone(&request_candidate_repository),
             DEVELOPMENT_ENCRYPTION_KEY,
+        )
+        .attach_proxy_node_repository_for_tests(
+            crate::tests::ai_execute::ai_execute_proxy_node_repository([
+                "proxy-node-kiro-cli-local-sync",
+            ]),
         ),
     )
     .with_oauth_refresh_coordinator_for_tests(oauth_refresh);

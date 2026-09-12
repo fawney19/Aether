@@ -19,6 +19,17 @@ use sha2::{Digest, Sha256};
 use crate::data::GatewayDataState;
 use crate::AppState;
 
+pub use crate::tunnel::build_tunnel_pressure_router;
+
+pub async fn gateway_metric_samples(
+    state: &AppState,
+) -> Result<Vec<aether_runtime::MetricSample>, String> {
+    if !state.prewarm_metric_snapshot().await {
+        return Err("gateway harness metric refresh timed out".to_string());
+    }
+    Ok(state.metric_samples().await)
+}
+
 #[derive(Debug, Clone)]
 pub struct OpenAiChatPressureTarget {
     pub base_url: String,

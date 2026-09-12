@@ -1,4 +1,4 @@
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use crate::LocalVideoTaskStatus;
 
@@ -20,9 +20,12 @@ pub fn parse_video_content_variant(query_string: Option<&str>) -> Option<&'stati
 }
 
 pub fn gemini_metadata_video_url(metadata: &Value) -> Option<String> {
-    metadata
-        .get("response")
-        .and_then(|value| value.get("generateVideoResponse"))
+    metadata.get("response").and_then(gemini_response_video_url)
+}
+
+pub(crate) fn gemini_response_video_url(response: &Value) -> Option<String> {
+    response
+        .get("generateVideoResponse")
         .and_then(|value| value.get("generatedSamples"))
         .and_then(Value::as_array)
         .and_then(|value| value.first())
@@ -30,6 +33,19 @@ pub fn gemini_metadata_video_url(metadata: &Value) -> Option<String> {
         .and_then(|value| value.get("uri"))
         .and_then(Value::as_str)
         .map(str::to_string)
+}
+
+pub(crate) fn gemini_video_metadata(video_url: Option<&str>) -> Value {
+    match video_url {
+        Some(video_url) => json!({
+            "response": {
+                "generateVideoResponse": {
+                    "generatedSamples": [{"video": {"uri": video_url}}]
+                }
+            }
+        }),
+        None => json!({}),
+    }
 }
 
 pub fn map_openai_task_status(status: LocalVideoTaskStatus) -> &'static str {

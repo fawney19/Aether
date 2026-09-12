@@ -15,7 +15,11 @@ fn admin_pool_parse_auth_config_json(
     if ciphertext.is_empty() {
         return None;
     }
-    let plaintext = state.decrypt_catalog_secret_with_fallbacks(ciphertext)?;
+    let plaintext = state
+        .app()
+        .decrypt_provider_catalog_key_auth_config(key)
+        .ok()
+        .flatten()?;
     serde_json::from_str::<serde_json::Value>(&plaintext)
         .ok()?
         .as_object()

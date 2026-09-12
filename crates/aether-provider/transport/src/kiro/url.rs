@@ -1,5 +1,5 @@
 use super::super::url::build_passthrough_path_url;
-use super::credentials::DEFAULT_REGION;
+use super::credentials::{normalize_kiro_region, DEFAULT_REGION};
 
 pub const GENERATE_ASSISTANT_RESPONSE_PATH: &str = "/generateAssistantResponse";
 pub const LIST_AVAILABLE_MODELS_PATH: &str = "/ListAvailableModels";
@@ -9,8 +9,7 @@ pub const KIRO_ENVELOPE_NAME: &str = "kiro:generateAssistantResponse";
 
 pub fn resolve_kiro_base_url(upstream_base_url: &str, api_region: Option<&str>) -> String {
     let region = api_region
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+        .map(normalize_kiro_region)
         .unwrap_or(DEFAULT_REGION);
     upstream_base_url
         .trim()
@@ -102,6 +101,29 @@ mod tests {
         assert_eq!(
             resolve_kiro_base_url("https://kiro.{region}.example/", Some("us-west-2")),
             "https://kiro.us-west-2.example"
+        );
+    }
+
+    #[test]
+    fn malicious_region_cannot_escape_configured_origin() {
+        for region in [
+            "attacker.example/",
+            "attacker.example?x=1",
+            "attacker.example#fragment",
+            "attacker@example",
+        ] {
+            assert_eq!(
+                resolve_kiro_base_url("https://q.{region}.amazonaws.com", Some(region)),
+                "https://q.us-east-1.amazonaws.com"
+            );
+        }
+        assert_eq!(
+            build_kiro_list_available_models_url(
+                "https://q.{region}.amazonaws.com",
+                Some("attacker.example/"),
+            )
+            .as_deref(),
+            Some("https://q.us-east-1.amazonaws.com/ListAvailableModels?origin=AI_EDITOR")
         );
     }
 

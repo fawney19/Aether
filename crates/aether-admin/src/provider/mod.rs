@@ -5,5 +5,6 @@ pub mod oauth;
 pub mod ops;
 pub mod pool;
 pub mod quota;
+pub mod redaction;
 pub mod state;
 pub mod status;

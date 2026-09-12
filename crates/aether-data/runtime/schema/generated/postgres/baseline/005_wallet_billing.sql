@@ -105,6 +105,7 @@ CREATE INDEX IF NOT EXISTS idx_payment_orders_wallet_created ON public.payment_o
 CREATE INDEX IF NOT EXISTS idx_payment_orders_user_created ON public.payment_orders USING btree (user_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_payment_orders_status ON public.payment_orders USING btree (status);
 CREATE INDEX IF NOT EXISTS idx_payment_orders_gateway_order_id ON public.payment_orders USING btree (gateway_order_id);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_payment_orders_payment_method_gateway_order_id ON public.payment_orders USING btree (payment_method, gateway_order_id);
 CREATE INDEX IF NOT EXISTS idx_payment_orders_kind_status ON public.payment_orders USING btree (order_kind, status);
 CREATE INDEX IF NOT EXISTS idx_payment_orders_product ON public.payment_orders USING btree (product_id);
 
@@ -137,8 +138,6 @@ ALTER TABLE ONLY public.user_referrals ADD CONSTRAINT user_referrals_invitee_use
 CREATE INDEX IF NOT EXISTS idx_user_referrals_inviter ON public.user_referrals USING btree (inviter_user_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_user_referrals_created ON public.user_referrals USING btree (created_at);
 CREATE INDEX IF NOT EXISTS idx_user_referrals_invite_code ON public.user_referrals USING btree (invite_code_snapshot);
-ALTER TABLE ONLY public.user_referrals ADD CONSTRAINT user_referrals_inviter_user_id_fkey FOREIGN KEY (inviter_user_id) REFERENCES public.users(id) ON DELETE CASCADE;
-ALTER TABLE ONLY public.user_referrals ADD CONSTRAINT user_referrals_invitee_user_id_fkey FOREIGN KEY (invitee_user_id) REFERENCES public.users(id) ON DELETE CASCADE;
 ALTER TABLE ONLY public.user_referrals ADD CONSTRAINT user_referrals_first_paid_order_fkey FOREIGN KEY (first_paid_order_id) REFERENCES public.payment_orders(id) ON DELETE SET NULL;
 
 CREATE TABLE IF NOT EXISTS public.referral_rewards (
@@ -169,8 +168,6 @@ CREATE INDEX IF NOT EXISTS idx_referral_rewards_inviter_created ON public.referr
 CREATE INDEX IF NOT EXISTS idx_referral_rewards_created ON public.referral_rewards USING btree (created_at);
 CREATE INDEX IF NOT EXISTS idx_referral_rewards_source_order ON public.referral_rewards USING btree (source_order_id);
 ALTER TABLE ONLY public.referral_rewards ADD CONSTRAINT referral_rewards_referral_id_fkey FOREIGN KEY (referral_id) REFERENCES public.user_referrals(id) ON DELETE CASCADE;
-ALTER TABLE ONLY public.referral_rewards ADD CONSTRAINT referral_rewards_inviter_user_id_fkey FOREIGN KEY (inviter_user_id) REFERENCES public.users(id) ON DELETE CASCADE;
-ALTER TABLE ONLY public.referral_rewards ADD CONSTRAINT referral_rewards_invitee_user_id_fkey FOREIGN KEY (invitee_user_id) REFERENCES public.users(id) ON DELETE CASCADE;
 ALTER TABLE ONLY public.referral_rewards ADD CONSTRAINT referral_rewards_source_order_fkey FOREIGN KEY (source_order_id) REFERENCES public.payment_orders(id) ON DELETE SET NULL;
 
 CREATE TABLE IF NOT EXISTS public.payment_gateway_configs (

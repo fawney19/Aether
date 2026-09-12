@@ -398,6 +398,11 @@ async fn gateway_executes_gemini_cli_sync_via_local_decision_gate_with_local_syn
             provider_catalog_repository,
             Arc::clone(&request_candidate_repository),
             DEVELOPMENT_ENCRYPTION_KEY,
+        )
+        .attach_proxy_node_repository_for_tests(
+            crate::tests::ai_execute::ai_execute_proxy_node_repository([
+                "proxy-node-gemini-cli-local",
+            ]),
         ),
     );
     let gateway = build_router_with_state(gateway_state);
@@ -668,7 +673,7 @@ async fn gateway_returns_gemini_cli_error_for_local_sync_failure_impl() {
         any(move |_request: Request| async move {
             Json(json!({
                 "request_id": "trace-gemini-cli-local-error-123",
-                "status_code": 200,
+                "status_code": 429,
                 "headers": {
                     "content-type": "application/json"
                 },
@@ -700,7 +705,12 @@ async fn gateway_returns_gemini_cli_error_for_local_sync_failure_impl() {
         ]));
     let request_candidate_repository = Arc::new(InMemoryRequestCandidateRepository::default());
     let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
-        vec![sample_provider_catalog_provider()],
+        vec![
+            crate::tests::ai_execute::ai_execute_provider_stop_on_status_code(
+                sample_provider_catalog_provider(),
+                429,
+            ),
+        ],
         vec![sample_provider_catalog_endpoint()],
         vec![sample_provider_catalog_key()],
     ));
@@ -715,6 +725,11 @@ async fn gateway_returns_gemini_cli_error_for_local_sync_failure_impl() {
             provider_catalog_repository,
             Arc::clone(&request_candidate_repository),
             DEVELOPMENT_ENCRYPTION_KEY,
+        )
+        .attach_proxy_node_repository_for_tests(
+            crate::tests::ai_execute::ai_execute_proxy_node_repository([
+                "proxy-node-gemini-cli-local",
+            ]),
         ),
     );
     let gateway = build_router_with_state(gateway_state);
@@ -1211,7 +1226,12 @@ async fn gateway_executes_gemini_cli_sync_via_local_decision_gate_after_oauth_re
         crate::provider_transport::LocalOAuthRefreshCoordinator::with_adapters_for_tests(vec![
             Arc::new(
                 crate::provider_transport::oauth_refresh::GenericOAuthRefreshAdapter::default()
-                    .with_token_url_for_tests("gemini_cli", format!("{refresh_url}/oauth/token")),
+                    .with_token_url_for_tests("gemini_cli", format!("{refresh_url}/oauth/token"))
+                    .with_oauth_credentials_for_tests(
+                        "gemini_cli",
+                        "test-gemini-client-id",
+                        "test-gemini-client-secret",
+                    ),
             ),
         ]);
     let gateway_state = build_state_with_execution_runtime_override(execution_runtime_url.clone())
@@ -1222,6 +1242,11 @@ async fn gateway_executes_gemini_cli_sync_via_local_decision_gate_after_oauth_re
             provider_catalog_repository,
             Arc::clone(&request_candidate_repository),
             DEVELOPMENT_ENCRYPTION_KEY,
+        )
+        .attach_proxy_node_repository_for_tests(
+            crate::tests::ai_execute::ai_execute_proxy_node_repository([
+                "proxy-node-gemini-cli-oauth-local",
+            ]),
         ),
     )
     .with_oauth_refresh_coordinator_for_tests(oauth_refresh);
@@ -1259,12 +1284,12 @@ async fn gateway_executes_gemini_cli_sync_via_local_decision_gate_after_oauth_re
     assert!(seen_refresh_request
         .body
         .contains("grant_type=refresh_token"));
-    assert!(seen_refresh_request.body.contains(
-        "client_id=681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com"
-    ));
     assert!(seen_refresh_request
         .body
-        .contains("client_secret=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"));
+        .contains("client_id=test-gemini-client-id"));
+    assert!(seen_refresh_request
+        .body
+        .contains("client_secret=test-gemini-client-secret"));
     assert!(seen_refresh_request
         .body
         .contains("refresh_token=rt-gemini-cli-local-123"));
@@ -2228,7 +2253,12 @@ async fn gateway_executes_antigravity_gemini_cli_sync_via_local_decision_gate_af
         crate::provider_transport::LocalOAuthRefreshCoordinator::with_adapters_for_tests(vec![
             Arc::new(
                 crate::provider_transport::oauth_refresh::GenericOAuthRefreshAdapter::default()
-                    .with_token_url_for_tests("antigravity", format!("{refresh_url}/oauth/token")),
+                    .with_token_url_for_tests("antigravity", format!("{refresh_url}/oauth/token"))
+                    .with_oauth_credentials_for_tests(
+                        "antigravity",
+                        "test-antigravity-client-id",
+                        "test-antigravity-client-secret",
+                    ),
             ),
         ]);
     let gateway_state = build_state_with_execution_runtime_override(execution_runtime_url.clone())
@@ -2239,7 +2269,8 @@ async fn gateway_executes_antigravity_gemini_cli_sync_via_local_decision_gate_af
             provider_catalog_repository,
             Arc::clone(&request_candidate_repository),
             DEVELOPMENT_ENCRYPTION_KEY,
-        ),
+        )
+        .with_system_default_routing_group_for_tests(),
     )
     .with_oauth_refresh_coordinator_for_tests(oauth_refresh);
     let gateway = build_router_with_state(gateway_state);
@@ -2297,12 +2328,12 @@ async fn gateway_executes_antigravity_gemini_cli_sync_via_local_decision_gate_af
     assert!(seen_refresh_request
         .body
         .contains("grant_type=refresh_token"));
-    assert!(seen_refresh_request.body.contains(
-        "client_id=1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
-    ));
     assert!(seen_refresh_request
         .body
-        .contains("client_secret=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"));
+        .contains("client_id=test-antigravity-client-id"));
+    assert!(seen_refresh_request
+        .body
+        .contains("client_secret=test-antigravity-client-secret"));
     assert!(seen_refresh_request
         .body
         .contains("refresh_token=rt-antigravity-cli-local-123"));
@@ -2326,7 +2357,7 @@ async fn gateway_executes_antigravity_gemini_cli_sync_via_local_decision_gate_af
         "Bearer refreshed-antigravity-cli-access-token"
     );
     assert_eq!(seen_execution_runtime_request.x_client_name, "antigravity");
-    assert_eq!(seen_execution_runtime_request.x_client_version, "1.2.3");
+    assert_eq!(seen_execution_runtime_request.x_client_version, "4.3.0");
     assert_eq!(
         seen_execution_runtime_request.x_vscode_sessionid,
         "sess-antigravity-local-123"

@@ -1,5 +1,7 @@
-use super::super::adapter::{find_string, form_headers, mapped_string};
-use crate::core::{OAuthAuthorizeResponse, OAuthError, OAuthTokenSet};
+use super::super::adapter::{find_string, form_headers, mapped_bool, mapped_string};
+use crate::core::{
+    redacted_oauth_error_body_excerpt, OAuthAuthorizeResponse, OAuthError, OAuthTokenSet,
+};
 use crate::identity::{
     ExternalIdentity, IdentityClaims, IdentityOAuthExchangeContext, IdentityOAuthProvider,
     IdentityOAuthProviderConfig, IdentityOAuthStartContext,
@@ -7,6 +9,16 @@ use crate::identity::{
 use crate::network::{OAuthHttpExecutor, OAuthHttpRequest, OAuthNetworkContext};
 use async_trait::async_trait;
 use url::form_urlencoded;
+
+const SERVER_MANAGED_AUTHORIZE_PARAMS: &[&str] = &[
+    "response_type",
+    "client_id",
+    "redirect_uri",
+    "state",
+    "scope",
+    "code_challenge",
+    "code_challenge_method",
+];
 
 #[derive(Debug, Clone, Default)]
 pub struct CustomOidcIdentityOAuthProvider;
@@ -24,6 +36,15 @@ impl IdentityOAuthProvider for CustomOidcIdentityOAuthProvider {
     ) -> Result<OAuthAuthorizeResponse, OAuthError> {
         let mut url = url::Url::parse(&config.authorization_url)
             .map_err(|_| OAuthError::invalid_request("authorization_url must be absolute"))?;
+        if url.query_pairs().any(|(name, _)| {
+            SERVER_MANAGED_AUTHORIZE_PARAMS
+                .iter()
+                .any(|reserved| name.eq_ignore_ascii_case(reserved))
+        }) {
+            return Err(OAuthError::invalid_request(
+                "authorization_url must not predefine server-managed OAuth parameters",
+            ));
+        }
         {
             let mut query = url.query_pairs_mut();
             query.append_pair("response_type", "code");
@@ -87,7 +108,7 @@ impl IdentityOAuthProvider for CustomOidcIdentityOAuthProvider {
         if !(200..300).contains(&response.status_code) {
             return Err(OAuthError::HttpStatus {
                 status_code: response.status_code,
-                body_excerpt: response.body_text.chars().take(500).collect(),
+                body_excerpt: redacted_oauth_error_body_excerpt(&response.body_text),
             });
         }
         let payload = response
@@ -130,7 +151,7 @@ impl IdentityOAuthProvider for CustomOidcIdentityOAuthProvider {
         if !(200..300).contains(&response.status_code) {
             return Err(OAuthError::HttpStatus {
                 status_code: response.status_code,
-                body_excerpt: response.body_text.chars().take(500).collect(),
+                body_excerpt: redacted_oauth_error_body_excerpt(&response.body_text),
             });
         }
         let raw = response
@@ -144,6 +165,8 @@ impl IdentityOAuthProvider for CustomOidcIdentityOAuthProvider {
             provider_type: config.provider_type.clone(),
             subject,
             email: mapped_string(&raw, config.attribute_mapping.as_ref(), "email"),
+            email_verified: mapped_bool(&raw, config.attribute_mapping.as_ref(), "email_verified")
+                .unwrap_or(false),
             username: mapped_string(&raw, config.attribute_mapping.as_ref(), "username"),
             display_name: mapped_string(&raw, config.attribute_mapping.as_ref(), "display_name")
                 .or_else(|| find_string(&raw, "name")),
@@ -160,10 +183,131 @@ impl IdentityOAuthProvider for CustomOidcIdentityOAuthProvider {
         Ok(IdentityClaims {
             provider_type: config.provider_type.clone(),
             subject: identity.subject,
+            email_verified: identity.email.is_some() && identity.email_verified,
             email: identity.email,
             username: identity.username,
             display_name: identity.display_name,
             raw: identity.raw,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CustomOidcIdentityOAuthProvider;
+    use crate::identity::{
+        ExternalIdentity, IdentityOAuthProvider, IdentityOAuthProviderConfig,
+        IdentityOAuthStartContext,
+    };
+    use crate::network::OAuthNetworkContext;
+    use serde_json::json;
+
+    fn config() -> IdentityOAuthProviderConfig {
+        IdentityOAuthProviderConfig {
+            provider_type: "custom_oidc_work".to_string(),
+            display_name: "Work OIDC".to_string(),
+            authorization_url: "https://idp.example.test/authorize".to_string(),
+            token_url: "https://idp.example.test/token".to_string(),
+            userinfo_url: Some("https://idp.example.test/userinfo".to_string()),
+            client_id: "client".to_string(),
+            client_secret: None,
+            scopes: vec!["openid".to_string(), "email".to_string()],
+            redirect_uri: "https://gateway.example.test/callback".to_string(),
+            frontend_callback_url: "https://app.example.test/callback".to_string(),
+            attribute_mapping: None,
+            extra_config: None,
+        }
+    }
+
+    fn start_context() -> IdentityOAuthStartContext {
+        IdentityOAuthStartContext {
+            state: "server-state".to_string(),
+            code_challenge: Some("server-challenge".to_string()),
+            network: OAuthNetworkContext::direct_identity(),
+        }
+    }
+
+    #[test]
+    fn custom_oidc_authorize_url_rejects_predefined_server_managed_parameters() {
+        for name in [
+            "response_type",
+            "client_id",
+            "redirect_uri",
+            "state",
+            "scope",
+            "code_challenge",
+            "code_challenge_method",
+        ] {
+            let mut config = config();
+            config.authorization_url =
+                format!("https://idp.example.test/authorize?{name}=attacker");
+
+            assert!(CustomOidcIdentityOAuthProvider
+                .build_authorize_url(&config, &start_context())
+                .is_err());
+        }
+    }
+
+    #[test]
+    fn custom_oidc_authorize_url_preserves_non_oauth_tenant_parameters() {
+        let mut config = config();
+        config.authorization_url =
+            "https://idp.example.test/authorize?tenant=workforce".to_string();
+
+        let response = CustomOidcIdentityOAuthProvider
+            .build_authorize_url(&config, &start_context())
+            .expect("tenant parameter should be preserved");
+        let parsed = url::Url::parse(&response.authorize_url).expect("authorize URL");
+        let params = parsed.query_pairs().collect::<Vec<_>>();
+
+        assert!(params
+            .iter()
+            .any(|(name, value)| name == "tenant" && value == "workforce"));
+        assert_eq!(params.iter().filter(|(name, _)| name == "state").count(), 1);
+        assert!(params
+            .iter()
+            .any(|(name, value)| name == "state" && value == "server-state"));
+    }
+
+    #[test]
+    fn custom_oidc_propagates_an_explicit_verified_email_claim() {
+        let claims = CustomOidcIdentityOAuthProvider
+            .map_identity(
+                &config(),
+                ExternalIdentity {
+                    provider_type: "custom_oidc_work".to_string(),
+                    subject: "user-1".to_string(),
+                    email: Some("user@example.test".to_string()),
+                    email_verified: true,
+                    username: Some("user".to_string()),
+                    display_name: None,
+                    avatar_url: None,
+                    raw: json!({"email_verified": true}),
+                },
+            )
+            .expect("identity should map");
+
+        assert!(claims.email_verified);
+    }
+
+    #[test]
+    fn custom_oidc_cannot_verify_a_missing_email() {
+        let claims = CustomOidcIdentityOAuthProvider
+            .map_identity(
+                &config(),
+                ExternalIdentity {
+                    provider_type: "custom_oidc_work".to_string(),
+                    subject: "user-1".to_string(),
+                    email: None,
+                    email_verified: true,
+                    username: Some("user".to_string()),
+                    display_name: None,
+                    avatar_url: None,
+                    raw: json!({"email_verified": true}),
+                },
+            )
+            .expect("identity should map");
+
+        assert!(!claims.email_verified);
     }
 }

@@ -5,8 +5,8 @@
       :class="headerClasses"
     >
       <slot name="header">
-        <div class="flex items-center justify-between">
-          <div>
+        <div class="flex flex-wrap items-start justify-between gap-4">
+          <div class="min-w-0 flex-1 basis-64">
             <h3
               v-if="title"
               class="text-lg font-medium leading-6 text-foreground"
@@ -20,7 +20,10 @@
               {{ description }}
             </p>
           </div>
-          <div v-if="$slots.actions">
+          <div
+            v-if="$slots.actions"
+            class="max-w-full shrink-0 [&>div]:flex-wrap [&_button]:shrink-0"
+          >
             <slot name="actions" />
           </div>
         </div>

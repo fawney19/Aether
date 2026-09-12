@@ -8,3 +8,5 @@ pub mod backfill;
 pub(crate) mod bootstrap;
 pub mod export;
 pub mod migrate;
+#[cfg(all(test, feature = "postgres"))]
+mod postgres_test_support;

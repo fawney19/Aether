@@ -1,12 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { AxiosAdapter, AxiosInstance, InternalAxiosRequestConfig } from 'axios'
+import type { AxiosAdapter, InternalAxiosRequestConfig } from 'axios'
 
-import apiClient, { AUTH_STATE_CHANGE_EVENT } from '@/api/client'
+import apiClient, {
+  AUTH_SESSION_SIGNAL_KEY,
+  AUTH_STATE_CHANGE_EVENT,
+  parseAuthSessionSignal,
+} from '@/api/client'
 import { cache, cachedRequest } from '@/utils/cache'
-
-type TestableApiClient = typeof apiClient & {
-  client: AxiosInstance
-}
 
 describe('apiClient auth state change event', () => {
   beforeEach(() => {
@@ -24,15 +24,80 @@ describe('apiClient auth state change event', () => {
     window.addEventListener(AUTH_STATE_CHANGE_EVENT, handler as EventListener)
 
     apiClient.setToken('access-token')
+    localStorage.setItem('access_token', 'legacy-local-token')
+    sessionStorage.setItem('access_token', 'legacy-session-token')
     apiClient.clearAuth()
 
     expect(localStorage.getItem('access_token')).toBeNull()
-    expect(handler).toHaveBeenCalledTimes(1)
+    expect(sessionStorage.getItem('access_token')).toBeNull()
+    expect(handler).toHaveBeenCalledTimes(2)
 
-    const event = handler.mock.calls[0][0] as CustomEvent<{ token: string | null }>
-    expect(event.detail).toEqual({ token: null })
+    const event = handler.mock.calls[1][0] as CustomEvent<{ authenticated: boolean }>
+    expect(event.detail).toEqual({ authenticated: false })
 
     window.removeEventListener(AUTH_STATE_CHANGE_EVENT, handler as EventListener)
+  })
+
+  it('keeps access tokens in memory and only stores token-free session metadata', () => {
+    apiClient.setToken('sensitive-access-token', true)
+
+    expect(apiClient.getToken()).toBe('sensitive-access-token')
+    expect(localStorage.getItem('access_token')).toBeNull()
+    expect(sessionStorage.getItem('access_token')).toBeNull()
+
+    const rawSignal = localStorage.getItem(AUTH_SESSION_SIGNAL_KEY)
+    expect(rawSignal).not.toContain('sensitive-access-token')
+    expect(parseAuthSessionSignal(rawSignal)).toMatchObject({ authenticated: true })
+  })
+
+  it('restores a session through the refresh cookie and stores the result in memory only', async () => {
+    const rawClient = apiClient['client']
+    const previousAdapter = rawClient.defaults.adapter
+
+    rawClient.defaults.adapter = (async (config: InternalAxiosRequestConfig) => ({
+      data: { access_token: 'restored-access-token' },
+      status: 200,
+      statusText: 'OK',
+      headers: {},
+      config,
+    })) as AxiosAdapter
+
+    try {
+      await expect(apiClient.restoreSession()).resolves.toBe('restored-access-token')
+      expect(apiClient.getToken()).toBe('restored-access-token')
+      expect(localStorage.getItem('access_token')).toBeNull()
+      expect(sessionStorage.getItem('access_token')).toBeNull()
+    } finally {
+      rawClient.defaults.adapter = previousAdapter
+    }
+  })
+
+  it('does not resurrect a session when logout wins an in-flight restore', async () => {
+    const rawClient = apiClient['client']
+    const previousAdapter = rawClient.defaults.adapter
+    let resolveRefresh!: (response: Awaited<ReturnType<AxiosAdapter>>) => void
+
+    rawClient.defaults.adapter = (() => new Promise((resolve) => {
+      resolveRefresh = resolve
+    })) as AxiosAdapter
+
+    try {
+      const restore = apiClient.restoreSession()
+      await vi.waitFor(() => expect(resolveRefresh).toBeTypeOf('function'))
+      apiClient.clearAuth()
+      resolveRefresh({
+        data: { access_token: 'stale-access-token' },
+        status: 200,
+        statusText: 'OK',
+        headers: {},
+        config: {} as InternalAxiosRequestConfig,
+      })
+
+      await expect(restore).rejects.toThrow('Auth state changed')
+      expect(apiClient.getToken()).toBeNull()
+    } finally {
+      rawClient.defaults.adapter = previousAdapter
+    }
   })
 
   it('clears cached API data whenever the authentication identity changes', () => {
@@ -72,11 +137,11 @@ describe('apiClient auth state change event', () => {
   })
 
   it('sends auth refresh without a request body', async () => {
-    const rawClient = apiClient as TestableApiClient
-    const previousAdapter = rawClient.client.defaults.adapter
+    const rawClient = apiClient['client']
+    const previousAdapter = rawClient.defaults.adapter
     const requests: InternalAxiosRequestConfig[] = []
 
-    rawClient.client.defaults.adapter = (async (config: InternalAxiosRequestConfig) => {
+    rawClient.defaults.adapter = (async (config: InternalAxiosRequestConfig) => {
       requests.push(config)
       return {
         data: { access_token: 'new-access-token' },
@@ -96,7 +161,35 @@ describe('apiClient auth state change event', () => {
       expect(requests[0].method).toBe('post')
       expect(requests[0].data).toBeUndefined()
     } finally {
-      rawClient.client.defaults.adapter = previousAdapter
+      rawClient.defaults.adapter = previousAdapter
+    }
+  })
+
+  it('authenticates protected gateway operational requests', async () => {
+    const rawClient = apiClient['client']
+    const previousAdapter = rawClient.defaults.adapter
+    const requests: InternalAxiosRequestConfig[] = []
+
+    rawClient.defaults.adapter = (async (config: InternalAxiosRequestConfig) => {
+      requests.push(config)
+      return {
+        data: '',
+        status: 200,
+        statusText: 'OK',
+        headers: {},
+        config,
+      }
+    }) as AxiosAdapter
+
+    try {
+      apiClient.setToken('operational-access-token')
+      await apiClient.get('/_gateway/metrics')
+
+      expect(requests).toHaveLength(1)
+      expect(requests[0].headers.Authorization).toBe('Bearer operational-access-token')
+      expect(requests[0].headers['X-Client-Device-Id']).toBeTruthy()
+    } finally {
+      rawClient.defaults.adapter = previousAdapter
     }
   })
 })

@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use uuid::Uuid;
 
-use super::credentials::KiroAuthConfig;
+use super::credentials::{normalize_kiro_region, KiroAuthConfig};
 
 pub const AWS_EVENTSTREAM_CONTENT_TYPE: &str = "application/vnd.amazon.eventstream";
 pub const KIRO_PROFILE_ARN_HEADER: &str = "x-amzn-kiro-profile-arn";
@@ -47,7 +47,7 @@ pub fn build_generate_assistant_headers(
     let kiro_version = auth_config.effective_kiro_version();
     let system_version = auth_config.effective_system_version();
     let node_version = auth_config.effective_node_version();
-    let region = auth_config.effective_api_region();
+    let region = normalize_kiro_region(auth_config.effective_api_region());
     let host = format!("q.{region}.amazonaws.com");
 
     BTreeMap::from([
@@ -92,7 +92,7 @@ pub fn build_mcp_headers(
     let kiro_version = auth_config.effective_kiro_version();
     let system_version = auth_config.effective_system_version();
     let node_version = auth_config.effective_node_version();
-    let region = auth_config.effective_api_region();
+    let region = normalize_kiro_region(auth_config.effective_api_region());
     let host = format!("q.{region}.amazonaws.com");
 
     let mut headers = BTreeMap::from([
@@ -134,7 +134,7 @@ pub fn build_list_available_models_headers(
     let kiro_version = auth_config.effective_kiro_version();
     let system_version = auth_config.effective_system_version();
     let node_version = auth_config.effective_node_version();
-    let region = auth_config.effective_api_region();
+    let region = normalize_kiro_region(auth_config.effective_api_region());
     let host = format!("q.{region}.amazonaws.com");
     let ide_tag = build_kiro_ide_tag(kiro_version, machine_id);
 
@@ -330,5 +330,31 @@ mod tests {
             Some("arn:aws:codewhisperer:us-east-1:123456789012:profile/demo")
         );
         assert!(!headers.contains_key(KIRO_TOKEN_TYPE_HEADER));
+    }
+
+    #[test]
+    fn malicious_api_region_cannot_inject_host_header() {
+        let auth_config = KiroAuthConfig {
+            auth_method: Some("social".to_string()),
+            refresh_token: None,
+            expires_at: None,
+            profile_arn: None,
+            region: None,
+            auth_region: None,
+            api_region: Some("attacker.example/".to_string()),
+            client_id: None,
+            client_secret: None,
+            machine_id: None,
+            kiro_version: None,
+            system_version: None,
+            node_version: None,
+            access_token: None,
+        };
+
+        let headers = build_list_available_models_headers(&auth_config, "machine");
+        assert_eq!(
+            headers.get("host").map(String::as_str),
+            Some("q.us-east-1.amazonaws.com")
+        );
     }
 }

@@ -1,9 +1,25 @@
 use async_trait::async_trait;
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+const REDACTED_DEBUG_VALUE: &str = "[REDACTED]";
+
+fn redacted_debug_option<T>(value: &Option<T>) -> Option<&'static str> {
+    value.as_ref().map(|_| REDACTED_DEBUG_VALUE)
+}
+
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ProviderCatalogUpstreamMetadataNamespaceUpdate {
     pub namespace: String,
     pub value: serde_json::Value,
+}
+
+impl std::fmt::Debug for ProviderCatalogUpstreamMetadataNamespaceUpdate {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProviderCatalogUpstreamMetadataNamespaceUpdate")
+            .field("namespace", &self.namespace)
+            .field("value", &REDACTED_DEBUG_VALUE)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -28,7 +44,7 @@ impl ProviderCatalogKeyAdaptiveState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ProviderCatalogKeyAdaptiveStateUpdate {
     pub key_id: String,
     /// Optional auth_config fence for request-owned adaptive feedback.
@@ -41,7 +57,24 @@ pub struct ProviderCatalogKeyAdaptiveStateUpdate {
     pub updated_at_unix_secs: Option<u64>,
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+impl std::fmt::Debug for ProviderCatalogKeyAdaptiveStateUpdate {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProviderCatalogKeyAdaptiveStateUpdate")
+            .field("key_id", &self.key_id)
+            .field(
+                "expected_encrypted_auth_config",
+                &redacted_debug_option(&self.expected_encrypted_auth_config),
+            )
+            .field("expected", &self.expected)
+            .field("next", &self.next)
+            .field("status_snapshot_patch", &REDACTED_DEBUG_VALUE)
+            .field("updated_at_unix_secs", &self.updated_at_unix_secs)
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ProviderCatalogKeyRuntimeMetadataUpdate {
     pub key_id: String,
     pub namespace: String,
@@ -59,7 +92,24 @@ pub struct ProviderCatalogKeyRuntimeMetadataUpdate {
     pub updated_at_unix_secs: Option<u64>,
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+impl std::fmt::Debug for ProviderCatalogKeyRuntimeMetadataUpdate {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProviderCatalogKeyRuntimeMetadataUpdate")
+            .field("key_id", &self.key_id)
+            .field("namespace", &self.namespace)
+            .field(
+                "expected_upstream_metadata_value",
+                &redacted_debug_option(&self.expected_upstream_metadata_value),
+            )
+            .field("upstream_metadata_value", &REDACTED_DEBUG_VALUE)
+            .field("status_snapshot_patch", &REDACTED_DEBUG_VALUE)
+            .field("updated_at_unix_secs", &self.updated_at_unix_secs)
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ProviderCatalogKeyStatusSnapshotUpdate {
     pub key_id: String,
     /// Top-level status fields owned by the caller.
@@ -67,10 +117,21 @@ pub struct ProviderCatalogKeyStatusSnapshotUpdate {
     pub updated_at_unix_secs: Option<u64>,
 }
 
+impl std::fmt::Debug for ProviderCatalogKeyStatusSnapshotUpdate {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProviderCatalogKeyStatusSnapshotUpdate")
+            .field("key_id", &self.key_id)
+            .field("status_snapshot_patch", &REDACTED_DEBUG_VALUE)
+            .field("updated_at_unix_secs", &self.updated_at_unix_secs)
+            .finish()
+    }
+}
+
 /// Credential context observed before an OAuth refresh started. Repositories
 /// compare every field atomically with the runtime-state update so an
 /// administrator replacement cannot be overwritten by an older refresh.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ProviderCatalogKeyOAuthCredentialFence {
     /// Exact nullable ciphertext stored in `provider_api_keys.api_key`.
     pub encrypted_api_key: Option<String>,
@@ -79,10 +140,25 @@ pub struct ProviderCatalogKeyOAuthCredentialFence {
     pub provider_type: String,
 }
 
+impl std::fmt::Debug for ProviderCatalogKeyOAuthCredentialFence {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProviderCatalogKeyOAuthCredentialFence")
+            .field(
+                "encrypted_api_key",
+                &redacted_debug_option(&self.encrypted_api_key),
+            )
+            .field("auth_type", &self.auth_type)
+            .field("provider_id", &self.provider_id)
+            .field("provider_type", &self.provider_type)
+            .finish()
+    }
+}
+
 /// Administrator-owned key replacement fenced by the exact credential state
 /// observed while the edit was prepared. This prevents an older admin request
 /// from restoring credentials that a concurrent request already replaced.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ProviderCatalogKeyAdminCasUpdate {
     pub expected_encrypted_auth_config: Option<String>,
     pub expected_credential: ProviderCatalogKeyOAuthCredentialFence,
@@ -102,9 +178,28 @@ pub struct ProviderCatalogKeyAdminCasUpdate {
     pub reset_oauth_runtime: bool,
 }
 
+impl std::fmt::Debug for ProviderCatalogKeyAdminCasUpdate {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProviderCatalogKeyAdminCasUpdate")
+            .field(
+                "expected_encrypted_auth_config",
+                &redacted_debug_option(&self.expected_encrypted_auth_config),
+            )
+            .field("expected_credential", &self.expected_credential)
+            .field("key", &self.key)
+            .field(
+                "codex_rotation",
+                &redacted_debug_option(&self.codex_rotation),
+            )
+            .field("reset_oauth_runtime", &self.reset_oauth_runtime)
+            .finish()
+    }
+}
+
 /// Atomic key deletion fenced by the exact OAuth credential generation that
 /// produced the terminal failure and, when supplied, one metadata namespace.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ProviderCatalogKeyOAuthCredentialCasDelete {
     pub key_id: String,
     pub expected_encrypted_auth_config: Option<String>,
@@ -114,22 +209,53 @@ pub struct ProviderCatalogKeyOAuthCredentialCasDelete {
         Option<ProviderCatalogUpstreamMetadataNamespaceExpectation>,
 }
 
+impl std::fmt::Debug for ProviderCatalogKeyOAuthCredentialCasDelete {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProviderCatalogKeyOAuthCredentialCasDelete")
+            .field("key_id", &self.key_id)
+            .field(
+                "expected_encrypted_auth_config",
+                &redacted_debug_option(&self.expected_encrypted_auth_config),
+            )
+            .field("expected_credential", &self.expected_credential)
+            .field(
+                "expected_upstream_metadata_namespace",
+                &self.expected_upstream_metadata_namespace,
+            )
+            .finish()
+    }
+}
+
 /// Optional single-namespace metadata fence for an OAuth runtime CAS.
 ///
 /// The outer option on the owning update controls whether the namespace is
 /// compared. Within an expectation, `None` requires the namespace to be absent.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ProviderCatalogUpstreamMetadataNamespaceExpectation {
     pub namespace: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_value: Option<serde_json::Value>,
 }
 
+impl std::fmt::Debug for ProviderCatalogUpstreamMetadataNamespaceExpectation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProviderCatalogUpstreamMetadataNamespaceExpectation")
+            .field("namespace", &self.namespace)
+            .field(
+                "expected_value",
+                &redacted_debug_option(&self.expected_value),
+            )
+            .finish()
+    }
+}
+
 /// Agent/runtime-owned OAuth state update fenced by the exact encrypted
 /// auth_config and, when supplied, credential context observed before the
 /// refresh started. Repositories must update only these fields and return
 /// `false` when an expected value changed.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ProviderCatalogKeyOAuthRuntimeStateCasUpdate {
     pub key_id: String,
     pub expected_encrypted_auth_config: Option<String>,
@@ -162,7 +288,53 @@ pub struct ProviderCatalogKeyOAuthRuntimeStateCasUpdate {
     pub updated_at_unix_secs: Option<u64>,
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+impl std::fmt::Debug for ProviderCatalogKeyOAuthRuntimeStateCasUpdate {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProviderCatalogKeyOAuthRuntimeStateCasUpdate")
+            .field("key_id", &self.key_id)
+            .field(
+                "expected_encrypted_auth_config",
+                &redacted_debug_option(&self.expected_encrypted_auth_config),
+            )
+            .field("expected_credential", &self.expected_credential)
+            .field(
+                "expected_upstream_metadata_namespace",
+                &self.expected_upstream_metadata_namespace,
+            )
+            .field("encrypted_auth_config", &REDACTED_DEBUG_VALUE)
+            .field(
+                "encrypted_api_key_update",
+                &redacted_debug_option(&self.encrypted_api_key_update),
+            )
+            .field(
+                "expires_at_unix_secs_update",
+                &self.expires_at_unix_secs_update,
+            )
+            .field(
+                "oauth_invalid_at_unix_secs",
+                &self.oauth_invalid_at_unix_secs,
+            )
+            .field(
+                "oauth_invalid_reason",
+                &redacted_debug_option(&self.oauth_invalid_reason),
+            )
+            .field(
+                "upstream_metadata_patch",
+                &redacted_debug_option(&self.upstream_metadata_patch),
+            )
+            .field(
+                "upstream_metadata_namespace_to_remove",
+                &self.upstream_metadata_namespace_to_remove,
+            )
+            .field("status_snapshot_patch", &REDACTED_DEBUG_VALUE)
+            .field("reset_error_count", &self.reset_error_count)
+            .field("updated_at_unix_secs", &self.updated_at_unix_secs)
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ProviderCatalogKeyHealthStateUpdate {
     pub key_id: String,
     /// Optional auth_config fence for lifecycle-owned health recovery.
@@ -174,7 +346,108 @@ pub struct ProviderCatalogKeyHealthStateUpdate {
     pub circuit_breaker_by_format: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+impl std::fmt::Debug for ProviderCatalogKeyHealthStateUpdate {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProviderCatalogKeyHealthStateUpdate")
+            .field("key_id", &self.key_id)
+            .field(
+                "expected_encrypted_auth_config",
+                &redacted_debug_option(&self.expected_encrypted_auth_config),
+            )
+            .field("expected_health_by_format", &self.expected_health_by_format)
+            .field(
+                "expected_circuit_breaker_by_format",
+                &self.expected_circuit_breaker_by_format,
+            )
+            .field("health_by_format", &self.health_by_format)
+            .field("circuit_breaker_by_format", &self.circuit_breaker_by_format)
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ProviderCatalogProviderConfigCasUpdate {
+    pub provider_id: String,
+    pub expected_config: Option<serde_json::Value>,
+    pub config: Option<serde_json::Value>,
+}
+
+impl std::fmt::Debug for ProviderCatalogProviderConfigCasUpdate {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProviderCatalogProviderConfigCasUpdate")
+            .field("provider_id", &self.provider_id)
+            .field(
+                "expected_config",
+                &redacted_debug_option(&self.expected_config),
+            )
+            .field("config", &redacted_debug_option(&self.config))
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ProviderCatalogProxyCasUpdate {
+    pub record_id: String,
+    pub expected_proxy: Option<serde_json::Value>,
+    pub proxy: Option<serde_json::Value>,
+}
+
+impl std::fmt::Debug for ProviderCatalogProxyCasUpdate {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProviderCatalogProxyCasUpdate")
+            .field("record_id", &self.record_id)
+            .field(
+                "expected_proxy",
+                &redacted_debug_option(&self.expected_proxy),
+            )
+            .field("proxy", &redacted_debug_option(&self.proxy))
+            .finish()
+    }
+}
+
+/// Secret-only migration fenced by the complete catalog-key credential
+/// identity. The provider fence prevents a legacy credential from being
+/// re-encrypted for an obsolete provider after a concurrent key move.
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ProviderCatalogKeyCredentialsCasUpdate {
+    pub key_id: String,
+    pub expected_provider_id: String,
+    pub expected_encrypted_api_key: Option<String>,
+    pub expected_encrypted_auth_config: Option<String>,
+    pub encrypted_api_key: Option<String>,
+    pub encrypted_auth_config: Option<String>,
+}
+
+impl std::fmt::Debug for ProviderCatalogKeyCredentialsCasUpdate {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProviderCatalogKeyCredentialsCasUpdate")
+            .field("key_id", &self.key_id)
+            .field("expected_provider_id", &self.expected_provider_id)
+            .field(
+                "expected_encrypted_api_key",
+                &redacted_debug_option(&self.expected_encrypted_api_key),
+            )
+            .field(
+                "expected_encrypted_auth_config",
+                &redacted_debug_option(&self.expected_encrypted_auth_config),
+            )
+            .field(
+                "encrypted_api_key",
+                &redacted_debug_option(&self.encrypted_api_key),
+            )
+            .field(
+                "encrypted_auth_config",
+                &redacted_debug_option(&self.encrypted_auth_config),
+            )
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct StoredProviderCatalogProvider {
     pub id: String,
     pub name: String,
@@ -199,6 +472,23 @@ pub struct StoredProviderCatalogProvider {
     pub config: Option<serde_json::Value>,
     pub created_at_unix_ms: Option<u64>,
     pub updated_at_unix_secs: Option<u64>,
+}
+
+impl std::fmt::Debug for StoredProviderCatalogProvider {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("StoredProviderCatalogProvider")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .field("provider_type", &self.provider_type)
+            .field("billing_type", &self.billing_type)
+            .field("is_active", &self.is_active)
+            .field("proxy", &redacted_debug_option(&self.proxy))
+            .field("config", &redacted_debug_option(&self.config))
+            .field("created_at_unix_ms", &self.created_at_unix_ms)
+            .field("updated_at_unix_secs", &self.updated_at_unix_secs)
+            .finish_non_exhaustive()
+    }
 }
 
 impl StoredProviderCatalogProvider {
@@ -311,7 +601,7 @@ impl StoredProviderCatalogProvider {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct StoredProviderCatalogEndpoint {
     pub id: String,
     pub provider_id: String,
@@ -330,6 +620,27 @@ pub struct StoredProviderCatalogEndpoint {
     pub proxy: Option<serde_json::Value>,
     pub created_at_unix_ms: Option<u64>,
     pub updated_at_unix_secs: Option<u64>,
+}
+
+impl std::fmt::Debug for StoredProviderCatalogEndpoint {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("StoredProviderCatalogEndpoint")
+            .field("id", &self.id)
+            .field("provider_id", &self.provider_id)
+            .field("api_format", &self.api_format)
+            .field("api_family", &self.api_family)
+            .field("endpoint_kind", &self.endpoint_kind)
+            .field("is_active", &self.is_active)
+            .field("base_url", &REDACTED_DEBUG_VALUE)
+            .field("header_rules", &redacted_debug_option(&self.header_rules))
+            .field("body_rules", &redacted_debug_option(&self.body_rules))
+            .field("config", &redacted_debug_option(&self.config))
+            .field("proxy", &redacted_debug_option(&self.proxy))
+            .field("created_at_unix_ms", &self.created_at_unix_ms)
+            .field("updated_at_unix_secs", &self.updated_at_unix_secs)
+            .finish_non_exhaustive()
+    }
 }
 
 impl StoredProviderCatalogEndpoint {
@@ -413,7 +724,7 @@ impl StoredProviderCatalogEndpoint {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct StoredProviderCatalogKey {
     pub id: String,
     pub provider_id: String,
@@ -470,12 +781,64 @@ pub struct StoredProviderCatalogKey {
     pub circuit_breaker_by_format: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+impl std::fmt::Debug for StoredProviderCatalogKey {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("StoredProviderCatalogKey")
+            .field("id", &self.id)
+            .field("provider_id", &self.provider_id)
+            .field("name", &self.name)
+            .field("auth_type", &self.auth_type)
+            .field("is_active", &self.is_active)
+            .field(
+                "encrypted_api_key",
+                &redacted_debug_option(&self.encrypted_api_key),
+            )
+            .field(
+                "encrypted_auth_config",
+                &redacted_debug_option(&self.encrypted_auth_config),
+            )
+            .field("proxy", &redacted_debug_option(&self.proxy))
+            .field("fingerprint", &redacted_debug_option(&self.fingerprint))
+            .field(
+                "upstream_metadata",
+                &redacted_debug_option(&self.upstream_metadata),
+            )
+            .field(
+                "oauth_invalid_reason",
+                &redacted_debug_option(&self.oauth_invalid_reason),
+            )
+            .field(
+                "status_snapshot",
+                &redacted_debug_option(&self.status_snapshot),
+            )
+            .field("created_at_unix_ms", &self.created_at_unix_ms)
+            .field("updated_at_unix_secs", &self.updated_at_unix_secs)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Clone, PartialEq)]
 pub struct StoredProviderCatalogKeyMaintenanceSummary {
     pub id: String,
     pub provider_id: String,
     pub is_active: bool,
     pub upstream_metadata: Option<serde_json::Value>,
+}
+
+impl std::fmt::Debug for StoredProviderCatalogKeyMaintenanceSummary {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("StoredProviderCatalogKeyMaintenanceSummary")
+            .field("id", &self.id)
+            .field("provider_id", &self.provider_id)
+            .field("is_active", &self.is_active)
+            .field(
+                "upstream_metadata",
+                &redacted_debug_option(&self.upstream_metadata),
+            )
+            .finish()
+    }
 }
 
 impl StoredProviderCatalogKey {
@@ -590,6 +953,18 @@ impl StoredProviderCatalogKey {
         Ok(self)
     }
 
+    pub fn with_auth_channel_policy_fields(
+        mut self,
+        auth_type_by_format: Option<serde_json::Value>,
+        allow_auth_channel_mismatch_formats: Option<serde_json::Value>,
+    ) -> Result<Self, crate::DataLayerError> {
+        validate_auth_type_by_format(auth_type_by_format.as_ref())?;
+        validate_auth_channel_mismatch_formats(allow_auth_channel_mismatch_formats.as_ref())?;
+        self.auth_type_by_format = auth_type_by_format;
+        self.allow_auth_channel_mismatch_formats = allow_auth_channel_mismatch_formats;
+        Ok(self)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn with_rate_limit_fields(
         mut self,
@@ -646,6 +1021,58 @@ impl StoredProviderCatalogKey {
     }
 }
 
+fn validate_auth_type_by_format(
+    value: Option<&serde_json::Value>,
+) -> Result<(), crate::DataLayerError> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    let Some(entries) = value.as_object() else {
+        return Err(crate::DataLayerError::UnexpectedValue(
+            "provider_api_keys.auth_type_by_format must be a JSON object".to_string(),
+        ));
+    };
+    for (api_format, auth_type) in entries {
+        let valid_api_format = !api_format.trim().is_empty();
+        let valid_auth_type = auth_type.as_str().is_some_and(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "api_key" | "bearer"
+            )
+        });
+        if !valid_api_format || !valid_auth_type {
+            return Err(crate::DataLayerError::UnexpectedValue(
+                "provider_api_keys.auth_type_by_format contains an invalid entry".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_auth_channel_mismatch_formats(
+    value: Option<&serde_json::Value>,
+) -> Result<(), crate::DataLayerError> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    let Some(items) = value.as_array() else {
+        return Err(crate::DataLayerError::UnexpectedValue(
+            "provider_api_keys.allow_auth_channel_mismatch_formats must be a JSON array"
+                .to_string(),
+        ));
+    };
+    if items
+        .iter()
+        .any(|item| item.as_str().is_none_or(|value| value.trim().is_empty()))
+    {
+        return Err(crate::DataLayerError::UnexpectedValue(
+            "provider_api_keys.allow_auth_channel_mismatch_formats contains an invalid entry"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 impl From<&StoredProviderCatalogKey> for ProviderCatalogKeyAdaptiveState {
     fn from(key: &StoredProviderCatalogKey) -> Self {
         Self {
@@ -664,7 +1091,60 @@ impl From<&StoredProviderCatalogKey> for ProviderCatalogKeyAdaptiveState {
 
 #[cfg(test)]
 mod transport_tests {
-    use super::StoredProviderCatalogKey;
+    use super::{
+        ProviderCatalogKeyCredentialsCasUpdate, ProviderCatalogKeyOAuthCredentialFence,
+        ProviderCatalogKeyOAuthRuntimeStateCasUpdate,
+        ProviderCatalogUpstreamMetadataNamespaceExpectation, StoredProviderCatalogEndpoint,
+        StoredProviderCatalogKey, StoredProviderCatalogProvider,
+    };
+
+    fn assert_debug_redacts<T: std::fmt::Debug>(value: &T, secrets: &[&str]) {
+        let debug = format!("{value:?}");
+        assert!(debug.contains("[REDACTED]"), "debug output: {debug}");
+        for secret in secrets {
+            assert!(
+                !debug.contains(secret),
+                "debug output leaked {secret}: {debug}"
+            );
+        }
+    }
+
+    fn sample_key() -> StoredProviderCatalogKey {
+        StoredProviderCatalogKey::new(
+            "key-policy".to_string(),
+            "provider-policy".to_string(),
+            "policy".to_string(),
+            "api_key".to_string(),
+            None,
+            true,
+        )
+        .expect("key should build")
+    }
+
+    #[test]
+    fn provider_catalog_key_auth_channel_policy_rejects_malformed_stored_json() {
+        assert!(sample_key()
+            .with_auth_channel_policy_fields(
+                Some(serde_json::json!({"openai:chat": "bearer"})),
+                Some(serde_json::json!([])),
+            )
+            .is_ok());
+        assert!(sample_key()
+            .with_auth_channel_policy_fields(Some(serde_json::Value::Null), None)
+            .is_err());
+        assert!(sample_key()
+            .with_auth_channel_policy_fields(
+                Some(serde_json::json!({"openai:chat": "oauth"})),
+                None,
+            )
+            .is_err());
+        assert!(sample_key()
+            .with_auth_channel_policy_fields(None, Some(serde_json::Value::Null))
+            .is_err());
+        assert!(sample_key()
+            .with_auth_channel_policy_fields(None, Some(serde_json::json!([""])))
+            .is_err());
+    }
 
     #[test]
     fn provider_catalog_key_defaults_concurrent_limit_to_none() {
@@ -706,6 +1186,152 @@ mod transport_tests {
 
         assert_eq!(key.rpm_limit, Some(120));
         assert_eq!(key.concurrent_limit, Some(3));
+    }
+
+    #[test]
+    fn provider_catalog_debug_output_redacts_credentials_and_transport_metadata() {
+        let mut key = sample_key();
+        key.encrypted_api_key = Some("catalog-api-key-ciphertext-canary".to_string());
+        key.encrypted_auth_config = Some("catalog-auth-config-ciphertext-canary".to_string());
+        key.proxy = Some(serde_json::json!({"password": "catalog-proxy-canary"}));
+        key.fingerprint = Some(serde_json::json!({"device": "catalog-device-canary"}));
+        key.upstream_metadata = Some(serde_json::json!({"token": "catalog-metadata-canary"}));
+        key.oauth_invalid_reason = Some("catalog-oauth-reason-canary".to_string());
+        key.status_snapshot = Some(serde_json::json!({"raw": "catalog-status-canary"}));
+        assert_debug_redacts(
+            &key,
+            &[
+                "catalog-api-key-ciphertext-canary",
+                "catalog-auth-config-ciphertext-canary",
+                "catalog-proxy-canary",
+                "catalog-device-canary",
+                "catalog-metadata-canary",
+                "catalog-oauth-reason-canary",
+                "catalog-status-canary",
+            ],
+        );
+
+        let provider = StoredProviderCatalogProvider::new(
+            "provider-debug".to_string(),
+            "debug".to_string(),
+            None,
+            "openai".to_string(),
+        )
+        .expect("provider should build")
+        .with_transport_fields(
+            true,
+            false,
+            false,
+            None,
+            None,
+            Some(serde_json::json!({"password": "provider-proxy-canary"})),
+            None,
+            None,
+            Some(serde_json::json!({"secret": "provider-config-canary"})),
+        );
+        assert_debug_redacts(
+            &provider,
+            &["provider-proxy-canary", "provider-config-canary"],
+        );
+
+        let endpoint = StoredProviderCatalogEndpoint::new(
+            "endpoint-debug".to_string(),
+            "provider-debug".to_string(),
+            "openai:chat".to_string(),
+            None,
+            None,
+            true,
+        )
+        .expect("endpoint should build")
+        .with_transport_fields(
+            "https://endpoint-user:endpoint-password-canary@example.com/endpoint-token-canary"
+                .to_string(),
+            Some(serde_json::json!({"Authorization": "endpoint-header-canary"})),
+            Some(serde_json::json!({"credential": "endpoint-body-canary"})),
+            None,
+            None,
+            Some(serde_json::json!({"secret": "endpoint-config-canary"})),
+            None,
+            Some(serde_json::json!({"password": "endpoint-proxy-canary"})),
+        )
+        .expect("endpoint should accept transport fields");
+        assert_debug_redacts(
+            &endpoint,
+            &[
+                "endpoint-password-canary",
+                "endpoint-token-canary",
+                "endpoint-header-canary",
+                "endpoint-body-canary",
+                "endpoint-config-canary",
+                "endpoint-proxy-canary",
+            ],
+        );
+    }
+
+    #[test]
+    fn provider_catalog_cas_debug_output_redacts_credential_fences() {
+        let fence = ProviderCatalogKeyOAuthCredentialFence {
+            encrypted_api_key: Some("fence-api-key-canary".to_string()),
+            auth_type: "oauth".to_string(),
+            provider_id: "provider-debug".to_string(),
+            provider_type: "codex".to_string(),
+        };
+        assert_debug_redacts(&fence, &["fence-api-key-canary"]);
+
+        let credentials = ProviderCatalogKeyCredentialsCasUpdate {
+            key_id: "key-debug".to_string(),
+            expected_provider_id: "provider-debug".to_string(),
+            expected_encrypted_api_key: Some("expected-api-key-canary".to_string()),
+            expected_encrypted_auth_config: Some("expected-auth-config-canary".to_string()),
+            encrypted_api_key: Some("replacement-api-key-canary".to_string()),
+            encrypted_auth_config: Some("replacement-auth-config-canary".to_string()),
+        };
+        assert_debug_redacts(
+            &credentials,
+            &[
+                "expected-api-key-canary",
+                "expected-auth-config-canary",
+                "replacement-api-key-canary",
+                "replacement-auth-config-canary",
+            ],
+        );
+
+        let runtime = ProviderCatalogKeyOAuthRuntimeStateCasUpdate {
+            key_id: "key-debug".to_string(),
+            expected_encrypted_auth_config: Some("runtime-expected-auth-canary".to_string()),
+            expected_credential: Some(fence),
+            expected_upstream_metadata_namespace: Some(
+                ProviderCatalogUpstreamMetadataNamespaceExpectation {
+                    namespace: "oauth".to_string(),
+                    expected_value: Some(serde_json::json!({"token": "runtime-fence-canary"})),
+                },
+            ),
+            encrypted_auth_config: "runtime-auth-config-canary".to_string(),
+            encrypted_api_key_update: Some("runtime-api-key-canary".to_string()),
+            expires_at_unix_secs_update: Some(Some(123)),
+            oauth_invalid_at_unix_secs: Some(124),
+            oauth_invalid_reason: Some("runtime-provider-error-canary".to_string()),
+            upstream_metadata_patch: Some(serde_json::json!({
+                "refresh_token": "runtime-metadata-canary"
+            })),
+            upstream_metadata_namespace_to_remove: None,
+            status_snapshot_patch: serde_json::json!({"raw": "runtime-status-canary"}),
+            reset_error_count: true,
+            updated_at_unix_secs: Some(125),
+        };
+        assert_debug_redacts(
+            &runtime,
+            &[
+                "runtime-expected-auth-canary",
+                "fence-api-key-canary",
+                "runtime-fence-canary",
+                "runtime-auth-config-canary",
+                "runtime-api-key-canary",
+                "runtime-provider-error-canary",
+                "runtime-metadata-canary",
+                "runtime-status-canary",
+            ],
+        );
     }
 }
 
@@ -848,6 +1474,26 @@ pub trait ProviderCatalogWriteRepository: Send + Sync {
         provider: &StoredProviderCatalogProvider,
     ) -> Result<StoredProviderCatalogProvider, crate::DataLayerError>;
 
+    async fn compare_and_swap_provider_config(
+        &self,
+        _update: &ProviderCatalogProviderConfigCasUpdate,
+    ) -> Result<bool, crate::DataLayerError> {
+        Err(crate::DataLayerError::InvalidConfiguration(
+            "provider catalog config compare-and-swap is not supported by this repository"
+                .to_string(),
+        ))
+    }
+
+    async fn compare_and_swap_provider_proxy(
+        &self,
+        _update: &ProviderCatalogProxyCasUpdate,
+    ) -> Result<bool, crate::DataLayerError> {
+        Err(crate::DataLayerError::InvalidConfiguration(
+            "provider catalog provider proxy compare-and-swap is not supported by this repository"
+                .to_string(),
+        ))
+    }
+
     async fn delete_provider(&self, provider_id: &str) -> Result<bool, crate::DataLayerError>;
 
     async fn cleanup_deleted_provider_refs(
@@ -868,6 +1514,16 @@ pub trait ProviderCatalogWriteRepository: Send + Sync {
         endpoint: &StoredProviderCatalogEndpoint,
     ) -> Result<StoredProviderCatalogEndpoint, crate::DataLayerError>;
 
+    async fn compare_and_swap_endpoint_proxy(
+        &self,
+        _update: &ProviderCatalogProxyCasUpdate,
+    ) -> Result<bool, crate::DataLayerError> {
+        Err(crate::DataLayerError::InvalidConfiguration(
+            "provider catalog endpoint proxy compare-and-swap is not supported by this repository"
+                .to_string(),
+        ))
+    }
+
     async fn delete_endpoint(&self, endpoint_id: &str) -> Result<bool, crate::DataLayerError>;
 
     async fn create_key(
@@ -879,6 +1535,26 @@ pub trait ProviderCatalogWriteRepository: Send + Sync {
         &self,
         key: &StoredProviderCatalogKey,
     ) -> Result<StoredProviderCatalogKey, crate::DataLayerError>;
+
+    async fn compare_and_swap_key_proxy(
+        &self,
+        _update: &ProviderCatalogProxyCasUpdate,
+    ) -> Result<bool, crate::DataLayerError> {
+        Err(crate::DataLayerError::InvalidConfiguration(
+            "provider catalog key proxy compare-and-swap is not supported by this repository"
+                .to_string(),
+        ))
+    }
+
+    async fn compare_and_swap_key_credentials(
+        &self,
+        _update: &ProviderCatalogKeyCredentialsCasUpdate,
+    ) -> Result<bool, crate::DataLayerError> {
+        Err(crate::DataLayerError::InvalidConfiguration(
+            "provider catalog key credential compare-and-swap is not supported by this repository"
+                .to_string(),
+        ))
+    }
 
     /// Compare-and-swap administrator-owned key configuration. Credential
     /// rotation, Codex namespace replacement, and quota invalidation must be
@@ -947,20 +1623,11 @@ pub trait ProviderCatalogWriteRepository: Send + Sync {
         key_id: &str,
     ) -> Result<bool, crate::DataLayerError>;
 
-    async fn update_key_oauth_credentials(
-        &self,
-        key_id: &str,
-        encrypted_api_key: &str,
-        encrypted_auth_config: Option<&str>,
-        expires_at_unix_secs: Option<u64>,
-    ) -> Result<bool, crate::DataLayerError>;
-
     async fn update_key_oauth_runtime_state(
         &self,
         key_id: &str,
         oauth_invalid_at_unix_secs: Option<u64>,
         oauth_invalid_reason: Option<&str>,
-        encrypted_auth_config_update: Option<&str>,
         updated_at_unix_secs: Option<u64>,
     ) -> Result<bool, crate::DataLayerError>;
 

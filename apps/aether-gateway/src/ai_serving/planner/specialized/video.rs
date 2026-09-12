@@ -16,6 +16,7 @@ use crate::ai_serving::{
     LocalVideoCreateSpec,
 };
 use crate::{AiExecutionDecision, AppState, GatewayError};
+use aether_routing_core::RoutingExecutionPolicy;
 
 use self::decision::maybe_build_local_video_create_decision_payload_for_candidate;
 use self::support::{
@@ -104,6 +105,13 @@ pub(crate) async fn build_local_video_sync_attempt_source_for_kind<'a>(
 
 #[async_trait]
 impl LocalExecutionAttemptSource<AiSyncAttempt> for LocalVideoCreateSyncAttemptSource<'_> {
+    fn routing_execution_policy(&self) -> Option<RoutingExecutionPolicy> {
+        self.input
+            .routing_policy
+            .as_ref()
+            .map(|policy| policy.execution_policy.clone())
+    }
+
     async fn next_execution_attempt(&mut self) -> Result<Option<AiSyncAttempt>, GatewayError> {
         while let Some(attempt) = self.candidates.next_attempt().await? {
             match self.build_sync_attempt(attempt).await? {

@@ -68,7 +68,7 @@ export const geminiFilesApi = {
    * 获取文件映射统计
    */
   async getStats(): Promise<FileMappingStatsResponse> {
-    const response = await apiClient.get('/api/admin/gemini-files/stats')
+    const response = await apiClient.get<FileMappingStatsResponse>('/api/admin/gemini-files/stats')
     return response.data
   },
 
@@ -76,7 +76,7 @@ export const geminiFilesApi = {
    * 列出文件映射
    */
   async listMappings(params?: ListMappingsParams): Promise<FileMappingListResponse> {
-    const response = await apiClient.get('/api/admin/gemini-files/mappings', { params })
+    const response = await apiClient.get<FileMappingListResponse>('/api/admin/gemini-files/mappings', { params })
     return response.data
   },
 
@@ -84,7 +84,7 @@ export const geminiFilesApi = {
    * 删除指定映射
    */
   async deleteMapping(mappingId: string): Promise<{ message: string; file_name: string }> {
-    const response = await apiClient.delete(`/api/admin/gemini-files/mappings/${mappingId}`)
+    const response = await apiClient.delete<{ message: string; file_name: string }>(`/api/admin/gemini-files/mappings/${mappingId}`)
     return response.data
   },
 
@@ -92,7 +92,7 @@ export const geminiFilesApi = {
    * 清理过期映射
    */
   async cleanupExpired(): Promise<{ message: string; deleted_count: number }> {
-    const response = await apiClient.delete('/api/admin/gemini-files/mappings')
+    const response = await apiClient.delete<{ message: string; deleted_count: number }>('/api/admin/gemini-files/mappings')
     return response.data
   },
 
@@ -100,7 +100,7 @@ export const geminiFilesApi = {
    * 获取可用的 Key 列表
    */
   async getCapableKeys(): Promise<CapableKeyResponse[]> {
-    const response = await apiClient.get('/api/admin/gemini-files/capable-keys')
+    const response = await apiClient.get<CapableKeyResponse[]>('/api/admin/gemini-files/capable-keys')
     return response.data
   },
 
@@ -110,7 +110,7 @@ export const geminiFilesApi = {
   async uploadFile(file: File, keyIds: string[]): Promise<UploadResponse> {
     const formData = new FormData()
     formData.append('file', file)
-    const response = await apiClient.post(
+    const response = await apiClient.post<UploadResponse>(
       `/api/admin/gemini-files/upload?key_ids=${keyIds.join(',')}`,
       formData,
       {

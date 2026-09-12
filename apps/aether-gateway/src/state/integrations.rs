@@ -13,6 +13,7 @@ use aether_data_contracts::repository::provider_catalog::{
     StoredProviderCatalogKey, StoredProviderCatalogProvider,
 };
 use aether_data_contracts::repository::quota::StoredProviderQuotaSnapshot;
+use aether_data_contracts::DataLayerError;
 use aether_model_fetch::{
     aggregate_models_for_cache, build_antigravity_load_code_assist_plan,
     fetch_models_from_transports, merge_upstream_metadata, model_fetch_interval_minutes,
@@ -25,7 +26,7 @@ use tracing::{debug, warn};
 
 use super::{AppState, GatewayError};
 use crate::clock::current_unix_secs;
-use crate::model_fetch::{CodexCatalogRuntime, ModelFetchRuntimeState};
+use crate::model_fetch::{safe_model_fetch_error, CodexCatalogRuntime, ModelFetchRuntimeState};
 use crate::provider_transport::{GatewayProviderTransportSnapshot, LocalResolvedOAuthRequestAuth};
 use crate::request_candidate_runtime::{
     RequestCandidateRuntimeCapabilityReader, RequestCandidateRuntimeReader,
@@ -35,6 +36,44 @@ use crate::scheduler::state::SchedulerRuntimeState;
 use crate::{execution_runtime, provider_transport};
 
 const MODEL_FETCH_RESPONSE_BODY_LIMIT_BYTES: usize = 8 * 1024 * 1024;
+
+#[async_trait]
+impl provider_transport::ProviderTransportSnapshotSource for AppState {
+    fn encryption_key(&self) -> Option<&str> {
+        AppState::encryption_key(self)
+    }
+
+    async fn list_provider_catalog_providers_by_ids(
+        &self,
+        ids: &[String],
+    ) -> Result<Vec<StoredProviderCatalogProvider>, DataLayerError> {
+        self.read_provider_catalog_providers_by_ids(ids)
+            .await
+            .map_err(provider_transport_snapshot_data_error)
+    }
+
+    async fn list_provider_catalog_endpoints_by_ids(
+        &self,
+        ids: &[String],
+    ) -> Result<Vec<StoredProviderCatalogEndpoint>, DataLayerError> {
+        self.read_provider_catalog_endpoints_by_ids(ids)
+            .await
+            .map_err(provider_transport_snapshot_data_error)
+    }
+
+    async fn list_provider_catalog_keys_by_ids(
+        &self,
+        ids: &[String],
+    ) -> Result<Vec<StoredProviderCatalogKey>, DataLayerError> {
+        self.read_provider_catalog_keys_by_ids(ids)
+            .await
+            .map_err(provider_transport_snapshot_data_error)
+    }
+}
+
+fn provider_transport_snapshot_data_error(error: GatewayError) -> DataLayerError {
+    DataLayerError::UnexpectedValue(error.into_message())
+}
 
 impl AppState {
     pub(crate) async fn hydrate_antigravity_project_metadata_for_transport(
@@ -159,7 +198,7 @@ impl AppState {
                         provider_id = %transport.provider.id,
                         endpoint_id = %transport.endpoint.id,
                         key_id = %transport.key.id,
-                        error = %err,
+                        error = %safe_model_fetch_error(&err),
                         "gemini_cli project metadata hydration failed"
                     );
                     return None;
@@ -324,31 +363,12 @@ impl CodexCatalogRuntime for AppState {
             return Ok(Some(scope));
         }
 
-        let decrypted_auth_config = match key.encrypted_auth_config.as_deref() {
-            Some(ciphertext) => Some(
-                crate::handlers::shared::decrypt_catalog_secret_with_fallbacks(
-                    self.encryption_key(),
-                    ciphertext,
-                )
-                .ok_or_else(|| {
-                    "Codex catalog auth config could not be verified for credential fencing"
-                        .to_string()
-                })?,
-            ),
-            None => None,
-        };
-        let decrypted_api_key = match key.encrypted_api_key.as_deref() {
-            Some(ciphertext) => Some(
-                crate::handlers::shared::decrypt_catalog_secret_with_fallbacks(
-                    self.encryption_key(),
-                    ciphertext,
-                )
-                .ok_or_else(|| {
-                    "Codex catalog API key could not be verified for credential fencing".to_string()
-                })?,
-            ),
-            None => None,
-        };
+        let decrypted_auth_config = self
+            .decrypt_provider_catalog_key_auth_config(&key)
+            .map_err(GatewayError::into_message)?;
+        let decrypted_api_key = self
+            .decrypt_provider_catalog_key_api_key(&key)
+            .map_err(GatewayError::into_message)?;
 
         Ok(
             crate::model_fetch::codex_catalog_credential_scope_from_stored_key(
@@ -377,11 +397,41 @@ impl ModelFetchRuntimeState for AppState {
         AppState::list_provider_catalog_providers(self, active_only).await
     }
 
+    async fn list_provider_catalog_providers_for_model_fetch(
+        &self,
+        active_only: bool,
+    ) -> Result<Vec<StoredProviderCatalogProvider>, GatewayError> {
+        self.data
+            .list_provider_catalog_providers(active_only)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
     async fn list_provider_catalog_endpoints_by_provider_ids(
         &self,
         provider_ids: &[String],
     ) -> Result<Vec<StoredProviderCatalogEndpoint>, GatewayError> {
         AppState::list_provider_catalog_endpoints_by_provider_ids(self, provider_ids).await
+    }
+
+    async fn list_provider_catalog_endpoints_for_model_fetch(
+        &self,
+        provider_ids: &[String],
+    ) -> Result<Vec<StoredProviderCatalogEndpoint>, GatewayError> {
+        self.data
+            .list_provider_catalog_endpoints_by_provider_ids(provider_ids)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
+    async fn list_provider_catalog_keys_for_model_fetch(
+        &self,
+        provider_ids: &[String],
+    ) -> Result<Vec<StoredProviderCatalogKey>, String> {
+        self.data
+            .list_provider_catalog_keys_by_provider_ids(provider_ids)
+            .await
+            .map_err(|err| err.to_string())
     }
 
     async fn read_provider_transport_snapshot(
@@ -405,22 +455,9 @@ impl ModelFetchRuntimeState for AppState {
         provider_id: &str,
         key_id: &str,
     ) -> Option<String> {
-        let credential_scope =
-            <AppState as CodexCatalogRuntime>::read_codex_catalog_credential_scope_strong(
-                self,
-                provider_id,
-                key_id,
-            )
+        crate::model_fetch::read_codex_management_catalog(self, provider_id, key_id)
             .await
-            .ok()
-            .flatten()?;
-        crate::model_fetch::read_recent_codex_catalog_client_version(
-            self.runtime_state.as_ref(),
-            provider_id,
-            key_id,
-            &credential_scope,
-        )
-        .await
+            .map(|catalog| catalog.client_version)
     }
 
     async fn update_provider_catalog_key_model_fetch_state(
@@ -634,7 +671,7 @@ impl SchedulerRuntimeState for AppState {
         &self,
         limit: usize,
     ) -> Result<Vec<StoredRequestCandidate>, GatewayError> {
-        AppState::read_recent_request_candidates(self, limit).await
+        AppState::read_recent_runtime_request_candidates(self, limit).await
     }
 
     fn provider_key_rpm_reset_at(&self, key_id: &str, now_unix_secs: u64) -> Option<u64> {
@@ -679,11 +716,5 @@ impl SchedulerRuntimeState for AppState {
             max_entries,
             expected_epoch,
         )
-    }
-
-    async fn read_scheduler_ordering_config(
-        &self,
-    ) -> Result<crate::scheduler::config::SchedulerOrderingConfig, GatewayError> {
-        crate::scheduler::config::read_scheduler_ordering_config(self).await
     }
 }

@@ -13,14 +13,17 @@
 </template>
 
 <script setup lang="ts">
+import type { ClassValue } from 'clsx'
 import { computed, ref, watch, onMounted, onUnmounted, nextTick, inject, type Ref } from 'vue'
 import { cn } from '@/lib/utils'
+import { useI18n } from '@/i18n'
 
 interface Props {
-  class?: string
+  class?: ClassValue
 }
 
 const props = defineProps<Props>()
+const { locale } = useI18n()
 
 const listRef = ref<HTMLElement | null>(null)
 const indicatorStyle = ref<Record<string, string>>({
@@ -39,7 +42,7 @@ const activeTab = inject<Ref<string>>('activeTab')
 
 // 检查是否有 grid 类（由外部传入）
 const hasGridClass = computed(() => {
-  return props.class?.includes('grid')
+  return cn(props.class).includes('grid')
 })
 
 const listClass = computed(() => {
@@ -82,11 +85,7 @@ const updateIndicator = () => {
   // 确保按钮已渲染
   if (buttonRect.width === 0) return
 
-  // 计算相对位置：累加前面所有按钮的宽度
-  let offsetLeft = 0
-  for (let i = 0; i < newIndex; i++) {
-    offsetLeft += buttons[i].getBoundingClientRect().width
-  }
+  const offsetLeft = activeButton.offsetLeft
 
   // 判断是否需要动画：
   // 1. 首次初始化不需要动画
@@ -123,7 +122,7 @@ const scheduleIndicatorUpdate = () => {
 
 // 监听 activeTab 变化
 watch(
-  () => activeTab?.value,
+  () => [activeTab?.value, locale.value],
   () => {
     nextTick(() => {
       scheduleIndicatorUpdate()
@@ -166,14 +165,22 @@ onUnmounted(() => {
 <style scoped>
 .tabs-list {
   position: relative;
-  height: 2.5rem;
+  min-height: 2.5rem;
+  max-width: 100%;
+  overflow-x: auto;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-start;
   border-radius: 0.5rem;
   background-color: hsl(var(--muted) / 0.3);
   padding: 0.25rem;
   color: hsl(var(--muted-foreground));
   border: 1px solid hsl(var(--border) / 0.6);
+}
+
+.tabs-list.grid :deep(button[data-value]) {
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .tabs-indicator {

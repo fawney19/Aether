@@ -189,7 +189,7 @@ async function loadUsers(search: string) {
     const options = result.map((user) => ({
       id: user.id,
       username: user.username,
-      email: user.email,
+      email: user.email ?? '',
     }))
     if (!search.trim()) loadedInitialBatch = true
     users.value = options

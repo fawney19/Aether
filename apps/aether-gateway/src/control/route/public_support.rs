@@ -197,18 +197,22 @@ pub(super) fn classify_public_support_route(
             "public:auth",
             false,
         ))
-    } else if matches!(method, &http::Method::GET | &http::Method::POST)
+    // Authentication state-changing endpoints must never be dispatched for GET.
+    // Besides violating HTTP method semantics, accepting GET here would allow
+    // browser prefetches/cross-site requests to trigger login, refresh, logout,
+    // registration, or verification side effects. `/me` is the sole read route.
+    } else if (method == http::Method::POST
         && matches!(
             normalized_path,
             "/api/auth/login"
                 | "/api/auth/refresh"
                 | "/api/auth/register"
-                | "/api/auth/me"
                 | "/api/auth/logout"
                 | "/api/auth/send-verification-code"
                 | "/api/auth/verify-email"
                 | "/api/auth/verification-status"
-        )
+        ))
+        || (method == http::Method::GET && normalized_path == "/api/auth/me")
     {
         let route_kind = match normalized_path {
             "/api/auth/login" => "login",
@@ -518,6 +522,65 @@ pub(super) fn classify_public_support_route(
             "ccswitch",
             "usage",
             "aether:ccswitch_usage",
+            false,
+        ))
+    } else if method == http::Method::POST
+        && matches!(normalized_path, "/api/vscodex/pair" | "/api/vscodex/pair/")
+    {
+        Some(classified(
+            "public_support",
+            "vscodex",
+            "pairing_exchange",
+            "public:vscodex",
+            false,
+        ))
+    } else if method == http::Method::GET
+        && matches!(
+            normalized_path,
+            "/api/users/me/vscodex/devices" | "/api/users/me/vscodex/devices/"
+        )
+    {
+        Some(classified(
+            "public_support",
+            "users_me",
+            "vscodex_devices_list",
+            "user:self",
+            false,
+        ))
+    } else if method == http::Method::POST
+        && matches!(
+            normalized_path,
+            "/api/users/me/vscodex/pairings" | "/api/users/me/vscodex/pairings/"
+        )
+    {
+        Some(classified(
+            "public_support",
+            "users_me",
+            "vscodex_pairing_create",
+            "user:self",
+            false,
+        ))
+    } else if method == http::Method::POST
+        && matches!(
+            normalized_path,
+            "/api/users/me/vscodex/ws-tickets" | "/api/users/me/vscodex/ws-tickets/"
+        )
+    {
+        Some(classified(
+            "public_support",
+            "users_me",
+            "vscodex_ws_ticket_create",
+            "user:self",
+            false,
+        ))
+    } else if method == http::Method::DELETE
+        && has_single_segment_after_prefix(normalized_path, "/api/users/me/vscodex/devices/")
+    {
+        Some(classified(
+            "public_support",
+            "users_me",
+            "vscodex_device_delete",
+            "user:self",
             false,
         ))
     } else if method == http::Method::GET

@@ -1,5 +1,11 @@
-use std::path::Path;
+use std::io;
+use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+#[cfg(unix)]
+use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 
 use aether_contracts::ExecutionPlan;
 use aether_runtime::{
@@ -13,8 +19,13 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use hyper::body::Incoming;
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
+use hyper_util::server::conn::auto::Builder as HyperServerBuilder;
+use hyper_util::service::TowerToHyperService;
 use serde_json::json;
 use thiserror::Error;
+use tower::{Service as _, ServiceExt as _};
 
 use crate::execution_runtime::{
     build_direct_execution_frame_stream, DirectSyncExecutionRuntime, ExecutionRuntimeTransportError,
@@ -24,6 +35,135 @@ use crate::middleware;
 const EXECUTION_RUNTIME_COMPONENT: &str = "aether-gateway-execution-runtime";
 const REQUEST_GATE_NAME: &str = "execution_runtime_requests";
 const DISTRIBUTED_REQUEST_GATE_NAME: &str = "execution_runtime_requests_distributed";
+
+// These limits protect only connection metadata.  Once the first complete
+// request reaches the service, request and response bodies remain fully
+// streaming (including long-lived streaming responses).  Keep the HTTP/2
+// stream default high enough for high-concurrency hosts; this is not a body
+// admission limit.
+const EXECUTION_RUNTIME_HTTP2_MAX_CONCURRENT_STREAMS: u32 = 16_384;
+const EXECUTION_RUNTIME_HTTP_HEADER_READ_TIMEOUT: Duration = Duration::from_secs(30);
+const EXECUTION_RUNTIME_HTTP_HEADER_MAX_BYTES: usize = 64 * 1024;
+const EXECUTION_RUNTIME_HTTP_MAX_HEADERS: usize = 256;
+const EXECUTION_RUNTIME_REQUEST_BODY_HARD_LIMIT_BYTES: usize = 256 * 1024 * 1024;
+
+/// Coordinates the connection-level deadline that covers protocol detection
+/// and the first request header block. Hyper's HTTP/1 timer starts only after
+/// the auto protocol detector has finished, while HTTP/2 has no equivalent
+/// header timer. Keeping this gate outside the parser closes that initial gap
+/// without imposing a deadline on request or response bodies.
+#[derive(Clone)]
+struct ExecutionRuntimeFirstRequestGate {
+    seen: Arc<AtomicBool>,
+    notify: Arc<tokio::sync::Notify>,
+}
+
+impl ExecutionRuntimeFirstRequestGate {
+    fn new() -> Self {
+        Self {
+            seen: Arc::new(AtomicBool::new(false)),
+            notify: Arc::new(tokio::sync::Notify::new()),
+        }
+    }
+
+    fn mark_seen(&self) {
+        if !self.seen.swap(true, Ordering::Release) {
+            self.notify.notify_one();
+        }
+    }
+
+    fn is_seen(&self) -> bool {
+        self.seen.load(Ordering::Acquire)
+    }
+}
+
+#[derive(Clone)]
+struct ExecutionRuntimeFirstRequestService<S> {
+    inner: S,
+    gate: ExecutionRuntimeFirstRequestGate,
+}
+
+impl<S, Req> tower::Service<Req> for ExecutionRuntimeFirstRequestService<S>
+where
+    S: tower::Service<Req>,
+{
+    type Response = S::Response;
+    type Error = S::Error;
+    type Future = S::Future;
+
+    fn poll_ready(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, request: Req) -> Self::Future {
+        self.gate.mark_seen();
+        self.inner.call(request)
+    }
+}
+
+/// Drive one Hyper connection while enforcing the deadline for its first
+/// request.  The timeout is deliberately limited to protocol detection and
+/// initial headers; after `gate.mark_seen()` body and response streaming are
+/// not interrupted by this helper.
+async fn drive_execution_runtime_connection<F, E>(
+    connection: F,
+    gate: ExecutionRuntimeFirstRequestGate,
+    timeout: Duration,
+) -> Result<(), E>
+where
+    F: std::future::Future<Output = Result<(), E>>,
+{
+    if gate.is_seen() {
+        return connection.await;
+    }
+
+    let mut connection = Box::pin(connection);
+    let timeout = tokio::time::sleep(timeout);
+    tokio::pin!(timeout);
+    let notified = gate.notify.notified();
+    tokio::pin!(notified);
+
+    tokio::select! {
+        result = &mut connection => result,
+        _ = &mut timeout => {
+            if gate.is_seen() {
+                (&mut connection).await
+            } else {
+                tracing::debug!(
+                    "execution runtime connection closed before the first request header completed"
+                );
+                Ok(())
+            }
+        }
+        _ = &mut notified => (&mut connection).await,
+    }
+}
+
+fn execution_runtime_http_builder() -> HyperServerBuilder<TokioExecutor> {
+    let mut builder = HyperServerBuilder::new(TokioExecutor::new());
+
+    // Hyper's HTTP/1 header timer is opt-in when using the custom connection
+    // builder. Configure both protocol parsers explicitly: HTTP/1 gets a
+    // slow-header deadline and bounded parser buffer; HTTP/2 gets a
+    // decompressed header-list limit. These settings apply to metadata only.
+    builder
+        .http1()
+        .timer(TokioTimer::new())
+        .header_read_timeout(EXECUTION_RUNTIME_HTTP_HEADER_READ_TIMEOUT)
+        .max_buf_size(EXECUTION_RUNTIME_HTTP_HEADER_MAX_BYTES)
+        .max_headers(EXECUTION_RUNTIME_HTTP_MAX_HEADERS);
+    builder
+        .http2()
+        .timer(TokioTimer::new())
+        .enable_connect_protocol()
+        .max_concurrent_streams(EXECUTION_RUNTIME_HTTP2_MAX_CONCURRENT_STREAMS)
+        .max_header_list_size(EXECUTION_RUNTIME_HTTP_HEADER_MAX_BYTES as u32);
+
+    builder
+}
 
 #[derive(Debug, Clone, Default)]
 struct ExecutionRuntimeAppState {
@@ -143,16 +283,60 @@ pub async fn serve_execution_runtime_tcp(
     max_in_flight_requests: Option<usize>,
     distributed_request_gate: Option<RuntimeSemaphore>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let listener = tokio::net::TcpListener::bind(bind).await?;
-    axum::serve(
-        listener,
-        build_execution_runtime_router_with_request_gates(
-            max_in_flight_requests,
-            distributed_request_gate,
-        ),
-    )
-    .await?;
-    Ok(())
+    // The execution runtime accepts plans containing upstream credentials and
+    // can issue arbitrary provider requests.  It has no network
+    // authentication layer, so a TCP listener must remain local-only.
+    let bind_addr = validate_execution_runtime_tcp_bind(bind)?;
+    let listener = tokio::net::TcpListener::bind(bind_addr).await?;
+    let router = build_execution_runtime_router_with_request_gates(
+        max_in_flight_requests,
+        distributed_request_gate,
+    );
+    let mut make_service = router.into_make_service();
+
+    loop {
+        let (io, _remote_addr) = listener.accept().await?;
+        let tower_service = make_service
+            .call(())
+            .await
+            .unwrap_or_else(|error| match error {})
+            .map_request(|request: http::Request<Incoming>| request.map(Body::new));
+        let first_request_gate = ExecutionRuntimeFirstRequestGate::new();
+        let hyper_service = TowerToHyperService::new(ExecutionRuntimeFirstRequestService {
+            inner: tower_service,
+            gate: first_request_gate.clone(),
+        });
+        let io = TokioIo::new(io);
+
+        tokio::spawn(async move {
+            let builder = execution_runtime_http_builder();
+            let result = drive_execution_runtime_connection(
+                builder.serve_connection_with_upgrades(io, hyper_service),
+                first_request_gate,
+                EXECUTION_RUNTIME_HTTP_HEADER_READ_TIMEOUT,
+            )
+            .await;
+            if let Err(error) = result {
+                tracing::trace!(error = ?error, "execution runtime TCP connection closed with error");
+            }
+        });
+    }
+}
+
+fn validate_execution_runtime_tcp_bind(bind: &str) -> io::Result<SocketAddr> {
+    let address = bind.parse::<SocketAddr>().map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "execution runtime TCP bind must be a literal loopback socket address",
+        )
+    })?;
+    if !address.ip().is_loopback() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "execution runtime TCP bind must use a loopback address",
+        ));
+    }
+    Ok(address)
 }
 
 #[cfg(unix)]
@@ -161,23 +345,321 @@ pub async fn serve_execution_runtime_unix(
     max_in_flight_requests: Option<usize>,
     distributed_request_gate: Option<RuntimeSemaphore>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if let Some(parent) = socket_path.parent() {
-        std::fs::create_dir_all(parent)?;
+    let listener = bind_secure_execution_runtime_socket(socket_path).await?;
+    let router = build_execution_runtime_router_with_request_gates(
+        max_in_flight_requests,
+        distributed_request_gate,
+    );
+    let mut make_service = router.into_make_service();
+
+    loop {
+        let (io, _peer_addr) = listener.accept().await?;
+        let tower_service = make_service
+            .call(())
+            .await
+            .unwrap_or_else(|error| match error {})
+            .map_request(|request: http::Request<Incoming>| request.map(Body::new));
+        let first_request_gate = ExecutionRuntimeFirstRequestGate::new();
+        let hyper_service = TowerToHyperService::new(ExecutionRuntimeFirstRequestService {
+            inner: tower_service,
+            gate: first_request_gate.clone(),
+        });
+        let io = TokioIo::new(io);
+
+        tokio::spawn(async move {
+            let builder = execution_runtime_http_builder();
+            let result = drive_execution_runtime_connection(
+                builder.serve_connection_with_upgrades(io, hyper_service),
+                first_request_gate,
+                EXECUTION_RUNTIME_HTTP_HEADER_READ_TIMEOUT,
+            )
+            .await;
+            if let Err(error) = result {
+                tracing::trace!(error = ?error, "execution runtime Unix connection closed with error");
+            }
+        });
     }
-    if socket_path.exists() {
-        std::fs::remove_file(socket_path)?;
+}
+
+/// Bind the execution-runtime UDS without exposing an unauthenticated socket
+/// to other local users. In particular, do not unlink an arbitrary path before
+/// binding: a symlink/regular file could otherwise be replaced during that
+/// gap. An occupied path is removed only after it is proven to be a stale
+/// current-user socket.
+#[cfg(unix)]
+async fn bind_secure_execution_runtime_socket(
+    requested_path: &Path,
+) -> io::Result<tokio::net::UnixListener> {
+    let socket_path = prepare_execution_runtime_socket_path(requested_path)?;
+    if let Ok(metadata) = std::fs::symlink_metadata(&socket_path) {
+        validate_existing_execution_runtime_socket(&metadata)?;
     }
 
-    let listener = tokio::net::UnixListener::bind(socket_path)?;
-    axum::serve(
-        listener,
-        build_execution_runtime_router_with_request_gates(
-            max_in_flight_requests,
-            distributed_request_gate,
-        ),
-    )
-    .await?;
+    // Try the requested path first. If it is occupied, only a current-user
+    // socket that is demonstrably stale may be removed; every other path
+    // fails closed. This removes the old unlink-before-bind TOCTOU window.
+    match bind_execution_runtime_listener(&socket_path) {
+        Ok(listener) => {
+            harden_execution_runtime_socket(&listener, &socket_path)?;
+            Ok(listener)
+        }
+        Err(error) if error.kind() == io::ErrorKind::AddrInUse => {
+            remove_stale_execution_runtime_socket(&socket_path).await?;
+            let listener = bind_execution_runtime_listener(&socket_path)?;
+            harden_execution_runtime_socket(&listener, &socket_path)?;
+            Ok(listener)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(unix)]
+fn bind_execution_runtime_listener(socket_path: &Path) -> io::Result<tokio::net::UnixListener> {
+    // Unix bind derives the socket mode from the process umask. Darwin does
+    // not support fchmod on a Unix-socket fd, so make the inode private at
+    // creation time instead of briefly publishing a world-accessible socket.
+    // Serialize the temporary process-wide umask change with other binds made
+    // by this component and restore it before returning.
+    static BIND_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    let _lock = BIND_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| io::Error::other("execution runtime socket bind lock poisoned"))?;
+    let previous_umask = unsafe { libc::umask(0o177) };
+    let result = tokio::net::UnixListener::bind(socket_path);
+    unsafe {
+        libc::umask(previous_umask);
+    }
+    result
+}
+
+#[cfg(unix)]
+fn prepare_execution_runtime_socket_path(requested_path: &Path) -> io::Result<PathBuf> {
+    use std::ffi::OsStr;
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+
+    let file_name = requested_path.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "execution runtime socket path must name a file",
+        )
+    })?;
+    if file_name == OsStr::new(".") || file_name == OsStr::new("..") {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "execution runtime socket path has an invalid file name",
+        ));
+    }
+
+    let requested_parent = requested_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+
+    // Do not let a caller-controlled symlink redirect directory creation (or
+    // the eventual socket) into an unrelated tree.  Root-owned compatibility
+    // links such as macOS `/tmp -> /private/tmp` and Linux `/var/run -> /run`
+    // remain allowed; links owned by an unprivileged user fail closed.
+    validate_requested_execution_runtime_parent_components(requested_parent)?;
+    let mut directory_builder = std::fs::DirBuilder::new();
+    directory_builder.recursive(true).mode(0o700);
+    directory_builder.create(requested_parent)?;
+    validate_requested_execution_runtime_parent_components(requested_parent)?;
+
+    let parent = std::fs::canonicalize(requested_parent)?;
+    validate_execution_runtime_socket_parent(&parent)?;
+    let metadata = std::fs::symlink_metadata(&parent)?;
+    if metadata.mode() & 0o022 != 0
+        && metadata.mode() & 0o1000 == 0
+        && metadata.uid() == unsafe { libc::geteuid() }
+    {
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o700))?;
+    }
+
+    Ok(parent.join(file_name))
+}
+
+#[cfg(unix)]
+fn validate_requested_execution_runtime_parent_components(parent: &Path) -> io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    use std::path::Component;
+
+    let mut prefix = PathBuf::new();
+    for component in parent.components() {
+        match component {
+            Component::Prefix(prefix_component) => prefix.push(prefix_component.as_os_str()),
+            Component::RootDir => prefix.push(Path::new("/")),
+            Component::CurDir => {}
+            Component::ParentDir => prefix.push(".."),
+            Component::Normal(name) => {
+                prefix.push(name);
+                let metadata = match std::fs::symlink_metadata(&prefix) {
+                    Ok(metadata) => metadata,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => break,
+                    Err(error) => return Err(error),
+                };
+                if metadata.file_type().is_symlink() {
+                    if metadata.uid() != 0 {
+                        return Err(io::Error::new(
+                            io::ErrorKind::PermissionDenied,
+                            "execution runtime socket parent contains an untrusted symlink",
+                        ));
+                    }
+                } else if !metadata.is_dir() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "execution runtime socket parent contains a non-directory component",
+                    ));
+                }
+            }
+        }
+    }
     Ok(())
+}
+
+#[cfg(unix)]
+fn validate_execution_runtime_socket_parent(parent: &Path) -> io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    let effective_uid = unsafe { libc::geteuid() };
+    let mut current = Some(parent);
+    let mut is_immediate_parent = true;
+    while let Some(path) = current {
+        let metadata = std::fs::symlink_metadata(path)?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "execution runtime socket parent contains an unsafe path component",
+            ));
+        }
+        let mode = metadata.mode();
+        if metadata.uid() != effective_uid && metadata.uid() != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "execution runtime socket parent has untrusted ownership",
+            ));
+        }
+        if mode & 0o022 != 0 && mode & 0o1000 == 0 && metadata.uid() != effective_uid {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "execution runtime socket parent must not be writable without sticky protection",
+            ));
+        }
+        if !is_immediate_parent && mode & 0o022 != 0 && mode & 0o1000 == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "execution runtime socket ancestor is writable without sticky protection",
+            ));
+        }
+        is_immediate_parent = false;
+        current = path.parent();
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn harden_execution_runtime_socket(
+    listener: &tokio::net::UnixListener,
+    socket_path: &Path,
+) -> io::Result<()> {
+    use std::mem::MaybeUninit;
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    use std::os::unix::io::AsRawFd;
+
+    let metadata = std::fs::symlink_metadata(socket_path)?;
+    let effective_uid = unsafe { libc::geteuid() };
+    let mut stat = MaybeUninit::<libc::stat>::uninit();
+    if unsafe { libc::fstat(listener.as_raw_fd(), stat.as_mut_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let stat = unsafe { stat.assume_init() };
+    let fd_mode = stat.st_mode as libc::mode_t;
+    if metadata.file_type().is_symlink()
+        || !metadata.file_type().is_socket()
+        || metadata.uid() != effective_uid
+        || metadata.nlink() != 1
+        || metadata.mode() & 0o777 != 0o600
+        // A pathname Unix socket and its connected sockfs inode do not have
+        // portable pathname identity.  In particular, Linux can report a
+        // different inode number (and always reports a different device) for
+        // the descriptor than for the dentry.  Validate the descriptor's own
+        // type and owner instead; the canonical, owner-checked
+        // parent and the path checks above prevent an untrusted user from
+        // replacing this private socket.
+        || (fd_mode & libc::S_IFMT) != libc::S_IFSOCK
+        || stat.st_uid != effective_uid
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "execution runtime socket path changed or has unsafe ownership",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn validate_existing_execution_runtime_socket(metadata: &std::fs::Metadata) -> io::Result<()> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    let effective_uid = unsafe { libc::geteuid() };
+    if metadata.file_type().is_symlink()
+        || !metadata.file_type().is_socket()
+        || metadata.uid() != effective_uid
+        || metadata.nlink() != 1
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "occupied execution runtime socket path is not a current-user socket",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+async fn remove_stale_execution_runtime_socket(socket_path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    use std::time::Duration;
+
+    let metadata = match std::fs::symlink_metadata(socket_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    validate_existing_execution_runtime_socket(&metadata)?;
+    match tokio::time::timeout(
+        Duration::from_millis(100),
+        tokio::net::UnixStream::connect(socket_path),
+    )
+    .await
+    {
+        Ok(Ok(_stream)) => {
+            return Err(io::Error::new(
+                io::ErrorKind::AddrInUse,
+                "execution runtime socket is already serving requests",
+            ));
+        }
+        Ok(Err(error))
+            if matches!(
+                error.kind(),
+                io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound
+            ) => {}
+        Ok(Err(error)) => return Err(error),
+        Err(_) => {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "could not determine whether execution runtime socket is active",
+            ));
+        }
+    }
+
+    let latest = std::fs::symlink_metadata(socket_path)?;
+    validate_existing_execution_runtime_socket(&latest)?;
+    if latest.ino() != metadata.ino() || latest.dev() != metadata.dev() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "occupied execution runtime socket path changed during cleanup",
+        ));
+    }
+    std::fs::remove_file(socket_path)
 }
 
 #[cfg(not(unix))]
@@ -309,17 +791,22 @@ async fn parse_request_json<T>(request: Request) -> Result<T, ExecutionRuntimeAp
 where
     T: serde::de::DeserializeOwned,
 {
-    let body = to_bytes(
-        request.into_body(),
-        usize::try_from(crate::headers::max_request_body_bytes()).unwrap_or(usize::MAX),
-    )
-    .await
-    .map_err(|err| {
-        ExecutionRuntimeAppError(ExecutionRuntimeServerError::RequestRead(err.to_string()))
-    })?;
+    let request_body_limit =
+        execution_runtime_request_body_limit_bytes(crate::headers::max_request_body_bytes());
+    let body = to_bytes(request.into_body(), request_body_limit)
+        .await
+        .map_err(|err| {
+            ExecutionRuntimeAppError(ExecutionRuntimeServerError::RequestRead(err.to_string()))
+        })?;
     serde_json::from_slice(&body).map_err(|err| {
         ExecutionRuntimeAppError(ExecutionRuntimeServerError::InvalidRequestJson(err))
     })
+}
+
+fn execution_runtime_request_body_limit_bytes(configured_limit: u64) -> usize {
+    usize::try_from(configured_limit)
+        .unwrap_or(EXECUTION_RUNTIME_REQUEST_BODY_HARD_LIMIT_BYTES)
+        .min(EXECUTION_RUNTIME_REQUEST_BODY_HARD_LIMIT_BYTES)
 }
 
 fn build_overloaded_response(message: &str) -> Response {
@@ -352,7 +839,7 @@ struct ExecutionRuntimeAppError(ExecutionRuntimeServerError);
 
 impl IntoResponse for ExecutionRuntimeAppError {
     fn into_response(self) -> Response {
-        let status_code = match self.0 {
+        let status_code = match &self.0 {
             ExecutionRuntimeServerError::RequestRead(_)
             | ExecutionRuntimeServerError::InvalidRequestJson(_) => StatusCode::BAD_REQUEST,
             ExecutionRuntimeServerError::Overloaded { .. } => {
@@ -360,7 +847,9 @@ impl IntoResponse for ExecutionRuntimeAppError {
             }
             ExecutionRuntimeServerError::Transport(
                 ExecutionRuntimeTransportError::RequestBodyRequired
+                | ExecutionRuntimeTransportError::RequestBodyAmbiguous
                 | ExecutionRuntimeTransportError::BodyDecode(_)
+                | ExecutionRuntimeTransportError::BodyTooLarge { .. }
                 | ExecutionRuntimeTransportError::UnsupportedContentEncoding(_)
                 | ExecutionRuntimeTransportError::ProxyUnsupported
                 | ExecutionRuntimeTransportError::InvalidMethod(_)
@@ -372,7 +861,7 @@ impl IntoResponse for ExecutionRuntimeAppError {
             ) => StatusCode::BAD_REQUEST,
             ExecutionRuntimeServerError::Transport(
                 ExecutionRuntimeTransportError::UpstreamHttpStatus { status_code, .. },
-            ) => StatusCode::from_u16(status_code).unwrap_or(StatusCode::BAD_GATEWAY),
+            ) => StatusCode::from_u16(*status_code).unwrap_or(StatusCode::BAD_GATEWAY),
             ExecutionRuntimeServerError::Transport(
                 ExecutionRuntimeTransportError::ClientBuild(_)
                 | ExecutionRuntimeTransportError::BrowserClientBuild(_)
@@ -384,11 +873,43 @@ impl IntoResponse for ExecutionRuntimeAppError {
                 | ExecutionRuntimeTransportError::InvalidJson(_),
             ) => StatusCode::BAD_GATEWAY,
         };
+        let message = match &self.0 {
+            ExecutionRuntimeServerError::RequestRead(_)
+            | ExecutionRuntimeServerError::InvalidRequestJson(_)
+            | ExecutionRuntimeServerError::Transport(
+                ExecutionRuntimeTransportError::RequestBodyRequired
+                | ExecutionRuntimeTransportError::RequestBodyAmbiguous
+                | ExecutionRuntimeTransportError::BodyDecode(_)
+                | ExecutionRuntimeTransportError::BodyTooLarge { .. }
+                | ExecutionRuntimeTransportError::UnsupportedContentEncoding(_)
+                | ExecutionRuntimeTransportError::ProxyUnsupported
+                | ExecutionRuntimeTransportError::InvalidMethod(_)
+                | ExecutionRuntimeTransportError::InvalidHeaderName(_)
+                | ExecutionRuntimeTransportError::InvalidHeaderValue(_)
+                | ExecutionRuntimeTransportError::InvalidProxy(_)
+                | ExecutionRuntimeTransportError::UnsupportedTransportProfile(_)
+                | ExecutionRuntimeTransportError::BodyEncode(_),
+            ) => "Invalid execution runtime request".to_string(),
+            ExecutionRuntimeServerError::Transport(
+                ExecutionRuntimeTransportError::UpstreamHttpStatus { status_code, .. },
+            ) => format!("Upstream request returned HTTP {status_code}"),
+            ExecutionRuntimeServerError::Transport(
+                ExecutionRuntimeTransportError::ClientBuild(_)
+                | ExecutionRuntimeTransportError::BrowserClientBuild(_)
+                | ExecutionRuntimeTransportError::BrowserBody(_)
+                | ExecutionRuntimeTransportError::UpstreamRequest(_)
+                | ExecutionRuntimeTransportError::UpstreamResponseTooLarge { .. }
+                | ExecutionRuntimeTransportError::UpstreamResponseDecode { .. }
+                | ExecutionRuntimeTransportError::RelayError(_)
+                | ExecutionRuntimeTransportError::InvalidJson(_),
+            ) => "Upstream request failed".to_string(),
+            ExecutionRuntimeServerError::Overloaded { .. } => unreachable!(),
+        };
 
         (
             status_code,
             Json(json!({
-                "error": self.0.to_string(),
+                "error": message,
             })),
         )
             .into_response()
@@ -399,7 +920,9 @@ impl IntoResponse for ExecutionRuntimeAppError {
 mod tests {
     use super::{
         build_execution_runtime_router_with_request_concurrency_limit,
-        build_execution_runtime_router_with_request_gates, DISTRIBUTED_REQUEST_GATE_NAME,
+        build_execution_runtime_router_with_request_gates,
+        execution_runtime_request_body_limit_bytes, validate_execution_runtime_tcp_bind,
+        ExecutionRuntimeAppError, ExecutionRuntimeServerError, DISTRIBUTED_REQUEST_GATE_NAME,
     };
     use aether_contracts::{
         ExecutionPlan, ExecutionTimeouts, RequestBody, StreamFrame, StreamFrameType,
@@ -408,13 +931,27 @@ mod tests {
         MemoryRuntimeStateConfig, RuntimeSemaphore, RuntimeSemaphoreConfig, RuntimeState,
     };
     use axum::body::{Body, Bytes};
-    use axum::response::Response;
+    use axum::response::{IntoResponse, Response};
     use axum::routing::any;
     use axum::{extract::Request, Router};
     use http::StatusCode;
+    use http_body_util::{BodyExt, Full};
+    use hyper::body::Incoming as HyperIncoming;
+    use hyper::{Request as HyperRequest, Response as HyperResponse};
+    use hyper_util::rt::{TokioExecutor, TokioIo};
     use std::convert::Infallible;
+    use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    #[cfg(unix)]
+    use std::os::unix::net::UnixListener as StdUnixListener;
+    use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tower::service_fn;
+
+    use crate::execution_runtime::ExecutionRuntimeTransportError;
 
     fn distributed_gate(gate: &'static str, limit: usize) -> RuntimeSemaphore {
         RuntimeState::memory(MemoryRuntimeStateConfig::default())
@@ -431,6 +968,183 @@ mod tests {
             axum::serve(listener, app).await.expect("server should run");
         });
         (format!("http://{addr}"), handle)
+    }
+
+    #[test]
+    fn execution_runtime_tcp_bind_accepts_only_literal_loopback_addresses() {
+        for bind in ["127.0.0.1:0", "127.42.17.9:5219", "[::1]:0"] {
+            let address = validate_execution_runtime_tcp_bind(bind)
+                .unwrap_or_else(|error| panic!("{bind} should be accepted: {error}"));
+            assert!(address.ip().is_loopback());
+        }
+    }
+
+    #[test]
+    fn execution_runtime_tcp_bind_rejects_wildcard_non_loopback_and_unparseable_addresses() {
+        for bind in [
+            "0.0.0.0:5219",
+            "[::]:5219",
+            "10.0.0.1:5219",
+            "192.168.1.10:5219",
+            "localhost:5219",
+            "not-a-socket-address",
+            "127.0.0.1",
+        ] {
+            assert!(
+                validate_execution_runtime_tcp_bind(bind).is_err(),
+                "{bind} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn execution_runtime_parser_defaults_preserve_high_http2_concurrency() {
+        assert_eq!(
+            super::EXECUTION_RUNTIME_HTTP2_MAX_CONCURRENT_STREAMS,
+            16_384
+        );
+        assert_eq!(
+            super::EXECUTION_RUNTIME_HTTP_HEADER_READ_TIMEOUT,
+            std::time::Duration::from_secs(30)
+        );
+        assert_eq!(super::EXECUTION_RUNTIME_HTTP_HEADER_MAX_BYTES, 64 * 1024);
+        assert_eq!(super::EXECUTION_RUNTIME_HTTP_MAX_HEADERS, 256);
+    }
+
+    #[test]
+    fn execution_runtime_request_body_limit_never_accepts_unbounded_sentinel() {
+        assert_eq!(
+            execution_runtime_request_body_limit_bytes(u64::MAX),
+            super::EXECUTION_RUNTIME_REQUEST_BODY_HARD_LIMIT_BYTES
+        );
+        assert_eq!(
+            execution_runtime_request_body_limit_bytes(512 * 1024 * 1024),
+            super::EXECUTION_RUNTIME_REQUEST_BODY_HARD_LIMIT_BYTES
+        );
+        assert_eq!(execution_runtime_request_body_limit_bytes(1024), 1024);
+    }
+
+    #[tokio::test]
+    async fn execution_runtime_first_request_deadline_covers_partial_protocol_input() {
+        let prefixes: &[&[u8]] = &[
+            b"G",
+            b"GET /health HTTP/1.1\r\nHost: localhost\r\n",
+            b"PRI * HTTP/2.0\r\n\r\nSM\r\n",
+        ];
+
+        for prefix in prefixes {
+            let (mut client, server) = tokio::io::duplex(16 * 1024);
+            client
+                .write_all(prefix)
+                .await
+                .expect("fixture prefix should be writable");
+
+            let gate = super::ExecutionRuntimeFirstRequestGate::new();
+            let service = service_fn(|_request: HyperRequest<HyperIncoming>| async {
+                Ok::<_, Infallible>(HyperResponse::new(Full::new(bytes::Bytes::from_static(
+                    b"ok",
+                ))))
+            });
+            let builder = super::execution_runtime_http_builder();
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                super::drive_execution_runtime_connection(
+                    builder.serve_connection_with_upgrades(
+                        TokioIo::new(server),
+                        super::TowerToHyperService::new(
+                            super::ExecutionRuntimeFirstRequestService {
+                                inner: service,
+                                gate: gate.clone(),
+                            },
+                        ),
+                    ),
+                    gate,
+                    std::time::Duration::from_millis(5),
+                ),
+            )
+            .await
+            .expect("partial protocol input should hit the first-request deadline");
+            assert!(result.is_ok());
+
+            let mut byte = [0u8; 1];
+            let read =
+                tokio::time::timeout(std::time::Duration::from_secs(1), client.read(&mut byte))
+                    .await
+                    .expect("timed-out connection should close its peer");
+            assert!(matches!(read, Ok(0) | Err(_)));
+        }
+    }
+
+    #[tokio::test]
+    async fn execution_runtime_first_request_deadline_does_not_cut_off_body_streaming() {
+        let (mut client, server) = tokio::io::duplex(16 * 1024);
+        let gate = super::ExecutionRuntimeFirstRequestGate::new();
+        let (headers_seen_tx, mut headers_seen_rx) = tokio::sync::mpsc::unbounded_channel();
+        let service = service_fn(move |request: HyperRequest<HyperIncoming>| {
+            let _ = headers_seen_tx.send(());
+            async move {
+                let body = request
+                    .into_body()
+                    .collect()
+                    .await
+                    .expect("test body should decode")
+                    .to_bytes();
+                Ok::<_, Infallible>(HyperResponse::new(Full::new(body)))
+            }
+        });
+        let builder = super::execution_runtime_http_builder();
+        let server_task = tokio::spawn(async move {
+            super::drive_execution_runtime_connection(
+                builder.serve_connection_with_upgrades(
+                    TokioIo::new(server),
+                    super::TowerToHyperService::new(super::ExecutionRuntimeFirstRequestService {
+                        inner: service,
+                        gate: gate.clone(),
+                    }),
+                ),
+                gate,
+                std::time::Duration::from_millis(20),
+            )
+            .await
+        });
+
+        let large_body = vec![b'x'; 128 * 1024];
+        let request_headers = format!(
+            "POST /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
+            large_body.len()
+        );
+        client
+            .write_all(request_headers.as_bytes())
+            .await
+            .expect("request headers should be writable");
+        tokio::time::timeout(std::time::Duration::from_secs(1), headers_seen_rx.recv())
+            .await
+            .expect("request headers should reach the service")
+            .expect("service notification should remain available");
+
+        tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+        // The parser's 64 KiB metadata buffer must not become a body-size or
+        // body-throughput limit. Send a body larger than that buffer after the
+        // first-request gate has opened and verify it is echoed intact.
+        client
+            .write_all(&large_body)
+            .await
+            .expect("body should remain writable after the header deadline");
+        let mut response = Vec::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            client.read_to_end(&mut response),
+        )
+        .await
+        .expect("streaming response should complete")
+        .expect("response should be readable");
+        let result = server_task
+            .await
+            .expect("server connection task should join");
+        assert!(result.is_ok());
+        assert!(response
+            .windows(large_body.len())
+            .any(|window| window == large_body.as_slice()));
     }
 
     fn stream_plan(url: String) -> ExecutionPlan {
@@ -463,6 +1177,159 @@ mod tests {
                 ..ExecutionTimeouts::default()
             }),
         }
+    }
+
+    #[cfg(unix)]
+    fn test_socket_path() -> PathBuf {
+        std::env::temp_dir()
+            .join(format!("ar{}", uuid::Uuid::new_v4().simple()))
+            .join("n")
+            .join("s.sock")
+    }
+
+    #[cfg(unix)]
+    fn remove_test_socket_path(socket_path: &std::path::Path) {
+        if let Some(parent) = socket_path.parent() {
+            if let Some(root) = parent.parent() {
+                let _ = fs::remove_dir_all(root);
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn execution_runtime_unix_socket_and_new_parent_are_private() {
+        let socket_path = test_socket_path();
+        let listener = super::bind_secure_execution_runtime_socket(&socket_path)
+            .await
+            .expect("socket should bind");
+
+        let socket_metadata = fs::symlink_metadata(&socket_path).expect("socket should exist");
+        assert!(socket_metadata.file_type().is_socket());
+        assert_eq!(socket_metadata.uid(), unsafe { libc::geteuid() });
+        assert_eq!(socket_metadata.mode() & 0o777, 0o600);
+
+        let parent = socket_path.parent().expect("socket should have a parent");
+        let parent_mode = fs::symlink_metadata(parent)
+            .expect("parent should exist")
+            .mode()
+            & 0o777;
+        assert_eq!(parent_mode, 0o700);
+
+        drop(listener);
+        remove_test_socket_path(&socket_path);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn execution_runtime_unix_socket_rejects_regular_file_path() {
+        let socket_path = test_socket_path();
+        let parent = socket_path.parent().expect("socket should have a parent");
+        fs::create_dir_all(parent).expect("parent should be created");
+        fs::write(&socket_path, b"do not replace this file").expect("file should be created");
+
+        let error = super::bind_secure_execution_runtime_socket(&socket_path)
+            .await
+            .expect_err("regular file must not be replaced");
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            fs::read(&socket_path).expect("file should remain"),
+            b"do not replace this file"
+        );
+
+        remove_test_socket_path(&socket_path);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn execution_runtime_unix_socket_rejects_symlink_path() {
+        use std::os::unix::fs::symlink;
+
+        let socket_path = test_socket_path();
+        let parent = socket_path.parent().expect("socket should have a parent");
+        fs::create_dir_all(parent).expect("parent should be created");
+        let target = parent.join("target");
+        fs::write(&target, b"target must not be followed").expect("target should be created");
+        symlink(&target, &socket_path).expect("symlink should be created");
+
+        let error = super::bind_secure_execution_runtime_socket(&socket_path)
+            .await
+            .expect_err("symlink must not be replaced or followed");
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            fs::read(&target).expect("target should remain"),
+            b"target must not be followed"
+        );
+
+        remove_test_socket_path(&socket_path);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn execution_runtime_unix_socket_rejects_untrusted_parent_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let socket_path = test_socket_path();
+        let parent_root = socket_path
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("socket should have a test root");
+        fs::create_dir_all(parent_root).expect("test root should be created");
+        let target = parent_root.join("target");
+        fs::create_dir_all(&target).expect("symlink target should be created");
+        let link = parent_root.join("link");
+        symlink(&target, &link).expect("parent symlink should be created");
+        let linked_socket_path = link.join("runtime.sock");
+
+        let error = super::bind_secure_execution_runtime_socket(&linked_socket_path)
+            .await
+            .expect_err("untrusted parent symlink must not be followed");
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(!target.join("runtime.sock").exists());
+
+        remove_test_socket_path(&socket_path);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn execution_runtime_unix_socket_does_not_replace_active_listener() {
+        let socket_path = test_socket_path();
+        let first_listener = super::bind_secure_execution_runtime_socket(&socket_path)
+            .await
+            .expect("first socket should bind");
+
+        let error = super::bind_secure_execution_runtime_socket(&socket_path)
+            .await
+            .expect_err("active socket must not be replaced");
+        assert_eq!(error.kind(), std::io::ErrorKind::AddrInUse);
+        assert!(fs::symlink_metadata(&socket_path)
+            .expect("active socket should remain")
+            .file_type()
+            .is_socket());
+
+        drop(first_listener);
+        remove_test_socket_path(&socket_path);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn execution_runtime_unix_socket_rebinds_stale_current_user_socket() {
+        let socket_path = test_socket_path();
+        let parent = socket_path.parent().expect("socket should have a parent");
+        fs::create_dir_all(parent).expect("parent should be created");
+        let stale_listener = StdUnixListener::bind(&socket_path).expect("stale socket should bind");
+        drop(stale_listener);
+
+        let listener = super::bind_secure_execution_runtime_socket(&socket_path)
+            .await
+            .expect("stale socket should be replaced");
+        let rebound_metadata =
+            fs::symlink_metadata(&socket_path).expect("rebound socket should exist");
+        assert!(rebound_metadata.file_type().is_socket());
+        assert_eq!(rebound_metadata.mode() & 0o777, 0o600);
+
+        drop(listener);
+        remove_test_socket_path(&socket_path);
     }
 
     #[tokio::test]
@@ -666,5 +1533,42 @@ mod tests {
         ));
 
         runtime_handle.abort();
+    }
+
+    #[tokio::test]
+    async fn execution_runtime_transport_errors_do_not_expose_internal_details() {
+        let secret = "Bearer upstream-secret https://user:password@example.test?q=token";
+        let response = ExecutionRuntimeAppError(ExecutionRuntimeServerError::Transport(
+            ExecutionRuntimeTransportError::UpstreamRequest(secret.to_string()),
+        ))
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("error body should read");
+        let body = String::from_utf8(body.to_vec()).expect("error body should be utf8");
+        assert_eq!(body, r#"{"error":"Upstream request failed"}"#);
+        assert!(!body.contains(secret));
+        assert!(!body.contains("upstream-secret"));
+    }
+
+    #[tokio::test]
+    async fn execution_runtime_upstream_status_keeps_only_status_diagnostics() {
+        let response = ExecutionRuntimeAppError(ExecutionRuntimeServerError::Transport(
+            ExecutionRuntimeTransportError::UpstreamHttpStatus {
+                status_code: 429,
+                message: "authorization=Bearer upstream-secret".to_string(),
+            },
+        ))
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("error body should read");
+        let body = String::from_utf8(body.to_vec()).expect("error body should be utf8");
+        assert_eq!(body, r#"{"error":"Upstream request returned HTTP 429"}"#);
+        assert!(!body.contains("upstream-secret"));
     }
 }

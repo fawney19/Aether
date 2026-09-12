@@ -7,6 +7,7 @@ use aether_runtime::{
     ConcurrencyError, ConcurrencyGate, ConcurrencyPermit, MetricKind, MetricLabel, MetricSample,
 };
 use dashmap::DashMap;
+use sha2::{Digest as _, Sha256};
 use tokio::time::timeout;
 use url::Url;
 
@@ -382,15 +383,59 @@ pub(crate) fn upstream_target_key_from_url(
     let proxy = proxy
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or("-");
-    Some(format!("{scheme}://{host}:{port}|proxy={proxy}"))
+        .map(safe_proxy_origin)
+        .unwrap_or_else(|| "-".to_string());
+    Some(format!(
+        "{scheme}://{}:{port}|proxy={proxy}",
+        format_target_host(&host)
+    ))
 }
 
 fn fallback_target_key(plan: &ExecutionPlan) -> String {
     format!(
-        "unparsed|provider={}|endpoint={}|url={}",
-        plan.provider_id, plan.endpoint_id, plan.url
+        "unparsed|provider_sha256={}|endpoint_sha256={}|url_sha256={}",
+        short_target_hash(&plan.provider_id),
+        short_target_hash(&plan.endpoint_id),
+        short_target_hash(&plan.url)
     )
+}
+
+/// Return a proxy identity suitable for an in-memory key and a Prometheus
+/// label.  Proxy URLs frequently contain credentials, query-string tokens, or
+/// fragments; none of those are relevant to target admission and must never be
+/// copied into a metric label or log message.
+fn safe_proxy_origin(raw_proxy: &str) -> String {
+    let Ok(proxy) = Url::parse(raw_proxy) else {
+        return "invalid".to_string();
+    };
+    let Some(host) = proxy.host_str() else {
+        return "invalid".to_string();
+    };
+    let scheme = proxy.scheme().trim().to_ascii_lowercase();
+    if scheme.is_empty() {
+        return "invalid".to_string();
+    }
+    let port = proxy
+        .port_or_known_default()
+        .map(|port| port.to_string())
+        .unwrap_or_else(|| "-".to_string());
+    format!("{scheme}://{}:{port}", format_target_host(host))
+}
+
+fn format_target_host(host: &str) -> String {
+    if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    }
+}
+
+fn short_target_hash(value: &str) -> String {
+    let digest = Sha256::digest(value.as_bytes());
+    digest[..12]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 fn upstream_target_metric_limit() -> usize {
@@ -473,6 +518,48 @@ mod tests {
             )
             .expect("url should parse"),
             "https://api.example.com:443|proxy=http://proxy.internal:8080"
+        );
+    }
+
+    #[test]
+    fn upstream_target_key_strips_proxy_credentials_and_url_components() {
+        let key = upstream_target_key_from_url(
+            "https://api.example.com/v1/chat/completions?api_key=upstream-secret#fragment",
+            Some("http://proxy-user:proxy-password@proxy.internal:8080/connect?token=proxy-secret#secret"),
+        )
+        .expect("url should parse");
+
+        assert_eq!(
+            key,
+            "https://api.example.com:443|proxy=http://proxy.internal:8080"
+        );
+        assert!(!key.contains("proxy-user"));
+        assert!(!key.contains("proxy-password"));
+        assert!(!key.contains("proxy-secret"));
+        assert!(!key.contains("upstream-secret"));
+    }
+
+    #[test]
+    fn fallback_target_key_hashes_unparsed_url_and_identifiers() {
+        let mut plan = test_plan("not a valid https://user:password@example.test/?key=secret");
+        plan.provider_id = "provider-secret".to_string();
+        plan.endpoint_id = "endpoint-secret".to_string();
+
+        let key = upstream_target_key(&plan);
+
+        assert!(key.starts_with("unparsed|provider_sha256="));
+        assert!(!key.contains("provider-secret"));
+        assert!(!key.contains("endpoint-secret"));
+        assert!(!key.contains("password"));
+        assert!(!key.contains("key=secret"));
+        assert!(key.len() <= 160);
+    }
+
+    #[test]
+    fn proxy_identity_handles_ipv6_without_ambiguity() {
+        assert_eq!(
+            safe_proxy_origin("http://user:pass@[2001:db8::1]:8080/path"),
+            "http://[2001:db8::1]:8080"
         );
     }
 

@@ -1,5 +1,6 @@
 use std::sync::{Arc, Mutex};
 
+use aether_crypto::DEVELOPMENT_ENCRYPTION_KEY;
 use aether_data::repository::video_tasks::InMemoryVideoTaskRepository;
 use aether_data_contracts::repository::video_tasks::{
     UpsertVideoTask, VideoTaskLookupKey, VideoTaskReadRepository, VideoTaskStatus,
@@ -11,7 +12,8 @@ use axum::{extract::Request, Json, Router};
 use serde_json::json;
 
 use super::{
-    build_state_with_execution_runtime_override, start_server, AppState, VideoTaskTruthSourceMode,
+    build_state_with_execution_runtime_override, start_server, video_provider_catalog_repository,
+    AppState, VideoTaskTruthSourceMode,
 };
 
 fn sample_due_openai_task(upstream_base_url: &str) -> UpsertVideoTask {
@@ -168,9 +170,24 @@ async fn gateway_background_video_task_poller_refreshes_due_openai_task_from_rep
         .upsert(sample_due_openai_task("https://api.openai.example/v1"))
         .await
         .expect("task upsert should succeed");
+    let provider_catalog_repository = video_provider_catalog_repository(
+        "provider-openai-video-local-1",
+        "openai",
+        "endpoint-openai-video-local-1",
+        "openai:video",
+        "https://api.openai.example/v1",
+        "key-openai-video-local-1",
+        "sk-upstream-openai-video",
+    );
 
     let gateway_state = build_state_with_execution_runtime_override(execution_runtime_url)
-        .with_video_task_data_repository_for_tests(Arc::clone(&repository))
+        .with_data_state_for_tests(
+            crate::data::GatewayDataState::with_video_task_repository_and_provider_transport_for_tests(
+                Arc::clone(&repository),
+                provider_catalog_repository,
+                DEVELOPMENT_ENCRYPTION_KEY,
+            ),
+        )
         .with_video_task_truth_source_mode(VideoTaskTruthSourceMode::RustAuthoritative)
         .with_video_task_poller_config(std::time::Duration::from_millis(25), 8);
     let background_tasks = gateway_state.spawn_background_tasks();
@@ -196,29 +213,23 @@ async fn gateway_background_video_task_poller_refreshes_due_openai_task_from_rep
     };
 
     assert_eq!(stored.status, VideoTaskStatus::Processing);
+    assert_eq!(stored.prompt.as_deref(), Some("hello"));
+    assert_eq!(stored.username.as_deref(), Some("video-user"));
+    assert_eq!(stored.api_key_name.as_deref(), Some("video-key"));
+    assert_eq!(stored.duration_seconds, Some(4));
+    assert_eq!(stored.resolution.as_deref(), Some("720p"));
+    assert_eq!(stored.aspect_ratio.as_deref(), Some("16:9"));
+    assert_eq!(stored.size.as_deref(), Some("1280x720"));
     assert_eq!(stored.progress_percent, 37);
     assert_eq!(stored.poll_count, 1);
     assert!(
         stored.next_poll_at_unix_secs.is_some_and(|value| value > 0),
         "poller should push next poll into the future"
     );
-    assert_eq!(
-        stored
-            .request_metadata
-            .as_ref()
-            .and_then(|value| value.get("rust_owner"))
-            .and_then(serde_json::Value::as_str),
-        Some("async_task")
-    );
-    assert_eq!(
-        stored
-            .request_metadata
-            .as_ref()
-            .and_then(|value| value.get("poll_raw_response"))
-            .and_then(|value| value.get("status"))
-            .and_then(serde_json::Value::as_str),
-        Some("processing")
-    );
+    assert!(stored.original_request_body.is_none());
+    assert!(stored.progress_message.is_none());
+    assert!(stored.error_message.is_none());
+    assert!(stored.request_metadata.is_none());
 
     assert_eq!(
         seen_execution_runtime_requests
@@ -274,10 +285,25 @@ async fn gateway_background_video_task_poller_refreshes_due_openai_task_from_rep
         .upsert(sample_due_openai_task(&upstream_api_root))
         .await
         .expect("task upsert should succeed");
+    let provider_catalog_repository = video_provider_catalog_repository(
+        "provider-openai-video-local-1",
+        "openai",
+        "endpoint-openai-video-local-1",
+        "openai:video",
+        &upstream_api_root,
+        "key-openai-video-local-1",
+        "sk-upstream-openai-video",
+    );
 
     let gateway_state = AppState::new()
         .expect("gateway state should build")
-        .with_video_task_data_repository_for_tests(Arc::clone(&repository))
+        .with_data_state_for_tests(
+            crate::data::GatewayDataState::with_video_task_repository_and_provider_transport_for_tests(
+                Arc::clone(&repository),
+                provider_catalog_repository,
+                DEVELOPMENT_ENCRYPTION_KEY,
+            ),
+        )
         .with_video_task_truth_source_mode(VideoTaskTruthSourceMode::RustAuthoritative)
         .with_video_task_poller_config(std::time::Duration::from_millis(25), 8);
     let background_tasks = gateway_state.spawn_background_tasks();

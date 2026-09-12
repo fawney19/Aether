@@ -1,31 +1,102 @@
+# Aether 单节点部署配置 - PostgreSQL + Redis
+# 使用方法: docker compose up -d
+
 services:
+  postgres:
+    # OCI index digest for the official multi-architecture postgres:15.19 image.
+    image: postgres:15.19@sha256:5f72c7b5bd616308ccfd2e74d6be16fb06364e5eecbb815fe9dc6ab9761d2111
+    container_name: aether-postgres
+    shm_size: ${POSTGRES_SHM_SIZE:-512mb}
+    environment:
+      POSTGRES_DB: aether
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env}
+      TZ: Asia/Shanghai
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:${DB_PORT:-5432}:5432"
+    command: >
+      postgres
+      -c idle_in_transaction_session_timeout=30000
+      -c tcp_keepalives_idle=30
+      -c tcp_keepalives_interval=10
+      -c shared_preload_libraries=pg_stat_statements
+      -c pg_stat_statements.track=all
+      -c pg_stat_statements.max=10000
+      -c shared_buffers=${POSTGRES_SHARED_BUFFERS:-1GB}
+      -c effective_cache_size=${POSTGRES_EFFECTIVE_CACHE_SIZE:-3GB}
+      -c work_mem=${POSTGRES_WORK_MEM:-16MB}
+      -c maintenance_work_mem=${POSTGRES_MAINTENANCE_WORK_MEM:-256MB}
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U postgres" ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    logging:
+      driver: local
+      options:
+        max-size: "100m"
+        max-file: "3"
+        compress: "true"
+    restart: unless-stopped
+
+  redis:
+    # OCI index digest for the official multi-architecture redis:7.4.11-alpine image.
+    image: redis:7.4.11-alpine@sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf
+    container_name: aether-redis
+    command: redis-server --dir /tmp --appendonly no --save "" --requirepass ${REDIS_PASSWORD:?set REDIS_PASSWORD in .env} --maxclients ${REDIS_MAXCLIENTS:-10000}
+    ports:
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: [ "CMD-SHELL", "redis-cli -a \"${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}\" ping | grep -q PONG" ]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
   app:
     image: ${APP_IMAGE:-ghcr.io/fawney19/aether:latest}
     container_name: aether-app
     user: "0:0"
+    read_only: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - DAC_OVERRIDE
+      - FOWNER
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,mode=1777
     env_file:
-      - ${AETHER_ENV_FILE:-.env}
+      - .env
     environment:
+      AETHER_DATABASE_DRIVER: postgres
+      DATABASE_URL: postgresql://postgres:${DB_PASSWORD:?set DB_PASSWORD in .env}@postgres:5432/aether
+      REDIS_URL: redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}@redis:6379/0
       TZ: Asia/Shanghai
       AETHER_BASE_DIR: /opt/aether
+      AETHER_GATEWAY_DEPLOYMENT_TOPOLOGY: single-node
       AETHER_UPDATE_STRATEGY: docker
       AETHER_DOCKER_UPDATE_COMMAND: ${AETHER_DOCKER_UPDATE_COMMAND:-./update.sh}
-      AETHER_DATABASE_DRIVER: sqlite
-      AETHER_DATABASE_URL: sqlite:///opt/aether/data/aether.db
-      AETHER_RUNTIME_BACKEND: memory
-      AETHER_GATEWAY_DEPLOYMENT_TOPOLOGY: single-node
-      AETHER_GATEWAY_NODE_ROLE: all
       AETHER_LOG_DESTINATION: stdout
       AETHER_LOG_FORMAT: ${AETHER_LOG_FORMAT:-pretty}
       APP_PORT: ${APP_PORT:-8084}
       AETHER_GATEWAY_AUTO_PREPARE_DATABASE: ${AETHER_GATEWAY_AUTO_PREPARE_DATABASE:-true}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     ports:
       - "${APP_PORT:-8084}:${APP_PORT:-8084}"
-    volumes:
-      - ./data:/opt/aether/data
     logging:
       driver: json-file
       options:
         max-size: "100m"
         max-file: "10"
     restart: unless-stopped
+
+volumes:
+  postgres_data:

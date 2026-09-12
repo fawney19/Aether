@@ -695,36 +695,6 @@ END $mig$;
 
 
 --
--- Name: user_referrals user_referrals_inviter_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-DO $mig$ BEGIN
-  ALTER TABLE ONLY public.user_referrals
-    ADD CONSTRAINT user_referrals_inviter_user_id_fkey FOREIGN KEY (inviter_user_id) REFERENCES public.users(id) ON DELETE CASCADE;
-EXCEPTION
-  WHEN duplicate_object THEN NULL;
-  WHEN duplicate_table THEN NULL;
-  WHEN invalid_table_definition THEN NULL;
-END $mig$;
-
-
-
---
--- Name: user_referrals user_referrals_invitee_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-DO $mig$ BEGIN
-  ALTER TABLE ONLY public.user_referrals
-    ADD CONSTRAINT user_referrals_invitee_user_id_fkey FOREIGN KEY (invitee_user_id) REFERENCES public.users(id) ON DELETE CASCADE;
-EXCEPTION
-  WHEN duplicate_object THEN NULL;
-  WHEN duplicate_table THEN NULL;
-  WHEN invalid_table_definition THEN NULL;
-END $mig$;
-
-
-
---
 -- Name: user_referrals user_referrals_first_paid_order_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -746,36 +716,6 @@ END $mig$;
 DO $mig$ BEGIN
   ALTER TABLE ONLY public.referral_rewards
     ADD CONSTRAINT referral_rewards_referral_id_fkey FOREIGN KEY (referral_id) REFERENCES public.user_referrals(id) ON DELETE CASCADE;
-EXCEPTION
-  WHEN duplicate_object THEN NULL;
-  WHEN duplicate_table THEN NULL;
-  WHEN invalid_table_definition THEN NULL;
-END $mig$;
-
-
-
---
--- Name: referral_rewards referral_rewards_inviter_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-DO $mig$ BEGIN
-  ALTER TABLE ONLY public.referral_rewards
-    ADD CONSTRAINT referral_rewards_inviter_user_id_fkey FOREIGN KEY (inviter_user_id) REFERENCES public.users(id) ON DELETE CASCADE;
-EXCEPTION
-  WHEN duplicate_object THEN NULL;
-  WHEN duplicate_table THEN NULL;
-  WHEN invalid_table_definition THEN NULL;
-END $mig$;
-
-
-
---
--- Name: referral_rewards referral_rewards_invitee_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-DO $mig$ BEGIN
-  ALTER TABLE ONLY public.referral_rewards
-    ADD CONSTRAINT referral_rewards_invitee_user_id_fkey FOREIGN KEY (invitee_user_id) REFERENCES public.users(id) ON DELETE CASCADE;
 EXCEPTION
   WHEN duplicate_object THEN NULL;
   WHEN duplicate_table THEN NULL;

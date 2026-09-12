@@ -8,6 +8,13 @@ const requestTraceApiMock = vi.hoisted(() => ({
   getRequestTrace: vi.fn(),
 }))
 
+const diagnosticCopyMock = vi.hoisted(() => ({ prepare: vi.fn(), copy: vi.fn() }))
+vi.mock('@/composables/useClipboard', () => ({ useClipboard: () => ({ copyToClipboard: diagnosticCopyMock.copy }) }))
+vi.mock('@/features/usage/utils/diagnosticExport', async importOriginal => ({
+  ...await importOriginal<typeof import('@/features/usage/utils/diagnosticExport')>(),
+  prepareDiagnosticExport: diagnosticCopyMock.prepare,
+}))
+
 vi.mock('@/api/requestTrace', () => ({
   requestTraceApi: requestTraceApiMock,
 }))
@@ -62,9 +69,16 @@ vi.mock('../JsonContentPanel.vue', async () => {
           type: String,
           default: 'JSON',
         },
+        customCopy: Boolean,
+        copyDisabled: Boolean,
+        copied: Boolean,
       },
-      setup(props) {
-        return () => h('pre', { 'data-title': props.title }, JSON.stringify(props.data))
+      emits: ['copy'],
+      setup(props, { emit }) {
+        return () => h('div', [
+          h('pre', { 'data-title': props.title }, JSON.stringify(props.data)),
+          props.customCopy ? h('button', { 'data-copy-diagnostic': '', 'data-copied': props.copied, disabled: props.copyDisabled, onClick: () => emit('copy') }) : null,
+        ])
       },
     }),
   }
@@ -173,6 +187,8 @@ function mountTimelineFromApi(
 
 afterEach(() => {
   requestTraceApiMock.getRequestTrace.mockReset()
+  diagnosticCopyMock.prepare.mockReset()
+  diagnosticCopyMock.copy.mockReset()
   vi.useRealTimers()
   for (const { app, root } of mountedApps.splice(0)) {
     app.unmount()
@@ -181,6 +197,66 @@ afterEach(() => {
 })
 
 describe('HorizontalRequestTimeline', () => {
+  it('exports a skipped conversion failure with context only after clicking copy', async () => {
+    diagnosticCopyMock.prepare.mockImplementation(async bundle => ({ ...bundle, reproduction: { status: 'sanitized_context' } }))
+    diagnosticCopyMock.copy.mockResolvedValue(true)
+    const root = mountTimeline(buildTrace([buildCandidate({
+      status: 'skipped', skip_reason: 'provider_request_body_build_failed',
+      extra_data: { failure_diagnostic: { kind: 'request_conversion', path: '$.n', message: 'lossy conversion blocked from openai:chat to claude:messages at n: multiple outputs' } },
+    })]))
+    await nextTick()
+    expect(diagnosticCopyMock.prepare).not.toHaveBeenCalled()
+    const button = root.querySelector<HTMLButtonElement>('[data-copy-diagnostic]')!
+    expect(button).not.toBeNull()
+    button.click()
+    await flushPendingUpdates()
+    expect(diagnosticCopyMock.prepare).toHaveBeenCalledTimes(1)
+    expect(JSON.parse(diagnosticCopyMock.copy.mock.calls[0][0])).toMatchObject({ schema_version: 2, breakpoint: '$.n', reproduction: { status: 'sanitized_context' } })
+    expect(button.dataset.copied).toBe('true')
+  })
+
+  it('does not report copy success when the clipboard rejects it', async () => {
+    diagnosticCopyMock.prepare.mockImplementation(async bundle => bundle)
+    diagnosticCopyMock.copy.mockResolvedValue(false)
+    const root = mountTimeline(buildTrace([buildCandidate({ error_message: 'unsupported provider stream finish reason: error' })]))
+    await nextTick()
+    const button = root.querySelector<HTMLButtonElement>('[data-copy-diagnostic]')!
+    button.click()
+    await flushPendingUpdates()
+    expect(button.dataset.copied).toBe('false')
+  })
+
+  it('cancels in-flight diagnostic exports on unmount', async () => {
+    let finish: (value: Record<string, unknown>) => void = () => undefined
+    diagnosticCopyMock.prepare.mockImplementation(() => new Promise(resolve => { finish = resolve }))
+    const root = mountTimeline(buildTrace([buildCandidate({ error_message: 'unsupported provider stream finish reason: error' })]))
+    await nextTick()
+    root.querySelector<HTMLButtonElement>('[data-copy-diagnostic]')!.click()
+    await nextTick()
+    mountedApps.splice(mountedApps.findIndex(item => item.root === root), 1)[0].app.unmount()
+    root.remove()
+    const signal = diagnosticCopyMock.prepare.mock.calls[0][3] as AbortSignal
+    expect(signal.aborted).toBe(true)
+    finish({ reproduction: { status: 'sanitized_context' } })
+    await flushPendingUpdates()
+    expect(diagnosticCopyMock.copy).not.toHaveBeenCalled()
+  })
+  it('only renders allowlisted provider website protocols', async () => {
+    const unsafeRoot = mountTimeline(buildTrace([
+      buildCandidate({ provider_website: 'javascript:alert(document.cookie)' }),
+    ]))
+    await nextTick()
+    expect(unsafeRoot.querySelector('.provider-link')).toBeNull()
+
+    const safeRoot = mountTimeline(buildTrace([
+      buildCandidate({ provider_website: ' HTTPS://provider.example/docs ' }),
+    ]))
+    await nextTick()
+    expect(safeRoot.querySelector<HTMLAnchorElement>('.provider-link')?.href).toBe(
+      'https://provider.example/docs',
+    )
+  })
+
   it('uses the trace aggregate latency instead of the successful candidate latency', async () => {
     const trace = buildTrace([
       buildCandidate({
@@ -505,7 +581,7 @@ describe('HorizontalRequestTimeline', () => {
     })
     await nextTick()
 
-    const lastCall = onTraceState.mock.calls.at(-1)?.[0]
+    const lastCall = onTraceState.mock.calls[onTraceState.mock.calls.length - 1]?.[0]
     expect(lastCall).toMatchObject({
       finalStatus: 'streaming',
     })
@@ -643,6 +719,98 @@ describe('HorizontalRequestTimeline', () => {
     expect(root.textContent).not.toContain('该错误被标记为敏感上游错误')
   })
 
+  it.each(['inline', 'reference', 'disabled', 'unavailable', 'none', undefined])(
+    'shows a fallback for redacted errors with body state %s',
+    async (bodyState) => {
+      const trace = buildTrace([
+        buildCandidate({
+          status_code: 400,
+          extra_data: {
+            upstream_response: {
+              status_code: 400,
+              body_state: bodyState,
+            },
+            error_flow: {
+              source: 'upstream_response',
+              status_code: 400,
+              decision: 'retry_next_candidate',
+            },
+          },
+        }),
+      ])
+      trace.final_status = 'failed'
+
+      const root = mountTimeline(trace, {
+        overrideStatusCode: 503,
+        requestStatus: 'failed',
+      })
+      await nextTick()
+
+      expect(root.querySelector('.status-tag')?.textContent?.trim()).toBe('400')
+      expect(root.querySelector('.error-status-badge')?.textContent?.trim()).toBe('HTTP 400')
+      expect(root.querySelector('.error-msg')?.textContent).toContain('链路追踪未包含详细错误内容')
+      expect(root.querySelector('.error-final-status')?.textContent).toContain('请求最终状态：HTTP 503')
+      expect(root.querySelector('.error-upstream-response-json')).toBeNull()
+    },
+  )
+
+  it('keeps the attempt status separate from the upstream transport status', async () => {
+    const root = mountTimeline(buildTrace([
+      buildCandidate({
+        status_code: 502,
+        error_type: 'stream_error',
+        extra_data: {
+          upstream_response: { status_code: 200, body_state: 'disabled' },
+        },
+      }),
+    ]))
+    await nextTick()
+
+    expect(root.querySelector('.status-tag')?.textContent?.trim()).toBe('502')
+    expect(root.querySelector('.error-status-badge')?.textContent?.trim()).toBe('HTTP 502')
+    expect(root.querySelector('.error-upstream-status')?.textContent).toContain('上游响应状态：HTTP 200')
+    expect(root.querySelector('.error-final-status')).toBeNull()
+  })
+
+  it('does not label an active request status as final', async () => {
+    const root = mountTimeline(buildTrace([
+      buildCandidate({ status_code: 400 }),
+    ]), {
+      overrideStatusCode: 200,
+      requestStatus: 'streaming',
+    })
+    await nextTick()
+
+    expect(root.querySelector('.error-final-status')).toBeNull()
+  })
+
+  it('shows failure details even when no status or error message was retained', async () => {
+    const root = mountTimeline(buildTrace([buildCandidate()]))
+    await nextTick()
+
+    expect(root.querySelector('.error-msg')?.textContent).toContain('链路追踪未包含详细错误内容')
+  })
+
+  it('keeps a generic error visible when only upstream headers are available', async () => {
+    const root = mountTimeline(buildTrace([
+      buildCandidate({
+        status_code: 400,
+        error_message: 'execution runtime stream returned non-success status 400',
+        extra_data: {
+          upstream_response: {
+            status_code: 400,
+            headers: { 'content-type': 'application/json' },
+            body_state: 'reference',
+          },
+        },
+      }),
+    ]))
+    await nextTick()
+
+    expect(root.querySelector('.error-msg')?.textContent).toContain('上游返回非成功状态 400')
+    expect(root.querySelector('.error-upstream-response-json')?.textContent).toContain('application/json')
+  })
+
   it('keeps local sync diagnostics visible when upstream response body capture is disabled', async () => {
     const trace = buildTrace([
       buildCandidate({
@@ -739,6 +907,55 @@ describe('HorizontalRequestTimeline', () => {
     expect(root.textContent).toContain('字段 $.finish_reason = "future_reason"')
     const diagnosticText = root.querySelector('.error-diagnostic-json')?.textContent ?? ''
     expect(diagnosticText).toContain('"breakpoint":"$.finish_reason"')
+  })
+
+  it.each([
+    'unsupported provider stream finish reason: error',
+    'Upstream stream ended with finish reason: error',
+  ])('shows an upstream terminal failure rather than a conversion error for %s', async (errorMessage) => {
+    const trace = buildTrace([
+      buildCandidate({
+        status: 'failed',
+        status_code: 200,
+        error_type: 'stream_terminal_error',
+        error_message: errorMessage,
+        extra_data: {
+          client_api_format: 'claude:messages',
+          provider_api_format: 'claude:messages',
+          upstream_response: { status_code: 200, body_state: 'reference' },
+        },
+      }),
+    ])
+    const root = mountTimeline(trace, { requestApiFormat: 'claude:messages' })
+    await nextTick()
+
+    expect(root.querySelector('.error-msg')?.textContent).toContain('上游流式响应异常终止')
+    expect(root.querySelector('.error-msg')?.textContent).not.toContain('格式转换失败')
+    const diagnostic = JSON.parse(root.querySelector('.error-diagnostic-json')?.textContent ?? '{}')
+    expect(diagnostic.breakpoint).toBe('$.delta.stop_reason')
+    expect(diagnostic.analysis_hint).toContain('不要映射为正常结束')
+    expect(diagnostic.analysis_hint).not.toContain('finish_reason 映射')
+    expect(diagnostic.node.status_code).toBe(200)
+    expect(diagnostic.node.error_message).toBe(errorMessage)
+  })
+
+  it('distinguishes terminal validation from an actual finish reason conversion failure', async () => {
+    const trace = buildTrace([
+      buildCandidate({
+        status_code: 200,
+        error_type: 'stream_terminal_error',
+        error_message: 'unsupported provider stream finish reason: future_reason',
+      }),
+    ])
+    const root = mountTimeline(trace)
+    await nextTick()
+
+    expect(root.querySelector('.error-msg')?.textContent).toContain('流式终态校验失败')
+    expect(root.querySelector('.error-msg')?.textContent).toContain('future_reason')
+    expect(root.querySelector('.error-msg')?.textContent).not.toContain('格式转换失败')
+    const diagnostic = JSON.parse(root.querySelector('.error-diagnostic-json')?.textContent ?? '{}')
+    expect(diagnostic.breakpoint).toBe('$.finish_reason')
+    expect(diagnostic.analysis_hint).toContain('上游流式终态校验')
   })
 
   it('uses conversion messages from error_flow as the diagnostic breakpoint source', async () => {

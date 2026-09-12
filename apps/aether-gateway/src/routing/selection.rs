@@ -8,6 +8,8 @@ pub(crate) const ROUTING_GROUP_HEADER: &str = "x-aether-scheduler-group";
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub(crate) enum GatewayRoutingSelectionError {
+    #[error("no enabled routing strategy is configured for this request")]
+    NoDefault,
     #[error("routing group was explicitly requested but was not found: {0}")]
     NotFound(String),
     #[error("routing group was explicitly requested but is not enabled: {0}")]
@@ -239,6 +241,7 @@ mod tests {
                 description: None,
                 enabled: true,
                 is_system_default: false,
+                sort_order: 0,
                 config_json: json!({}),
                 version: 1,
                 created_at: 1,
@@ -287,6 +290,7 @@ mod tests {
                 description: None,
                 enabled: true,
                 is_system_default: true,
+                sort_order: 0,
                 config_json: json!({}),
                 version: 1,
                 created_at: 1,
@@ -322,6 +326,7 @@ mod tests {
                 description: None,
                 enabled: true,
                 is_system_default: false,
+                sort_order: 0,
                 config_json: json!({}),
                 version: 1,
                 created_at: 1,
@@ -444,6 +449,7 @@ mod tests {
                 description: None,
                 enabled: false,
                 is_system_default: false,
+                sort_order: 0,
                 config_json: json!({}),
                 version: 1,
                 created_at: 1,
@@ -481,6 +487,7 @@ mod tests {
                 description: None,
                 enabled: true,
                 is_system_default: false,
+                sort_order: 0,
                 config_json: json!({}),
                 version: 1,
                 created_at: 1,

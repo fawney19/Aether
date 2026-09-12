@@ -52,13 +52,12 @@ pub(super) fn admin_provider_oauth_key_name_from_auth_config(
     auth_config: &Map<String, Value>,
     batch_index: Option<usize>,
 ) -> String {
-    let provider_type = provider_type.trim();
     if let Some(email) = trimmed_auth_config_string(auth_config, "email") {
-        return format!("{provider_type}_{email}");
+        return email;
     }
-    if provider_type.eq_ignore_ascii_case("grok") {
+    if provider_type.trim().eq_ignore_ascii_case("grok") {
         if let Some(user_id) = trimmed_auth_config_string(auth_config, "user_id") {
-            return format!("grok_{user_id}");
+            return user_id;
         }
     }
 
@@ -68,7 +67,7 @@ pub(super) fn admin_provider_oauth_key_name_from_auth_config(
         .map(|duration| duration.as_secs())
         .unwrap_or(0);
     match batch_index {
-        Some(index) => format!("{provider_type}_{timestamp}_{index}"),
+        Some(index) => format!("账号_{timestamp}_{index}"),
         None => format!("账号_{timestamp}"),
     }
 }
@@ -87,6 +86,106 @@ mod tests {
     use super::*;
     use serde_json::{json, Map};
 
+    const PROVIDER_TYPES: &[&str] = &[
+        "codex",
+        " Codex ",
+        "claude_code",
+        "chatgpt_web",
+        "gemini_cli",
+        "antigravity",
+        "grok",
+        " Grok ",
+        "kiro",
+        "windsurf",
+    ];
+
+    #[test]
+    fn default_key_name_uses_email_without_provider_prefix() {
+        let mut auth_config = Map::new();
+        auth_config.insert("email".to_string(), json!("  user@example.com  "));
+
+        for provider_type in PROVIDER_TYPES {
+            for batch_index in [None, Some(3)] {
+                assert_eq!(
+                    admin_provider_oauth_key_name_from_auth_config(
+                        provider_type,
+                        &auth_config,
+                        batch_index,
+                    ),
+                    "user@example.com"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn antigravity_default_key_name_uses_email_without_provider_prefix() {
+        for email in ["  user@example.com  ", "antigravity_user@example.com"] {
+            let mut auth_config = Map::new();
+            auth_config.insert("email".to_string(), json!(email));
+
+            for provider_type in ["antigravity", " Antigravity "] {
+                for batch_index in [None, Some(3)] {
+                    assert_eq!(
+                        admin_provider_oauth_key_name_from_auth_config(
+                            provider_type,
+                            &auth_config,
+                            batch_index,
+                        ),
+                        email.trim()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn default_key_name_preserves_email_with_provider_prefix() {
+        for provider_type in PROVIDER_TYPES {
+            let email = format!("{}_user@example.com", provider_type.trim());
+            let mut auth_config = Map::new();
+            auth_config.insert("email".to_string(), json!(email));
+
+            for batch_index in [None, Some(3)] {
+                assert_eq!(
+                    admin_provider_oauth_key_name_from_auth_config(
+                        provider_type,
+                        &auth_config,
+                        batch_index,
+                    ),
+                    email
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn default_key_name_without_email_uses_generic_account_name() {
+        for email in [None, Some(""), Some("  ")] {
+            let mut auth_config = Map::new();
+            if let Some(email) = email {
+                auth_config.insert("email".to_string(), json!(email));
+            }
+
+            for provider_type in PROVIDER_TYPES {
+                for batch_index in [None, Some(3)] {
+                    let name = admin_provider_oauth_key_name_from_auth_config(
+                        provider_type,
+                        &auth_config,
+                        batch_index,
+                    );
+                    let suffix = name.strip_prefix("账号_").expect("generic account prefix");
+                    let timestamp = if batch_index.is_some() {
+                        suffix.strip_suffix("_3").expect("batch index suffix")
+                    } else {
+                        suffix
+                    };
+                    assert!(timestamp.parse::<u64>().is_ok());
+                }
+            }
+        }
+    }
+
     #[test]
     fn grok_default_key_name_uses_full_user_id() {
         let mut auth_config = Map::new();
@@ -95,10 +194,18 @@ mod tests {
             json!("1619039a-0191-4e0a-a490-8f4ad21262c9"),
         );
 
-        assert_eq!(
-            admin_provider_oauth_key_name_from_auth_config("grok", &auth_config, None),
-            "grok_1619039a-0191-4e0a-a490-8f4ad21262c9"
-        );
+        for provider_type in ["grok", " Grok "] {
+            for batch_index in [None, Some(3)] {
+                assert_eq!(
+                    admin_provider_oauth_key_name_from_auth_config(
+                        provider_type,
+                        &auth_config,
+                        batch_index,
+                    ),
+                    "1619039a-0191-4e0a-a490-8f4ad21262c9"
+                );
+            }
+        }
     }
 
     #[test]
@@ -109,17 +216,22 @@ mod tests {
 
         assert_eq!(
             admin_provider_oauth_key_name_from_auth_config("grok", &auth_config, None),
-            "grok_grok@example.com"
+            "grok@example.com"
         );
     }
 
     #[test]
-    fn batch_default_key_name_keeps_existing_timestamp_shape() {
+    fn batch_default_key_name_keeps_distinct_indexes_without_provider_prefix() {
         let auth_config = Map::new();
-        let name = admin_provider_oauth_key_name_from_auth_config("codex", &auth_config, Some(3));
+        let name = admin_provider_oauth_key_name_from_auth_config("grok", &auth_config, Some(3));
+        let other_name =
+            admin_provider_oauth_key_name_from_auth_config("grok", &auth_config, Some(4));
 
-        assert!(name.starts_with("codex_"));
+        assert!(name.starts_with("账号_"));
         assert!(name.ends_with("_3"));
+        assert!(other_name.starts_with("账号_"));
+        assert!(other_name.ends_with("_4"));
+        assert_ne!(name, other_name);
     }
 
     #[test]

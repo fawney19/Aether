@@ -24,6 +24,8 @@ const ACCOUNT_BLOCK_REASON_KEYWORDS: &[&str] = &[
     "deactivated",
     "访问被禁止",
     "账户访问被禁止",
+    "账号已停用",
+    "账户已停用",
     "访问受限",
     "账户访问受限",
     "oauth_token_invalid",
@@ -229,6 +231,8 @@ fn classify_block_reason(reason: &str) -> (&'static str, &'static str) {
         "organization_disabled",
         "访问被禁止",
         "账户访问被禁止",
+        "账号已停用",
+        "账户已停用",
     ]
     .iter()
     .any(|keyword| lowered.contains(keyword))
@@ -867,5 +871,27 @@ mod tests {
         assert_eq!(state.code.as_deref(), Some("account_verification"));
         assert!(!should_auto_remove_account_state(&state));
         assert!(account_state_indicates_known_ban(&state));
+    }
+
+    #[test]
+    fn canonical_chinese_account_disabled_state_is_auto_removed() {
+        for reason in [
+            "[ACCOUNT_BLOCK] OpenAI 账号已停用",
+            "[ACCOUNT_BLOCK] OpenAI 账户已停用",
+        ] {
+            let state = resolve_pool_account_state(Some("codex"), None, Some(reason));
+
+            assert!(state.blocked);
+            assert_eq!(state.code.as_deref(), Some("account_disabled"));
+            assert!(should_auto_remove_account_state(&state));
+        }
+
+        let verification = resolve_pool_account_state(
+            Some("codex"),
+            None,
+            Some("[ACCOUNT_BLOCK] verify your account before continuing"),
+        );
+        assert_eq!(verification.code.as_deref(), Some("account_verification"));
+        assert!(!should_auto_remove_account_state(&verification));
     }
 }

@@ -24,7 +24,10 @@ use std::sync::{Arc, Mutex};
 
 use crate::constants::TRACE_ID_HEADER;
 
-use super::{build_router_with_state, build_state_with_execution_runtime_override, start_server};
+use super::{
+    build_router_with_state, build_state_with_execution_runtime_override, start_server,
+    video_proxy_node_repository,
+};
 
 #[tokio::test]
 async fn gateway_executes_gemini_video_create_via_local_decision_gate_with_local_planning_only() {
@@ -405,7 +408,10 @@ async fn gateway_executes_gemini_video_create_via_local_decision_gate_with_local
             provider_catalog_repository,
             Arc::clone(&request_candidate_repository),
             DEVELOPMENT_ENCRYPTION_KEY,
-        ),
+        )
+        .attach_proxy_node_repository_for_tests(video_proxy_node_repository([
+            "proxy-node-gemini-video-local",
+        ])),
     );
     let gateway = build_router_with_state(gateway_state);
     let (gateway_url, gateway_handle) = start_server(gateway).await;

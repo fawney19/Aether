@@ -1,12 +1,11 @@
-use aether_crypto::{encrypt_python_fernet_plaintext, DEVELOPMENT_ENCRYPTION_KEY};
+use aether_crypto::DEVELOPMENT_ENCRYPTION_KEY;
+use aether_data::repository::auth::{
+    InMemoryAuthApiKeySnapshotRepository, StoredAuthApiKeySnapshot,
+};
 use aether_data::repository::candidates::InMemoryRequestCandidateRepository;
-use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
 use aether_data::repository::video_tasks::InMemoryVideoTaskRepository;
 use aether_data_contracts::repository::candidates::{
     RequestCandidateReadRepository, RequestCandidateStatus,
-};
-use aether_data_contracts::repository::provider_catalog::{
-    StoredProviderCatalogEndpoint, StoredProviderCatalogKey, StoredProviderCatalogProvider,
 };
 use aether_data_contracts::repository::video_tasks::{
     UpsertVideoTask, VideoTaskStatus, VideoTaskWriteRepository,
@@ -18,13 +17,14 @@ use axum::{extract::Request, Json, Router};
 use http::header::{HeaderName, HeaderValue};
 use http::StatusCode;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use std::sync::{Arc, Mutex};
 
 use crate::constants::{CONTROL_EXECUTED_HEADER, CONTROL_EXECUTE_FALLBACK_HEADER, TRACE_ID_HEADER};
 
 use super::{
     build_router_with_state, build_state_with_execution_runtime_override, start_server,
-    VideoTaskTruthSourceMode,
+    video_provider_catalog_repository, VideoTaskTruthSourceMode,
 };
 
 #[tokio::test]
@@ -37,73 +37,37 @@ async fn gateway_executes_openai_video_delete_via_reconstructed_data_backed_loca
         authorization: String,
     }
 
-    fn sample_provider() -> StoredProviderCatalogProvider {
-        StoredProviderCatalogProvider::new(
-            "provider-openai-video-followup-1".to_string(),
-            "openai".to_string(),
-            Some("https://example.com".to_string()),
-            "custom".to_string(),
-        )
-        .expect("provider should build")
-        .with_transport_fields(
-            true,
-            false,
-            false,
-            None,
-            Some(2),
-            None,
-            Some(20.0),
-            None,
-            None,
-        )
+    fn hash_api_key(value: &str) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(value.as_bytes());
+        format!("{:x}", hasher.finalize())
     }
 
-    fn sample_endpoint() -> StoredProviderCatalogEndpoint {
-        StoredProviderCatalogEndpoint::new(
-            "endpoint-openai-video-followup-1".to_string(),
-            "provider-openai-video-followup-1".to_string(),
-            "openai:video".to_string(),
-            Some("openai".to_string()),
-            Some("video".to_string()),
+    fn sample_auth_snapshot(api_key_id: &str, user_id: &str) -> StoredAuthApiKeySnapshot {
+        StoredAuthApiKeySnapshot::new(
+            user_id.to_string(),
+            "video-user".to_string(),
+            Some("video@example.com".to_string()),
+            "user".to_string(),
+            "local".to_string(),
             true,
-        )
-        .expect("endpoint should build")
-        .with_transport_fields(
-            "https://api.openai.example/v1".to_string(),
-            None,
-            None,
-            Some(2),
-            None,
-            None,
-            None,
-            None,
-        )
-        .expect("endpoint transport should build")
-    }
-
-    fn sample_key() -> StoredProviderCatalogKey {
-        StoredProviderCatalogKey::new(
-            "key-openai-video-followup-1".to_string(),
-            "provider-openai-video-followup-1".to_string(),
-            "prod".to_string(),
-            "api_key".to_string(),
-            None,
-            true,
-        )
-        .expect("key should build")
-        .with_transport_fields(
+            false,
+            Some(json!(["openai"])),
             Some(json!(["openai:video"])),
-            encrypt_python_fernet_plaintext(DEVELOPMENT_ENCRYPTION_KEY, "sk-upstream-openai-video")
-                .expect("api key should encrypt"),
-            None,
-            None,
-            Some(json!({"openai:video": 1})),
-            None,
-            None,
-            None,
-            None,
+            Some(json!(["sora-2"])),
+            api_key_id.to_string(),
+            Some("default".to_string()),
+            true,
+            false,
+            false,
+            Some(60),
+            Some(5),
+            Some(4_102_444_800),
+            Some(json!(["openai"])),
+            Some(json!(["openai:video"])),
+            Some(json!(["sora-2"])),
         )
-        .expect("key transport should build")
+        .expect("auth snapshot should build")
     }
 
     let decision_hits = Arc::new(Mutex::new(0usize));
@@ -116,7 +80,6 @@ async fn gateway_executes_openai_video_delete_via_reconstructed_data_backed_loca
     let report_hits_clone = Arc::clone(&report_hits);
     let seen_execution_runtime = Arc::new(Mutex::new(None::<SeenExecutionRuntimeSyncRequest>));
     let seen_execution_runtime_clone = Arc::clone(&seen_execution_runtime);
-
     let upstream = Router::new()
         .route(
             "/api/internal/gateway/resolve",
@@ -128,11 +91,6 @@ async fn gateway_executes_openai_video_delete_via_reconstructed_data_backed_loca
                     "route_kind": "video",
                     "auth_endpoint_signature": "openai:video",
                     "execution_runtime_candidate": true,
-                    "auth_context": {
-                        "user_id": "user-openai-video-delete-local-123",
-                        "api_key_id": "key-openai-video-delete-local-123",
-                        "access_allowed": true
-                    },
                     "public_path": "/v1/videos/task-local-followup-123"
                 }))
             }),
@@ -279,12 +237,32 @@ async fn gateway_executes_openai_video_delete_via_reconstructed_data_backed_loca
         })
         .await
         .expect("upsert should succeed");
-    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
-        vec![sample_provider()],
-        vec![sample_endpoint()],
-        vec![sample_key()],
-    ));
+    let provider_catalog_repository = video_provider_catalog_repository(
+        "provider-openai-video-followup-1",
+        "openai",
+        "endpoint-openai-video-followup-1",
+        "openai:video",
+        "https://api.openai.example/v1",
+        "key-openai-video-followup-1",
+        "sk-upstream-openai-video",
+    );
     let request_candidate_repository = Arc::new(InMemoryRequestCandidateRepository::default());
+    let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![
+        (
+            Some(hash_api_key("client-video-delete-foreign-key")),
+            sample_auth_snapshot(
+                "key-openai-video-delete-foreign-123",
+                "user-openai-video-delete-foreign-123",
+            ),
+        ),
+        (
+            Some(hash_api_key("client-video-delete-owner-key")),
+            sample_auth_snapshot(
+                "key-openai-video-delete-rotated-local-123",
+                "user-openai-video-delete-local-123",
+            ),
+        ),
+    ]));
 
     let gateway = build_router_with_state(
         build_state_with_execution_runtime_override(execution_runtime_url)
@@ -295,14 +273,44 @@ async fn gateway_executes_openai_video_delete_via_reconstructed_data_backed_loca
                     provider_catalog_repository,
                     Arc::clone(&request_candidate_repository),
                     DEVELOPMENT_ENCRYPTION_KEY,
-                ),
+                )
+                .with_auth_api_key_reader(auth_repository),
             ),
     );
     let (gateway_url, gateway_handle) = start_server(gateway).await;
 
-    let response = reqwest::Client::new()
+    let client = reqwest::Client::new();
+    let foreign_response = client
         .delete(format!("{gateway_url}/v1/videos/task-local-followup-123"))
         .header(CONTROL_EXECUTE_FALLBACK_HEADER, "true")
+        .bearer_auth("client-video-delete-foreign-key")
+        .header(
+            TRACE_ID_HEADER,
+            "trace-openai-video-delete-foreign-local-123",
+        )
+        .send()
+        .await
+        .expect("foreign delete request should complete");
+    let foreign_status = foreign_response.status();
+    let foreign_body = foreign_response.text().await.expect("body should read");
+    assert_eq!(
+        foreign_status,
+        StatusCode::NOT_FOUND,
+        "unexpected foreign response body: {foreign_body}"
+    );
+    assert!(seen_execution_runtime
+        .lock()
+        .expect("mutex should lock")
+        .is_none());
+    assert_eq!(*decision_hits.lock().expect("mutex should lock"), 0);
+    assert_eq!(*execute_hits.lock().expect("mutex should lock"), 0);
+    assert_eq!(*report_hits.lock().expect("mutex should lock"), 0);
+    assert_eq!(*public_hits.lock().expect("mutex should lock"), 0);
+
+    let response = client
+        .delete(format!("{gateway_url}/v1/videos/task-local-followup-123"))
+        .header(CONTROL_EXECUTE_FALLBACK_HEADER, "true")
+        .bearer_auth("client-video-delete-owner-key")
         .header(TRACE_ID_HEADER, "trace-openai-video-delete-local-123")
         .send()
         .await

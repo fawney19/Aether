@@ -10,13 +10,14 @@ use super::log_reported_tunnel_error_event;
 use crate::DataLayerError;
 use aether_data_contracts::repository::proxy_nodes::{
     bucket_start_unix_secs, build_tunnel_error_event_detail, build_tunnel_metrics_sample,
-    normalize_proxy_metadata, preserve_proxy_metadata_tunnel_security,
-    reconcile_remote_config_after_heartbeat, ProxyNodeEventQuery, ProxyNodeHeartbeatMutation,
-    ProxyNodeManualCreateMutation, ProxyNodeManualUpdateMutation, ProxyNodeMetricsCleanupSummary,
-    ProxyNodeMetricsStep, ProxyNodeReadRepository, ProxyNodeRegistrationMutation,
-    ProxyNodeRemoteConfigMutation, ProxyNodeTrafficMutation, ProxyNodeTunnelStatusMutation,
-    ProxyNodeWriteRepository, StoredProxyFleetMetricsBucket, StoredProxyNode, StoredProxyNodeEvent,
-    StoredProxyNodeMetricsBucket, TunnelMetricsSample, PROXY_NODE_EVENT_TYPE_TUNNEL_ERROR,
+    merge_proxy_metadata_for_registration, normalize_heartbeat_proxy_metadata,
+    normalize_proxy_metadata, reconcile_remote_config_after_heartbeat, ProxyNodeEventQuery,
+    ProxyNodeHeartbeatMutation, ProxyNodeManualCreateMutation, ProxyNodeManualUpdateMutation,
+    ProxyNodeMetricsCleanupSummary, ProxyNodeMetricsStep, ProxyNodeReadRepository,
+    ProxyNodeRegistrationMutation, ProxyNodeRemoteConfigMutation, ProxyNodeTrafficMutation,
+    ProxyNodeTunnelStatusMutation, ProxyNodeWriteRepository, StoredProxyFleetMetricsBucket,
+    StoredProxyNode, StoredProxyNodeEvent, StoredProxyNodeMetricsBucket, TunnelMetricsSample,
+    PROXY_NODE_EVENT_TYPE_TUNNEL_ERROR,
 };
 
 #[derive(Debug, Default)]
@@ -357,6 +358,42 @@ impl ProxyNodeWriteRepository for InMemoryProxyNodeRepository {
         Ok(updated)
     }
 
+    async fn compare_and_set_proxy_password(
+        &self,
+        node_id: &str,
+        expected: &str,
+        replacement: &str,
+    ) -> Result<bool, DataLayerError> {
+        let mut nodes = self.nodes.write().expect("proxy node repository lock");
+        let Some(node) = nodes.get_mut(node_id) else {
+            return Ok(false);
+        };
+        if node.proxy_password.as_deref() != Some(expected) {
+            return Ok(false);
+        }
+        node.proxy_password = Some(replacement.to_string());
+        node.updated_at_unix_secs = Self::now_unix_secs();
+        Ok(true)
+    }
+
+    async fn compare_and_set_proxy_metadata(
+        &self,
+        node_id: &str,
+        expected: &serde_json::Value,
+        replacement: &serde_json::Value,
+    ) -> Result<bool, DataLayerError> {
+        let mut nodes = self.nodes.write().expect("proxy node repository lock");
+        let Some(node) = nodes.get_mut(node_id) else {
+            return Ok(false);
+        };
+        if node.proxy_metadata.as_ref() != Some(expected) {
+            return Ok(false);
+        }
+        node.proxy_metadata = Some(replacement.clone());
+        node.updated_at_unix_secs = Self::now_unix_secs();
+        Ok(true)
+    }
+
     async fn create_manual_node(
         &self,
         mutation: &ProxyNodeManualCreateMutation,
@@ -369,9 +406,14 @@ impl ProxyNodeWriteRepository for InMemoryProxyNodeRepository {
             return Err(Self::duplicate_proxy_node_error(existing));
         }
 
+        let node_id = requested_proxy_node_id(mutation.node_id.as_deref())?
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
+        if let Some(existing) = nodes.get(&node_id) {
+            return Err(proxy_node_id_in_use_error(existing));
+        }
         let now = Self::now_unix_secs();
         let node = StoredProxyNode::new(
-            Uuid::new_v4().to_string(),
+            node_id,
             mutation.name.clone(),
             mutation.ip.clone(),
             mutation.port,
@@ -466,18 +508,35 @@ impl ProxyNodeWriteRepository for InMemoryProxyNodeRepository {
     ) -> Result<StoredProxyNode, DataLayerError> {
         let mut nodes = self.nodes.write().expect("proxy node repository lock");
         let now = Self::now_unix_secs();
-        let normalized_proxy_metadata = normalize_proxy_metadata(
-            mutation.proxy_metadata.as_ref(),
-            mutation.proxy_version.as_deref(),
+        let normalized_proxy_metadata = merge_proxy_metadata_for_registration(
+            None,
+            normalize_proxy_metadata(
+                mutation.proxy_metadata.as_ref(),
+                mutation.proxy_version.as_deref(),
+            ),
         );
 
         if let Some(existing_id) = nodes
             .iter()
-            .find(|(_, node)| {
+            .filter(|(_, node)| {
                 !node.is_manual && node.ip == mutation.ip && node.port == mutation.port
+            })
+            .min_by(|(_, left), (_, right)| {
+                left.created_at_unix_ms
+                    .unwrap_or(u64::MAX)
+                    .cmp(&right.created_at_unix_ms.unwrap_or(u64::MAX))
+                    .then(left.id.cmp(&right.id))
             })
             .map(|(node_id, _)| node_id.clone())
         {
+            if let Some(requested_id) = requested_proxy_node_id(mutation.node_id.as_deref())? {
+                if requested_id != existing_id {
+                    return Err(proxy_node_registration_identity_error(
+                        &requested_id,
+                        &existing_id,
+                    ));
+                }
+            }
             let node = nodes
                 .get_mut(&existing_id)
                 .expect("existing proxy node should be present");
@@ -505,9 +564,10 @@ impl ProxyNodeWriteRepository for InMemoryProxyNodeRepository {
             if let Some(estimated_max_concurrency) = mutation.estimated_max_concurrency {
                 node.estimated_max_concurrency = Some(estimated_max_concurrency);
             }
-            if let Some(proxy_metadata) = normalized_proxy_metadata {
-                node.proxy_metadata = Some(proxy_metadata);
-            }
+            node.proxy_metadata = merge_proxy_metadata_for_registration(
+                node.proxy_metadata.as_ref(),
+                normalized_proxy_metadata,
+            );
             if node.created_at_unix_ms.is_none() {
                 node.created_at_unix_ms = now;
             }
@@ -515,8 +575,13 @@ impl ProxyNodeWriteRepository for InMemoryProxyNodeRepository {
             return Ok(node.clone());
         }
 
+        let node_id = requested_proxy_node_id(mutation.node_id.as_deref())?
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
+        if let Some(existing) = nodes.get(&node_id) {
+            return Err(proxy_node_id_in_use_error(existing));
+        }
         let mut node = StoredProxyNode::new(
-            Uuid::new_v4().to_string(),
+            node_id,
             mutation.name.clone(),
             mutation.ip.clone(),
             mutation.port,
@@ -555,11 +620,18 @@ impl ProxyNodeWriteRepository for InMemoryProxyNodeRepository {
         &self,
         mutation: &ProxyNodeHeartbeatMutation,
     ) -> Result<Option<StoredProxyNode>, DataLayerError> {
+        let mut nodes = self.nodes.write().expect("proxy node repository lock");
         let (node, sample, now_unix_secs) = {
-            let mut nodes = self.nodes.write().expect("proxy node repository lock");
             let Some(node) = nodes.get_mut(&mutation.node_id) else {
                 return Ok(None);
             };
+            if mutation
+                .expected_tunnel_generation
+                .as_deref()
+                .is_some_and(|expected| expected != node.tunnel_generation)
+            {
+                return Ok(None);
+            }
             if !node.tunnel_mode {
                 return Err(DataLayerError::InvalidInput(
                     "non-tunnel mode is no longer supported, please upgrade aether-tunnel to use tunnel mode"
@@ -587,13 +659,10 @@ impl ProxyNodeWriteRepository for InMemoryProxyNodeRepository {
             if let Some(value) = mutation.avg_latency_ms {
                 node.avg_latency_ms = Some(value);
             }
-            let normalized_proxy_metadata = normalize_proxy_metadata(
+            let normalized_proxy_metadata = normalize_heartbeat_proxy_metadata(
+                previous_proxy_metadata.as_ref(),
                 mutation.proxy_metadata.as_ref(),
                 mutation.proxy_version.as_deref(),
-            );
-            let normalized_proxy_metadata = preserve_proxy_metadata_tunnel_security(
-                previous_proxy_metadata.as_ref(),
-                normalized_proxy_metadata,
             );
             if let Some(value) = normalized_proxy_metadata {
                 node.proxy_metadata = Some(value);
@@ -671,6 +740,7 @@ impl ProxyNodeWriteRepository for InMemoryProxyNodeRepository {
                 });
             }
         }
+        drop(nodes);
 
         Ok(Some(node))
     }
@@ -684,6 +754,12 @@ impl ProxyNodeWriteRepository for InMemoryProxyNodeRepository {
             return Ok(false);
         };
         if !node.is_manual {
+            return Ok(false);
+        }
+        let Some(expected_generation) = mutation.expected_tunnel_generation.as_deref() else {
+            return Ok(false);
+        };
+        if expected_generation != node.tunnel_generation {
             return Ok(false);
         }
 
@@ -703,6 +779,13 @@ impl ProxyNodeWriteRepository for InMemoryProxyNodeRepository {
         let Some(node) = nodes.get_mut(&mutation.node_id) else {
             return Ok(None);
         };
+        if mutation
+            .expected_tunnel_generation
+            .as_deref()
+            .is_some_and(|expected| expected != node.tunnel_generation)
+        {
+            return Ok(None);
+        }
 
         let event_time = mutation
             .observed_at_unix_secs
@@ -776,11 +859,11 @@ impl ProxyNodeWriteRepository for InMemoryProxyNodeRepository {
     }
 
     async fn delete_node(&self, node_id: &str) -> Result<Option<StoredProxyNode>, DataLayerError> {
-        let removed = self
-            .nodes
-            .write()
-            .expect("proxy node repository lock")
-            .remove(node_id);
+        // Keep the parent lock until all child state is removed. Registration
+        // also takes this lock, so the same id cannot be recreated between the
+        // parent delete and cleanup of its events or metrics.
+        let mut nodes = self.nodes.write().expect("proxy node repository lock");
+        let removed = nodes.remove(node_id);
         if removed.is_some() {
             self.events
                 .write()
@@ -795,6 +878,7 @@ impl ProxyNodeWriteRepository for InMemoryProxyNodeRepository {
                 .expect("proxy node repository lock")
                 .retain(|(metric_node_id, _), _| metric_node_id != node_id);
         }
+        drop(nodes);
         Ok(removed)
     }
 
@@ -806,6 +890,13 @@ impl ProxyNodeWriteRepository for InMemoryProxyNodeRepository {
         let Some(node) = nodes.get_mut(&mutation.node_id) else {
             return Ok(None);
         };
+        if mutation
+            .expected_tunnel_generation
+            .as_deref()
+            .is_some_and(|expected| expected != node.tunnel_generation)
+        {
+            return Ok(None);
+        }
         if node.is_manual {
             return Err(DataLayerError::InvalidInput(
                 "手动节点不支持远程配置下发".to_string(),
@@ -886,6 +977,31 @@ impl ProxyNodeWriteRepository for InMemoryProxyNodeRepository {
     }
 }
 
+fn requested_proxy_node_id(value: Option<&str>) -> Result<Option<String>, DataLayerError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.is_empty() || value.trim() != value {
+        return Err(DataLayerError::InvalidInput(
+            "proxy node id must be non-empty and unpadded".to_string(),
+        ));
+    }
+    Ok(Some(value.to_string()))
+}
+
+fn proxy_node_registration_identity_error(requested_id: &str, existing_id: &str) -> DataLayerError {
+    DataLayerError::InvalidInput(format!(
+        "proxy node registration identity changed: requested {requested_id}, existing {existing_id}"
+    ))
+}
+
+fn proxy_node_id_in_use_error(node: &StoredProxyNode) -> DataLayerError {
+    DataLayerError::InvalidInput(format!(
+        "proxy node id is already in use: {} ({}:{})",
+        node.id, node.ip, node.port
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::InMemoryProxyNodeRepository;
@@ -894,7 +1010,7 @@ mod tests {
         ProxyNodeRemoteConfigMutation, ProxyNodeTunnelStatusMutation, ProxyNodeWriteRepository,
         StoredProxyNode, StoredProxyNodeEvent,
     };
-    use serde_json::json;
+    use serde_json::{json, Value};
 
     fn sample_node() -> StoredProxyNode {
         StoredProxyNode::new(
@@ -937,6 +1053,7 @@ mod tests {
         let heartbeat = repository
             .apply_heartbeat(&ProxyNodeHeartbeatMutation {
                 node_id: "node-1".to_string(),
+                expected_tunnel_generation: None,
                 heartbeat_interval: Some(45),
                 active_connections: Some(5),
                 total_requests_delta: Some(8),
@@ -944,7 +1061,13 @@ mod tests {
                 failed_requests_delta: Some(2),
                 dns_failures_delta: Some(1),
                 stream_errors_delta: Some(3),
-                proxy_metadata: Some(json!({"arch": "arm64"})),
+                proxy_metadata: Some(json!({
+                    "arch": "arm64",
+                    "tunnel_security": {
+                        "mode": "disabled",
+                        "encryption_key": "attacker-controlled"
+                    }
+                })),
                 proxy_version: Some("1.2.3".to_string()),
             })
             .await
@@ -966,10 +1089,16 @@ mod tests {
                 .and_then(|value| value.as_str()),
             Some("1.2.3")
         );
+        assert!(heartbeat
+            .proxy_metadata
+            .as_ref()
+            .and_then(|value| value.get("tunnel_security"))
+            .is_none());
 
         let stale = repository
             .update_tunnel_status(&ProxyNodeTunnelStatusMutation {
                 node_id: "node-1".to_string(),
+                expected_tunnel_generation: None,
                 connected: false,
                 conn_count: 0,
                 detail: None,
@@ -994,6 +1123,7 @@ mod tests {
         let updated = repository
             .update_tunnel_status(&ProxyNodeTunnelStatusMutation {
                 node_id: "node-1".to_string(),
+                expected_tunnel_generation: None,
                 connected: false,
                 conn_count: 0,
                 detail: None,
@@ -1061,6 +1191,96 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn delete_cleans_child_state_before_same_id_can_be_reused() {
+        let old_node = sample_node();
+        let old_generation = old_node.tunnel_generation.clone();
+        let repository = InMemoryProxyNodeRepository::seed_with_events(
+            vec![old_node],
+            vec![StoredProxyNodeEvent {
+                id: 1,
+                node_id: "node-1".to_string(),
+                event_type: "connected".to_string(),
+                detail: Some("old incarnation".to_string()),
+                event_metadata: None,
+                created_at_unix_ms: Some(1_710_000_000),
+            }],
+        );
+
+        repository
+            .apply_heartbeat(&ProxyNodeHeartbeatMutation {
+                node_id: "node-1".to_string(),
+                expected_tunnel_generation: Some(old_generation.clone()),
+                heartbeat_interval: None,
+                active_connections: Some(1),
+                total_requests_delta: None,
+                avg_latency_ms: None,
+                failed_requests_delta: None,
+                dns_failures_delta: None,
+                stream_errors_delta: None,
+                proxy_metadata: Some(json!({
+                    "tunnel_metrics": {
+                        "connect_errors": 0,
+                        "disconnects": 0,
+                        "error_events_total": 0,
+                        "ws_in_bytes": 0,
+                        "ws_out_bytes": 0,
+                        "ws_in_frames": 0,
+                        "ws_out_frames": 0,
+                        "heartbeat_rtt_last_ms": 1
+                    }
+                })),
+                proxy_version: None,
+            })
+            .await
+            .expect("heartbeat should create metric buckets")
+            .expect("old node should exist");
+
+        repository
+            .delete_node("node-1")
+            .await
+            .expect("delete should succeed")
+            .expect("old node should be removed");
+
+        let replacement = repository
+            .register_node(&ProxyNodeRegistrationMutation {
+                node_id: Some("node-1".to_string()),
+                name: "replacement".to_string(),
+                ip: "127.0.0.2".to_string(),
+                port: 7002,
+                region: None,
+                heartbeat_interval: 30,
+                active_connections: None,
+                total_requests: None,
+                avg_latency_ms: None,
+                hardware_info: None,
+                estimated_max_concurrency: None,
+                proxy_metadata: None,
+                proxy_version: None,
+                registered_by: None,
+                tunnel_mode: true,
+            })
+            .await
+            .expect("same id should be reusable after delete");
+        assert_ne!(replacement.tunnel_generation, old_generation);
+
+        assert!(repository
+            .list_proxy_node_events("node-1", 10)
+            .await
+            .expect("events should read")
+            .is_empty());
+        for step in [
+            crate::repository::proxy_nodes::ProxyNodeMetricsStep::OneMinute,
+            crate::repository::proxy_nodes::ProxyNodeMetricsStep::OneHour,
+        ] {
+            assert!(repository
+                .list_proxy_node_metrics("node-1", step, 0, u64::MAX, 10)
+                .await
+                .expect("metrics should read")
+                .is_empty());
+        }
+    }
+
+    #[tokio::test]
     async fn resets_stale_tunnel_statuses_without_touching_manual_nodes() {
         let mut stale_tunnel = sample_node();
         stale_tunnel.tunnel_connected = true;
@@ -1102,11 +1322,126 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn registration_rejects_rebinding_existing_endpoint_to_different_node_id() {
+        let repository = InMemoryProxyNodeRepository::default();
+        let mutation = ProxyNodeRegistrationMutation {
+            node_id: Some("stable-node-id".to_string()),
+            name: "stable-node".to_string(),
+            ip: "127.0.0.9".to_string(),
+            port: 7009,
+            region: None,
+            heartbeat_interval: 30,
+            active_connections: None,
+            total_requests: None,
+            avg_latency_ms: None,
+            hardware_info: None,
+            estimated_max_concurrency: None,
+            proxy_metadata: Some(json!({"secret_marker": "first"})),
+            proxy_version: None,
+            registered_by: None,
+            tunnel_mode: true,
+        };
+        let registered = repository
+            .register_node(&mutation)
+            .await
+            .expect("initial registration should succeed");
+        assert_eq!(registered.id, "stable-node-id");
+
+        let mut conflicting = mutation;
+        conflicting.node_id = Some("replacement-node-id".to_string());
+        conflicting.proxy_metadata = Some(json!({"secret_marker": "replacement"}));
+        assert!(repository.register_node(&conflicting).await.is_err());
+        let persisted = repository
+            .find_proxy_node("stable-node-id")
+            .await
+            .expect("stable node should read")
+            .expect("stable node should remain");
+        assert_eq!(
+            persisted
+                .proxy_metadata
+                .as_ref()
+                .and_then(|value| value.get("secret_marker")),
+            Some(&json!("first"))
+        );
+    }
+
+    #[tokio::test]
+    async fn registration_preserves_omitted_security_and_allows_rotation() {
+        let repository = InMemoryProxyNodeRepository::default();
+        let first_mutation = ProxyNodeRegistrationMutation {
+            node_id: Some("registration-security-node".to_string()),
+            name: "registration-security-node".to_string(),
+            ip: "127.0.0.70".to_string(),
+            port: 7070,
+            region: None,
+            heartbeat_interval: 30,
+            active_connections: None,
+            total_requests: None,
+            avg_latency_ms: None,
+            hardware_info: None,
+            estimated_max_concurrency: None,
+            proxy_metadata: Some(json!({
+                "version": "1.0.0",
+                "tunnel_security": {
+                    "mode": "non_tls_required",
+                    "encryption_key_encrypted": "aether-proxy-node-secret-v2:aether-runtime-secret-v1:sealed-old"
+                }
+            })),
+            proxy_version: None,
+            registered_by: None,
+            tunnel_mode: true,
+        };
+        let first = repository
+            .register_node(&first_mutation)
+            .await
+            .expect("first registration should succeed");
+
+        let mut refreshed_mutation = first_mutation.clone();
+        refreshed_mutation.name = "registration-security-node-refreshed".to_string();
+        refreshed_mutation.proxy_metadata = Some(json!({"runtime": "refreshed"}));
+        refreshed_mutation.proxy_version = Some("2.0.0".to_string());
+        let refreshed = repository
+            .register_node(&refreshed_mutation)
+            .await
+            .expect("metadata-only re-registration should succeed");
+        assert_eq!(refreshed.id, first.id);
+        assert_eq!(
+            refreshed
+                .proxy_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.pointer("/tunnel_security/encryption_key_encrypted"))
+                .and_then(Value::as_str),
+            Some("aether-proxy-node-secret-v2:aether-runtime-secret-v1:sealed-old")
+        );
+
+        let mut rotated_mutation = refreshed_mutation;
+        rotated_mutation.proxy_metadata = Some(json!({
+            "tunnel_security": {
+                "mode": "non_tls_required",
+                "encryption_key_encrypted": "aether-proxy-node-secret-v2:aether-runtime-secret-v1:sealed-new"
+            }
+        }));
+        let rotated = repository
+            .register_node(&rotated_mutation)
+            .await
+            .expect("explicit security rotation should succeed");
+        assert_eq!(
+            rotated
+                .proxy_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.pointer("/tunnel_security/encryption_key_encrypted"))
+                .and_then(Value::as_str),
+            Some("aether-proxy-node-secret-v2:aether-runtime-secret-v1:sealed-new")
+        );
+    }
+
+    #[tokio::test]
     async fn registers_updates_config_and_unregisters_nodes() {
         let repository = InMemoryProxyNodeRepository::default();
 
         let registered = repository
             .register_node(&ProxyNodeRegistrationMutation {
+                node_id: None,
                 name: "proxy-01".to_string(),
                 ip: "127.0.0.1".to_string(),
                 port: 0,
@@ -1131,6 +1466,7 @@ mod tests {
         let updated = repository
             .update_remote_config(&ProxyNodeRemoteConfigMutation {
                 node_id: registered.id.clone(),
+                expected_tunnel_generation: None,
                 node_name: Some("proxy-02".to_string()),
                 allowed_ports: Some(vec![443, 8443]),
                 log_level: Some("info".to_string()),
@@ -1160,6 +1496,7 @@ mod tests {
         let after_upgrade = repository
             .apply_heartbeat(&ProxyNodeHeartbeatMutation {
                 node_id: registered.id.clone(),
+                expected_tunnel_generation: None,
                 heartbeat_interval: None,
                 active_connections: Some(2),
                 total_requests_delta: Some(1),

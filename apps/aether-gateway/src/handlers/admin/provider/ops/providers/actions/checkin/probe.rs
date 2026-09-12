@@ -24,11 +24,13 @@ pub(in super::super) async fn admin_provider_ops_probe_new_api_checkin(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or("/api/user/checkin");
-    let url = admin_provider_ops_request_url(
+    let Ok(url) = admin_provider_ops_request_url(
         base_url,
         &admin_provider_ops_json_object_map(json!({ "endpoint": endpoint })),
         endpoint,
-    );
+    ) else {
+        return None;
+    };
     let (status, response_json) = match admin_provider_ops_execute_json_request(
         state,
         "provider-ops-action:probe_checkin",
@@ -58,8 +60,15 @@ pub(in super::super) async fn admin_provider_ops_probe_new_api_checkin(
             cookie_expired: true,
         });
     }
+    if status != http::StatusCode::OK {
+        return Some(AdminProviderOpsCheckinOutcome {
+            success: Some(false),
+            message: "签到失败".to_string(),
+            cookie_expired: false,
+        });
+    }
 
-    let message = response_json
+    let upstream_message = response_json
         .get("message")
         .and_then(serde_json::Value::as_str)
         .unwrap_or_default()
@@ -72,43 +81,27 @@ pub(in super::super) async fn admin_provider_ops_probe_new_api_checkin(
     {
         return Some(AdminProviderOpsCheckinOutcome {
             success: Some(true),
-            message: if message.is_empty() {
-                "签到成功".to_string()
-            } else {
-                message
-            },
+            message: "签到成功".to_string(),
             cookie_expired: false,
         });
     }
-    if admin_provider_ops_checkin_already_done(&message) {
+    if admin_provider_ops_checkin_already_done(&upstream_message) {
         return Some(AdminProviderOpsCheckinOutcome {
             success: None,
-            message: if message.is_empty() {
-                "今日已签到".to_string()
-            } else {
-                message
-            },
+            message: "今日已签到".to_string(),
             cookie_expired: false,
         });
     }
-    if admin_provider_ops_checkin_auth_failure(&message) {
+    if admin_provider_ops_checkin_auth_failure(&upstream_message) {
         return has_cookie.then(|| AdminProviderOpsCheckinOutcome {
             success: None,
-            message: if message.is_empty() {
-                "Cookie 已失效".to_string()
-            } else {
-                message
-            },
+            message: "Cookie 已失效".to_string(),
             cookie_expired: true,
         });
     }
     Some(AdminProviderOpsCheckinOutcome {
         success: Some(false),
-        message: if message.is_empty() {
-            "签到失败".to_string()
-        } else {
-            message
-        },
+        message: "签到失败".to_string(),
         cookie_expired: false,
     })
 }

@@ -114,6 +114,10 @@ case "$MODE" in
         ;;
 esac
 
+[[ -n "${APP_SERVICE}" && ${#APP_SERVICE} -le 128 \
+    && "${APP_SERVICE}" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]*$ ]] \
+    || die "service name contains unsafe characters"
+
 if [[ "${MODE}" == "local-build" || "${LOCAL_BUILD}" == "true" ]]; then
     [[ "${PREPARE_ONLY}" != "true" ]] || die "--prepare is only supported for Docker Compose deployments"
     deploy_script="${SCRIPT_DIR}/deploy.sh"
@@ -205,7 +209,7 @@ for file in "${COMPOSE_FILES[@]}"; do
 done
 
 services="$(compose_config --services)"
-if ! grep -qx "${APP_SERVICE}" <<< "${services}"; then
+if ! grep -Fqx -- "${APP_SERVICE}" <<< "${services}"; then
     die "service '${APP_SERVICE}' not found in compose config"
 fi
 
@@ -229,6 +233,12 @@ compose_up_app() {
 
     up_args+=("${APP_SERVICE}")
     compose "${up_args[@]}"
+}
+
+compose_supports_wait() {
+    local help
+    help="$(compose up --help 2>/dev/null)" || return 1
+    grep -Fq -- '--wait' <<<"${help}"
 }
 
 wait_healthy() {
@@ -271,11 +281,15 @@ if [[ "${NO_PULL}" != "true" ]]; then
 fi
 
 echo ">>> Recreating ${APP_SERVICE}..."
-compose_up_app true || {
-    echo ">>> Compose up with --wait failed; falling back to simple recreate..."
+if compose_supports_wait; then
+    compose_up_app true \
+        || die "updated app failed to become healthy; inspect the container before retrying"
+else
+    echo ">>> Compose does not support --wait; using explicit health polling..."
     compose_up_app false
-    wait_healthy || true
-}
+    wait_healthy \
+        || die "updated app failed to become healthy; inspect the container before retrying"
+fi
 
 echo ">>> Current services:"
 compose ps

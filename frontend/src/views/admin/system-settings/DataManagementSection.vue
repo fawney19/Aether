@@ -33,21 +33,23 @@
                 variant="outline"
                 size="sm"
                 class="w-full"
+                :title="item.exportLabel"
                 :disabled="item.exportLoading"
                 @click="$emit('export', item.key)"
               >
                 <Download class="w-3.5 h-3.5 mr-1.5" />
-                {{ item.exportLoading ? '导出中...' : item.exportLabel }}
+                {{ item.exportLoading ? '导出中...' : '导出' }}
               </Button>
               <Button
                 variant="outline"
                 size="sm"
                 class="w-full"
+                :title="item.importLabel"
                 :disabled="item.importLoading"
                 @click="triggerDataFileSelect(item.key)"
               >
                 <Upload class="w-3.5 h-3.5 mr-1.5" />
-                {{ item.importLoading ? '导入中...' : item.importLabel }}
+                {{ item.importLoading ? '导入中...' : '导入' }}
               </Button>
             </div>
           </div>

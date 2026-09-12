@@ -218,7 +218,12 @@ pub(super) async fn build_admin_monitoring_resilience_snapshot(
                     "model": item.model,
                     "api_format": item.api_format,
                     "status_code": item.status_code,
-                    "error_message": item.error_message,
+                    "error_message": item
+                        .error_category
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .unwrap_or("request_failed"),
                 }
             })
         })

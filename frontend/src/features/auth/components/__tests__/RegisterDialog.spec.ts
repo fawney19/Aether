@@ -161,6 +161,7 @@ beforeEach(() => {
     success: true,
     message: 'ok',
     expire_minutes: 5,
+    verification_token: 'verification-session-token',
   })
 })
 

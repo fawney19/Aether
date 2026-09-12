@@ -11,8 +11,9 @@ use aether_data::driver::postgres::{
 use aether_data::{DataLayerError, PostgresBackend};
 use aether_runtime_state::{RedisClientConfig, RedisLockRunner, RedisLockRunnerConfig};
 use aether_testkit::{
-    init_test_runtime_for, reserve_local_port, BenchmarkRuntimeSampler, BenchmarkRuntimeSnapshot,
-    ManagedPostgresServer, ManagedRedisServer, TunnelHarness, TunnelHarnessConfig,
+    init_test_runtime_for, insert_tunnel_harness_auth_headers, reserve_local_port,
+    BenchmarkRuntimeSampler, BenchmarkRuntimeSnapshot, ManagedPostgresServer, ManagedRedisServer,
+    TunnelHarness, TunnelHarnessConfig, TUNNEL_HARNESS_NODE_ID,
 };
 use futures_util::{FutureExt, StreamExt};
 use serde::Serialize;
@@ -171,8 +172,13 @@ impl RecoveryCollector {
     }
 }
 
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let _log_shutdown = aether_runtime::LogShutdownGuard::new();
+    run()
+}
+
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn run() -> Result<(), Box<dyn std::error::Error>> {
     init_test_runtime_for("failure-recovery-baseline");
     let config = parse_args(std::env::args().skip(1).collect())?;
     let report = run_suite(&config).await?;
@@ -508,12 +514,8 @@ async fn benchmark_tunnel_restart_recovery(
                     .clone()
                     .into_client_request()
                     .map_err(|err| format!("failed to build websocket request: {err}"))?;
-                request.headers_mut().insert(
-                    "x-node-id",
-                    format!("recovery-node-{worker_index}-{current}")
-                        .parse()
-                        .map_err(|err| format!("failed to build x-node-id header: {err}"))?,
-                );
+                insert_tunnel_harness_auth_headers(request.headers_mut(), TUNNEL_HARNESS_NODE_ID)
+                    .map_err(|err| format!("failed to build tunnel auth headers: {err}"))?;
                 request.headers_mut().insert(
                     aether_contracts::tunnel::TUNNEL_PROTOCOL_VERSION_HEADER,
                     aether_contracts::tunnel::CURRENT_TUNNEL_PROTOCOL_VERSION_STR

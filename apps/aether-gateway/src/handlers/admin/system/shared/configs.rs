@@ -1,6 +1,9 @@
 use crate::handlers::admin::model::ADMIN_EXTERNAL_MODELS_PROXY_NODE_CONFIG_KEY;
 use crate::handlers::admin::request::AdminAppState;
-use crate::handlers::shared::unix_secs_to_rfc3339;
+use crate::handlers::shared::{
+    bark_device_key_binding, encrypt_bark_device_key, encrypt_smtp_password, smtp_password_binding,
+    system_config_bool, system_config_string, unix_secs_to_rfc3339,
+};
 use crate::GatewayError;
 use aether_admin::system::{
     admin_system_config_default_value as admin_system_config_default_value_pure,
@@ -13,7 +16,6 @@ use aether_admin::system::{
     normalize_admin_system_config_key as normalize_admin_system_config_key_pure,
     parse_admin_system_config_update,
 };
-use aether_crypto::encrypt_python_fernet_plaintext;
 use axum::body::Bytes;
 use axum::http;
 use serde_json::json;
@@ -125,18 +127,70 @@ pub(crate) async fn apply_admin_system_config_update(
     if is_sensitive_admin_system_config_key(&normalized_key)
         && value.as_str().is_some_and(|raw| !raw.is_empty())
     {
-        let Some(encryption_key) = state
-            .encryption_key()
-            .filter(|value| !value.trim().is_empty())
-        else {
+        let plaintext = value
+            .as_str()
+            .expect("sensitive config value was a non-empty string");
+        let encrypted = if normalized_key.eq_ignore_ascii_case("smtp_password") {
+            let host = state
+                .read_system_config_json_value("smtp_host")
+                .await?
+                .and_then(|value| system_config_string(Some(&value)));
+            let port = state
+                .read_system_config_json_value("smtp_port")
+                .await?
+                .map(|value| crate::email_delivery::system_config_u16(Some(&value), 587))
+                .unwrap_or(587);
+            let user = state
+                .read_system_config_json_value("smtp_user")
+                .await?
+                .and_then(|value| system_config_string(Some(&value)));
+            let use_tls = state
+                .read_system_config_json_value("smtp_use_tls")
+                .await?
+                .map(|value| system_config_bool(Some(&value), true))
+                .unwrap_or(true);
+            let use_ssl = state
+                .read_system_config_json_value("smtp_use_ssl")
+                .await?
+                .map(|value| system_config_bool(Some(&value), false))
+                .unwrap_or(false);
+            let Some(binding) = host.as_deref().and_then(|host| {
+                smtp_password_binding(host, port, user.as_deref(), use_tls, use_ssl)
+            }) else {
+                return Ok(Err((
+                    http::StatusCode::BAD_REQUEST,
+                    json!({
+                        "detail": "保存 SMTP 密码前必须先配置有效的 smtp_host 和 smtp_user"
+                    }),
+                )));
+            };
+            encrypt_smtp_password(state.app(), &binding, plaintext)
+        } else if normalized_key.eq_ignore_ascii_case("module.bark_push.device_key") {
+            let server_url = state
+                .read_system_config_json_value("module.bark_push.server_url")
+                .await?
+                .and_then(|value| system_config_string(Some(&value)))
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| "https://api.day.app".to_string());
+            let Some(binding) = bark_device_key_binding(&server_url) else {
+                return Ok(Err((
+                    http::StatusCode::BAD_REQUEST,
+                    json!({
+                        "detail": "保存 Bark Device Key 前必须先配置有效的 module.bark_push.server_url"
+                    }),
+                )));
+            };
+            encrypt_bark_device_key(state.app(), &binding, plaintext)
+        } else {
+            state.encrypt_system_config_secret(&normalized_key, plaintext)
+        };
+        let Some(encrypted) = encrypted else {
             return Ok(Err((
                 http::StatusCode::SERVICE_UNAVAILABLE,
                 json!({ "detail": "系统配置写入需要可用的加密密钥" }),
             )));
         };
-        let plaintext = value.as_str().unwrap();
-        value = json!(encrypt_python_fernet_plaintext(encryption_key, plaintext)
-            .map_err(|err| GatewayError::Internal(err.to_string()))?);
+        value = json!(encrypted);
     }
 
     let updated = state

@@ -25,7 +25,9 @@ use super::vertex::{
     supports_local_vertex_service_account_auth_resolution, VertexServiceAccountRefreshAdapter,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+const LOCAL_OAUTH_RESPONSE_BODY_LIMIT_BYTES: usize = 4 * 1024 * 1024;
+
+#[derive(Clone, PartialEq, Eq)]
 #[allow(clippy::large_enum_variant)]
 pub enum LocalResolvedOAuthRequestAuth {
     #[allow(dead_code)]
@@ -36,7 +38,20 @@ pub enum LocalResolvedOAuthRequestAuth {
     Kiro(KiroRequestAuth),
 }
 
-#[derive(Debug, Clone, PartialEq)]
+impl fmt::Debug for LocalResolvedOAuthRequestAuth {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Header { name, .. } => formatter
+                .debug_struct("Header")
+                .field("name", name)
+                .field("value", &"[REDACTED]")
+                .finish(),
+            Self::Kiro(auth) => formatter.debug_tuple("Kiro").field(auth).finish(),
+        }
+    }
+}
+
+#[derive(Clone, PartialEq)]
 pub struct LocalOAuthResolution {
     pub auth: Option<LocalResolvedOAuthRequestAuth>,
     pub refreshed_entry: Option<CachedOAuthEntry>,
@@ -51,6 +66,23 @@ pub struct LocalOAuthResolution {
     /// credential fence and publishes or discards `refreshed_entry`.
     #[doc(hidden)]
     pub local_refresh_guard: Option<LocalOAuthRefreshCommitGuard>,
+}
+
+impl fmt::Debug for LocalOAuthResolution {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("LocalOAuthResolution")
+            .field("auth", &self.auth)
+            .field("refreshed_entry", &self.refreshed_entry)
+            .field("refresh_in_flight", &self.refresh_in_flight)
+            .field("reused_refresh", &self.reused_refresh)
+            .field("has_distributed_lease", &self.distributed_lease.is_some())
+            .field(
+                "has_local_refresh_guard",
+                &self.local_refresh_guard.is_some(),
+            )
+            .finish()
+    }
 }
 
 #[derive(Clone)]
@@ -78,7 +110,7 @@ impl PartialEq for LocalOAuthRefreshCommitGuard {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct CachedOAuthEntry {
     pub provider_type: String,
     pub auth_header_name: String,
@@ -89,7 +121,21 @@ pub struct CachedOAuthEntry {
     pub source_fingerprint: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+impl fmt::Debug for CachedOAuthEntry {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CachedOAuthEntry")
+            .field("provider_type", &self.provider_type)
+            .field("auth_header_name", &self.auth_header_name)
+            .field("auth_header_value", &"[REDACTED]")
+            .field("expires_at_unix_secs", &self.expires_at_unix_secs)
+            .field("has_metadata", &self.metadata.is_some())
+            .field("has_source_fingerprint", &self.source_fingerprint.is_some())
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq)]
 pub struct LocalOAuthHttpRequest {
     pub request_id: &'static str,
     pub method: reqwest::Method,
@@ -99,21 +145,44 @@ pub struct LocalOAuthHttpRequest {
     pub body_bytes: Option<Vec<u8>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+impl fmt::Debug for LocalOAuthHttpRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("LocalOAuthHttpRequest")
+            .field("request_id", &self.request_id)
+            .field("method", &self.method)
+            .field("url", &"[REDACTED]")
+            .field("header_names", &self.headers.keys().collect::<Vec<_>>())
+            .field("json_body", &self.json_body.as_ref().map(|_| "[REDACTED]"))
+            .field("body_bytes_len", &self.body_bytes.as_ref().map(Vec::len))
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
 pub struct LocalOAuthHttpResponse {
     pub status_code: u16,
     pub body_text: String,
 }
 
-#[derive(Debug, Error)]
+impl fmt::Debug for LocalOAuthHttpResponse {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("LocalOAuthHttpResponse")
+            .field("status_code", &self.status_code)
+            .field("body_bytes_len", &self.body_text.len())
+            .finish()
+    }
+}
+
+#[derive(Error)]
 pub enum LocalOAuthRefreshError {
-    #[error("{provider_type} oauth refresh request failed: {source}")]
+    #[error("{provider_type} oauth refresh request failed")]
     Transport {
         provider_type: &'static str,
-        #[source]
-        source: reqwest::Error,
+        error: reqwest::Error,
     },
-    #[error("{provider_type} oauth refresh returned HTTP {status_code}: {body_excerpt}")]
+    #[error("{provider_type} oauth refresh returned HTTP {status_code}")]
     HttpStatus {
         provider_type: &'static str,
         status_code: u16,
@@ -152,6 +221,64 @@ impl ReqwestLocalOAuthHttpExecutor {
     }
 }
 
+impl fmt::Debug for LocalOAuthRefreshError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Transport { provider_type, .. } => formatter
+                .debug_struct("Transport")
+                .field("provider_type", provider_type)
+                .field("error", &"[REDACTED]")
+                .finish(),
+            Self::HttpStatus {
+                provider_type,
+                status_code,
+                ..
+            } => formatter
+                .debug_struct("HttpStatus")
+                .field("provider_type", provider_type)
+                .field("status_code", status_code)
+                .field("body_excerpt", &"[REDACTED]")
+                .finish(),
+            Self::TransportMessage { provider_type, .. } => formatter
+                .debug_struct("TransportMessage")
+                .field("provider_type", provider_type)
+                .field("message", &"[REDACTED]")
+                .finish(),
+            Self::InvalidResponse { provider_type, .. } => formatter
+                .debug_struct("InvalidResponse")
+                .field("provider_type", provider_type)
+                .field("message", &"[REDACTED]")
+                .finish(),
+        }
+    }
+}
+
+fn validate_local_oauth_request_url(
+    provider_type: &'static str,
+    raw_url: &str,
+) -> Result<url::Url, LocalOAuthRefreshError> {
+    let invalid = |message: &'static str| LocalOAuthRefreshError::TransportMessage {
+        provider_type,
+        message: message.to_string(),
+    };
+    let url = url::Url::parse(raw_url).map_err(|_| invalid("invalid OAuth endpoint URL"))?;
+    if url.host().is_none() || !matches!(url.scheme(), "http" | "https") {
+        return Err(invalid(
+            "OAuth endpoint URL must use HTTP or HTTPS and include a host",
+        ));
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(invalid("OAuth endpoint URL must not include credentials"));
+    }
+    if url.fragment().is_some() {
+        return Err(invalid("OAuth endpoint URL must not include a fragment"));
+    }
+    if !aether_http::is_https_or_loopback_http_url(&url) {
+        return Err(invalid("remote OAuth endpoint URL must use HTTPS"));
+    }
+    Ok(url)
+}
+
 #[async_trait]
 impl LocalOAuthHttpExecutor for ReqwestLocalOAuthHttpExecutor {
     async fn execute(
@@ -160,9 +287,8 @@ impl LocalOAuthHttpExecutor for ReqwestLocalOAuthHttpExecutor {
         _transport: &GatewayProviderTransportSnapshot,
         request: &LocalOAuthHttpRequest,
     ) -> Result<LocalOAuthHttpResponse, LocalOAuthRefreshError> {
-        let mut builder = self
-            .client
-            .request(request.method.clone(), request.url.as_str());
+        let request_url = validate_local_oauth_request_url(provider_type, request.url.as_str())?;
+        let mut builder = self.client.request(request.method.clone(), request_url);
         for (name, value) in &request.headers {
             builder = builder.header(name, value);
         }
@@ -172,27 +298,48 @@ impl LocalOAuthHttpExecutor for ReqwestLocalOAuthHttpExecutor {
             builder = builder.body(body_bytes.clone());
         }
 
-        let response =
+        let mut response =
             builder
                 .send()
                 .await
-                .map_err(|source| LocalOAuthRefreshError::Transport {
+                .map_err(|error| LocalOAuthRefreshError::Transport {
                     provider_type,
-                    source,
+                    error,
                 })?;
         let status_code = response.status().as_u16();
-        let body_text =
+        if response
+            .content_length()
+            .is_some_and(|length| length > LOCAL_OAUTH_RESPONSE_BODY_LIMIT_BYTES as u64)
+        {
+            return Err(local_oauth_response_too_large(provider_type));
+        }
+        let mut body = Vec::new();
+        while let Some(chunk) =
             response
-                .text()
+                .chunk()
                 .await
-                .map_err(|source| LocalOAuthRefreshError::Transport {
+                .map_err(|error| LocalOAuthRefreshError::Transport {
                     provider_type,
-                    source,
-                })?;
+                    error,
+                })?
+        {
+            if chunk.len() > LOCAL_OAUTH_RESPONSE_BODY_LIMIT_BYTES.saturating_sub(body.len()) {
+                return Err(local_oauth_response_too_large(provider_type));
+            }
+            body.extend_from_slice(&chunk);
+        }
+        let body_text = String::from_utf8_lossy(&body).to_string();
         Ok(LocalOAuthHttpResponse {
             status_code,
             body_text,
         })
+    }
+}
+
+fn local_oauth_response_too_large(provider_type: &'static str) -> LocalOAuthRefreshError {
+    LocalOAuthRefreshError::InvalidResponse {
+        provider_type,
+        message: format!("response body exceeds {LOCAL_OAUTH_RESPONSE_BODY_LIMIT_BYTES} bytes"),
     }
 }
 
@@ -299,8 +446,8 @@ pub(crate) fn oauth_error_to_local_refresh_error(
 
 fn local_refresh_error_to_oauth_error(error: LocalOAuthRefreshError) -> OAuthError {
     match error {
-        LocalOAuthRefreshError::Transport { source, .. } => {
-            OAuthError::Transport(source.to_string())
+        LocalOAuthRefreshError::Transport { .. } => {
+            OAuthError::Transport("oauth refresh request failed".to_string())
         }
         LocalOAuthRefreshError::TransportMessage { message, .. } => OAuthError::Transport(message),
         LocalOAuthRefreshError::HttpStatus {
@@ -965,12 +1112,127 @@ mod tests {
         GatewayProviderTransportProvider, GatewayProviderTransportSnapshot,
     };
     use super::{
-        CachedOAuthEntry, LocalOAuthHttpExecutor, LocalOAuthRefreshAdapter,
-        LocalOAuthRefreshCoordinator, LocalOAuthRefreshError, LocalOAuthResolution,
-        LocalResolvedOAuthRequestAuth, ReqwestLocalOAuthHttpExecutor,
+        validate_local_oauth_request_url, CachedOAuthEntry, LocalOAuthHttpExecutor,
+        LocalOAuthRefreshAdapter, LocalOAuthRefreshCoordinator, LocalOAuthRefreshError,
+        LocalOAuthResolution, LocalResolvedOAuthRequestAuth, ReqwestLocalOAuthHttpExecutor,
     };
     use async_trait::async_trait;
     use std::sync::Arc;
+
+    #[test]
+    fn local_oauth_transport_requires_https_or_literal_loopback_http() {
+        for allowed in [
+            "https://oauth.example.test/token?tenant=one",
+            "http://localhost:8080/token",
+            "http://127.42.0.1:8080/token",
+            "http://[::1]:8080/token",
+        ] {
+            assert!(
+                validate_local_oauth_request_url("test", allowed).is_ok(),
+                "URL should be accepted: {allowed}"
+            );
+        }
+        for rejected in [
+            "http://oauth.example.test/token",
+            "http://10.0.0.1/token",
+            "http://0.0.0.0:8080/token",
+            "http://[::ffff:127.0.0.1]:8080/token",
+            "https://token@oauth.example.test/token",
+            "https://oauth.example.test/token#secret",
+            "file:///tmp/token",
+        ] {
+            assert!(
+                validate_local_oauth_request_url("test", rejected).is_err(),
+                "URL should be rejected: {rejected}"
+            );
+        }
+    }
+
+    #[test]
+    fn local_oauth_url_error_does_not_echo_embedded_credentials() {
+        let error = validate_local_oauth_request_url(
+            "test",
+            "https://sensitive-user:sensitive-password@oauth.example.test/token",
+        )
+        .expect_err("userinfo should be rejected")
+        .to_string();
+
+        assert!(!error.contains("sensitive-user"));
+        assert!(!error.contains("sensitive-password"));
+    }
+
+    #[test]
+    fn local_oauth_debug_output_redacts_request_response_and_cached_credentials() {
+        let request = super::LocalOAuthHttpRequest {
+            request_id: "provider-oauth:test",
+            method: reqwest::Method::POST,
+            url: "https://oauth.example.test/token?client_secret=url-secret-canary".to_string(),
+            headers: std::collections::BTreeMap::from([
+                (
+                    "authorization".to_string(),
+                    "Bearer request-header-canary".to_string(),
+                ),
+                ("content-type".to_string(), "application/json".to_string()),
+            ]),
+            json_body: Some(serde_json::json!({
+                "refresh_token": "request-body-canary"
+            })),
+            body_bytes: None,
+        };
+        let response = super::LocalOAuthHttpResponse {
+            status_code: 401,
+            body_text: "{\"access_token\":\"response-body-canary\"}".to_string(),
+        };
+        let entry = super::CachedOAuthEntry {
+            provider_type: "test".to_string(),
+            auth_header_name: "authorization".to_string(),
+            auth_header_value: "Bearer cached-header-canary".to_string(),
+            expires_at_unix_secs: Some(1),
+            metadata: Some(serde_json::json!({
+                "refresh_token": "cached-metadata-canary"
+            })),
+            source_fingerprint: Some("non-secret-fingerprint".to_string()),
+        };
+        let resolution = super::LocalOAuthResolution {
+            auth: Some(super::LocalResolvedOAuthRequestAuth::Header {
+                name: "authorization".to_string(),
+                value: "Bearer resolution-header-canary".to_string(),
+            }),
+            refreshed_entry: Some(entry.clone()),
+            refresh_in_flight: false,
+            reused_refresh: false,
+            distributed_lease: None,
+            local_refresh_guard: None,
+        };
+
+        let debug = format!("{request:?} {response:?} {entry:?} {resolution:?}");
+        for secret in [
+            "url-secret-canary",
+            "request-header-canary",
+            "request-body-canary",
+            "response-body-canary",
+            "cached-header-canary",
+            "cached-metadata-canary",
+            "resolution-header-canary",
+        ] {
+            assert!(!debug.contains(secret), "debug leaked {secret}");
+        }
+        assert!(debug.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn local_oauth_refresh_error_debug_and_display_hide_body_and_transport_details() {
+        let http_error = LocalOAuthRefreshError::HttpStatus {
+            provider_type: "test",
+            status_code: 401,
+            body_excerpt: "{\"access_token\":\"refresh-error-canary\"}".to_string(),
+        };
+        let debug = format!("{http_error:?}");
+        let display = http_error.to_string();
+        assert!(!debug.contains("refresh-error-canary"));
+        assert!(!display.contains("refresh-error-canary"));
+        assert_eq!(display, "test oauth refresh returned HTTP 401");
+    }
 
     #[derive(Debug)]
     struct TestAdapter {

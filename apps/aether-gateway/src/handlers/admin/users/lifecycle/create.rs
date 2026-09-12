@@ -1,6 +1,7 @@
 use super::super::{
-    admin_default_user_initial_gift, build_admin_users_read_only_response,
-    disabled_user_policy_detail, disabled_user_policy_field, normalize_admin_feature_settings,
+    admin_default_user_initial_gift, build_admin_users_permission_denied_response,
+    build_admin_users_read_only_response, disabled_user_policy_detail, disabled_user_policy_field,
+    management_token_may_administer_user_accounts, normalize_admin_feature_settings,
     normalize_admin_optional_user_email, normalize_admin_user_group_ids, normalize_admin_user_role,
     normalize_admin_username, validate_admin_user_password, AdminCreateUserRequest,
 };
@@ -18,7 +19,7 @@ use serde_json::{json, Value};
 
 pub(in super::super) async fn build_admin_create_user_response(
     state: &AdminAppState<'_>,
-    _request_context: &AdminRequestContext<'_>,
+    request_context: &AdminRequestContext<'_>,
     request_body: Option<&axum::body::Bytes>,
 ) -> Result<Response<Body>, GatewayError> {
     if !state.has_auth_user_write_capability() {
@@ -107,6 +108,13 @@ pub(in super::super) async fn build_admin_create_user_response(
                 .into_response())
         }
     };
+    if crate::roles::can_access_admin_console(&role)
+        && !management_token_may_administer_user_accounts(request_context)
+    {
+        return Ok(build_admin_users_permission_denied_response(
+            request_context,
+        ));
+    }
     let password_policy = admin_user_password_policy(state).await?;
     if let Err(detail) = validate_admin_user_password(&payload.password, &password_policy) {
         return Ok((
@@ -206,25 +214,152 @@ pub(in super::super) async fn build_admin_create_user_response(
         ));
     };
 
-    if state
-        .initialize_auth_user_wallet(&user.id, initial_gift_usd, payload.unlimited)
-        .await?
-        .is_none()
+    let initialized = match state
+        .initialize_auth_user_wallet_with_outcome(&user.id, initial_gift_usd, payload.unlimited)
+        .await
     {
-        return Ok(build_admin_users_read_only_response(
-            "当前为只读模式，无法初始化用户钱包",
+        Ok(Some(initialized)) => initialized,
+        Ok(None) => {
+            // The user row was created before wallet provisioning. Remove it
+            // when the backend reports that wallet initialization is unavailable;
+            // the guarded rollback refuses to delete a concurrently-created or
+            // funded wallet.
+            if let Err(cleanup_error) = state
+                .rollback_provisional_auth_user_with_wallet(&user.id, None)
+                .await
+            {
+                tracing::error!(
+                    error = ?cleanup_error,
+                    user_id = %user.id,
+                    "admin user wallet-unavailable cleanup failed"
+                );
+            }
+            return Ok(build_admin_users_read_only_response(
+                "当前为只读模式，无法初始化用户钱包",
+            ));
+        }
+        Err(err) => {
+            if let Err(cleanup_error) = state
+                .rollback_provisional_auth_user_with_wallet(&user.id, None)
+                .await
+            {
+                tracing::error!(
+                    error = ?cleanup_error,
+                    user_id = %user.id,
+                    "admin user wallet initialization cleanup failed"
+                );
+            }
+            return Err(err);
+        }
+    };
+    let owned_wallet_id = initialized.created.then(|| initialized.wallet.id.clone());
+    let wallet_is_user_owned = initialized.wallet.user_id.as_deref() == Some(user.id.as_str())
+        && initialized.wallet.api_key_id.is_none();
+    if !wallet_is_user_owned {
+        if let Err(cleanup_error) = state
+            .rollback_provisional_auth_user_with_wallet(&user.id, owned_wallet_id.as_deref())
+            .await
+        {
+            tracing::error!(
+                error = ?cleanup_error,
+                user_id = %user.id,
+                wallet_id = ?owned_wallet_id,
+                "admin user wallet owner validation cleanup failed"
+            );
+        }
+        return Err(GatewayError::Internal(
+            "admin user wallet owner does not match the provisioned user".to_string(),
         ));
     }
     if !group_ids.is_empty() {
-        state
+        let replaced_groups = match state
             .replace_user_groups_for_user(&user.id, &group_ids)
-            .await?;
+            .await
+        {
+            Ok(groups) if groups.len() == group_ids.len() => groups,
+            Ok(_) => {
+                let error =
+                    GatewayError::Internal("user groups could not be persisted".to_string());
+                if let Err(cleanup_error) = state
+                    .rollback_provisional_auth_user_with_wallet(
+                        &user.id,
+                        owned_wallet_id.as_deref(),
+                    )
+                    .await
+                {
+                    tracing::error!(
+                        error = ?cleanup_error,
+                        user_id = %user.id,
+                        wallet_id = ?owned_wallet_id,
+                        "admin user group provisioning cleanup failed"
+                    );
+                }
+                return Err(error);
+            }
+            Err(error) => {
+                if let Err(cleanup_error) = state
+                    .rollback_provisional_auth_user_with_wallet(
+                        &user.id,
+                        owned_wallet_id.as_deref(),
+                    )
+                    .await
+                {
+                    tracing::error!(
+                        error = ?cleanup_error,
+                        user_id = %user.id,
+                        wallet_id = ?owned_wallet_id,
+                        "admin user group provisioning cleanup failed"
+                    );
+                }
+                return Err(error);
+            }
+        };
+        let _ = replaced_groups;
     }
-    let feature_settings = if feature_settings.is_some() {
-        state
-            .update_user_feature_settings(&user.id, feature_settings.clone())
-            .await?
-            .or(feature_settings)
+    let feature_settings = if let Some(requested_feature_settings) = feature_settings {
+        match state
+            .update_user_feature_settings(&user.id, Some(requested_feature_settings))
+            .await
+        {
+            Ok(Some(updated_feature_settings)) => Some(updated_feature_settings),
+            Ok(None) => {
+                let error = GatewayError::Internal(
+                    "user feature settings could not be persisted".to_string(),
+                );
+                if let Err(cleanup_error) = state
+                    .rollback_provisional_auth_user_with_wallet(
+                        &user.id,
+                        owned_wallet_id.as_deref(),
+                    )
+                    .await
+                {
+                    tracing::error!(
+                        error = ?cleanup_error,
+                        user_id = %user.id,
+                        wallet_id = ?owned_wallet_id,
+                        "admin user feature settings cleanup failed"
+                    );
+                }
+                return Err(error);
+            }
+            Err(error) => {
+                if let Err(cleanup_error) = state
+                    .rollback_provisional_auth_user_with_wallet(
+                        &user.id,
+                        owned_wallet_id.as_deref(),
+                    )
+                    .await
+                {
+                    tracing::error!(
+                        error = ?cleanup_error,
+                        user_id = %user.id,
+                        wallet_id = ?owned_wallet_id,
+                        "admin user feature settings cleanup failed"
+                    );
+                }
+                return Err(error);
+            }
+        }
     } else {
         None
     };

@@ -895,6 +895,44 @@ impl GatewayDataState {
         .await
     }
 
+    pub(crate) async fn compare_and_set_system_config_string_value(
+        &self,
+        key: &str,
+        expected: &str,
+        replacement: &str,
+    ) -> Result<bool, DataLayerError> {
+        if let Some(values) = &self.system_config_values {
+            let updated = {
+                let mut values = values.write().expect("system config values lock");
+                match values.get_mut(key) {
+                    Some(entry) if entry.value.as_str() == Some(expected) => {
+                        entry.value = serde_json::Value::String(replacement.to_string());
+                        entry.updated_at_unix_secs =
+                            Some(current_system_config_updated_at_unix_secs());
+                        true
+                    }
+                    _ => false,
+                }
+            };
+            self.clear_cached_system_config_value(key);
+            return Ok(updated);
+        }
+
+        let result = match self.backends.as_ref() {
+            Some(backends) => {
+                crate::request_diagnostics::observe_db_operation(
+                    "system_config_compare_and_set",
+                    self.database_pool_summary(),
+                    backends.compare_and_set_system_config_string_value(key, expected, replacement),
+                )
+                .await
+            }
+            None => Ok(false),
+        };
+        self.clear_cached_system_config_value(key);
+        result
+    }
+
     pub(crate) async fn upsert_system_config_value(
         &self,
         key: &str,
@@ -1078,10 +1116,7 @@ impl GatewayDataState {
 }
 
 fn database_driver_supports_usage_counter_flush(driver: Option<DatabaseDriver>) -> bool {
-    matches!(
-        driver,
-        Some(DatabaseDriver::Postgres | DatabaseDriver::Mysql | DatabaseDriver::Sqlite)
-    )
+    matches!(driver, Some(DatabaseDriver::Postgres))
 }
 
 #[cfg(test)]
@@ -1093,12 +1128,6 @@ mod usage_counter_flush_backend_tests {
     fn every_sql_driver_supports_usage_counter_flush() {
         assert!(database_driver_supports_usage_counter_flush(Some(
             DatabaseDriver::Postgres
-        )));
-        assert!(database_driver_supports_usage_counter_flush(Some(
-            DatabaseDriver::Mysql
-        )));
-        assert!(database_driver_supports_usage_counter_flush(Some(
-            DatabaseDriver::Sqlite
         )));
         assert!(!database_driver_supports_usage_counter_flush(None));
     }

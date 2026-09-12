@@ -3,7 +3,6 @@ use tracing::debug;
 
 use crate::ai_serving::build_request_trace_proxy_value;
 use crate::ai_serving::planner::decision_input::apply_provider_request_routing_policy_to_decision_with_websocket_mode;
-use crate::ai_serving::planner::redaction::sanitize_upstream_url_for_log;
 use crate::ai_serving::planner::report_context::{
     build_local_execution_report_context, insert_native_client_envelope_name,
     insert_provider_stream_event_api_format, LocalExecutionReportContextParts,
@@ -184,6 +183,7 @@ pub(crate) async fn maybe_build_local_openai_responses_decision_payload_for_cand
                 client_session_affinity: input.client_session_affinity.as_ref(),
                 routing_policy: input.routing_policy.as_ref(),
                 scheduler_affinity_epoch: eligible.orchestration.scheduler_affinity_epoch,
+                sticky_key_attempts: eligible.orchestration.sticky_key_attempts,
                 client_requested_stream: body_json
                     .get("stream")
                     .and_then(serde_json::Value::as_bool)
@@ -204,12 +204,10 @@ pub(crate) async fn maybe_build_local_openai_responses_decision_payload_for_cand
         &resolved.transport,
     );
 
-    let log_base_url = sanitize_upstream_url_for_log(resolved.transport.endpoint.base_url.as_str());
     let log_request_query = parts
         .uri
         .query()
         .and_then(crate::ai_serving::api::sanitize_request_query_string);
-    let log_upstream_url = sanitize_upstream_url_for_log(resolved.upstream_url.as_str());
     debug!(
         event_name = "local_openai_responses_decision_payload_built",
         log_type = "debug",
@@ -226,9 +224,12 @@ pub(crate) async fn maybe_build_local_openai_responses_decision_payload_for_cand
         client_api_format = spec_metadata.api_format,
         provider_api_format = %resolved.provider_api_format,
         request_path = %parts.uri.path(),
+        request_path_and_query = %crate::ai_serving::pure::sanitize_request_path_and_query(
+            parts.uri.path(),
+            parts.uri.query(),
+        ).unwrap_or_else(|| "/".to_string()),
+        upstream_origin = %crate::handlers::shared::security_log_url_origin(&resolved.upstream_url),
         request_query = ?log_request_query,
-        upstream_base_url = %log_base_url,
-        upstream_url = %log_upstream_url,
         upstream_is_stream = resolved.upstream_is_stream,
         has_envelope = resolved.envelope_name.is_some(),
         "gateway built local openai responses decision payload"

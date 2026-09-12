@@ -36,8 +36,8 @@ const CODEX_OPENAI_RESPONSES_COMPACT_BODY_FIELDS: &[&str] = &[
     "prompt_cache_key",
     "text",
 ];
-pub const CODEX_CLIENT_VERSION: &str = "0.144.1";
-pub const CODEX_CLIENT_USER_AGENT: &str = "codex_cli_rs/0.144.1";
+pub const CODEX_CLIENT_VERSION: &str = "0.153.4";
+pub const CODEX_CLIENT_USER_AGENT: &str = "codex_cli_rs/0.153.4";
 pub const CODEX_CLIENT_ORIGINATOR: &str = "codex_cli_rs";
 pub const CODEX_OPENAI_IMAGE_INTERNAL_MODEL: &str = "gpt-5.4-mini";
 pub const CODEX_OPENAI_IMAGE_DEFAULT_MODEL: &str = "gpt-image-2";
@@ -851,8 +851,24 @@ fn header_value_contains_media_type(value: &str, media_type: &str) -> bool {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CodexAuthIdentity {
     pub account_id: Option<String>,
+    pub account_user_id: Option<String>,
+    pub user_id: Option<String>,
+    pub email: Option<String>,
+    pub codex_identity_fingerprint: Option<String>,
     pub is_fedramp: bool,
     pub uses_codex_backend: bool,
+}
+
+fn first_non_empty_codex_identity_string<'a>(
+    values: impl IntoIterator<Item = Option<&'a Value>>,
+) -> Option<String> {
+    values.into_iter().find_map(|value| {
+        value
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+    })
 }
 
 pub fn parse_codex_auth_identity(decrypted_auth_config_raw: Option<&str>) -> CodexAuthIdentity {
@@ -868,29 +884,72 @@ pub fn parse_codex_auth_identity(decrypted_auth_config_raw: Option<&str>) -> Cod
     let namespaced_auth = value
         .get("https://api.openai.com/auth")
         .and_then(Value::as_object);
+    let namespaced_profile = value
+        .get("https://api.openai.com/profile")
+        .and_then(Value::as_object);
     let agent_identity = value
         .get("agent_identity")
         .or_else(|| value.get("agentIdentity"))
         .and_then(Value::as_object);
-    let account_id = value
-        .get("account_id")
-        .or_else(|| value.get("accountId"))
-        .or_else(|| value.get("chatgpt_account_id"))
-        .or_else(|| value.get("chatgptAccountId"))
-        .or_else(|| namespaced_auth.and_then(|auth| auth.get("chatgpt_account_id")))
-        .or_else(|| {
-            agent_identity.and_then(|identity| {
-                identity
-                    .get("account_id")
-                    .or_else(|| identity.get("accountId"))
-                    .or_else(|| identity.get("chatgpt_account_id"))
-                    .or_else(|| identity.get("chatgptAccountId"))
-            })
-        })
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned);
+    let account_id = first_non_empty_codex_identity_string([
+        value.get("account_id"),
+        value.get("accountId"),
+        value.get("chatgpt_account_id"),
+        value.get("chatgptAccountId"),
+        namespaced_auth.and_then(|auth| auth.get("chatgpt_account_id")),
+        agent_identity.and_then(|identity| identity.get("account_id")),
+        agent_identity.and_then(|identity| identity.get("accountId")),
+        agent_identity.and_then(|identity| identity.get("chatgpt_account_id")),
+        agent_identity.and_then(|identity| identity.get("chatgptAccountId")),
+    ]);
+    let account_user_id = first_non_empty_codex_identity_string([
+        value.get("account_user_id"),
+        value.get("accountUserId"),
+        value.get("chatgpt_account_user_id"),
+        value.get("chatgptAccountUserId"),
+        namespaced_auth.and_then(|auth| auth.get("chatgpt_account_user_id")),
+        agent_identity.and_then(|identity| identity.get("account_user_id")),
+        agent_identity.and_then(|identity| identity.get("accountUserId")),
+        agent_identity.and_then(|identity| identity.get("chatgpt_account_user_id")),
+        agent_identity.and_then(|identity| identity.get("chatgptAccountUserId")),
+    ]);
+    let user_id = first_non_empty_codex_identity_string([
+        value.get("user_id"),
+        value.get("userId"),
+        value.get("chatgpt_user_id"),
+        value.get("chatgptUserId"),
+        namespaced_auth.and_then(|auth| auth.get("chatgpt_user_id")),
+        agent_identity.and_then(|identity| identity.get("user_id")),
+        agent_identity.and_then(|identity| identity.get("userId")),
+        agent_identity.and_then(|identity| identity.get("chatgpt_user_id")),
+        agent_identity.and_then(|identity| identity.get("chatgptUserId")),
+        value.get("sub"),
+    ]);
+    let email = first_non_empty_codex_identity_string([
+        value.get("email"),
+        value.get("email_address"),
+        value.get("emailAddress"),
+        value.get("outlook_email"),
+        namespaced_auth.and_then(|auth| auth.get("email")),
+        namespaced_auth.and_then(|auth| auth.get("email_address")),
+        namespaced_auth.and_then(|auth| auth.get("emailAddress")),
+        namespaced_auth.and_then(|auth| auth.get("outlook_email")),
+        namespaced_profile.and_then(|profile| profile.get("email")),
+        namespaced_profile.and_then(|profile| profile.get("email_address")),
+        namespaced_profile.and_then(|profile| profile.get("emailAddress")),
+        agent_identity.and_then(|identity| identity.get("email")),
+        agent_identity.and_then(|identity| identity.get("email_address")),
+        agent_identity.and_then(|identity| identity.get("emailAddress")),
+        agent_identity.and_then(|identity| identity.get("outlook_email")),
+    ]);
+    let codex_identity_fingerprint = first_non_empty_codex_identity_string([
+        value.get("codex_identity_fingerprint"),
+        value.get("codex-identity-fingerprint"),
+        value.get("codexIdentityFingerprint"),
+        agent_identity.and_then(|identity| identity.get("codex_identity_fingerprint")),
+        agent_identity.and_then(|identity| identity.get("codex-identity-fingerprint")),
+        agent_identity.and_then(|identity| identity.get("codexIdentityFingerprint")),
+    ]);
     let is_fedramp = value
         .get("is_fedramp")
         .or_else(|| value.get("chatgpt_account_is_fedramp"))
@@ -907,6 +966,9 @@ pub fn parse_codex_auth_identity(decrypted_auth_config_raw: Option<&str>) -> Cod
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let uses_codex_backend = account_id.is_some()
+        || account_user_id.is_some()
+        || user_id.is_some()
+        || codex_identity_fingerprint.is_some()
         || value
             .get("provider_type")
             .and_then(Value::as_str)
@@ -919,6 +981,10 @@ pub fn parse_codex_auth_identity(decrypted_auth_config_raw: Option<&str>) -> Cod
 
     CodexAuthIdentity {
         account_id,
+        account_user_id,
+        user_id,
+        email,
+        codex_identity_fingerprint,
         is_fedramp,
         uses_codex_backend,
     }
@@ -2125,12 +2191,21 @@ mod tests {
         apply_codex_openai_responses_websocket_continuation_body_edits_with_source_model_and_capabilities,
         apply_codex_openai_special_headers, apply_openai_responses_compact_special_body_edits,
         build_codex_model_catalog_metadata, bundled_codex_model_cards, effective_codex_model_cards,
-        project_codex_catalog_model_card, resolve_codex_responses_model_capabilities,
+        parse_codex_auth_identity, project_codex_catalog_model_card,
+        resolve_codex_responses_model_capabilities,
         validate_codex_openai_responses_compact_request_contract, CODEX_CLIENT_ORIGINATOR,
-        CODEX_CLIENT_USER_AGENT, CODEX_OPENAI_IMAGE_INTERNAL_MODEL,
+        CODEX_CLIENT_USER_AGENT, CODEX_CLIENT_VERSION, CODEX_OPENAI_IMAGE_INTERNAL_MODEL,
         CODEX_OPENAI_RESPONSES_UNSUPPORTED_BODY_FIELDS, CODEX_RESPONSES_LITE_HEADER,
     };
     use serde_json::{json, Value};
+
+    #[test]
+    fn codex_client_user_agent_matches_originator_and_version() {
+        assert_eq!(
+            CODEX_CLIENT_USER_AGENT,
+            format!("{CODEX_CLIENT_ORIGINATOR}/{CODEX_CLIENT_VERSION}")
+        );
+    }
 
     #[test]
     fn model_card_drives_unknown_codex_model_body_and_header_contracts() {
@@ -2776,6 +2851,41 @@ mod tests {
         assert!(capabilities.supports_parallel_tool_calls);
         assert_eq!(capabilities.default_verbosity.as_deref(), Some("low"));
         assert!(capabilities.supported_service_tiers.is_empty());
+    }
+
+    #[test]
+    fn codex_auth_identity_parses_member_claims_and_persisted_fingerprint() {
+        let identity = parse_codex_auth_identity(Some(
+            &json!({
+                "provider_type": "codex",
+                "accountId": "workspace-1",
+                "codexIdentityFingerprint": "codex-persisted-fingerprint:v1:stable",
+                "https://api.openai.com/auth": {
+                    "chatgpt_account_user_id": "workspace-member-1",
+                    "chatgpt_user_id": "user-1"
+                },
+                "https://api.openai.com/profile": {
+                    "email": "Alice@Example.com"
+                }
+            })
+            .to_string(),
+        ));
+
+        assert_eq!(identity.account_id.as_deref(), Some("workspace-1"));
+        assert_eq!(
+            identity.account_user_id.as_deref(),
+            Some("workspace-member-1")
+        );
+        assert_eq!(identity.user_id.as_deref(), Some("user-1"));
+        assert_eq!(identity.email.as_deref(), Some("Alice@Example.com"));
+        assert_eq!(
+            identity.codex_identity_fingerprint.as_deref(),
+            Some("codex-persisted-fingerprint:v1:stable")
+        );
+        assert!(identity.uses_codex_backend);
+
+        let sub_fallback = parse_codex_auth_identity(Some(r#"{"sub":"legacy-user-1"}"#));
+        assert_eq!(sub_fallback.user_id.as_deref(), Some("legacy-user-1"));
     }
 
     #[test]

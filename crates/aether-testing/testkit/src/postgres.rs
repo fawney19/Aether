@@ -11,6 +11,7 @@ use crate::wait_until;
 pub struct ManagedPostgresServer {
     child: Option<Child>,
     postgres_bin: String,
+    pg_ctl_bin: PathBuf,
     port: u16,
     workdir: PathBuf,
     data_dir: PathBuf,
@@ -26,7 +27,7 @@ impl ManagedPostgresServer {
             port
         ));
         let data_dir = workdir.join("data");
-        std::fs::create_dir_all(&workdir)?;
+        std::fs::create_dir(&workdir)?;
 
         let initdb_bin = std::env::var("AETHER_INITDB_BIN")
             .ok()
@@ -36,10 +37,31 @@ impl ManagedPostgresServer {
             .ok()
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| "postgres".to_string());
+        let pg_ctl_bin = std::env::var("AETHER_PG_CTL_BIN")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                PathBuf::from(&postgres_bin).with_file_name(if cfg!(windows) {
+                    "pg_ctl.exe"
+                } else {
+                    "pg_ctl"
+                })
+            });
+        let database_url = format!("postgres://aether@127.0.0.1:{port}/postgres");
+        let mut server = Self {
+            child: None,
+            postgres_bin,
+            pg_ctl_bin,
+            port,
+            workdir,
+            data_dir,
+            database_url,
+        };
 
         let init_output = Command::new(&initdb_bin)
             .arg("-D")
-            .arg(&data_dir)
+            .arg(&server.data_dir)
             .arg("-U")
             .arg("aether")
             .arg("--auth=trust")
@@ -54,15 +76,6 @@ impl ManagedPostgresServer {
             .into());
         }
 
-        let database_url = format!("postgres://aether@127.0.0.1:{port}/postgres");
-        let mut server = Self {
-            child: None,
-            postgres_bin,
-            port,
-            workdir,
-            data_dir,
-            database_url,
-        };
         server.restart().await?;
         Ok(server)
     }
@@ -76,10 +89,29 @@ impl ManagedPostgresServer {
     }
 
     pub fn stop(&mut self) -> Result<(), std::io::Error> {
-        if let Some(mut child) = self.child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
+        let Some(child) = self.child.as_mut() else {
+            return Ok(());
+        };
+        if child.try_wait()?.is_some() {
+            self.child = None;
+            return Ok(());
         }
+
+        let output = Command::new(&self.pg_ctl_bin)
+            .arg("-D")
+            .arg(&self.data_dir)
+            .args(["stop", "-m", "fast", "-w", "-t", "10"])
+            .output()?;
+        if !output.status.success() && child.try_wait()?.is_none() {
+            return Err(std::io::Error::other(format!(
+                "pg_ctl stop failed for {}: {}{}",
+                self.data_dir.display(),
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            )));
+        }
+        child.wait()?;
+        self.child = None;
         Ok(())
     }
 
@@ -96,6 +128,8 @@ impl ManagedPostgresServer {
             .arg("-p")
             .arg(self.port.to_string())
             .arg("-F")
+            .arg("-c")
+            .arg("unix_socket_directories=")
             .arg("-c")
             .arg("fsync=off")
             .arg("-c")
@@ -137,8 +171,17 @@ impl ManagedPostgresServer {
 
 impl Drop for ManagedPostgresServer {
     fn drop(&mut self) {
-        let _ = self.stop();
-        let _ = std::fs::remove_dir_all(&self.workdir);
+        match self.stop() {
+            Ok(()) => {
+                let _ = std::fs::remove_dir_all(&self.workdir);
+            }
+            Err(error) => {
+                eprintln!(
+                    "failed to stop managed postgres; preserving {}: {error}",
+                    self.workdir.display(),
+                );
+            }
+        }
     }
 }
 
@@ -167,4 +210,58 @@ fn reserve_local_port() -> Result<u16, std::io::Error> {
     let port = listener.local_addr()?.port();
     drop(listener);
     Ok(port)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    #[ignore = "requires local initdb, postgres, and pg_ctl binaries"]
+    async fn live_managed_postgres_restarts_cleanly_with_open_connections() {
+        let mut server = ManagedPostgresServer::start().await.unwrap();
+        let workdir = server.workdir.clone();
+        let mut connection = PgConnection::connect(server.database_url()).await.unwrap();
+        sqlx::query("CREATE TABLE restart_probe (value INTEGER NOT NULL)")
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO restart_probe VALUES (42)")
+            .execute(&mut connection)
+            .await
+            .unwrap();
+
+        for _iteration in 0..4 {
+            server.stop().unwrap();
+            server.stop().unwrap();
+            assert!(server.child.is_none());
+            assert!(!server.data_dir.join("postmaster.pid").exists());
+            assert!(server.data_dir.exists());
+            server.restart().await.unwrap();
+            connection = PgConnection::connect(server.database_url()).await.unwrap();
+            let value: i32 = sqlx::query_scalar("SELECT value FROM restart_probe")
+                .fetch_one(&mut connection)
+                .await
+                .unwrap();
+            assert_eq!(value, 42);
+        }
+
+        drop(server);
+        assert!(!workdir.exists());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires local initdb, postgres, and pg_ctl binaries"]
+    async fn live_failed_postgres_stop_can_be_retried_without_losing_ownership() {
+        let mut server = ManagedPostgresServer::start().await.unwrap();
+        let pg_ctl_bin = server.pg_ctl_bin.clone();
+        server.pg_ctl_bin = server.workdir.join("missing-pg-ctl");
+        assert!(server.stop().is_err());
+        assert!(server.child.as_mut().unwrap().try_wait().unwrap().is_none());
+        assert!(server.data_dir.exists());
+        server.pg_ctl_bin = pg_ctl_bin;
+        server.stop().unwrap();
+        assert!(server.child.is_none());
+        assert!(!server.data_dir.join("postmaster.pid").exists());
+    }
 }

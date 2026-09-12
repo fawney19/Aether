@@ -70,7 +70,7 @@
             class="p-2 hover:bg-muted rounded-md transition-colors shrink-0"
             :disabled="fetchingUpstreamModels"
             title="刷新上游模型"
-            @click="fetchUpstreamModels()"
+            @click="fetchUpstreamModels(true)"
           >
             <RefreshCw
               class="w-4 h-4"
@@ -82,7 +82,7 @@
             type="button"
             class="p-2 hover:bg-muted rounded-md transition-colors shrink-0"
             title="从提供商获取模型"
-            @click="fetchUpstreamModels()"
+            @click="fetchUpstreamModels(true)"
           >
             <Zap class="w-4 h-4" />
           </button>
@@ -678,12 +678,12 @@ function toggleGroupCollapse(group: string) {
 }
 
 // 从提供商获取模型（使用缓存）
-async function fetchUpstreamModels() {
+async function fetchUpstreamModels(forceRefresh = false) {
   if (!props.providerId) return
   try {
     loadingModels.value = true
     fetchingUpstreamModels.value = true
-    const result = await fetchCachedModels(props.providerId)
+    const result = await fetchCachedModels(props.providerId, undefined, forceRefresh)
     if (result.models.length > 0) {
       upstreamModels.value = result.models
       upstreamModelsLoaded.value = true

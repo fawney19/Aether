@@ -1,13 +1,13 @@
 use super::super::config::{
-    admin_provider_ops_config_object, admin_provider_ops_merge_credentials,
-    resolve_admin_provider_ops_base_url,
+    admin_provider_ops_binding_from_config, admin_provider_ops_config_object,
+    admin_provider_ops_merge_credentials, resolve_admin_provider_ops_base_url,
 };
 use super::super::support::AdminProviderOpsSaveConfigRequest;
 use super::super::verify::admin_provider_ops_local_verify_response;
 use crate::handlers::admin::request::AdminAppState;
 use crate::handlers::admin::shared::attach_admin_audit_response;
 use crate::GatewayError;
-use aether_admin::provider::ops::{admin_provider_ops_verify_failure, normalize_architecture_id};
+use aether_admin::provider::ops::admin_provider_ops_verify_failure;
 use axum::{
     body::{Body, Bytes},
     http,
@@ -39,14 +39,41 @@ pub(super) async fn handle_admin_provider_ops_verify(
     } else {
         Vec::new()
     };
-    let base_url = payload
-        .base_url
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
+    let (effective_provider, mut credentials, saved_binding, reused_saved_secret) =
+        match existing_provider.as_ref() {
+            Some(provider) if admin_provider_ops_config_object(provider).is_some() => {
+                match admin_provider_ops_merge_credentials(
+                    state,
+                    &payload.architecture_id,
+                    provider,
+                    payload.connector.credentials.clone(),
+                )
+                .await
+                {
+                    Ok(snapshot) => (
+                        Some(snapshot.provider),
+                        snapshot.credentials,
+                        Some(snapshot.saved_binding),
+                        snapshot.reused_saved_secret,
+                    ),
+                    Err(detail) => {
+                        return Ok(Json(admin_provider_ops_verify_failure(detail)).into_response())
+                    }
+                }
+            }
+            Some(provider) => (
+                Some(provider.clone()),
+                payload.connector.credentials.clone(),
+                None,
+                false,
+            ),
+            None => (None, payload.connector.credentials.clone(), None, false),
+        };
+    let fallback_base_url = saved_binding
+        .as_ref()
+        .map(|binding| binding.destination.base_url().to_string())
         .or_else(|| {
-            existing_provider.as_ref().and_then(|provider| {
+            effective_provider.as_ref().and_then(|provider| {
                 resolve_admin_provider_ops_base_url(
                     provider,
                     &endpoints,
@@ -54,27 +81,70 @@ pub(super) async fn handle_admin_provider_ops_verify(
                 )
             })
         });
+    let base_url = payload
+        .base_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .or(fallback_base_url);
     let Some(base_url) = base_url else {
         return Ok(Json(admin_provider_ops_verify_failure("请提供 API 地址")).into_response());
     };
-
-    let architecture_id = normalize_architecture_id(&payload.architecture_id);
-    let credentials = existing_provider.as_ref().map_or_else(
-        || payload.connector.credentials.clone(),
-        |provider| {
-            admin_provider_ops_merge_credentials(
-                state,
-                architecture_id,
-                provider,
-                payload.connector.credentials.clone(),
+    let actions = payload
+        .actions
+        .iter()
+        .map(|(action_type, action)| {
+            (
+                action_type.clone(),
+                serde_json::json!({
+                    "enabled": action.enabled,
+                    "config": action.config,
+                }),
             )
+        })
+        .collect::<serde_json::Map<String, serde_json::Value>>();
+    let requested_provider_ops_config = serde_json::json!({
+        "architecture_id": payload.architecture_id,
+        "base_url": base_url,
+        "connector": {
+            "auth_type": payload.connector.auth_type,
+            "config": payload.connector.config,
+            "credentials": {},
         },
-    );
+        "actions": actions,
+    });
+    let requested_binding = match admin_provider_ops_binding_from_config(
+        provider_id,
+        requested_provider_ops_config
+            .as_object()
+            .expect("Provider Ops verify config should be an object"),
+        &base_url,
+    ) {
+        Ok(binding) => binding,
+        Err(detail) => return Ok(Json(admin_provider_ops_verify_failure(detail)).into_response()),
+    };
+    if let Some(saved_binding) = saved_binding.as_ref() {
+        let same_secret_destination = saved_binding.provider_id == requested_binding.provider_id
+            && saved_binding.architecture_id == requested_binding.architecture_id
+            && saved_binding.auth_type == requested_binding.auth_type
+            && saved_binding.destination == requested_binding.destination;
+        if reused_saved_secret && !same_secret_destination {
+            return Ok(Json(admin_provider_ops_verify_failure(
+                "验证不同的 Provider Ops 架构、认证类型或目标地址时必须重新填写凭据",
+            ))
+            .into_response());
+        }
+        if saved_binding != &requested_binding {
+            credentials.retain(|field, _| !field.starts_with("_cached_"));
+        }
+    };
+
     let payload = admin_provider_ops_local_verify_response(
         state,
-        existing_provider.as_ref(),
-        &base_url,
-        architecture_id,
+        effective_provider.as_ref(),
+        requested_binding.destination.base_url(),
+        &requested_binding.architecture_id,
         &payload.connector.config,
         &credentials,
     )

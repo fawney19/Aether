@@ -60,6 +60,11 @@ type = "bool"
 default = false
 
 [[table.users.columns]]
+name = "security_version"
+type = "int64"
+default = 0
+
+[[table.users.columns]]
 name = "allowed_models"
 type = "json"
 nullable = true
@@ -822,6 +827,11 @@ length = 64
 name = "user_id"
 type = "text_id"
 length = 64
+
+[[table.user_sessions.columns]]
+name = "security_version"
+type = "int64"
+default = 0
 
 [[table.user_sessions.columns]]
 name = "client_device_id"

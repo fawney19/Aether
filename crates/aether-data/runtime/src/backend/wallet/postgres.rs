@@ -104,6 +104,14 @@ impl PostgresBackend {
         let window_end = unix_secs_to_utc(input.window_end_unix_secs, "window_end")?;
         let aggregated_at = unix_secs_to_utc(input.aggregated_at_unix_secs, "aggregated_at")?;
         let mut tx = self.pool().begin().await.map_postgres_err()?;
+        sqlx::query("SET LOCAL statement_timeout = '5min'")
+            .execute(&mut *tx)
+            .await
+            .map_postgres_err()?;
+        sqlx::query("SET LOCAL lock_timeout = '30s'")
+            .execute(&mut *tx)
+            .await
+            .map_postgres_err()?;
 
         let aggregated_wallets = sqlx::query(UPSERT_WALLET_DAILY_USAGE_LEDGER_SQL)
             .bind(window_start)

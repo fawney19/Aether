@@ -2,6 +2,7 @@ use base64::Engine as _;
 use http::HeaderMap;
 
 pub const MAX_TUNNEL_STREAMS: usize = 2_048;
+const MAX_TUNNEL_NODE_NAME_UTF8_BYTES: usize = 100 * 4;
 
 pub fn resolve_proxy_max_streams(headers: &HeaderMap, fallback: usize) -> usize {
     headers
@@ -17,10 +18,20 @@ pub fn resolve_proxy_node_name(headers: &HeaderMap, node_id: &str) -> String {
         .get(aether_contracts::tunnel::TUNNEL_NODE_NAME_B64_HEADER)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| {
+            let value = value.trim();
+            let max_encoded_len = MAX_TUNNEL_NODE_NAME_UTF8_BYTES
+                .saturating_add(2)
+                .checked_div(3)
+                .unwrap_or(usize::MAX)
+                .saturating_mul(4);
+            if value.len() > max_encoded_len {
+                return None;
+            }
             base64::engine::general_purpose::URL_SAFE_NO_PAD
-                .decode(value.trim())
+                .decode(value)
                 .ok()
         })
+        .filter(|bytes| bytes.len() <= MAX_TUNNEL_NODE_NAME_UTF8_BYTES)
         .and_then(|bytes| String::from_utf8(bytes).ok())
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty() && value.chars().count() <= 100)
@@ -90,6 +101,18 @@ mod tests {
 
         headers.remove(aether_contracts::tunnel::TUNNEL_NODE_NAME_B64_HEADER);
         headers.insert("x-node-name", HeaderValue::from_static("edge-1"));
+        assert_eq!(resolve_proxy_node_name(&headers, "node-1"), "edge-1");
+
+        let max_encoded_len = super::MAX_TUNNEL_NODE_NAME_UTF8_BYTES
+            .saturating_add(2)
+            .checked_div(3)
+            .unwrap()
+            .saturating_mul(4);
+        headers.insert(
+            aether_contracts::tunnel::TUNNEL_NODE_NAME_B64_HEADER,
+            HeaderValue::from_str(&"A".repeat(max_encoded_len + 1))
+                .expect("oversized encoded header should parse"),
+        );
         assert_eq!(resolve_proxy_node_name(&headers, "node-1"), "edge-1");
     }
 }

@@ -5,14 +5,14 @@ use sqlx::{postgres::PgRow, PgPool, Postgres, QueryBuilder, Row};
 
 use aether_data_contracts::repository::proxy_nodes::{
     bucket_start_unix_secs, build_tunnel_error_event_detail, build_tunnel_metrics_sample,
-    normalize_proxy_metadata, preserve_proxy_metadata_tunnel_security,
-    reconcile_remote_config_after_heartbeat, ProxyNodeEventQuery, ProxyNodeHeartbeatMutation,
-    ProxyNodeManualCreateMutation, ProxyNodeManualUpdateMutation, ProxyNodeMetricsCleanupSummary,
-    ProxyNodeMetricsStep, ProxyNodeReadRepository, ProxyNodeRegistrationMutation,
-    ProxyNodeRemoteConfigMutation, ProxyNodeTrafficMutation, ProxyNodeTunnelStatusMutation,
-    ProxyNodeWriteRepository, StoredProxyFleetMetricsBucket, StoredProxyNode, StoredProxyNodeEvent,
-    StoredProxyNodeMetricsBucket, TunnelErrorEventRecord, TunnelMetricsSample,
-    PROXY_NODE_EVENT_TYPE_TUNNEL_ERROR,
+    merge_proxy_metadata_for_registration, normalize_heartbeat_proxy_metadata,
+    normalize_proxy_metadata, reconcile_remote_config_after_heartbeat, ProxyNodeEventQuery,
+    ProxyNodeHeartbeatMutation, ProxyNodeManualCreateMutation, ProxyNodeManualUpdateMutation,
+    ProxyNodeMetricsCleanupSummary, ProxyNodeMetricsStep, ProxyNodeReadRepository,
+    ProxyNodeRegistrationMutation, ProxyNodeRemoteConfigMutation, ProxyNodeTrafficMutation,
+    ProxyNodeTunnelStatusMutation, ProxyNodeWriteRepository, StoredProxyFleetMetricsBucket,
+    StoredProxyNode, StoredProxyNodeEvent, StoredProxyNodeMetricsBucket, TunnelErrorEventRecord,
+    TunnelMetricsSample, PROXY_NODE_EVENT_TYPE_TUNNEL_ERROR,
 };
 use aether_data_contracts::DataLayerError;
 use aether_data_query::{push_eq, push_limit, WhereClause};
@@ -44,6 +44,7 @@ fn log_reported_tunnel_error_event(
 const FIND_PROXY_NODE_SQL: &str = r#"
 SELECT
   id,
+  tunnel_generation,
   name,
   ip,
   port,
@@ -118,17 +119,58 @@ SET
   heartbeat_interval = COALESCE($2, heartbeat_interval),
   active_connections = COALESCE($3, active_connections),
   avg_latency_ms = COALESCE($4, avg_latency_ms),
-  proxy_metadata = COALESCE($5::json, proxy_metadata),
-  total_requests = total_requests + GREATEST(COALESCE($6, 0), 0),
-  failed_requests = failed_requests + GREATEST(COALESCE($7, 0), 0),
-  dns_failures = dns_failures + GREATEST(COALESCE($8, 0), 0),
-  stream_errors = stream_errors + GREATEST(COALESCE($9, 0), 0)
+  total_requests = total_requests + GREATEST(COALESCE($5, 0), 0),
+  failed_requests = failed_requests + GREATEST(COALESCE($6, 0), 0),
+  dns_failures = dns_failures + GREATEST(COALESCE($7, 0), 0),
+  stream_errors = stream_errors + GREATEST(COALESCE($8, 0), 0)
 WHERE id = $1
+  AND tunnel_mode = TRUE
+  AND tunnel_generation = $9
+"#;
+
+const CAS_HEARTBEAT_PROXY_METADATA_SQL: &str = r#"
+UPDATE proxy_nodes
+SET proxy_metadata = $2::json, updated_at = NOW()
+WHERE id = $1
+  AND tunnel_generation = $3
+  AND proxy_metadata::jsonb IS NOT DISTINCT FROM $4::jsonb
+"#;
+
+const UPDATE_TUNNEL_STATUS_SQL: &str = r#"
+UPDATE proxy_nodes
+SET
+  tunnel_connected = $2,
+  active_connections = CASE
+    WHEN $2 THEN active_connections
+    ELSE 0
+  END,
+  tunnel_connected_at = CASE
+    WHEN $3::double precision IS NULL THEN NOW()
+    ELSE TO_TIMESTAMP($3::double precision)
+  END,
+  status = CASE
+    WHEN $2 THEN 'online'::proxynodestatus
+    ELSE 'offline'::proxynodestatus
+  END,
+  updated_at = CASE
+    WHEN $3::double precision IS NULL THEN NOW()
+    ELSE TO_TIMESTAMP($3::double precision)
+  END
+WHERE id = $1
+  AND tunnel_generation = $4
+  AND (
+    tunnel_connected_at IS NULL
+    OR tunnel_connected_at <= CASE
+      WHEN $3::double precision IS NULL THEN NOW()
+      ELSE TO_TIMESTAMP($3::double precision)
+    END
+  )
 "#;
 
 const FIND_EXISTING_TUNNEL_NODE_SQL: &str = r#"
 SELECT
   id,
+  tunnel_generation,
   name,
   ip,
   port,
@@ -184,7 +226,8 @@ INSERT INTO proxy_nodes (
   estimated_max_concurrency,
   tunnel_mode,
   tunnel_connected,
-  proxy_metadata
+  proxy_metadata,
+  tunnel_generation
 )
 VALUES (
   $1,
@@ -203,7 +246,8 @@ VALUES (
   $12,
   $13,
   FALSE,
-  $14::json
+  $14::json,
+  $15
 )
 "#;
 
@@ -253,7 +297,8 @@ INSERT INTO proxy_nodes (
   total_requests,
   tunnel_mode,
   tunnel_connected,
-  config_version
+  config_version,
+  tunnel_generation
 )
 VALUES (
   $1,
@@ -273,7 +318,8 @@ VALUES (
   0,
   FALSE,
   FALSE,
-  0
+  0,
+  $10
 )
 "#;
 
@@ -311,6 +357,7 @@ SET
   updated_at = NOW()
 WHERE id = $1
   AND is_manual = TRUE
+  AND tunnel_generation = $9
 "#;
 
 const RECORD_PROXY_NODE_TRAFFIC_SQL: &str = r#"
@@ -323,6 +370,7 @@ SET
   updated_at = NOW()
 WHERE id = $1
   AND is_manual = TRUE
+  AND tunnel_generation = $6
 "#;
 
 const UNREGISTER_PROXY_NODE_SQL: &str = r#"
@@ -333,11 +381,56 @@ SET
   tunnel_connected_at = NOW(),
   updated_at = NOW()
 WHERE id = $1
+  AND tunnel_generation = $2
 "#;
 
 const DELETE_PROXY_NODE_SQL: &str = r#"
 DELETE FROM proxy_nodes
 WHERE id = $1
+  AND tunnel_generation = $2
+"#;
+
+// Run after the parent delete commits so delete never waits on an outbox row
+// already claimed by the flusher (which acquires locks in the opposite order).
+const RETIRE_PROXY_NODE_PENDING_COUNTERS_SQL: &str = r#"
+DELETE FROM usage_counter_deltas
+WHERE kind = 'proxy_node'
+  AND target_id = $1
+  AND target_tunnel_generation = $2
+  AND processed_at IS NULL
+"#;
+
+const DELETE_PROXY_NODE_EVENTS_SQL: &str = r#"
+DELETE FROM proxy_node_events
+WHERE node_id = $1
+  AND EXISTS (
+    SELECT 1
+    FROM proxy_nodes
+    WHERE id = $1
+      AND tunnel_generation = $2
+  )
+"#;
+
+const DELETE_PROXY_NODE_METRICS_1M_SQL: &str = r#"
+DELETE FROM proxy_node_metrics_1m
+WHERE node_id = $1
+  AND EXISTS (
+    SELECT 1
+    FROM proxy_nodes
+    WHERE id = $1
+      AND tunnel_generation = $2
+  )
+"#;
+
+const DELETE_PROXY_NODE_METRICS_1H_SQL: &str = r#"
+DELETE FROM proxy_node_metrics_1h
+WHERE node_id = $1
+  AND EXISTS (
+    SELECT 1
+    FROM proxy_nodes
+    WHERE id = $1
+      AND tunnel_generation = $2
+  )
 "#;
 
 const UPDATE_PROXY_NODE_REMOTE_CONFIG_SQL: &str = r#"
@@ -348,6 +441,9 @@ SET
   config_version = config_version + 1,
   updated_at = NOW()
 WHERE id = $1
+  AND tunnel_generation = $4
+  AND config_version = $5
+  AND is_manual = FALSE
 "#;
 
 const RESET_STALE_TUNNEL_STATUSES_SQL: &str = r#"
@@ -372,11 +468,12 @@ SET
   updated_at = NOW()
 WHERE id = $4
   AND is_manual = TRUE
+  AND tunnel_generation = $5
 "#;
 
 const INSERT_PROXY_NODE_EVENT_SQL: &str = r#"
 INSERT INTO proxy_node_events (node_id, event_type, detail, event_metadata, created_at)
-VALUES (
+SELECT
   $1,
   $2,
   $3,
@@ -385,7 +482,8 @@ VALUES (
     WHEN $5::double precision IS NULL THEN NOW()
     ELSE TO_TIMESTAMP($5::double precision)
   END
-)
+FROM proxy_nodes
+WHERE id = $1 AND ($6::text IS NULL OR tunnel_generation = $6)
 "#;
 
 const UPSERT_PROXY_NODE_METRICS_1M_SQL: &str = r#"
@@ -406,7 +504,9 @@ INSERT INTO proxy_node_metrics_1m (
   ws_in_frames_delta,
   ws_out_frames_delta
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15
+FROM proxy_nodes
+WHERE id = $1 AND ($16::text IS NULL OR tunnel_generation = $16)
 ON CONFLICT (node_id, bucket_start_unix_secs) DO UPDATE SET
   samples = proxy_node_metrics_1m.samples + EXCLUDED.samples,
   uptime_samples = proxy_node_metrics_1m.uptime_samples + EXCLUDED.uptime_samples,
@@ -441,7 +541,9 @@ INSERT INTO proxy_node_metrics_1h (
   ws_in_frames_delta,
   ws_out_frames_delta
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15
+FROM proxy_nodes
+WHERE id = $1 AND ($16::text IS NULL OR tunnel_generation = $16)
 ON CONFLICT (node_id, bucket_start_unix_secs) DO UPDATE SET
   samples = proxy_node_metrics_1h.samples + EXCLUDED.samples,
   uptime_samples = proxy_node_metrics_1h.uptime_samples + EXCLUDED.uptime_samples,
@@ -571,6 +673,12 @@ impl SqlxProxyNodeRepository {
     }
 
     fn row_to_stored(row: &PgRow) -> Result<StoredProxyNode, DataLayerError> {
+        let tunnel_generation: String = row.try_get("tunnel_generation").map_postgres_err()?;
+        if tunnel_generation.trim().is_empty() {
+            return Err(DataLayerError::UnexpectedValue(
+                "proxy_nodes.tunnel_generation must not be empty".to_string(),
+            ));
+        }
         Ok(StoredProxyNode::new(
             row.try_get("id").map_postgres_err()?,
             row.try_get("name").map_postgres_err()?,
@@ -588,6 +696,7 @@ impl SqlxProxyNodeRepository {
             row.try_get("tunnel_connected").map_postgres_err()?,
             row.try_get("config_version").map_postgres_err()?,
         )?
+        .with_tunnel_generation(tunnel_generation)
         .with_manual_proxy_fields(
             row.try_get("proxy_url").map_postgres_err()?,
             row.try_get("proxy_username").map_postgres_err()?,
@@ -676,6 +785,7 @@ impl SqlxProxyNodeRepository {
     async fn insert_event(
         &self,
         node_id: &str,
+        expected_tunnel_generation: Option<&str>,
         event_type: &str,
         detail: Option<&str>,
         event_metadata: Option<&serde_json::Value>,
@@ -687,6 +797,7 @@ impl SqlxProxyNodeRepository {
             .bind(detail)
             .bind(event_metadata)
             .bind(created_at_unix_secs.map(|value| value as f64))
+            .bind(expected_tunnel_generation)
             .execute(&self.pool)
             .await
             .map_postgres_err()?;
@@ -697,6 +808,7 @@ impl SqlxProxyNodeRepository {
         &self,
         step: ProxyNodeMetricsStep,
         node_id: &str,
+        expected_tunnel_generation: Option<&str>,
         bucket_start: u64,
         sample: &TunnelMetricsSample,
     ) -> Result<(), DataLayerError> {
@@ -720,6 +832,7 @@ impl SqlxProxyNodeRepository {
             .bind(sample.ws_out_bytes_delta)
             .bind(sample.ws_in_frames_delta)
             .bind(sample.ws_out_frames_delta)
+            .bind(expected_tunnel_generation)
             .execute(&self.pool)
             .await
             .map_postgres_err()?;
@@ -1007,6 +1120,56 @@ impl ProxyNodeWriteRepository for SqlxProxyNodeRepository {
         Ok(result.rows_affected() as usize)
     }
 
+    async fn compare_and_set_proxy_password(
+        &self,
+        node_id: &str,
+        expected: &str,
+        replacement: &str,
+    ) -> Result<bool, DataLayerError> {
+        let result = sqlx::query(
+            r#"
+UPDATE proxy_nodes
+SET proxy_password = $2, updated_at = NOW()
+WHERE id = $1 AND proxy_password = $3
+"#,
+        )
+        .bind(node_id)
+        .bind(replacement)
+        .bind(expected)
+        .execute(&self.pool)
+        .await
+        .map_postgres_err()?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    async fn compare_and_set_proxy_metadata(
+        &self,
+        node_id: &str,
+        expected: &serde_json::Value,
+        replacement: &serde_json::Value,
+    ) -> Result<bool, DataLayerError> {
+        let expected = serde_json::to_string(expected).map_err(|err| {
+            DataLayerError::InvalidInput(format!("proxy_nodes.proxy_metadata is invalid: {err}"))
+        })?;
+        let replacement = serde_json::to_string(replacement).map_err(|err| {
+            DataLayerError::InvalidInput(format!("proxy_nodes.proxy_metadata is invalid: {err}"))
+        })?;
+        let result = sqlx::query(
+            r#"
+UPDATE proxy_nodes
+SET proxy_metadata = $2::json, updated_at = NOW()
+WHERE id = $1 AND proxy_metadata::jsonb = $3::jsonb
+"#,
+        )
+        .bind(node_id)
+        .bind(replacement)
+        .bind(expected)
+        .execute(&self.pool)
+        .await
+        .map_postgres_err()?;
+        Ok(result.rows_affected() == 1)
+    }
+
     async fn create_manual_node(
         &self,
         mutation: &ProxyNodeManualCreateMutation,
@@ -1028,7 +1191,12 @@ impl ProxyNodeWriteRepository for SqlxProxyNodeRepository {
             ));
         }
 
-        let node_id = uuid::Uuid::new_v4().to_string();
+        let node_id = requested_proxy_node_id(mutation.node_id.as_deref())?
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let tunnel_generation = uuid::Uuid::new_v4().to_string();
+        if let Some((ip, port)) = proxy_node_id_owner_locked(&mut tx, &node_id).await? {
+            return Err(proxy_node_id_in_use_error(&node_id, &ip, port));
+        }
         sqlx::query(INSERT_MANUAL_PROXY_NODE_SQL)
             .bind(&node_id)
             .bind(&mutation.name)
@@ -1039,6 +1207,7 @@ impl ProxyNodeWriteRepository for SqlxProxyNodeRepository {
             .bind(mutation.proxy_username.as_deref())
             .bind(mutation.proxy_password.as_deref())
             .bind(mutation.registered_by.as_deref())
+            .bind(&tunnel_generation)
             .execute(&mut *tx)
             .await
             .map_postgres_err()?;
@@ -1086,7 +1255,7 @@ impl ProxyNodeWriteRepository for SqlxProxyNodeRepository {
             ));
         }
 
-        sqlx::query(UPDATE_MANUAL_PROXY_NODE_SQL)
+        let result = sqlx::query(UPDATE_MANUAL_PROXY_NODE_SQL)
             .bind(&mutation.node_id)
             .bind(mutation.name.as_deref())
             .bind(mutation.ip.as_deref())
@@ -1095,9 +1264,15 @@ impl ProxyNodeWriteRepository for SqlxProxyNodeRepository {
             .bind(mutation.proxy_url.as_deref())
             .bind(mutation.proxy_username.as_deref())
             .bind(mutation.proxy_password.as_deref())
+            .bind(&existing.tunnel_generation)
             .execute(&mut *tx)
             .await
             .map_postgres_err()?;
+
+        if result.rows_affected() == 0 {
+            tx.rollback().await.map_postgres_err()?;
+            return Ok(None);
+        }
 
         tx.commit().await.map_err(postgres_error)?;
         self.find_proxy_node(&mutation.node_id).await
@@ -1107,9 +1282,12 @@ impl ProxyNodeWriteRepository for SqlxProxyNodeRepository {
         &self,
         mutation: &ProxyNodeRegistrationMutation,
     ) -> Result<StoredProxyNode, DataLayerError> {
-        let normalized_proxy_metadata = normalize_proxy_metadata(
-            mutation.proxy_metadata.as_ref(),
-            mutation.proxy_version.as_deref(),
+        let normalized_proxy_metadata = merge_proxy_metadata_for_registration(
+            None,
+            normalize_proxy_metadata(
+                mutation.proxy_metadata.as_ref(),
+                mutation.proxy_version.as_deref(),
+            ),
         );
         let lock_key = Self::registration_lock_key(&mutation.ip, mutation.port);
         let mut tx = self.pool.begin().await.map_postgres_err()?;
@@ -1129,6 +1307,18 @@ impl ProxyNodeWriteRepository for SqlxProxyNodeRepository {
 
         let node_id = if let Some(row) = existing.as_ref() {
             let existing = Self::row_to_stored(row)?;
+            if let Some(requested_id) = requested_proxy_node_id(mutation.node_id.as_deref())? {
+                if requested_id != existing.id {
+                    return Err(proxy_node_registration_identity_error(
+                        &requested_id,
+                        &existing.id,
+                    ));
+                }
+            }
+            let registration_proxy_metadata = merge_proxy_metadata_for_registration(
+                existing.proxy_metadata.as_ref(),
+                normalized_proxy_metadata,
+            );
             sqlx::query(UPDATE_PROXY_NODE_REGISTRATION_SQL)
                 .bind(&existing.id)
                 .bind(&mutation.name)
@@ -1143,13 +1333,18 @@ impl ProxyNodeWriteRepository for SqlxProxyNodeRepository {
                 .bind(mutation.hardware_info.as_ref())
                 .bind(mutation.estimated_max_concurrency)
                 .bind(mutation.tunnel_mode)
-                .bind(normalized_proxy_metadata.as_ref())
+                .bind(registration_proxy_metadata.as_ref())
                 .execute(&mut *tx)
                 .await
                 .map_postgres_err()?;
             existing.id
         } else {
-            let node_id = uuid::Uuid::new_v4().to_string();
+            let node_id = requested_proxy_node_id(mutation.node_id.as_deref())?
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+            let tunnel_generation = uuid::Uuid::new_v4().to_string();
+            if let Some((ip, port)) = proxy_node_id_owner_locked(&mut tx, &node_id).await? {
+                return Err(proxy_node_id_in_use_error(&node_id, &ip, port));
+            }
             sqlx::query(INSERT_PROXY_NODE_SQL)
                 .bind(&node_id)
                 .bind(&mutation.name)
@@ -1165,6 +1360,7 @@ impl ProxyNodeWriteRepository for SqlxProxyNodeRepository {
                 .bind(mutation.estimated_max_concurrency)
                 .bind(mutation.tunnel_mode)
                 .bind(normalized_proxy_metadata.as_ref())
+                .bind(&tunnel_generation)
                 .execute(&mut *tx)
                 .await
                 .map_postgres_err()?;
@@ -1185,6 +1381,13 @@ impl ProxyNodeWriteRepository for SqlxProxyNodeRepository {
         let Some(existing) = existing else {
             return Ok(None);
         };
+        if mutation
+            .expected_tunnel_generation
+            .as_deref()
+            .is_some_and(|expected| expected != existing.tunnel_generation)
+        {
+            return Ok(None);
+        }
         if !existing.tunnel_mode {
             return Err(DataLayerError::InvalidInput(
                 "non-tunnel mode is no longer supported, please upgrade aether-tunnel to use tunnel mode"
@@ -1192,47 +1395,106 @@ impl ProxyNodeWriteRepository for SqlxProxyNodeRepository {
             ));
         }
 
-        let normalized_proxy_metadata = normalize_proxy_metadata(
+        let tunnel_generation = existing.tunnel_generation.clone();
+        let has_proxy_metadata_update = normalize_heartbeat_proxy_metadata(
+            None,
             mutation.proxy_metadata.as_ref(),
             mutation.proxy_version.as_deref(),
-        );
-        let normalized_proxy_metadata = preserve_proxy_metadata_tunnel_security(
-            existing.proxy_metadata.as_ref(),
-            normalized_proxy_metadata,
-        );
+        )
+        .is_some();
 
-        sqlx::query(APPLY_HEARTBEAT_SQL)
+        let result = sqlx::query(APPLY_HEARTBEAT_SQL)
             .bind(&mutation.node_id)
             .bind(mutation.heartbeat_interval)
             .bind(mutation.active_connections)
             .bind(mutation.avg_latency_ms)
-            .bind(normalized_proxy_metadata)
             .bind(mutation.total_requests_delta)
             .bind(mutation.failed_requests_delta)
             .bind(mutation.dns_failures_delta)
             .bind(mutation.stream_errors_delta)
+            .bind(&tunnel_generation)
             .execute(&self.pool)
             .await
             .map_postgres_err()?;
-
-        let updated = self.find_proxy_node(&mutation.node_id).await?;
-        let Some(updated) = updated else {
+        if result.rows_affected() == 0 {
             return Ok(None);
+        }
+
+        let mut updated = None;
+        let mut tunnel_metrics_sample = None;
+        if has_proxy_metadata_update {
+            for _ in 0..8 {
+                let Some(current) = self.find_proxy_node(&mutation.node_id).await? else {
+                    return Ok(None);
+                };
+                if current.tunnel_generation != tunnel_generation {
+                    return Ok(None);
+                }
+                let Some(replacement) = normalize_heartbeat_proxy_metadata(
+                    current.proxy_metadata.as_ref(),
+                    mutation.proxy_metadata.as_ref(),
+                    mutation.proxy_version.as_deref(),
+                ) else {
+                    break;
+                };
+                if current.proxy_metadata.as_ref() == Some(&replacement) {
+                    tunnel_metrics_sample = build_tunnel_metrics_sample(
+                        current.proxy_metadata.as_ref(),
+                        Some(&replacement),
+                        current.active_connections,
+                        current.tunnel_connected,
+                    );
+                    updated = Some(current);
+                    break;
+                }
+
+                let result = sqlx::query(CAS_HEARTBEAT_PROXY_METADATA_SQL)
+                    .bind(&mutation.node_id)
+                    .bind(&replacement)
+                    .bind(&tunnel_generation)
+                    .bind(current.proxy_metadata.as_ref())
+                    .execute(&self.pool)
+                    .await
+                    .map_postgres_err()?;
+                if result.rows_affected() == 0 {
+                    continue;
+                }
+                let Some(after_cas) = self.find_proxy_node(&mutation.node_id).await? else {
+                    return Ok(None);
+                };
+                if after_cas.tunnel_generation != tunnel_generation {
+                    return Ok(None);
+                }
+                tunnel_metrics_sample = build_tunnel_metrics_sample(
+                    current.proxy_metadata.as_ref(),
+                    after_cas.proxy_metadata.as_ref(),
+                    after_cas.active_connections,
+                    after_cas.tunnel_connected,
+                );
+                updated = Some(after_cas);
+                break;
+            }
+        }
+        let updated = if let Some(updated) = updated {
+            updated
+        } else {
+            let Some(current) = self.find_proxy_node(&mutation.node_id).await? else {
+                return Ok(None);
+            };
+            if current.tunnel_generation != tunnel_generation {
+                return Ok(None);
+            }
+            current
         };
         let now_unix_secs = updated
             .last_heartbeat_at_unix_secs
             .unwrap_or_else(|| chrono::Utc::now().timestamp().max(0) as u64);
-        let tunnel_metrics_sample = build_tunnel_metrics_sample(
-            existing.proxy_metadata.as_ref(),
-            updated.proxy_metadata.as_ref(),
-            updated.active_connections,
-            updated.tunnel_connected,
-        );
 
         if let Some(sample) = tunnel_metrics_sample.as_ref() {
             self.upsert_metrics_bucket(
                 ProxyNodeMetricsStep::OneMinute,
                 &updated.id,
+                Some(tunnel_generation.as_str()),
                 bucket_start_unix_secs(now_unix_secs, ProxyNodeMetricsStep::OneMinute),
                 sample,
             )
@@ -1240,6 +1502,7 @@ impl ProxyNodeWriteRepository for SqlxProxyNodeRepository {
             self.upsert_metrics_bucket(
                 ProxyNodeMetricsStep::OneHour,
                 &updated.id,
+                Some(tunnel_generation.as_str()),
                 bucket_start_unix_secs(now_unix_secs, ProxyNodeMetricsStep::OneHour),
                 sample,
             )
@@ -1261,6 +1524,7 @@ impl ProxyNodeWriteRepository for SqlxProxyNodeRepository {
                 });
                 self.insert_event(
                     &updated.id,
+                    Some(tunnel_generation.as_str()),
                     PROXY_NODE_EVENT_TYPE_TUNNEL_ERROR,
                     Some(detail.as_str()),
                     Some(&event_metadata),
@@ -1282,6 +1546,7 @@ impl ProxyNodeWriteRepository for SqlxProxyNodeRepository {
             return self
                 .update_remote_config(&ProxyNodeRemoteConfigMutation {
                     node_id: mutation.node_id.clone(),
+                    expected_tunnel_generation: Some(tunnel_generation),
                     node_name: None,
                     allowed_ports: None,
                     log_level: None,
@@ -1299,17 +1564,38 @@ impl ProxyNodeWriteRepository for SqlxProxyNodeRepository {
         &self,
         mutation: &ProxyNodeTrafficMutation,
     ) -> Result<bool, DataLayerError> {
+        let mut tx = self.pool.begin().await.map_postgres_err()?;
+        let row = sqlx::query(&format!("{FIND_PROXY_NODE_SQL} FOR UPDATE"))
+            .bind(&mutation.node_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_postgres_err()?;
+        let Some(row) = row else {
+            tx.rollback().await.map_postgres_err()?;
+            return Ok(false);
+        };
+        let generation = Self::row_to_stored(&row)?.tunnel_generation;
+        let Some(expected_generation) = mutation.expected_tunnel_generation.as_deref() else {
+            tx.rollback().await.map_postgres_err()?;
+            return Ok(false);
+        };
+        if expected_generation != generation {
+            tx.rollback().await.map_postgres_err()?;
+            return Ok(false);
+        }
         let result = sqlx::query(RECORD_PROXY_NODE_TRAFFIC_SQL)
             .bind(&mutation.node_id)
             .bind(mutation.total_requests_delta)
             .bind(mutation.failed_requests_delta)
             .bind(mutation.dns_failures_delta)
             .bind(mutation.stream_errors_delta)
-            .execute(&self.pool)
+            .bind(expected_generation)
+            .execute(&mut *tx)
             .await
             .map_postgres_err()?;
-
-        Ok(result.rows_affected() > 0)
+        let applied = result.rows_affected() > 0;
+        tx.commit().await.map_err(postgres_error)?;
+        Ok(applied)
     }
 
     async fn update_tunnel_status(
@@ -1320,6 +1606,14 @@ impl ProxyNodeWriteRepository for SqlxProxyNodeRepository {
         let Some(existing) = existing else {
             return Ok(None);
         };
+        if mutation
+            .expected_tunnel_generation
+            .as_deref()
+            .is_some_and(|expected| expected != existing.tunnel_generation)
+        {
+            return Ok(None);
+        }
+        let tunnel_generation = existing.tunnel_generation.clone();
 
         let observed_at_unix_secs = mutation.observed_at_unix_secs;
         let event_type = if mutation.connected {
@@ -1335,100 +1629,136 @@ impl ProxyNodeWriteRepository for SqlxProxyNodeRepository {
         });
 
         let mut tx = self.pool.begin().await.map_postgres_err()?;
-
-        if existing
-            .tunnel_connected_at_unix_secs
-            .zip(observed_at_unix_secs)
-            .is_some_and(|(last_transition, observed_at)| observed_at < last_transition)
-        {
-            sqlx::query(INSERT_PROXY_NODE_EVENT_SQL)
-                .bind(&mutation.node_id)
-                .bind(event_type)
-                .bind(format!("[stale_ignored] {event_detail}"))
-                .bind(None::<serde_json::Value>)
-                .bind(None::<f64>)
-                .execute(&mut *tx)
-                .await
-                .map_postgres_err()?;
-            tx.commit().await.map_err(postgres_error)?;
-            return self.find_proxy_node(&mutation.node_id).await;
-        }
-
-        sqlx::query(
-            r#"
-UPDATE proxy_nodes
-SET
-  tunnel_connected = $2,
-  active_connections = CASE
-    WHEN $2 THEN active_connections
-    ELSE 0
-  END,
-  tunnel_connected_at = CASE
-    WHEN $3::double precision IS NULL THEN NOW()
-    ELSE TO_TIMESTAMP($3::double precision)
-  END,
-  status = CASE
-    WHEN $2 THEN 'online'::proxynodestatus
-    ELSE 'offline'::proxynodestatus
-  END,
-  updated_at = CASE
-    WHEN $3::double precision IS NULL THEN NOW()
-    ELSE TO_TIMESTAMP($3::double precision)
-  END
-WHERE id = $1
-"#,
-        )
-        .bind(&mutation.node_id)
-        .bind(mutation.connected)
-        .bind(observed_at_unix_secs.map(|value| value as f64))
-        .execute(&mut *tx)
-        .await
-        .map_postgres_err()?;
+        let result = sqlx::query(UPDATE_TUNNEL_STATUS_SQL)
+            .bind(&mutation.node_id)
+            .bind(mutation.connected)
+            .bind(observed_at_unix_secs.map(|value| value as f64))
+            .bind(&tunnel_generation)
+            .execute(&mut *tx)
+            .await
+            .map_postgres_err()?;
+        let stale = result.rows_affected() == 0;
+        let persisted_detail = if stale {
+            format!("[stale_ignored] {event_detail}")
+        } else {
+            event_detail
+        };
 
         sqlx::query(INSERT_PROXY_NODE_EVENT_SQL)
             .bind(&mutation.node_id)
             .bind(event_type)
-            .bind(event_detail)
+            .bind(persisted_detail)
             .bind(None::<serde_json::Value>)
-            .bind(observed_at_unix_secs.map(|value| value as f64))
+            .bind(
+                (!stale)
+                    .then_some(observed_at_unix_secs)
+                    .flatten()
+                    .map(|value| value as f64),
+            )
+            .bind(&tunnel_generation)
             .execute(&mut *tx)
             .await
             .map_postgres_err()?;
 
         tx.commit().await.map_err(postgres_error)?;
-        self.find_proxy_node(&mutation.node_id).await
+        let current = self.find_proxy_node(&mutation.node_id).await?;
+        Ok(current.filter(|node| node.tunnel_generation == tunnel_generation))
     }
 
     async fn unregister_node(
         &self,
         node_id: &str,
     ) -> Result<Option<StoredProxyNode>, DataLayerError> {
-        let existing = self.find_proxy_node(node_id).await?;
-        let Some(existing) = existing else {
-            return Ok(None);
-        };
-
-        sqlx::query(UNREGISTER_PROXY_NODE_SQL)
+        let mut tx = self.pool.begin().await.map_postgres_err()?;
+        let row = sqlx::query(&format!("{FIND_PROXY_NODE_SQL} FOR UPDATE"))
             .bind(node_id)
-            .execute(&self.pool)
+            .fetch_optional(&mut *tx)
             .await
             .map_postgres_err()?;
-
-        self.find_proxy_node(&existing.id).await
+        let Some(row) = row else {
+            tx.rollback().await.map_postgres_err()?;
+            return Ok(None);
+        };
+        let generation = Self::row_to_stored(&row)?.tunnel_generation;
+        sqlx::query(UNREGISTER_PROXY_NODE_SQL)
+            .bind(node_id)
+            .bind(&generation)
+            .execute(&mut *tx)
+            .await
+            .map_postgres_err()?;
+        let updated_row = sqlx::query(&format!("{FIND_PROXY_NODE_SQL} FOR UPDATE"))
+            .bind(node_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_postgres_err()?;
+        let updated = Self::row_to_stored(&updated_row)?;
+        tx.commit().await.map_err(postgres_error)?;
+        Ok(Some(updated))
     }
 
     async fn delete_node(&self, node_id: &str) -> Result<Option<StoredProxyNode>, DataLayerError> {
-        let existing = self.find_proxy_node(node_id).await?;
-        let Some(existing) = existing else {
+        let mut tx = self.pool.begin().await.map_postgres_err()?;
+        let row = sqlx::query(&format!("{FIND_PROXY_NODE_SQL} FOR UPDATE"))
+            .bind(node_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_postgres_err()?;
+        let Some(row) = row else {
+            tx.rollback().await.map_postgres_err()?;
             return Ok(None);
         };
+        // Reuse the canonical projection so the value returned to callers is
+        // identical to find_proxy_node while the row remains locked.
+        let existing = Self::row_to_stored(&row)?;
+        let generation = existing.tunnel_generation.as_str();
 
-        sqlx::query(DELETE_PROXY_NODE_SQL)
+        // Keep child cleanup in this transaction and bind it to the locked
+        // generation.  The FK cascade is still a final backstop for deployments
+        // that have the PostgreSQL constraints enabled.
+        sqlx::query(DELETE_PROXY_NODE_EVENTS_SQL)
             .bind(node_id)
-            .execute(&self.pool)
+            .bind(generation)
+            .execute(&mut *tx)
+            .await
+            .map_postgres_err()?;
+        sqlx::query(DELETE_PROXY_NODE_METRICS_1M_SQL)
+            .bind(node_id)
+            .bind(generation)
+            .execute(&mut *tx)
+            .await
+            .map_postgres_err()?;
+        sqlx::query(DELETE_PROXY_NODE_METRICS_1H_SQL)
+            .bind(node_id)
+            .bind(generation)
+            .execute(&mut *tx)
             .await
             .map_postgres_err()?;
 
+        let deleted = sqlx::query(DELETE_PROXY_NODE_SQL)
+            .bind(node_id)
+            .bind(generation)
+            .execute(&mut *tx)
+            .await
+            .map_postgres_err()?;
+        if deleted.rows_affected() != 1 {
+            tx.rollback().await.map_postgres_err()?;
+            return Ok(None);
+        }
+        tx.commit().await.map_err(postgres_error)?;
+        if let Err(error) = sqlx::query(RETIRE_PROXY_NODE_PENDING_COUNTERS_SQL)
+            .bind(node_id)
+            .bind(generation)
+            .execute(&self.pool)
+            .await
+            .map_postgres_err()
+        {
+            tracing::warn!(
+                node_id = %node_id,
+                tunnel_generation = %generation,
+                error = ?error,
+                "failed to retire deleted proxy node counter rows"
+            );
+        }
         Ok(Some(existing))
     }
 
@@ -1436,27 +1766,46 @@ WHERE id = $1
         &self,
         mutation: &ProxyNodeRemoteConfigMutation,
     ) -> Result<Option<StoredProxyNode>, DataLayerError> {
-        let existing = self.find_proxy_node(&mutation.node_id).await?;
-        let Some(existing) = existing else {
-            return Ok(None);
-        };
-        if existing.is_manual {
-            return Err(DataLayerError::InvalidInput(
-                "手动节点不支持远程配置下发".to_string(),
-            ));
+        for _ in 0..8 {
+            let Some(existing) = self.find_proxy_node(&mutation.node_id).await? else {
+                return Ok(None);
+            };
+            if mutation
+                .expected_tunnel_generation
+                .as_deref()
+                .is_some_and(|expected| expected != existing.tunnel_generation)
+            {
+                return Ok(None);
+            }
+            if existing.is_manual {
+                return Err(DataLayerError::InvalidInput(
+                    "手动节点不支持远程配置下发".to_string(),
+                ));
+            }
+
+            let tunnel_generation = existing.tunnel_generation.clone();
+            let remote_config =
+                Self::normalize_remote_config(mutation, existing.remote_config.as_ref());
+            let result = sqlx::query(UPDATE_PROXY_NODE_REMOTE_CONFIG_SQL)
+                .bind(&mutation.node_id)
+                .bind(mutation.node_name.as_deref())
+                .bind(remote_config.as_ref())
+                .bind(&tunnel_generation)
+                .bind(existing.config_version)
+                .execute(&self.pool)
+                .await
+                .map_postgres_err()?;
+            if result.rows_affected() == 0 {
+                continue;
+            }
+
+            let current = self.find_proxy_node(&mutation.node_id).await?;
+            return Ok(current.filter(|node| node.tunnel_generation == tunnel_generation));
         }
 
-        let remote_config =
-            Self::normalize_remote_config(mutation, existing.remote_config.as_ref());
-        sqlx::query(UPDATE_PROXY_NODE_REMOTE_CONFIG_SQL)
-            .bind(&mutation.node_id)
-            .bind(mutation.node_name.as_deref())
-            .bind(remote_config.as_ref())
-            .execute(&self.pool)
-            .await
-            .map_postgres_err()?;
-
-        self.find_proxy_node(&mutation.node_id).await
+        Err(DataLayerError::UnexpectedValue(
+            "proxy node remote config changed during every CAS retry".to_string(),
+        ))
     }
 
     async fn increment_manual_node_requests(
@@ -1466,14 +1815,27 @@ WHERE id = $1
         failed_delta: i64,
         latency_ms: Option<i64>,
     ) -> Result<(), DataLayerError> {
+        let mut tx = self.pool.begin().await.map_postgres_err()?;
+        let row = sqlx::query(&format!("{FIND_PROXY_NODE_SQL} FOR UPDATE"))
+            .bind(node_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_postgres_err()?;
+        let Some(row) = row else {
+            tx.rollback().await.map_postgres_err()?;
+            return Ok(());
+        };
+        let generation = Self::row_to_stored(&row)?.tunnel_generation;
         sqlx::query(INCREMENT_MANUAL_PROXY_NODE_REQUESTS_SQL)
             .bind(total_delta)
             .bind(failed_delta)
             .bind(latency_ms)
             .bind(node_id)
-            .execute(&self.pool)
+            .bind(&generation)
+            .execute(&mut *tx)
             .await
             .map_postgres_err()?;
+        tx.commit().await.map_err(postgres_error)?;
         Ok(())
     }
 
@@ -1535,18 +1897,63 @@ WHERE metrics.node_id = expired.node_id
     }
 }
 
+fn requested_proxy_node_id(value: Option<&str>) -> Result<Option<String>, DataLayerError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.is_empty() || value.trim() != value {
+        return Err(DataLayerError::InvalidInput(
+            "proxy node id must be non-empty and unpadded".to_string(),
+        ));
+    }
+    Ok(Some(value.to_string()))
+}
+
+async fn proxy_node_id_owner_locked(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    node_id: &str,
+) -> Result<Option<(String, i32)>, DataLayerError> {
+    let row = sqlx::query("SELECT ip, port FROM proxy_nodes WHERE id = $1 FOR UPDATE")
+        .bind(node_id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_postgres_err()?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    Ok(Some((
+        row.try_get::<String, _>("ip").map_postgres_err()?,
+        row.try_get::<i32, _>("port").map_postgres_err()?,
+    )))
+}
+
+fn proxy_node_registration_identity_error(requested_id: &str, existing_id: &str) -> DataLayerError {
+    DataLayerError::InvalidInput(format!(
+        "proxy node registration identity changed: requested {requested_id}, existing {existing_id}"
+    ))
+}
+
+fn proxy_node_id_in_use_error(node_id: &str, ip: &str, port: i32) -> DataLayerError {
+    DataLayerError::InvalidInput(format!(
+        "proxy node id is already in use: {node_id} ({ip}:{port})"
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
     fn proxy_node_sql_uses_json_casts_for_json_columns() {
-        assert!(super::APPLY_HEARTBEAT_SQL
-            .contains("proxy_metadata = COALESCE($5::json, proxy_metadata)"));
+        assert!(!super::APPLY_HEARTBEAT_SQL.contains("proxy_metadata"));
+        assert!(super::CAS_HEARTBEAT_PROXY_METADATA_SQL.contains("proxy_metadata = $2::json"));
+        assert!(super::CAS_HEARTBEAT_PROXY_METADATA_SQL
+            .contains("proxy_metadata::jsonb IS NOT DISTINCT FROM $4::jsonb"));
         assert!(super::INSERT_PROXY_NODE_SQL
-            .contains("\n  $11::json,\n  $12,\n  $13,\n  FALSE,\n  $14::json\n"));
+            .contains("\n  $11::json,\n  $12,\n  $13,\n  FALSE,\n  $14::json,\n  $15\n"));
         assert!(super::UPDATE_PROXY_NODE_REGISTRATION_SQL
             .contains("hardware_info = COALESCE($11::json, hardware_info)"));
         assert!(super::UPDATE_PROXY_NODE_REGISTRATION_SQL
             .contains("proxy_metadata = COALESCE($14::json, proxy_metadata)"));
+        assert!(!super::UPDATE_PROXY_NODE_REGISTRATION_SQL.contains("tunnel_generation"));
         assert!(super::UPDATE_PROXY_NODE_REMOTE_CONFIG_SQL.contains("remote_config = $3::json"));
     }
 
@@ -1556,5 +1963,16 @@ mod tests {
         assert!(!super::INSERT_PROXY_NODE_SQL.contains("::jsonb"));
         assert!(!super::UPDATE_PROXY_NODE_REGISTRATION_SQL.contains("::jsonb"));
         assert!(!super::UPDATE_PROXY_NODE_REMOTE_CONFIG_SQL.contains("::jsonb"));
+    }
+
+    #[test]
+    fn tunnel_status_sql_rejects_out_of_order_transitions_atomically() {
+        assert!(super::UPDATE_TUNNEL_STATUS_SQL.contains("tunnel_connected_at <= CASE"));
+        assert!(super::UPDATE_TUNNEL_STATUS_SQL.contains("tunnel_generation = $4"));
+        assert!(super::APPLY_HEARTBEAT_SQL.contains("total_requests = total_requests + GREATEST"));
+        assert!(super::APPLY_HEARTBEAT_SQL.contains("tunnel_generation = $9"));
+        assert!(!super::APPLY_HEARTBEAT_SQL.contains("remote_config ="));
+        assert!(!super::APPLY_HEARTBEAT_SQL.contains("config_version ="));
+        assert!(super::UPDATE_PROXY_NODE_REMOTE_CONFIG_SQL.contains("config_version = $5"));
     }
 }

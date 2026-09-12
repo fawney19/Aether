@@ -24,6 +24,29 @@ use url::form_urlencoded;
 
 pub const ADMIN_USAGE_DATA_UNAVAILABLE_DETAIL: &str = "Admin usage data unavailable";
 
+fn admin_usage_safe_error_message(item: &StoredRequestUsageAudit) -> Option<String> {
+    if item
+        .error_message
+        .as_deref()
+        .is_none_or(|value| value.trim().is_empty())
+        && item.status_code.is_none_or(|status| status < 400)
+    {
+        return None;
+    }
+
+    item.error_category
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            item.status_code
+                .filter(|status| *status >= 400)
+                .map(|status| format!("http_{status}"))
+        })
+        .or_else(|| Some("request_failed".to_string()))
+}
+
 pub fn admin_usage_data_unavailable_response(detail: &'static str) -> Response<Body> {
     (
         http::StatusCode::SERVICE_UNAVAILABLE,
@@ -337,6 +360,77 @@ fn admin_usage_strip_settlement_metadata(metadata: &mut serde_json::Map<String, 
 
 fn admin_usage_strip_trace_metadata(metadata: &mut serde_json::Map<String, Value>) {
     metadata.remove("trace_id");
+}
+
+/// Projects historical observability metadata without exposing credentials or
+/// URL query/fragment values. This is shared by all admin observability views
+/// because older rows may predate the current persistence policy.
+pub fn admin_usage_safe_metadata_value(value: &Value) -> Value {
+    admin_usage_safe_metadata_value_inner(value, false)
+}
+
+fn admin_usage_safe_metadata_value_inner(value: &Value, in_realtime_session: bool) -> Value {
+    match value {
+        Value::Object(object) => Value::Object(
+            object
+                .iter()
+                .filter_map(|(key, value)| {
+                    let compact = key
+                        .chars()
+                        .filter(|ch| ch.is_ascii_alphanumeric())
+                        .map(|ch| ch.to_ascii_lowercase())
+                        .collect::<String>();
+                    // The generic `token` key filter protects historical rows that may
+                    // predate the persistence projection. Realtime audio usage counters
+                    // are explicitly safe numeric metrics, but only when they occur in the
+                    // structured realtime-session object. Do not broaden this exception to
+                    // arbitrary token-shaped fields or string values.
+                    let safe_realtime_counter = in_realtime_session
+                        && matches!(compact.as_str(), "inputaudiotokens" | "outputaudiotokens")
+                        && value.as_u64().is_some();
+                    if (compact.contains("authorization")
+                        || compact.contains("credential")
+                        || compact.contains("secret")
+                        || compact.contains("token")
+                        || compact.contains("apikey")
+                        || compact.contains("password")
+                        || matches!(compact.as_str(), "cookie" | "setcookie" | "headers"))
+                        && !safe_realtime_counter
+                    {
+                        return None;
+                    }
+                    let child_in_realtime_session = compact == "realtimesession";
+                    Some((
+                        key.clone(),
+                        admin_usage_safe_metadata_value_inner(value, child_in_realtime_session),
+                    ))
+                })
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .map(|item| admin_usage_safe_metadata_value_inner(item, false))
+                .collect(),
+        ),
+        Value::String(value) => {
+            if let Ok(mut url) = url::Url::parse(value.trim()) {
+                if !url.username().is_empty()
+                    || url.password().is_some()
+                    || url.query().is_some()
+                    || url.fragment().is_some()
+                {
+                    let _ = url.set_username("");
+                    let _ = url.set_password(None);
+                    url.set_query(None);
+                    url.set_fragment(None);
+                    return Value::String(url.to_string());
+                }
+            }
+            Value::String(value.clone())
+        }
+        other => other.clone(),
+    }
 }
 
 fn admin_usage_string_field<'a>(value: &'a Value, field: &str) -> Option<&'a str> {
@@ -1219,7 +1313,7 @@ fn admin_usage_active_request_json(
         "updated_at": unix_secs_to_rfc3339(item.updated_at_unix_secs),
         "response_time_updated_at": admin_usage_response_time_updated_at(item),
         "status_code": item.status_code,
-        "error_message": item.error_message,
+        "error_message": admin_usage_safe_error_message(item),
         "provider": item.provider_name,
         "api_key_name": api_key_name,
         "provider_key_name": provider_key_name,
@@ -1334,7 +1428,7 @@ pub fn admin_usage_record_json(
         "cache_creation_price_per_1m": cache_creation_price_per_1m,
         "cache_read_price_per_1m": cache_read_price_per_1m,
         "status_code": item.status_code,
-        "error_message": item.error_message,
+        "error_message": admin_usage_safe_error_message(item),
         "status": item.status,
         "request_type": item.request_type,
         "has_fallback": admin_usage_has_fallback(item),
@@ -2464,7 +2558,11 @@ pub fn build_admin_usage_detail_payload(
         auth_api_key_reader_available,
         provider_key_name,
     );
-    let mut metadata = match item.request_metadata.clone() {
+    let mut metadata = match item
+        .request_metadata
+        .as_ref()
+        .map(admin_usage_safe_metadata_value)
+    {
         Some(Value::Object(object)) => Value::Object(object),
         Some(value) => json!({ "request_metadata": value }),
         None => json!({}),
@@ -2626,7 +2724,8 @@ mod tests {
         admin_usage_has_fallback, admin_usage_is_failed, admin_usage_is_success,
         admin_usage_matches_search, admin_usage_matches_status, admin_usage_matches_username,
         admin_usage_record_json, admin_usage_resolve_request_capture_body,
-        admin_usage_total_tokens, admin_usage_upstream_is_stream, build_admin_usage_detail_payload,
+        admin_usage_safe_metadata_value, admin_usage_total_tokens, admin_usage_upstream_is_stream,
+        build_admin_usage_detail_payload,
     };
     use aether_data_contracts::repository::usage::{StoredRequestUsageAudit, UsageBodyField};
 
@@ -2686,6 +2785,35 @@ mod tests {
         assert!(!admin_usage_is_failed(&item));
         assert!(!admin_usage_matches_status(&item, Some("failed")));
         assert!(admin_usage_matches_status(&item, Some("completed")));
+    }
+
+    #[test]
+    fn admin_usage_summaries_do_not_return_historical_raw_error_text() {
+        let item = StoredRequestUsageAudit {
+            error_category: Some("authentication_error".to_string()),
+            ..sample_usage(
+                "failed",
+                Some(401),
+                Some(
+                    "upstream said Authorization: Bearer live-secret at https://api.example?key=secret",
+                ),
+            )
+        };
+
+        let record = admin_usage_record_json(
+            &item,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            false,
+            false,
+            None,
+        );
+        let active = admin_usage_active_request_json(&item, None, None, None);
+
+        assert_eq!(record["error_message"], "authentication_error");
+        assert_eq!(active["error_message"], "authentication_error");
+        assert!(!record.to_string().contains("live-secret"));
+        assert!(!active.to_string().contains("live-secret"));
     }
 
     #[test]
@@ -2840,6 +2968,35 @@ mod tests {
         assert_eq!(payload["realtime_session"], realtime_session);
         assert_eq!(payload["metadata"]["live_session"], live_session);
         assert_eq!(payload["metadata"]["realtime_session"], realtime_session);
+    }
+
+    #[test]
+    fn admin_usage_safe_metadata_keeps_only_numeric_realtime_audio_counters() {
+        let projected = admin_usage_safe_metadata_value(&json!({
+            "input_audio_tokens": 99,
+            "refresh_token": "should-be-removed",
+            "realtime_session": {
+                "input_audio_tokens": 7,
+                "output_audio_tokens": 3,
+                "input_audio_tokens_text": "should-be-removed",
+                "refresh_token": 11,
+                "nested": {
+                    "output_audio_tokens": 5
+                }
+            }
+        }));
+
+        assert!(projected.get("input_audio_tokens").is_none());
+        assert!(projected.get("refresh_token").is_none());
+        assert_eq!(projected["realtime_session"]["input_audio_tokens"], 7);
+        assert_eq!(projected["realtime_session"]["output_audio_tokens"], 3);
+        assert!(projected["realtime_session"]
+            .get("input_audio_tokens_text")
+            .is_none());
+        assert!(projected["realtime_session"].get("refresh_token").is_none());
+        assert!(projected["realtime_session"]["nested"]
+            .get("output_audio_tokens")
+            .is_none());
     }
 
     #[test]
@@ -3242,6 +3399,60 @@ mod tests {
     }
 
     #[test]
+    fn detail_payload_preserves_original_headers_with_or_without_bodies() {
+        let item = StoredRequestUsageAudit {
+            request_headers: Some(json!({
+                "authorization": "Bearer original-client-token",
+                "originator": "codex-cli",
+                "session-id": "original-session",
+                "thread-id": "original-thread",
+                "x-codex-turn-metadata": "{\"turn_id\":\"original-turn\"}",
+                "x-openai-subagent": "reviewer"
+            })),
+            provider_request_headers: Some(json!({
+                "authorization": "Bearer original-provider-token",
+                "x-api-key": "original-provider-key"
+            })),
+            response_headers: Some(json!({
+                "set-cookie": ["session=original-upstream", "preference=original"],
+                "x-upstream-custom": "original-upstream-value"
+            })),
+            client_response_headers: Some(json!({
+                "set-cookie": "session=original-client",
+                "x-client-custom": "original-client-value"
+            })),
+            ..sample_usage("completed", Some(200), None)
+        };
+
+        for include_bodies in [false, true] {
+            let payload = build_admin_usage_detail_payload(
+                &item,
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                false,
+                false,
+                None,
+                include_bodies,
+                None,
+                &BTreeMap::new(),
+            );
+
+            for (field, expected) in [
+                ("request_headers", &item.request_headers),
+                ("provider_request_headers", &item.provider_request_headers),
+                ("response_headers", &item.response_headers),
+                ("client_response_headers", &item.client_response_headers),
+            ] {
+                assert_eq!(
+                    &payload[field],
+                    expected.as_ref().unwrap(),
+                    "{field} should retain original values when include_bodies={include_bodies}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn detail_payload_marks_reference_backed_bodies_as_available() {
         let item = StoredRequestUsageAudit {
             request_body: None,
@@ -3311,6 +3522,46 @@ mod tests {
         assert_eq!(payload["has_provider_request_body"], true);
         assert_eq!(payload["has_response_body"], true);
         assert_eq!(payload["has_client_response_body"], true);
+    }
+
+    #[test]
+    fn detail_payload_sanitizes_historical_request_metadata() {
+        let item = StoredRequestUsageAudit {
+            request_metadata: Some(json!({
+                "trace_id": "internal-trace",
+                "authorization": "Bearer live-secret",
+                "nested": {
+                    "refresh_token": "refresh-secret",
+                    "endpoint_url": "https://user:password@api.example.test/v1?key=secret#fragment",
+                    "safe_count": 2
+                }
+            })),
+            ..sample_usage("failed", Some(500), Some("failed"))
+        };
+
+        let payload = build_admin_usage_detail_payload(
+            &item,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            false,
+            false,
+            None,
+            false,
+            None,
+            &BTreeMap::new(),
+        );
+        let metadata = &payload["metadata"];
+        assert!(metadata.get("authorization").is_none());
+        assert!(metadata["nested"].get("refresh_token").is_none());
+        assert_eq!(
+            metadata["nested"]["endpoint_url"],
+            "https://api.example.test/v1"
+        );
+        assert_eq!(metadata["nested"]["safe_count"], 2);
+        let encoded = metadata.to_string();
+        for secret in ["live-secret", "refresh-secret", "password", "key=secret"] {
+            assert!(!encoded.contains(secret), "leaked {secret}");
+        }
     }
 
     #[test]
@@ -3505,14 +3756,8 @@ mod tests {
             &BTreeMap::new(),
         );
 
-        assert_eq!(
-            payload["client_error"]["message"],
-            "没有可用提供商支持模型 gpt-5.4 的流式请求"
-        );
-        assert_eq!(
-            payload["failure_summary"]["message"],
-            "没有可用提供商支持模型 gpt-5.4 的流式请求"
-        );
+        assert!(payload["client_error"]["message"].is_null());
+        assert!(payload["failure_summary"].is_null());
         assert_eq!(
             payload["scheduling_failure"]["title"],
             "本地调度失败：没有可调度候选"
@@ -3522,10 +3767,7 @@ mod tests {
             "candidate_list_empty"
         );
         assert!(payload["scheduling_failure"]["reason_summary"].is_null());
-        assert_eq!(
-            payload["scheduling_failure"]["message"],
-            "没有可用提供商支持模型 gpt-5.4 的流式请求"
-        );
+        assert!(payload["scheduling_failure"]["message"].is_null());
         assert_eq!(payload["scheduling_failure"]["no_upstream_attempt"], true);
     }
 
@@ -3562,14 +3804,8 @@ mod tests {
             &BTreeMap::new(),
         );
 
-        assert_eq!(
-            payload["client_error"]["message"],
-            "没有可用提供商支持模型 gpt-5.4 的流式请求"
-        );
-        assert_eq!(
-            payload["failure_summary"]["message"],
-            "没有可用提供商支持模型 gpt-5.4 的流式请求"
-        );
+        assert!(payload["client_error"]["message"].is_null());
+        assert!(payload["failure_summary"].is_null());
         assert_eq!(
             payload["scheduling_failure"]["title"],
             "本地调度失败：所有候选均被跳过"
@@ -3578,14 +3814,8 @@ mod tests {
             payload["scheduling_failure"]["reason"],
             "all_candidates_skipped"
         );
-        assert_eq!(
-            payload["scheduling_failure"]["reason_summary"],
-            "provider_quota_blocked 2 次"
-        );
-        assert_eq!(
-            payload["scheduling_failure"]["message"],
-            "没有可用提供商支持模型 gpt-5.4 的流式请求"
-        );
+        assert!(payload["scheduling_failure"]["reason_summary"].is_null());
+        assert!(payload["scheduling_failure"]["message"].is_null());
         assert_eq!(payload["scheduling_failure"]["no_upstream_attempt"], true);
     }
 

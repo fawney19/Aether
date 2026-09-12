@@ -167,6 +167,14 @@ fn parse_pool_score_rules(pool_advanced: &Map<String, Value>) -> PoolMemberScore
 
 fn normalize_pool_preset_mode(preset: &str, raw_mode: Option<&Value>) -> Option<String> {
     match preset {
+        "cache_affinity" => Some(
+            raw_mode
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| matches!(*value, "single_account" | "lru"))
+                .unwrap_or("single_account")
+                .to_string(),
+        ),
         "free_team_first" | "free_first" | "team_first" | "plus_first" | "pro_first" => {
             let default_mode = match preset {
                 "free_team_first" => "both",

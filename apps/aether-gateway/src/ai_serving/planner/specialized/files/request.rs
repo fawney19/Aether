@@ -8,7 +8,10 @@ use crate::ai_serving::transport::{
     GeminiFilesRequestBodyError,
 };
 use crate::ai_serving::GEMINI_FILES_UPLOAD_PLAN_KIND;
-use crate::ai_serving::{CandidateFailureDiagnostic, GatewayProviderTransportSnapshot};
+use crate::ai_serving::{
+    CandidateFailureDiagnostic, GatewayProviderTransportSnapshot, GEMINI_FILES_DELETE_PLAN_KIND,
+    GEMINI_FILES_DOWNLOAD_PLAN_KIND, GEMINI_FILES_GET_PLAN_KIND,
+};
 use crate::AppState;
 
 use super::support::{
@@ -46,6 +49,26 @@ pub(super) async fn resolve_local_gemini_files_candidate_payload_parts(
     let candidate = &attempt.eligible.candidate;
     let transport = &attempt.eligible.transport;
     let effective_headers = input.effective_headers(&parts.headers);
+
+    if matches!(
+        spec_metadata.decision_kind,
+        GEMINI_FILES_GET_PLAN_KIND
+            | GEMINI_FILES_DELETE_PLAN_KIND
+            | GEMINI_FILES_DOWNLOAD_PLAN_KIND
+    ) && !candidate_matches_owned_gemini_file_mapping(state, parts, input, attempt).await
+    {
+        mark_skipped_local_gemini_files_candidate(
+            state,
+            input,
+            trace_id,
+            candidate,
+            attempt.candidate_index,
+            &attempt.candidate_id,
+            "gemini_file_mapping_mismatch",
+        )
+        .await;
+        return None;
+    }
 
     if let Some(skip_reason) =
         gemini_files_transport_unsupported_reason(transport, GEMINI_FILES_CANDIDATE_API_FORMAT)
@@ -190,4 +213,65 @@ pub(super) async fn resolve_local_gemini_files_candidate_payload_parts(
         upstream_url,
         file_name,
     })
+}
+
+async fn candidate_matches_owned_gemini_file_mapping(
+    state: &AppState,
+    parts: &http::request::Parts,
+    input: &LocalGeminiFilesDecisionInput,
+    attempt: &LocalGeminiFilesCandidateAttempt,
+) -> bool {
+    let Some(file_name) = normalize_gemini_file_name_from_path(parts.uri.path()) else {
+        return false;
+    };
+    let user_id = input.auth_context.user_id.trim();
+    if user_id.is_empty() || !state.has_gemini_file_mapping_data_reader() {
+        return false;
+    }
+    let Ok(Some(mapping)) = state
+        .find_active_gemini_file_mapping_for_owner(
+            file_name.as_str(),
+            &attempt.eligible.transport.key.id,
+            user_id,
+            crate::clock::current_unix_secs(),
+        )
+        .await
+    else {
+        return false;
+    };
+
+    mapping.user_id.as_deref().map(str::trim) == Some(user_id)
+        && mapping.key_id == attempt.eligible.transport.key.id
+}
+
+pub(crate) fn normalize_gemini_file_name_from_path(path: &str) -> Option<String> {
+    let suffix = path.strip_prefix("/v1beta/files/")?.trim_matches('/');
+    let suffix = suffix.strip_suffix(":download").unwrap_or(suffix).trim();
+    let suffix = suffix.strip_prefix("files/").unwrap_or(suffix).trim();
+    if suffix.is_empty() || suffix.contains('/') {
+        return None;
+    }
+    Some(format!("files/{suffix}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_gemini_file_name_from_path;
+
+    #[test]
+    fn normalizes_supported_gemini_file_object_paths() {
+        assert_eq!(
+            normalize_gemini_file_name_from_path("/v1beta/files/file-123"),
+            Some("files/file-123".to_string())
+        );
+        assert_eq!(
+            normalize_gemini_file_name_from_path("/v1beta/files/file-123:download"),
+            Some("files/file-123".to_string())
+        );
+        assert_eq!(
+            normalize_gemini_file_name_from_path("/v1beta/files/files/abc-123"),
+            Some("files/abc-123".to_string())
+        );
+        assert_eq!(normalize_gemini_file_name_from_path("/v1beta/files"), None);
+    }
 }

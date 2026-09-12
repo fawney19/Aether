@@ -295,7 +295,7 @@ import {
   validatePasswordByPolicy,
   type PasswordPolicyLevel,
 } from '@/utils/passwordPolicy'
-import type { UserGroup } from '@/api/users'
+import type { UserGroup, UserRole } from '@/api/users'
 
 export interface UserFormData {
   id?: string
@@ -303,7 +303,7 @@ export interface UserFormData {
   email: string
   initial_gift_usd?: number | null
   unlimited?: boolean
-  role: 'admin' | 'user'
+  role: UserRole
   is_active?: boolean
   group_ids?: string[]
   feature_settings?: Record<string, unknown> | null
@@ -332,7 +332,7 @@ const form = ref({
   confirmPassword: '',
   email: '',
   initial_gift_usd: 10 as number | undefined,
-  role: 'user' as 'admin' | 'user',
+  role: 'user' as UserRole,
   unlimited: false,
   is_active: true,
   group_ids: [] as string[],

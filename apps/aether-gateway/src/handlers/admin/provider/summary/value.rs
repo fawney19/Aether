@@ -6,12 +6,14 @@ use crate::handlers::admin::shared::unix_secs_to_rfc3339;
 use crate::handlers::public::{request_candidate_event_unix_ms, request_candidate_status_label};
 use crate::orchestration::{codex_cyber_flag_passthrough_enabled, responses_websocket_adapter};
 use crate::provider_key_auth::provider_key_effective_api_formats;
+use aether_admin::provider::redaction::{admin_secret_safe_json, admin_secret_safe_proxy};
 use aether_data_contracts::repository::candidates::{
     RequestCandidateStatus, StoredRequestCandidate,
 };
 use aether_data_contracts::repository::provider_catalog::{
     StoredProviderCatalogEndpoint, StoredProviderCatalogKey, StoredProviderCatalogProvider,
 };
+use aether_scheduler_core::provider_key_health_score;
 use serde_json::json;
 use std::collections::BTreeMap;
 
@@ -90,23 +92,20 @@ pub(crate) fn build_admin_provider_summary_value(
                 .get(&endpoint.id)
                 .cloned()
                 .unwrap_or_default();
-            let health_score = if endpoint_keys.is_empty() {
-                1.0
-            } else {
-                let mut scores = Vec::new();
-                for key in &endpoint_keys {
-                    let score = key
-                        .health_by_format
-                        .as_ref()
-                        .and_then(|value| value.get(&endpoint.api_format))
-                        .and_then(|value| value.get("health_score"))
-                        .and_then(serde_json::Value::as_f64)
-                        .unwrap_or(1.0);
-                    scores.push(score);
-                }
-                scores.iter().sum::<f64>() / scores.len() as f64
-            };
-            endpoint_health_scores.push(health_score);
+            let scores = endpoint_keys
+                .iter()
+                .filter(|key| endpoint.is_active && key.is_active)
+                .map(|key| {
+                    provider_key_health_score(key, &endpoint.api_format)
+                        .filter(|score| score.is_finite())
+                        .unwrap_or(1.0)
+                })
+                .collect::<Vec<_>>();
+            let health_score =
+                (!scores.is_empty()).then(|| scores.iter().sum::<f64>() / scores.len() as f64);
+            if let Some(score) = health_score {
+                endpoint_health_scores.push(score);
+            }
             json!({
                 "api_format": endpoint.api_format,
                 "health_score": health_score,
@@ -116,11 +115,8 @@ pub(crate) fn build_admin_provider_summary_value(
             })
         })
         .collect::<Vec<_>>();
-    let avg_health_score = if endpoint_health_scores.is_empty() {
-        1.0
-    } else {
-        endpoint_health_scores.iter().sum::<f64>() / endpoint_health_scores.len() as f64
-    };
+    let avg_health_score = (!endpoint_health_scores.is_empty())
+        .then(|| endpoint_health_scores.iter().sum::<f64>() / endpoint_health_scores.len() as f64);
     let unhealthy_endpoints = endpoint_health_scores
         .iter()
         .filter(|score| **score < 0.5)
@@ -196,13 +192,13 @@ pub(crate) fn build_admin_provider_summary_value(
         "max_retries": provider.max_retries,
         "max_transfer_count": max_transfer_count,
         "max_transfer_timeout_seconds": max_transfer_timeout_seconds,
-        "proxy": provider.proxy.clone(),
+        "proxy": admin_secret_safe_proxy(provider.proxy.as_ref()),
         "stream_first_byte_timeout": provider.stream_first_byte_timeout_secs,
         "request_timeout": provider.request_timeout_secs,
-        "claude_code_advanced": config.and_then(|cfg| cfg.get("claude_code_advanced")).cloned(),
-        "pool_advanced": config.and_then(|cfg| cfg.get("pool_advanced")).cloned(),
-        "failover_rules": config.and_then(|cfg| cfg.get("failover_rules")).cloned(),
-        "chat_pii_redaction": config.and_then(|cfg| cfg.get("chat_pii_redaction")).cloned(),
+        "claude_code_advanced": admin_secret_safe_json(config.and_then(|cfg| cfg.get("claude_code_advanced"))),
+        "pool_advanced": admin_secret_safe_json(config.and_then(|cfg| cfg.get("pool_advanced"))),
+        "failover_rules": admin_secret_safe_json(config.and_then(|cfg| cfg.get("failover_rules"))),
+        "chat_pii_redaction": admin_secret_safe_json(config.and_then(|cfg| cfg.get("chat_pii_redaction"))),
         "total_endpoints": total_endpoints,
         "active_endpoints": active_endpoints,
         "total_keys": total_keys,

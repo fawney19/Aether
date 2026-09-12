@@ -1,6 +1,11 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 
-import { useModelsDevPricingSources } from '../useModelsDevPricingSources'
+import {
+  getModelsDevPricingSourceFromConfig,
+  modelsDevPricingSourcesEqual,
+  useModelsDevPricingSources,
+  withModelsDevPricingSource,
+} from '../useModelsDevPricingSources'
 
 const STORAGE_KEY = 'aether:models-dev-pricing-sources:v1'
 const LEGACY_STORAGE_KEY = 'aether:models-dev-pricing-preferences:v1'
@@ -30,6 +35,24 @@ describe('useModelsDevPricingSources', () => {
           provider_name: 'OpenAI',
         },
       },
+    })
+  })
+
+  it('prefers the database-backed model config over the local migration fallback', () => {
+    const { getSource, setSource } = useModelsDevPricingSources()
+    setSource('model-1', {
+      provider_id: 'openai',
+      provider_name: 'OpenAI',
+    })
+
+    expect(getSource('model-1', {
+      models_dev_pricing_source: {
+        provider_id: 'anthropic',
+        provider_name: 'Anthropic',
+      },
+    })).toEqual({
+      provider_id: 'anthropic',
+      provider_name: 'Anthropic',
     })
   })
 
@@ -64,5 +87,40 @@ describe('useModelsDevPricingSources', () => {
     const { getSource } = useModelsDevPricingSources()
 
     expect(getSource('model-1')).toBeNull()
+  })
+})
+
+describe('database-backed models.dev pricing sources', () => {
+  it('merges the source into model config without dropping unrelated settings', () => {
+    const config = withModelsDevPricingSource({
+      streaming: true,
+      billing: { video: { price_per_second: 0.1 } },
+    }, {
+      provider_id: ' google ',
+      provider_name: ' Google ',
+    })
+
+    expect(config).toEqual({
+      streaming: true,
+      billing: { video: { price_per_second: 0.1 } },
+      models_dev_pricing_source: {
+        provider_id: 'google',
+        provider_name: 'Google',
+      },
+    })
+    expect(getModelsDevPricingSourceFromConfig(config)).toEqual({
+      provider_id: 'google',
+      provider_name: 'Google',
+    })
+  })
+
+  it('rejects malformed config records and compares provider ids case-insensitively', () => {
+    expect(getModelsDevPricingSourceFromConfig({
+      models_dev_pricing_source: { provider_id: '', provider_name: 'Missing id' },
+    })).toBeNull()
+    expect(modelsDevPricingSourcesEqual(
+      { provider_id: 'OpenAI', provider_name: 'OpenAI' },
+      { provider_id: 'openai', provider_name: 'OpenAI' },
+    )).toBe(true)
   })
 })

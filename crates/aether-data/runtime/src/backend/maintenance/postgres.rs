@@ -16,17 +16,36 @@ impl PostgresBackend {
         table_names: &[&str],
     ) -> Result<DatabaseMaintenanceSummary, DataLayerError> {
         let mut summary = DatabaseMaintenanceSummary::default();
+        if table_names.is_empty() {
+            return Ok(summary);
+        }
+        // VACUUM cannot run inside a transaction. Discard this connection on every
+        // exit path so its longer session deadlines never leak into request queries.
+        let mut conn = self.pool().acquire().await.map_postgres_err()?;
+        conn.close_on_drop();
+        sqlx::query("SET statement_timeout = '5min'")
+            .execute(&mut *conn)
+            .await
+            .map_postgres_err()?;
+        sqlx::query("SET lock_timeout = '30s'")
+            .execute(&mut *conn)
+            .await
+            .map_postgres_err()?;
         for table_name in table_names {
             let table_name = maintenance_identifier(table_name)?;
             summary.attempted += 1;
             let statement = format!("VACUUM ANALYZE \"{table_name}\"");
-            if sqlx::raw_sql(&statement)
-                .execute(self.pool())
+            match sqlx::query(&statement)
+                .execute(&mut *conn)
                 .await
                 .map_postgres_err()
-                .is_ok()
             {
-                summary.succeeded += 1;
+                Ok(_) => summary.succeeded += 1,
+                Err(error) => tracing::warn!(
+                    table_name,
+                    error = %error,
+                    "PostgreSQL table maintenance failed"
+                ),
             }
         }
         Ok(summary)

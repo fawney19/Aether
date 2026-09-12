@@ -5,9 +5,10 @@ use super::usage::{
     sample_local_openai_endpoint, sample_local_openai_key, sample_local_openai_provider,
 };
 use super::{
-    any, build_router_with_state, build_state_with_execution_runtime_override, start_server,
-    wait_until, AppState, Arc, Body, Bytes, GatewayFallbackMetricKind, GatewayFallbackReason,
-    HeaderValue, Infallible, Request, Response, Router, StatusCode,
+    any, authenticated_operational_client, build_router_with_state,
+    build_state_with_execution_runtime_override, start_authenticated_operational_server,
+    start_server, wait_until, AppState, Arc, Body, Bytes, GatewayFallbackMetricKind,
+    GatewayFallbackReason, HeaderValue, Infallible, Request, Response, Router, StatusCode,
     EXECUTION_PATH_DISTRIBUTED_OVERLOADED, EXECUTION_PATH_HEADER,
     EXECUTION_PATH_LOCAL_EXECUTION_RUNTIME_MISS, EXECUTION_PATH_LOCAL_OVERLOADED,
 };
@@ -389,6 +390,43 @@ fn gateway_exposes_request_concurrency_metrics() {
     );
 }
 
+#[test]
+fn gateway_rejects_anonymous_operational_metrics() {
+    run_concurrency_test(
+        "gateway_rejects_anonymous_operational_metrics",
+        gateway_rejects_anonymous_operational_metrics_impl,
+    );
+}
+
+async fn gateway_rejects_anonymous_operational_metrics_impl() {
+    let gateway = build_router_with_state(AppState::new().expect("gateway state should build"));
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .get(format!("{gateway_url}/_gateway/metrics"))
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        response
+            .headers()
+            .get(http::header::CACHE_CONTROL)
+            .and_then(|value| value.to_str().ok()),
+        Some("no-store")
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get(http::header::WWW_AUTHENTICATE)
+            .and_then(|value| value.to_str().ok()),
+        Some("Bearer")
+    );
+
+    gateway_handle.abort();
+}
+
 async fn gateway_exposes_request_concurrency_metrics_impl() {
     let state = AppState::new()
         .expect("gateway state should build")
@@ -403,10 +441,11 @@ async fn gateway_exposes_request_concurrency_metrics_impl() {
             9,
         ));
     assert!(state.prewarm_metric_snapshot().await);
-    let gateway = build_router_with_state(state);
-    let (gateway_url, gateway_handle) = start_server(gateway).await;
+    let (gateway_url, gateway_handle, access_token) =
+        start_authenticated_operational_server(state).await;
+    let operational_client = authenticated_operational_client(&access_token);
 
-    let response = reqwest::Client::new()
+    let response = operational_client
         .get(format!("{gateway_url}/_gateway/metrics"))
         .send()
         .await
@@ -532,10 +571,11 @@ async fn gateway_exposes_fallback_metrics_impl() {
         GatewayFallbackReason::LocalExecutionPathRequired,
     );
     assert!(state.prewarm_metric_snapshot().await);
-    let gateway = build_router_with_state(state);
-    let (gateway_url, gateway_handle) = start_server(gateway).await;
+    let (gateway_url, gateway_handle, access_token) =
+        start_authenticated_operational_server(state).await;
+    let operational_client = authenticated_operational_client(&access_token);
 
-    let response = reqwest::Client::new()
+    let response = operational_client
         .get(format!("{gateway_url}/_gateway/metrics"))
         .send()
         .await

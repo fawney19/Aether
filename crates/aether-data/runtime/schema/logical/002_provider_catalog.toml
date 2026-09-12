@@ -1734,6 +1734,11 @@ type = "bool"
 default = false
 
 [[table.routing_groups.columns]]
+name = "sort_order"
+type = "int64"
+default = 0
+
+[[table.routing_groups.columns]]
 name = "config_json"
 type = "json"
 
@@ -1762,6 +1767,10 @@ columns = ["name"]
 [[table.routing_groups.indexes]]
 name = "routing_groups_system_default_idx"
 columns = ["is_system_default", "enabled"]
+
+[[table.routing_groups.indexes]]
+name = "routing_groups_enabled_sort_idx"
+columns = ["enabled", "sort_order", "name", "id"]
 
 [table.routing_group_bindings]
 domain = "provider_catalog"

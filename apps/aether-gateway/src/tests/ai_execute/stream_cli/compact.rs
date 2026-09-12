@@ -500,6 +500,11 @@ async fn gateway_executes_openai_responses_compact_as_unary_request_impl() {
             provider_catalog_repository,
             Arc::clone(&request_candidate_repository),
             DEVELOPMENT_ENCRYPTION_KEY,
+        )
+        .attach_proxy_node_repository_for_tests(
+            crate::tests::ai_execute::ai_execute_proxy_node_repository([
+                "proxy-node-openai-compact-local",
+            ]),
         ),
     );
     let gateway = build_router_with_state(gateway_state);

@@ -8,7 +8,8 @@ use super::super::super::state::{
     is_fixed_provider_type_for_provider_oauth,
 };
 use super::shared::{
-    parse_admin_provider_oauth_complete_callback, parse_admin_provider_oauth_complete_request_body,
+    admin_provider_oauth_state_matches_principal, parse_admin_provider_oauth_complete_callback,
+    parse_admin_provider_oauth_complete_request_body,
 };
 use crate::handlers::admin::provider::shared::paths::admin_provider_oauth_complete_provider_id;
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
@@ -43,12 +44,18 @@ pub(super) async fn handle_admin_provider_oauth_complete_provider(
         Err(response) => return Ok(response),
     };
 
-    let state_data = match state
-        .consume_provider_oauth_state(&callback.state_nonce)
-        .await
-    {
+    let preview = match state.load_provider_oauth_state(&callback.state_nonce).await {
         Ok(Some(state_data)) => state_data,
         Ok(None) => {
+            return Ok(build_internal_control_error_response(
+                http::StatusCode::BAD_REQUEST,
+                "state 无效或已过期",
+            ));
+        }
+        Err(GatewayError::Client {
+            status: http::StatusCode::BAD_REQUEST,
+            ..
+        }) => {
             return Ok(build_internal_control_error_response(
                 http::StatusCode::BAD_REQUEST,
                 "state 无效或已过期",
@@ -61,12 +68,42 @@ pub(super) async fn handle_admin_provider_oauth_complete_provider(
             ));
         }
     };
-    if !state_data.key_id.trim().is_empty() || state_data.provider_id != provider_id {
+    if !preview.key_id.trim().is_empty()
+        || preview.provider_id != provider_id
+        || !admin_provider_oauth_state_matches_principal(&preview, request_context)
+    {
         return Ok(build_internal_control_error_response(
             http::StatusCode::BAD_REQUEST,
             "state 无效或已过期",
         ));
     }
+    let state_data = match state
+        .consume_provider_oauth_state(&callback.state_nonce)
+        .await
+    {
+        Ok(Some(state_data)) if state_data == preview => state_data,
+        Ok(Some(_)) | Ok(None) => {
+            return Ok(build_internal_control_error_response(
+                http::StatusCode::BAD_REQUEST,
+                "state 无效或已过期",
+            ));
+        }
+        Err(GatewayError::Client {
+            status: http::StatusCode::BAD_REQUEST,
+            ..
+        }) => {
+            return Ok(build_internal_control_error_response(
+                http::StatusCode::BAD_REQUEST,
+                "state 无效或已过期",
+            ));
+        }
+        Err(_) => {
+            return Ok(build_internal_control_error_response(
+                http::StatusCode::SERVICE_UNAVAILABLE,
+                "provider oauth redis unavailable",
+            ));
+        }
+    };
 
     let Some(provider) = state
         .read_provider_catalog_providers_by_ids(std::slice::from_ref(&provider_id))

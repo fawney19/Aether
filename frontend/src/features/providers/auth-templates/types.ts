@@ -105,7 +105,9 @@ export function buildProxyConfig(formData: Record<string, unknown>): { proxy_nod
   if (!formData.proxy_enabled || !formData.proxy_node_id) {
     return {}
   }
-  return { proxy_node_id: formData.proxy_node_id }
+  return typeof formData.proxy_node_id === 'string'
+    ? { proxy_node_id: formData.proxy_node_id }
+    : {}
 }
 
 /**

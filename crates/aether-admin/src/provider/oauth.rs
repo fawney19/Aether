@@ -20,7 +20,7 @@ pub fn build_kiro_batch_import_key_name(
                 .iter()
                 .map(|byte| format!("{byte:02x}"))
                 .collect::<String>();
-            format!("kiro_{}", &hex[..6])
+            format!("账号_{}", &hex[..6])
         });
     format!("{base} ({method})")
 }
@@ -129,4 +129,37 @@ pub fn parse_admin_provider_oauth_kiro_batch_import_entries(raw_credentials: &st
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
         .map(|refresh_token| json!({ "refreshToken": refresh_token }))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_kiro_batch_import_key_name;
+
+    #[test]
+    fn kiro_batch_import_key_name_preserves_email_and_auth_method() {
+        for method in ["social", "idc"] {
+            assert_eq!(
+                build_kiro_batch_import_key_name(
+                    Some("  kiro_user@example.com  "),
+                    Some(method),
+                    Some("refresh-token-1"),
+                ),
+                format!("kiro_user@example.com ({method})")
+            );
+        }
+    }
+
+    #[test]
+    fn kiro_batch_import_key_name_without_email_uses_generic_account_prefix() {
+        for email in [None, Some(""), Some("  ")] {
+            assert_eq!(
+                build_kiro_batch_import_key_name(email, None, Some("refresh-token-1")),
+                "账号_154f43 (social)"
+            );
+            assert_eq!(
+                build_kiro_batch_import_key_name(email, Some("idc"), Some("refresh-token-1")),
+                "账号_154f43 (idc)"
+            );
+        }
+    }
 }

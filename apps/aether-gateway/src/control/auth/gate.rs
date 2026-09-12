@@ -205,8 +205,8 @@ async fn available_balance_capacity_usd(
         .as_ref()
         .is_some_and(|wallet| wallet.limit_mode.eq_ignore_ascii_case("unlimited"));
     Ok(match quota.as_ref() {
-        Some(quota) if !quota.allow_wallet_overage => Some(quota.remaining_usd.max(0.0)),
         Some(_) if wallet_is_unlimited => None,
+        Some(quota) if !quota.allow_wallet_overage => Some(quota.remaining_usd.max(0.0)),
         Some(quota) => Some(quota.remaining_usd.max(0.0) + wallet_available_usd.unwrap_or(0.0)),
         None if wallet_is_unlimited => None,
         None => wallet_available_usd,
@@ -224,7 +224,7 @@ fn wallet_finite_available_usd(
     Some(wallet.balance.max(0.0) + wallet.gift_balance.max(0.0))
 }
 
-async fn estimate_execution_plan_cost_upper_bound_usd(
+pub(crate) async fn estimate_execution_plan_cost_upper_bound_usd(
     state: &AppState,
     plan: &aether_contracts::ExecutionPlan,
     report_context: Option<&serde_json::Value>,
@@ -832,9 +832,10 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        execution_plan_balance_capacity_rejection, execution_plan_cost_upper_bound_cache_key,
-        max_output_tokens_from_request, openai_request_input_is_self_contained,
-        output_choice_count_upper_bound, request_model_local_rejection, GatewayLocalAuthRejection,
+        available_balance_capacity_usd, execution_plan_balance_capacity_rejection,
+        execution_plan_cost_upper_bound_cache_key, max_output_tokens_from_request,
+        openai_request_input_is_self_contained, output_choice_count_upper_bound,
+        request_model_local_rejection, GatewayLocalAuthRejection,
     };
     use crate::control::{GatewayControlAuthContext, GatewayControlDecision};
     use crate::data::GatewayDataState;
@@ -925,6 +926,7 @@ mod tests {
             local_rejection: None,
             allowed_models: Some(allowed_models),
             ip_rules: None,
+            verified_api_key_hash: None,
         });
         decision
     }
@@ -941,6 +943,14 @@ mod tests {
         quota: UserDailyQuotaAvailabilityRecord,
         context: StoredBillingModelContext,
     ) -> AppState {
+        state_with_quota_context_and_wallet(quota, context, sample_wallet("user-1", 30.0))
+    }
+
+    fn state_with_quota_context_and_wallet(
+        quota: UserDailyQuotaAvailabilityRecord,
+        context: StoredBillingModelContext,
+        wallet: StoredWalletSnapshot,
+    ) -> AppState {
         let candidate_repository =
             Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
                 sample_row(),
@@ -953,7 +963,7 @@ mod tests {
         AppState::new()
             .expect("state should build")
             .with_data_state_for_tests(data)
-            .with_auth_wallets_for_tests(vec![sample_wallet("user-1", 30.0)])
+            .with_auth_wallets_for_tests(vec![wallet])
     }
 
     fn state_with_model_mapping() -> AppState {
@@ -1349,6 +1359,26 @@ mod tests {
 
             assert_eq!(rejection, None);
         }
+    }
+
+    #[tokio::test]
+    async fn unlimited_wallet_capacity_ignores_exhausted_non_overage_quota() {
+        let context = billing_context_with_pricing(None, None, None, None);
+        let mut wallet = sample_wallet("user-1", 0.0);
+        wallet.limit_mode = "unlimited".to_string();
+        let state =
+            state_with_quota_context_and_wallet(quota_availability(0.0, false), context, wallet);
+        let decision = decision_with_allowed_models(vec!["gpt-5".to_string()]);
+        let auth_context = decision
+            .auth_context
+            .as_ref()
+            .expect("decision should include auth context");
+
+        let capacity = available_balance_capacity_usd(&state, auth_context)
+            .await
+            .expect("capacity should resolve");
+
+        assert_eq!(capacity, None);
     }
 
     #[tokio::test]

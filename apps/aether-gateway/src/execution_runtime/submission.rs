@@ -9,9 +9,9 @@ use crate::api::response::build_client_response_from_parts;
 use crate::control::GatewayControlDecision;
 use crate::usage::spawn_sync_report;
 use crate::{usage::GatewaySyncReportRequest, AppState, GatewayError};
+use aether_usage_runtime::decode_internal_report_body_base64;
 use axum::body::Body;
 use axum::http::{Response, StatusCode};
-use base64::Engine as _;
 use tracing::warn;
 
 #[derive(Clone, Debug)]
@@ -144,9 +144,8 @@ fn build_local_core_sync_finalize_fallback_response(
     }
 
     if let Some(body_base64) = payload.body_base64.as_ref() {
-        let body_bytes = base64::engine::general_purpose::STANDARD
-            .decode(body_base64)
-            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        let body_bytes =
+            decode_internal_report_body_base64(body_base64).map_err(GatewayError::Internal)?;
         return build_local_sync_response_from_bytes(trace_id, decision, payload, body_bytes);
     }
 
@@ -299,9 +298,8 @@ fn resolve_local_sync_source_body_json(
     let body_json = if let Some(body_json) = payload.body_json.clone() {
         body_json
     } else if let Some(body_base64) = payload.body_base64.as_deref() {
-        let body_bytes = base64::engine::general_purpose::STANDARD
-            .decode(body_base64)
-            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        let body_bytes =
+            decode_internal_report_body_base64(body_base64).map_err(GatewayError::Internal)?;
         let stripped = strip_utf8_bom_and_ws(&body_bytes);
         let Ok(body_json) = serde_json::from_slice::<serde_json::Value>(stripped) else {
             return Ok(None);
@@ -328,9 +326,8 @@ fn decode_local_sync_body_text(
     let Some(body_base64) = payload.body_base64.as_deref() else {
         return Ok(None);
     };
-    let body_bytes = base64::engine::general_purpose::STANDARD
-        .decode(body_base64)
-        .map_err(|err| GatewayError::Internal(err.to_string()))?;
+    let body_bytes =
+        decode_internal_report_body_base64(body_base64).map_err(GatewayError::Internal)?;
     let stripped = strip_utf8_bom_and_ws(&body_bytes);
     let body_text = String::from_utf8_lossy(stripped).trim().to_string();
     if body_text.is_empty() {
@@ -532,7 +529,13 @@ fn classify_local_sync_error_kind(
     {
         return LocalCoreSyncErrorKind::Overloaded;
     }
-    if (500..600).contains(&status_code) {
+    if (500..600).contains(&status_code)
+        || raw_type.is_some_and(|value| {
+            ["server_error", "internal_error", "api_error"]
+                .iter()
+                .any(|kind| value.trim().eq_ignore_ascii_case(kind))
+        })
+    {
         return LocalCoreSyncErrorKind::ServerError;
     }
     LocalCoreSyncErrorKind::InvalidRequest
@@ -679,6 +682,13 @@ pub(crate) async fn submit_local_core_error_or_sync_finalize(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn success_http_status_does_not_misclassify_explicit_server_errors_as_bad_requests() {
+        for error_type in ["server_error", "internal_error", "api_error"] {
+            let body = serde_json::json!({ "error": { "type": error_type, "message": "failed" } });
+            assert_eq!(super::resolve_local_sync_error_status_code(200, &body), 500);
+        }
+    }
     use axum::body::to_bytes;
     use serde_json::json;
 

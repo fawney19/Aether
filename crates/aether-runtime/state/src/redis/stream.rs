@@ -1,16 +1,19 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 
-use redis::from_redis_value;
-use redis::streams::StreamReadReply;
 use redis::Value as RedisValue;
+use redis::{from_owned_redis_value, from_redis_value};
 
 use crate::error::{redis_error, RedisResultExt};
 use crate::redis::{
     run_lane_with_timeout, RedisClientConfig, RedisClientFactory, RedisConnectionLane,
     RedisConnectionRouter, RedisKeyspace,
 };
-use crate::{DataLayerError, RuntimeQueueStats};
+use crate::{
+    validate_runtime_queue_transfer, DataLayerError, RuntimeQueueStats, RuntimeQueueTransferOutcome,
+};
+
+const DEAD_LETTER_TRANSFER_SCRIPT: &str = include_str!("dead_letter_transfer.lua");
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RedisStreamName(pub String);
@@ -259,6 +262,41 @@ impl RedisStreamRunner {
         self.append_fields(stream, &fields).await
     }
 
+    /// Atomically archives a pending entry and removes it from its source group and stream.
+    /// Requires Redis 7+ for ACL preflight. Both stream keys must share a slot on Redis Cluster.
+    pub async fn try_transfer_pending_to_stream(
+        &self,
+        source: &str,
+        group: &str,
+        entry_id: &str,
+        destination: &str,
+        destination_fields: &BTreeMap<String, String>,
+    ) -> Result<RuntimeQueueTransferOutcome, DataLayerError> {
+        validate_runtime_queue_transfer(source, group, entry_id, destination, destination_fields)?;
+        self.run_with_timeout(
+            RedisConnectionLane::BlockingStream,
+            "redis stream pending transfer",
+            async {
+                let mut lease = self.connections.blocking_stream_connection().await?;
+                let mut command = redis::cmd("EVAL");
+                command
+                    .arg(DEAD_LETTER_TRANSFER_SCRIPT)
+                    .arg(2)
+                    .arg(source)
+                    .arg(destination)
+                    .arg(group)
+                    .arg(entry_id);
+                for (field, value) in destination_fields {
+                    command.arg(field).arg(value);
+                }
+                let outcome = parse_transfer_result(lease.query(&command).await?)?;
+                lease.recycle();
+                Ok(outcome)
+            },
+        )
+        .await
+    }
+
     pub async fn read_group(
         &self,
         stream: &RedisStreamName,
@@ -275,7 +313,6 @@ impl RedisStreamRunner {
             RedisConnectionLane::Stream
         };
         self.run_with_timeout(lane, "redis stream read group", async {
-            let mut connection = self.connections.connection(lane);
             let mut command = redis::cmd("XREADGROUP");
             command
                 .arg("GROUP")
@@ -288,6 +325,14 @@ impl RedisStreamRunner {
             }
             command.arg("STREAMS").arg(&stream.0).arg(">");
 
+            if lane == RedisConnectionLane::BlockingStream {
+                let mut lease = self.connections.blocking_stream_connection().await?;
+                let entries = parse_stream_read_entries(lease.query(&command).await?)?;
+                lease.recycle();
+                return Ok(entries);
+            }
+
+            let mut connection = self.connections.connection(lane);
             let reply = command
                 .query_async::<RedisValue>(&mut connection)
                 .await
@@ -364,22 +409,25 @@ impl RedisStreamRunner {
         validate_stream_position(start_id)?;
         config.validate()?;
 
-        self.run_with_timeout(RedisConnectionLane::Stream, "redis stream reclaim", async {
-            let mut connection = self.connections.connection(RedisConnectionLane::Stream);
-            let reply = redis::cmd("XAUTOCLAIM")
-                .arg(&stream.0)
-                .arg(&group.0)
-                .arg(&consumer.0)
-                .arg(config.min_idle_ms)
-                .arg(start_id)
-                .arg("COUNT")
-                .arg(config.count)
-                .query_async::<RedisValue>(&mut connection)
-                .await
-                .map_redis_err()?;
-
-            parse_reclaim_result(reply)
-        })
+        self.run_with_timeout(
+            RedisConnectionLane::BlockingStream,
+            "redis stream reclaim",
+            async {
+                let mut lease = self.connections.blocking_stream_connection().await?;
+                let mut command = redis::cmd("XAUTOCLAIM");
+                command
+                    .arg(&stream.0)
+                    .arg(&group.0)
+                    .arg(&consumer.0)
+                    .arg(config.min_idle_ms)
+                    .arg(start_id)
+                    .arg("COUNT")
+                    .arg(config.count);
+                let result = parse_reclaim_result(lease.query(&command).await?)?;
+                lease.recycle();
+                Ok(result)
+            },
+        )
         .await
     }
 
@@ -536,24 +584,52 @@ fn parse_stream_read_entries(value: RedisValue) -> Result<Vec<RedisStreamEntry>,
         return Ok(Vec::new());
     }
 
-    let reply = from_redis_value::<StreamReadReply>(&value).map_err(redis_error)?;
-    Ok(reply
-        .keys
+    // StreamReadReply in redis 0.28 falls back to borrowed conversion even for an
+    // owned input. Its underlying containers support moving every payload buffer.
+    type StreamReadRows = Vec<HashMap<String, Vec<HashMap<String, HashMap<String, RedisValue>>>>>;
+    let rows = from_owned_redis_value::<StreamReadRows>(value).map_err(redis_error)?;
+    Ok(rows
         .into_iter()
-        .flat_map(|key| key.ids.into_iter())
-        .map(|id| RedisStreamEntry {
-            id: id.id,
-            fields: id
-                .map
+        .flat_map(HashMap::into_values)
+        .flatten()
+        .flat_map(HashMap::into_iter)
+        .map(|(id, fields)| RedisStreamEntry {
+            id,
+            fields: fields
                 .into_iter()
                 .filter_map(|(field, value)| {
-                    redis::from_redis_value::<String>(&value)
+                    from_owned_redis_value::<String>(value)
                         .ok()
                         .map(|text| (field, text))
                 })
                 .collect(),
         })
         .collect())
+}
+
+fn parse_transfer_result(value: RedisValue) -> Result<RuntimeQueueTransferOutcome, DataLayerError> {
+    if !matches!(&value, RedisValue::Array(parts) if parts.len() == 4) {
+        return Err(DataLayerError::UnexpectedValue(
+            "redis stream pending transfer returned an invalid result shape".to_string(),
+        ));
+    }
+    let (transferred, destination_id, acked, deleted) =
+        from_owned_redis_value::<(i64, String, usize, usize)>(value).map_err(redis_error)?;
+    match transferred {
+        0 if destination_id.is_empty() && acked == 0 && deleted == 0 => {
+            Ok(RuntimeQueueTransferOutcome::NotPending)
+        }
+        1 if !destination_id.is_empty() && acked == 1 && deleted <= 1 => {
+            Ok(RuntimeQueueTransferOutcome::Transferred {
+                destination_id,
+                acked,
+                deleted,
+            })
+        }
+        _ => Err(DataLayerError::UnexpectedValue(
+            "redis stream pending transfer returned inconsistent outcome fields".to_string(),
+        )),
+    }
 }
 
 fn parse_reclaim_result(value: RedisValue) -> Result<RedisStreamReclaimResult, DataLayerError> {
@@ -570,9 +646,13 @@ fn parse_reclaim_result(value: RedisValue) -> Result<RedisStreamReclaimResult, D
         )));
     }
 
-    let next_start_id = parse_string_value(&parts[0], "redis xautoclaim next_start_id")?;
-    let entries = parse_reclaim_entries(&parts[1])?;
-    let deleted_ids = match parts.get(2) {
+    let mut parts = parts.into_iter();
+    let next_start_id = parse_owned_string_value(
+        parts.next().expect("validated reclaim result length"),
+        "redis xautoclaim next_start_id",
+    )?;
+    let entries = parse_reclaim_entries(parts.next().expect("validated reclaim result length"))?;
+    let deleted_ids = match parts.next() {
         Some(value) => parse_string_array(value, "redis xautoclaim deleted_ids")?,
         None => Vec::new(),
     };
@@ -584,9 +664,9 @@ fn parse_reclaim_result(value: RedisValue) -> Result<RedisStreamReclaimResult, D
     })
 }
 
-fn parse_reclaim_entries(value: &RedisValue) -> Result<Vec<RedisStreamEntry>, DataLayerError> {
+fn parse_reclaim_entries(value: RedisValue) -> Result<Vec<RedisStreamEntry>, DataLayerError> {
     match value {
-        RedisValue::Array(entries) => entries.iter().map(parse_reclaim_entry).collect(),
+        RedisValue::Array(entries) => entries.into_iter().map(parse_reclaim_entry).collect(),
         RedisValue::Nil => Ok(Vec::new()),
         _ => Err(DataLayerError::UnexpectedValue(
             "redis xautoclaim entries payload was not an array".to_string(),
@@ -594,7 +674,7 @@ fn parse_reclaim_entries(value: &RedisValue) -> Result<Vec<RedisStreamEntry>, Da
     }
 }
 
-fn parse_reclaim_entry(value: &RedisValue) -> Result<RedisStreamEntry, DataLayerError> {
+fn parse_reclaim_entry(value: RedisValue) -> Result<RedisStreamEntry, DataLayerError> {
     let RedisValue::Array(parts) = value else {
         return Err(DataLayerError::UnexpectedValue(
             "redis xautoclaim entry was not an array".to_string(),
@@ -607,13 +687,20 @@ fn parse_reclaim_entry(value: &RedisValue) -> Result<RedisStreamEntry, DataLayer
         )));
     }
 
-    let id = parse_string_value(&parts[0], "redis xautoclaim entry id")?;
-    let fields = parse_string_map(&parts[1], "redis xautoclaim entry fields")?;
+    let mut parts = parts.into_iter();
+    let id = parse_owned_string_value(
+        parts.next().expect("validated reclaim entry length"),
+        "redis xautoclaim entry id",
+    )?;
+    let fields = parse_string_map(
+        parts.next().expect("validated reclaim entry length"),
+        "redis xautoclaim entry fields",
+    )?;
     Ok(RedisStreamEntry { id, fields })
 }
 
 fn parse_string_map(
-    value: &RedisValue,
+    value: RedisValue,
     context: &str,
 ) -> Result<BTreeMap<String, String>, DataLayerError> {
     match value {
@@ -625,19 +712,23 @@ fn parse_string_map(
                 )));
             }
             let mut fields = BTreeMap::new();
-            for pair in values.chunks(2) {
-                let key = parse_string_value(&pair[0], context)?;
-                let value = parse_string_value(&pair[1], context)?;
+            let mut values = values.into_iter();
+            while let Some(key) = values.next() {
+                let key = parse_owned_string_value(key, context)?;
+                let value = parse_owned_string_value(
+                    values.next().expect("validated even number of fields"),
+                    context,
+                )?;
                 fields.insert(key, value);
             }
             Ok(fields)
         }
         RedisValue::Map(entries) => entries
-            .iter()
+            .into_iter()
             .map(|(key, value)| {
                 Ok((
-                    parse_string_value(key, context)?,
-                    parse_string_value(value, context)?,
+                    parse_owned_string_value(key, context)?,
+                    parse_owned_string_value(value, context)?,
                 ))
             })
             .collect(),
@@ -648,11 +739,11 @@ fn parse_string_map(
     }
 }
 
-fn parse_string_array(value: &RedisValue, context: &str) -> Result<Vec<String>, DataLayerError> {
+fn parse_string_array(value: RedisValue, context: &str) -> Result<Vec<String>, DataLayerError> {
     match value {
         RedisValue::Array(values) => values
-            .iter()
-            .map(|value| parse_string_value(value, context))
+            .into_iter()
+            .map(|value| parse_owned_string_value(value, context))
             .collect(),
         RedisValue::Nil => Ok(Vec::new()),
         _ => Err(DataLayerError::UnexpectedValue(format!(
@@ -663,6 +754,14 @@ fn parse_string_array(value: &RedisValue, context: &str) -> Result<Vec<String>, 
 
 fn parse_string_value(value: &RedisValue, context: &str) -> Result<String, DataLayerError> {
     from_redis_value::<String>(value).map_err(|err| {
+        DataLayerError::UnexpectedValue(format!(
+            "{context} was not a string-compatible redis value: {err}"
+        ))
+    })
+}
+
+fn parse_owned_string_value(value: RedisValue, context: &str) -> Result<String, DataLayerError> {
+    from_owned_redis_value::<String>(value).map_err(|err| {
         DataLayerError::UnexpectedValue(format!(
             "{context} was not a string-compatible redis value: {err}"
         ))
@@ -789,17 +888,58 @@ fn parse_u64_value(value: &RedisValue, context: &str) -> Result<u64, DataLayerEr
 }
 
 #[cfg(test)]
+#[path = "stream_owned_reply_tests.rs"]
+mod owned_reply_tests;
+
+#[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
 
     use super::{
-        parse_reclaim_result, parse_stream_read_entries, parse_xinfo_group_stats,
-        parse_xpending_oldest_idle_ms, redis_stream_stats_missing_stream,
+        parse_reclaim_result, parse_stream_read_entries, parse_transfer_result,
+        parse_xinfo_group_stats, parse_xpending_oldest_idle_ms, redis_stream_stats_missing_stream,
         redis_stream_stats_missing_stream_or_group, validate_consumer, validate_group,
         validate_stream_name, validate_stream_position, RedisConsumerName, RedisStreamName,
         RedisStreamReclaimConfig, RedisStreamReclaimResult, RedisStreamRunnerConfig,
     };
     use redis::Value as RedisValue;
+
+    #[test]
+    fn pending_transfer_result_requires_complete_consistent_outcome() {
+        assert!(matches!(
+            parse_transfer_result(RedisValue::Array(vec![
+                RedisValue::Int(0),
+                RedisValue::BulkString(Vec::new()),
+                RedisValue::Int(0),
+                RedisValue::Int(0),
+            ])),
+            Ok(crate::RuntimeQueueTransferOutcome::NotPending)
+        ));
+        for values in [
+            Vec::new(),
+            vec![RedisValue::Int(0)],
+            vec![
+                RedisValue::Int(0),
+                RedisValue::BulkString(b"1-0".to_vec()),
+                RedisValue::Int(0),
+                RedisValue::Int(0),
+            ],
+            vec![
+                RedisValue::Int(1),
+                RedisValue::BulkString(b"1-0".to_vec()),
+                RedisValue::Int(0),
+                RedisValue::Int(1),
+            ],
+            vec![
+                RedisValue::Int(1),
+                RedisValue::BulkString(b"1-0".to_vec()),
+                RedisValue::Int(1),
+                RedisValue::Int(2),
+            ],
+        ] {
+            assert!(parse_transfer_result(RedisValue::Array(values)).is_err());
+        }
+    }
 
     #[test]
     fn validates_stream_runner_config() {

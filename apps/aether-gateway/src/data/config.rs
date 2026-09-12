@@ -113,10 +113,7 @@ impl GatewayDataConfig {
             return (self.clone(), None);
         };
         let total_max = database.pool.max_connections;
-        if total_max < 2
-            || configured_background_max == Some(0)
-            || is_private_sqlite_memory_database(database)
-        {
+        if total_max < 2 || configured_background_max == Some(0) {
             return (self.clone(), None);
         }
 
@@ -152,14 +149,9 @@ impl GatewayDataConfig {
     }
 }
 
-fn is_private_sqlite_memory_database(database: &aether_data::SqlDatabaseConfig) -> bool {
-    database.driver == aether_data::DatabaseDriver::Sqlite
-        && matches!(database.url.trim(), "sqlite::memory:" | "sqlite://:memory:")
-}
-
 #[cfg(test)]
 mod tests {
-    use super::GatewayDataConfig;
+    use super::{GatewayDataConfig, PostgresPoolConfig};
     use aether_data::{DatabaseDriver, SqlDatabaseConfig, SqlPoolConfig};
 
     #[test]
@@ -226,7 +218,10 @@ mod tests {
 
     #[test]
     fn runtime_pool_split_can_be_disabled_or_degrade_for_single_connection() {
-        let mut database = SqlDatabaseConfig::sqlite_default();
+        let mut database = SqlDatabaseConfig::from_postgres_config(PostgresPoolConfig {
+            database_url: "postgres://localhost/aether".to_string(),
+            ..Default::default()
+        });
         database.pool.max_connections = 1;
         let config = GatewayDataConfig::from_database_config(database);
         assert!(config
@@ -234,42 +229,15 @@ mod tests {
             .1
             .is_none());
 
-        let mut database = SqlDatabaseConfig::sqlite_default();
+        let mut database = SqlDatabaseConfig::from_postgres_config(PostgresPoolConfig {
+            database_url: "postgres://localhost/aether".to_string(),
+            ..Default::default()
+        });
         database.pool.max_connections = 8;
         let config = GatewayDataConfig::from_database_config(database);
         assert!(config
             .split_runtime_pools_with_background_max(Some(0))
             .1
             .is_none());
-    }
-
-    #[test]
-    fn runtime_pool_split_keeps_private_sqlite_memory_database_in_one_pool() {
-        for url in ["sqlite::memory:", "sqlite://:memory:"] {
-            let config = GatewayDataConfig::from_database_config(
-                SqlDatabaseConfig::new(
-                    DatabaseDriver::Sqlite,
-                    url,
-                    SqlPoolConfig {
-                        min_connections: 1,
-                        max_connections: 8,
-                        ..SqlPoolConfig::default()
-                    },
-                )
-                .expect("sqlite memory database config should be valid"),
-            );
-
-            let (foreground, background) = config.split_runtime_pools_with_background_max(Some(2));
-
-            assert!(background.is_none(), "private SQLite URL {url} was split");
-            assert_eq!(
-                foreground
-                    .database()
-                    .expect("foreground database")
-                    .pool
-                    .max_connections,
-                8
-            );
-        }
     }
 }

@@ -7,6 +7,7 @@ repository.workspace = true
 description = "Provider-specific pool behavior adapters for Aether"
 
 [dependencies]
+aether-contracts.workspace = true
 aether-data-contracts.workspace = true
 aether-pool-core.workspace = true
 aether-provider-transport.workspace = true

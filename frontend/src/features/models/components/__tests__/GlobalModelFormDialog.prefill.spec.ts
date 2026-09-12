@@ -247,6 +247,80 @@ afterEach(() => {
 })
 
 describe('GlobalModelFormDialog preset replacement', () => {
+  it('shows a catalog error and retries instead of presenting a failed load as an empty catalog', async () => {
+    modelsDevMocks.getModelsDevList
+      .mockRejectedValueOnce({
+        response: {
+          status: 503,
+          data: { detail: 'External models catalog unavailable' },
+        },
+      })
+      .mockResolvedValueOnce([stalePreset, freshPreset])
+
+    mountDialog()
+    await settle()
+
+    const errorState = document.body.querySelector('[data-testid="models-catalog-load-error"]')
+    expect(errorState?.textContent).toContain('外部模型目录加载失败')
+    expect(errorState?.textContent).toContain('External models catalog unavailable')
+    expect(document.body.textContent).not.toContain('暂无可用模型')
+    expect(findExactButton('手动填写').disabled).toBe(false)
+
+    const retryButton = document.body.querySelector<HTMLButtonElement>(
+      '[data-testid="models-catalog-retry"]',
+    )
+    if (!retryButton) throw new Error('Missing catalog retry button')
+    retryButton.click()
+    await settle()
+
+    expect(modelsDevMocks.getModelsDevList).toHaveBeenCalledTimes(2)
+    expect(document.body.querySelector('[data-testid="models-catalog-load-error"]')).toBeNull()
+    expect(document.body.textContent).toContain('Stale Model')
+    expect(document.body.textContent).toContain('Fresh Model')
+  })
+
+  it('keeps manual model creation available when the external catalog is unavailable', async () => {
+    modelsDevMocks.getModelsDevList.mockRejectedValueOnce({
+      response: {
+        status: 503,
+        data: { detail: 'External models catalog unavailable' },
+      },
+    })
+
+    mountDialog()
+    await settle()
+
+    const manualEntryButton = document.body.querySelector<HTMLButtonElement>(
+      '[data-testid="models-catalog-manual-entry"]',
+    )
+    if (!manualEntryButton) throw new Error('Missing catalog manual-entry button')
+    manualEntryButton.click()
+    await settle()
+
+    expect(document.body.querySelector('[data-testid="models-catalog-load-error"]')).toBeNull()
+    expect(document.body.textContent).toContain('手动填写模式')
+    expect(document.body.querySelector('#model-name')).not.toBeNull()
+  })
+
+  it('allows manual model creation while the external catalog request is still pending', async () => {
+    modelsDevMocks.getModelsDevList.mockReturnValueOnce(
+      new Promise<ModelsDevModelItem[]>(() => {}),
+    )
+
+    mountDialog()
+    await settle()
+
+    const manualEntryButton = document.body.querySelector<HTMLButtonElement>(
+      '[data-testid="models-catalog-manual-entry-loading"]',
+    )
+    if (!manualEntryButton) throw new Error('Missing loading-state manual-entry button')
+    manualEntryButton.click()
+    await settle()
+
+    expect(document.body.textContent).toContain('手动填写模式')
+    expect(document.body.querySelector('#model-name')).not.toBeNull()
+  })
+
   it('drops the previous draft and submits only the newly selected model preset', async () => {
     mountDialog()
     await settle()
@@ -306,6 +380,10 @@ describe('GlobalModelFormDialog preset replacement', () => {
         family: 'fresh-family',
         input_modalities: ['text'],
         output_modalities: ['text'],
+        models_dev_pricing_source: {
+          provider_id: 'openai',
+          provider_name: 'OpenAI',
+        },
       },
       default_tiered_pricing: {
         tiers: [
@@ -477,9 +555,17 @@ describe('GlobalModelFormDialog preset replacement', () => {
 
   it('refreshes and applies the latest online price from the edit dialog', async () => {
     const existingStaleModel = buildExistingStaleModel()
+    const nextConfig = {
+      ...existingStaleModel.config,
+      models_dev_pricing_source: {
+        provider_id: stalePreset.providerId,
+        provider_name: stalePreset.providerName,
+      },
+    }
     const syncedModel = {
       ...existingStaleModel,
       default_tiered_pricing: stalePreset.tieredPricing!,
+      config: nextConfig,
     }
     globalModelMocks.updateGlobalModel.mockResolvedValue(syncedModel)
     globalModelMocks.listGlobalModels.mockResolvedValue({
@@ -495,7 +581,7 @@ describe('GlobalModelFormDialog preset replacement', () => {
       '[data-testid="sync-online-pricing"]',
     )
     if (!syncButton) throw new Error('Missing online pricing sync button')
-    expect(syncButton.title).toBe('同步最新在线价格')
+    expect(syncButton.title).toBe('选择并同步在线价格来源')
     expect(syncButton.getAttribute('aria-label')).toBe('同步最新在线价格')
 
     syncButton.click()
@@ -505,7 +591,10 @@ describe('GlobalModelFormDialog preset replacement', () => {
     expect(modelsDevMocks.refreshModelsDevList).toHaveBeenCalledWith(false)
     expect(globalModelMocks.updateGlobalModel).toHaveBeenCalledWith(
       existingStaleModel.id,
-      { default_tiered_pricing: stalePreset.tieredPricing },
+      {
+        default_tiered_pricing: stalePreset.tieredPricing,
+        config: nextConfig,
+      },
     )
     expect(pricingSynced).toHaveBeenCalledWith(syncedModel)
     expect(document.body.querySelector<HTMLInputElement>('[data-testid="tier-input-price"]')?.value)
@@ -524,11 +613,62 @@ describe('GlobalModelFormDialog preset replacement', () => {
     })
   })
 
+  it('persists a newly selected source even when prices already match and keeps it on save', async () => {
+    const existingModel = {
+      ...buildExistingStaleModel(),
+      default_tiered_pricing: stalePreset.tieredPricing!,
+    }
+    const nextConfig = {
+      ...existingModel.config,
+      models_dev_pricing_source: {
+        provider_id: stalePreset.providerId,
+        provider_name: stalePreset.providerName,
+      },
+    }
+    const syncedModel = { ...existingModel, config: nextConfig }
+    globalModelMocks.updateGlobalModel.mockResolvedValue(syncedModel)
+    const { editingModel, pricingSynced } = mountDialog()
+    await settle()
+
+    editingModel.value = existingModel
+    await settle()
+    const syncButton = document.body.querySelector<HTMLButtonElement>(
+      '[data-testid="sync-online-pricing"]',
+    )
+    if (!syncButton) throw new Error('Missing online pricing sync button')
+    syncButton.click()
+    await settle()
+
+    expect(globalModelMocks.updateGlobalModel).toHaveBeenNthCalledWith(
+      1,
+      existingModel.id,
+      {
+        default_tiered_pricing: stalePreset.tieredPricing,
+        config: nextConfig,
+      },
+    )
+    expect(pricingSynced).toHaveBeenCalledWith(syncedModel)
+
+    findExactButton('保存').click()
+    await settle()
+
+    expect(globalModelMocks.updateGlobalModel).toHaveBeenCalledTimes(2)
+    expect(globalModelMocks.updateGlobalModel.mock.calls[1][1].config).toEqual(nextConfig)
+  })
+
   it('offers a provider choice when the remembered source is unavailable', async () => {
     const existingStaleModel = buildExistingStaleModel()
+    const nextConfig = {
+      ...existingStaleModel.config,
+      models_dev_pricing_source: {
+        provider_id: alternateStalePreset.providerId,
+        provider_name: alternateStalePreset.providerName,
+      },
+    }
     const syncedModel = {
       ...existingStaleModel,
       default_tiered_pricing: alternateStalePreset.tieredPricing!,
+      config: nextConfig,
     }
     modelsDevMocks.refreshModelsDevList.mockResolvedValue([
       unavailableStalePreset,
@@ -578,7 +718,10 @@ describe('GlobalModelFormDialog preset replacement', () => {
 
     expect(globalModelMocks.updateGlobalModel).toHaveBeenCalledWith(
       existingStaleModel.id,
-      { default_tiered_pricing: alternateStalePreset.tieredPricing },
+      {
+        default_tiered_pricing: alternateStalePreset.tieredPricing,
+        config: nextConfig,
+      },
     )
     expect(pricingSynced).toHaveBeenCalledWith(syncedModel)
     expect(document.body.textContent).not.toContain('选择在线价格来源')

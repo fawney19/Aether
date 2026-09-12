@@ -78,6 +78,7 @@ pub use crate::formats::openai::{
         OpenAiProviderRequestFinalization,
     },
     responses::{
+        normalize_openai_responses_message_item_ids, openai_responses_message_item_id,
         openai_responses_synthetic_reasoning_item_id,
         strip_incompatible_openai_responses_reasoning_items,
         strip_incompatible_openai_responses_reasoning_items_with_policy,

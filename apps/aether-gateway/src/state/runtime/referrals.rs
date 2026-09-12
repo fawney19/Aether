@@ -4,13 +4,39 @@ use crate::data::state::{
 };
 use crate::{AppState, GatewayError};
 use axum::http::StatusCode;
+use tracing::warn;
+
+const REFERRAL_INVALID_INPUT_FALLBACK: &str = "返利请求无效";
+
+fn safe_referral_invalid_input_detail(detail: &str) -> &'static str {
+    // These messages are deliberate domain-level validation responses. Any
+    // future adapter/storage detail must stay server-side instead of becoming
+    // an oracle for database state or schema information.
+    match detail {
+        "邀请码无效" => "邀请码无效",
+        "不能使用自己的邀请码注册" => "不能使用自己的邀请码注册",
+        "仅失败返利可以补发" => "仅失败返利可以补发",
+        "返利金额无效，无法补发" => "返利金额无效，无法补发",
+        _ => REFERRAL_INVALID_INPUT_FALLBACK,
+    }
+}
 
 fn referral_data_error(err: aether_data::DataLayerError) -> GatewayError {
     match err {
-        aether_data::DataLayerError::InvalidInput(detail) => GatewayError::Client {
-            status: StatusCode::BAD_REQUEST,
-            message: detail,
-        },
+        aether_data::DataLayerError::InvalidInput(detail) => {
+            let safe_detail = safe_referral_invalid_input_detail(&detail);
+            if safe_detail == REFERRAL_INVALID_INPUT_FALLBACK {
+                warn!(
+                    event_name = "referral_invalid_input_hidden",
+                    error_length = detail.len(),
+                    "referral data-layer validation detail hidden from client"
+                );
+            }
+            GatewayError::Client {
+                status: StatusCode::BAD_REQUEST,
+                message: safe_detail.to_string(),
+            }
+        }
         other => GatewayError::Internal(other.to_string()),
     }
 }
@@ -48,6 +74,15 @@ fn config_f64(value: Option<&serde_json::Value>, default: f64) -> f64 {
         Some(serde_json::Value::Number(value)) => value.as_f64().unwrap_or(default),
         Some(serde_json::Value::String(value)) => value.trim().parse::<f64>().unwrap_or(default),
         _ => default,
+    }
+}
+
+fn config_percent(value: Option<&serde_json::Value>) -> f64 {
+    let value = config_f64(value, 0.0);
+    if value.is_finite() && value > 0.0 && value <= 100.0 {
+        value
+    } else {
+        0.0
     }
 }
 
@@ -93,7 +128,7 @@ impl AppState {
             config_string(headcount_trigger.as_ref()).unwrap_or_else(|| "registration".to_string());
         Ok(Some(ReferralRewardConfig {
             percent_enabled: matches!(mode.as_str(), "percent" | "both"),
-            percent_rate: config_f64(percent.as_ref(), 0.0),
+            percent_rate: config_percent(percent.as_ref()),
             headcount_enabled: matches!(mode.as_str(), "headcount" | "both"),
             headcount_amount_usd: config_f64(headcount_amount.as_ref(), 0.0),
             headcount_trigger,
@@ -237,5 +272,44 @@ impl AppState {
             .reverse_referral_rewards_for_order(order_id, amount_usd)
             .await
             .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
+    pub(crate) async fn reconcile_referral_rewards_once(
+        &self,
+    ) -> Result<crate::data::state::ReferralReconciliationSummary, GatewayError> {
+        let config = self.referral_reward_config().await?;
+        self.data
+            .reconcile_referral_rewards_once(config)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{referral_data_error, REFERRAL_INVALID_INPUT_FALLBACK};
+
+    #[test]
+    fn referral_invalid_input_projection_allowlists_domain_messages() {
+        let known = super::referral_data_error(aether_data::DataLayerError::InvalidInput(
+            "邀请码无效".to_string(),
+        ));
+        match known {
+            crate::GatewayError::Client { message, .. } => assert_eq!(message, "邀请码无效"),
+            other => panic!("expected client error, got {other:?}"),
+        }
+
+        let secret = "database table referral_rewards row reward-secret has invalid wallet";
+        let unknown = referral_data_error(aether_data::DataLayerError::InvalidInput(
+            secret.to_string(),
+        ));
+        match unknown {
+            crate::GatewayError::Client { message, .. } => {
+                assert_eq!(message, REFERRAL_INVALID_INPUT_FALLBACK);
+                assert!(!message.contains("reward-secret"));
+                assert!(!message.contains("referral_rewards"));
+            }
+            other => panic!("expected client error, got {other:?}"),
+        }
     }
 }

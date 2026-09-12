@@ -3,7 +3,7 @@ use crate::handlers::admin::shared::{
 };
 use serde::Deserialize;
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub(crate) struct AdminProviderKeyCreateRequest {
     #[serde(default)]
     pub(crate) api_formats: Option<Vec<String>>,
@@ -48,7 +48,31 @@ pub(crate) struct AdminProviderKeyCreateRequest {
     pub(crate) fingerprint: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Deserialize)]
+impl std::fmt::Debug for AdminProviderKeyCreateRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AdminProviderKeyCreateRequest")
+            .field("api_formats", &self.api_formats)
+            .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
+            .field("auth_type", &self.auth_type)
+            .field(
+                "auth_config",
+                &self.auth_config.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("name", &self.name)
+            .field("internal_priority", &self.internal_priority)
+            .field("rpm_limit", &self.rpm_limit)
+            .field("concurrent_limit", &self.concurrent_limit)
+            .field("auto_fetch_models", &self.auto_fetch_models)
+            .field(
+                "fingerprint",
+                &self.fingerprint.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Deserialize)]
 pub(crate) struct AdminProviderKeyUpdateRequest {
     #[serde(default)]
     pub(crate) api_formats: Option<Vec<String>>,
@@ -98,6 +122,32 @@ pub(crate) struct AdminProviderKeyUpdateRequest {
     pub(crate) proxy: Option<serde_json::Value>,
     #[serde(default)]
     pub(crate) fingerprint: Option<serde_json::Value>,
+}
+
+impl std::fmt::Debug for AdminProviderKeyUpdateRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AdminProviderKeyUpdateRequest")
+            .field("api_formats", &self.api_formats)
+            .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
+            .field("auth_type", &self.auth_type)
+            .field(
+                "auth_config",
+                &self.auth_config.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("name", &self.name)
+            .field("internal_priority", &self.internal_priority)
+            .field("rpm_limit", &self.rpm_limit)
+            .field("concurrent_limit", &self.concurrent_limit)
+            .field("is_active", &self.is_active)
+            .field("auto_fetch_models", &self.auto_fetch_models)
+            .field("proxy", &self.proxy.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "fingerprint",
+                &self.fingerprint.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish_non_exhaustive()
+    }
 }
 
 pub(crate) type AdminProviderKeyUpdatePatch = AdminTypedObjectPatch<AdminProviderKeyUpdateRequest>;
@@ -347,7 +397,54 @@ pub(crate) struct AdminImportProviderModelsRequest {
 
 #[cfg(test)]
 mod tests {
-    use super::AdminCodexResetCreditConsumeRequest;
+    use super::{
+        AdminCodexResetCreditConsumeRequest, AdminProviderKeyCreateRequest,
+        AdminProviderKeyUpdateRequest,
+    };
+
+    #[test]
+    fn provider_key_request_debug_output_redacts_authorization_material() {
+        let create = serde_json::from_value::<AdminProviderKeyCreateRequest>(serde_json::json!({
+            "name": "key",
+            "api_key": "create-api-key-canary",
+            "auth_config": {"refresh_token": "create-refresh-token-canary"},
+            "fingerprint": {"device_id": "create-device-canary"}
+        }))
+        .expect("create request should deserialize");
+        let update = serde_json::from_value::<AdminProviderKeyUpdateRequest>(serde_json::json!({
+            "api_key": "update-api-key-canary",
+            "auth_config": {"refresh_token": "update-refresh-token-canary"},
+            "proxy": {"password": "update-proxy-canary"},
+            "fingerprint": {"device_id": "update-device-canary"}
+        }))
+        .expect("update request should deserialize");
+
+        let create_debug = format!("{create:?}");
+        let update_debug = format!("{update:?}");
+        assert!(create_debug.contains("[REDACTED]"));
+        assert!(update_debug.contains("[REDACTED]"));
+        for secret in [
+            "create-api-key-canary",
+            "create-refresh-token-canary",
+            "create-device-canary",
+        ] {
+            assert!(
+                !create_debug.contains(secret),
+                "create debug leaked {secret}"
+            );
+        }
+        for secret in [
+            "update-api-key-canary",
+            "update-refresh-token-canary",
+            "update-proxy-canary",
+            "update-device-canary",
+        ] {
+            assert!(
+                !update_debug.contains(secret),
+                "update debug leaked {secret}"
+            );
+        }
+    }
 
     #[test]
     fn codex_reset_credit_consume_requires_an_explicit_credential_generation() {

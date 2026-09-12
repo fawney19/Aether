@@ -7,6 +7,8 @@ urlsafe_rand() { openssl rand -base64 "$1" | tr '+/' '-_' | tr -d '='; }
 
 jwt_key=$(urlsafe_rand 32)
 encryption_key=$(urlsafe_rand 32)
+db_password=$(urlsafe_rand 32)
+redis_password=$(urlsafe_rand 32)
 
 cat <<EOF
 
@@ -14,8 +16,11 @@ cat <<EOF
 
 JWT_SECRET_KEY=${jwt_key}
 ENCRYPTION_KEY=${encryption_key}
+DB_PASSWORD=${db_password}
+REDIS_PASSWORD=${redis_password}
 
 注意:
   - JWT_SECRET_KEY 用于用户登录 token 签名
   - ENCRYPTION_KEY 用于敏感数据加密 (如 Provider API Keys)
+  - 数据库和 Redis 密码分别生成，不复用应用加密密钥
 EOF

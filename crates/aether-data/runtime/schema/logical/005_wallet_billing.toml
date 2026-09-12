@@ -431,6 +431,11 @@ name = "idx_payment_orders_gateway_order_id"
 columns = ["gateway_order_id"]
 
 [[table.payment_orders.indexes]]
+name = "uq_payment_orders_payment_method_gateway_order_id"
+columns = ["payment_method", "gateway_order_id"]
+unique = true
+
+[[table.payment_orders.indexes]]
 name = "idx_payment_orders_kind_status"
 columns = ["order_kind", "status"]
 
@@ -541,20 +546,6 @@ columns = ["created_at"]
 [[table.user_referrals.indexes]]
 name = "idx_user_referrals_invite_code"
 columns = ["invite_code_snapshot"]
-
-[[table.user_referrals.foreign_keys]]
-name = "user_referrals_inviter_user_id_fkey"
-columns = ["inviter_user_id"]
-references_table = "users"
-references_columns = ["id"]
-on_delete = "cascade"
-
-[[table.user_referrals.foreign_keys]]
-name = "user_referrals_invitee_user_id_fkey"
-columns = ["invitee_user_id"]
-references_table = "users"
-references_columns = ["id"]
-on_delete = "cascade"
 
 [[table.user_referrals.foreign_keys]]
 name = "user_referrals_first_paid_order_fkey"
@@ -683,20 +674,6 @@ columns = ["source_order_id"]
 name = "referral_rewards_referral_id_fkey"
 columns = ["referral_id"]
 references_table = "user_referrals"
-references_columns = ["id"]
-on_delete = "cascade"
-
-[[table.referral_rewards.foreign_keys]]
-name = "referral_rewards_inviter_user_id_fkey"
-columns = ["inviter_user_id"]
-references_table = "users"
-references_columns = ["id"]
-on_delete = "cascade"
-
-[[table.referral_rewards.foreign_keys]]
-name = "referral_rewards_invitee_user_id_fkey"
-columns = ["invitee_user_id"]
-references_table = "users"
 references_columns = ["id"]
 on_delete = "cascade"
 

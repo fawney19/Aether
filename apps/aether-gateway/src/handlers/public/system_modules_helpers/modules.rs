@@ -44,18 +44,7 @@ pub(crate) fn oauth_module_config_is_valid(
 pub(crate) fn ldap_module_config_is_valid(
     config: Option<&aether_data::repository::auth_modules::StoredLdapModuleConfig>,
 ) -> bool {
-    let Some(config) = config else {
-        return false;
-    };
-    !config.server_url.trim().is_empty()
-        && !config.bind_dn.trim().is_empty()
-        && !config.base_dn.trim().is_empty()
-        && config
-            .bind_password_encrypted
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .is_some()
+    crate::handlers::shared::ldap_module_config_is_valid(config)
 }
 
 pub(crate) async fn build_public_auth_modules_status_payload(

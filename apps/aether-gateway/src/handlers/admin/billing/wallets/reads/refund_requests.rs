@@ -1,12 +1,13 @@
 use super::super::shared::{
-    build_admin_wallets_bad_request_response, parse_admin_wallets_limit,
-    parse_admin_wallets_offset, parse_admin_wallets_owner_type_filter,
+    admin_wallet_payout_proof_projection, build_admin_wallets_bad_request_response,
+    parse_admin_wallets_limit, parse_admin_wallets_offset, parse_admin_wallets_owner_type_filter,
     resolve_admin_wallet_owner_summary, wallet_owner_summary_from_fields,
     ADMIN_WALLETS_API_KEY_REFUND_DETAIL,
 };
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::handlers::admin::shared::{query_param_value, unix_secs_to_rfc3339};
 use crate::GatewayError;
+use aether_data::repository::wallet::stored_timestamp_unix_secs;
 use axum::{
     body::Body,
     response::{IntoResponse, Response},
@@ -40,6 +41,7 @@ pub(in super::super) async fn build_admin_wallet_refund_requests_response(
         .await?;
     let mut items = Vec::with_capacity(refunds.len());
     for refund in refunds {
+        let payout_proof = admin_wallet_payout_proof_projection(refund.payout_proof.as_ref());
         let mut owner = wallet_owner_summary_from_fields(
             refund.wallet_user_id.as_deref(),
             refund.wallet_user_name.clone(),
@@ -75,11 +77,14 @@ pub(in super::super) async fn build_admin_wallet_refund_requests_response(
             "gateway_refund_id": refund.gateway_refund_id,
             "payout_method": refund.payout_method,
             "payout_reference": refund.payout_reference,
-            "payout_proof": refund.payout_proof,
+            "payout_proof": payout_proof,
             "requested_by": refund.requested_by,
             "approved_by": refund.approved_by,
             "processed_by": refund.processed_by,
-            "created_at": refund.created_at_unix_ms.and_then(unix_secs_to_rfc3339),
+            "created_at": refund
+                .created_at_unix_ms
+                .map(stored_timestamp_unix_secs)
+                .and_then(unix_secs_to_rfc3339),
             "updated_at": refund.updated_at_unix_secs.and_then(unix_secs_to_rfc3339),
             "processed_at": refund.processed_at_unix_secs.and_then(unix_secs_to_rfc3339),
             "completed_at": refund.completed_at_unix_secs.and_then(unix_secs_to_rfc3339),

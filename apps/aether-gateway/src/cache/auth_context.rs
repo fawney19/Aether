@@ -422,6 +422,7 @@ mod tests {
             local_rejection: None,
             allowed_models: None,
             ip_rules: None,
+            verified_api_key_hash: None,
         }
     }
 

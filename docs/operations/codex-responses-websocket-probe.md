@@ -151,6 +151,32 @@ ws.send(json.dumps({
 - Direct provider proxy settings are honored through the selected transport
   profile. Tunnel-mode proxy nodes are not supported for this bridge yet.
 
+### DNS and proxy behavior
+
+The gateway's plain and browser-profile WebSocket clients share the HTTP/SSE
+provider DNS resolver. Provider hostname answers are not filtered by address
+range, including Fake-IP answers such as `198.18.0.0/15`. DNS lookup timeout,
+answer-count limits, and rejection of empty answers still apply. Resolution
+happens during connection establishment, not while building the client; DNS
+failures therefore surface as upstream handshake failures rather than invalid
+upstream URLs.
+
+This policy applies only to configured provider hostnames. URL validation still
+rejects credentials, fragments, and literal private/reserved IP targets (except
+loopback `ws://`), and the gateway frontdoor self-loop guard remains active.
+Tunnel owner-relay DNS address filtering is unchanged.
+
+Configure an explicit HTTP(S) or SOCKS proxy on the provider when needed; these
+clients do not automatically use system proxy environment variables. A proxy
+connection does not trigger a separate gateway-side lookup of the provider
+hostname. Existing SOCKS remote-DNS normalization remains in effect.
+
+The [DNS egress audit](dns-egress-audit-2026-09-08.md) documents the separate
+tunnel and untrusted-download policies, regression coverage, and remaining
+deployment limitations; not every outbound path uses the provider DNS policy.
+
+### Usage and logging
+
 Usage and audit finalization now runs for every accepted `response.create`.
 Existing usage body-capture and header-redaction policies apply to the resulting
 records. Newly created WebSocket usage records expose `is_websocket=true`, and

@@ -18,6 +18,8 @@ use sqlx::{PgPool, Row};
 use tokio::sync::Mutex;
 
 const PROVIDER_ID: &str = "provider-hotspot";
+const USER_ID: &str = "settlement-hotspot-user";
+const WALLET_ID: &str = "settlement-hotspot-wallet";
 const REQUEST_PREFIX: &str = "settlement-hotspot";
 const COST_PER_REQUEST_USD: f64 = 0.001;
 
@@ -99,6 +101,7 @@ struct CounterReport {
     provider_monthly_outbox_rows: i64,
     provider_monthly_used_usd: f64,
     expected_provider_monthly_used_usd: f64,
+    wallet_consumed_usd: f64,
 }
 
 #[derive(Debug, Serialize, Clone, Copy, Default)]
@@ -120,8 +123,13 @@ struct LockSample {
     oldest_lock_wait_ms: i64,
 }
 
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let _log_shutdown = aether_runtime::LogShutdownGuard::new();
+    run()
+}
+
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn run() -> Result<(), Box<dyn std::error::Error>> {
     init_test_runtime_for("usage-settlement-hotspot-baseline");
     let config = parse_args(std::env::args().skip(1).collect())?;
 
@@ -238,6 +246,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::fs::create_dir_all(parent)?;
         }
         std::fs::write(path, format!("{raw}\n"))?;
+    }
+    if report.failed_requests != 0
+        || report.counters.settled_usage_rows != config.requests as i64
+        || report.counters.settlement_snapshot_rows != config.requests as i64
+        || report.counters.outbox_pending_rows != 0
+        || (report.counters.provider_monthly_used_usd
+            - report.counters.expected_provider_monthly_used_usd)
+            .abs()
+            > 1e-8
+        || (report.counters.wallet_consumed_usd
+            - report.counters.expected_provider_monthly_used_usd)
+            .abs()
+            > 1e-8
+    {
+        return Err(std::io::Error::other(
+            "settlement baseline failed correctness checks; see report",
+        )
+        .into());
     }
     Ok(())
 }
@@ -389,6 +415,24 @@ async fn wait_for_outbox_drain(
 
 async fn seed_settlement_rows(pool: &PgPool, requests: usize) -> Result<(), sqlx::Error> {
     sqlx::query(
+        "INSERT INTO users (id, username, email_verified) VALUES ($1, $1, true) ON CONFLICT (id) DO NOTHING",
+    )
+    .bind(USER_ID)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r#"
+INSERT INTO wallets (id, user_id, balance, gift_balance, total_consumed, created_at, updated_at)
+VALUES ($1, $2, $3, 0, 0, NOW(), NOW())
+ON CONFLICT (id) DO UPDATE SET balance = EXCLUDED.balance, gift_balance = 0, total_consumed = 0
+"#,
+    )
+    .bind(WALLET_ID)
+    .bind(USER_ID)
+    .bind(requests as f64 * COST_PER_REQUEST_USD + 1.0)
+    .execute(pool)
+    .await?;
+    sqlx::query(
         r#"
 INSERT INTO providers (id, name, provider_type, monthly_used_usd)
 VALUES ($1, 'Hotspot Provider', 'openai', 0)
@@ -432,6 +476,7 @@ WHERE request_id LIKE $1
 INSERT INTO "usage" (
   id,
   request_id,
+  user_id,
   provider_name,
   model,
   provider_id,
@@ -445,6 +490,7 @@ INSERT INTO "usage" (
 SELECT
   'settlement-usage-' || LPAD(gs::TEXT, 8, '0'),
   $2 || '-' || LPAD(gs::TEXT, 8, '0'),
+  $7,
   'Hotspot Provider',
   'gpt-5',
   $3,
@@ -463,6 +509,7 @@ FROM generate_series(0, $1::INTEGER - 1) AS gs
     .bind(COST_PER_REQUEST_USD)
     .bind(now_unix_ms() as i64)
     .bind(now_unix_secs() as i64)
+    .bind(USER_ID)
     .execute(pool)
     .await?;
 
@@ -472,7 +519,7 @@ FROM generate_series(0, $1::INTEGER - 1) AS gs
 fn settlement_input(index: usize) -> UsageSettlementInput {
     UsageSettlementInput {
         request_id: format!("{REQUEST_PREFIX}-{index:08}"),
-        user_id: None,
+        user_id: Some(USER_ID.to_string()),
         api_key_id: None,
         api_key_is_standalone: false,
         provider_id: Some(PROVIDER_ID.to_string()),
@@ -552,11 +599,13 @@ SELECT
     SELECT CAST(monthly_used_usd AS DOUBLE PRECISION)
     FROM providers
     WHERE id = $2
-  ) AS provider_monthly_used_usd
+  ) AS provider_monthly_used_usd,
+  (SELECT CAST(total_consumed AS DOUBLE PRECISION) FROM wallets WHERE id = $3) AS wallet_consumed_usd
 "#,
     )
     .bind(format!("{REQUEST_PREFIX}-%"))
     .bind(PROVIDER_ID)
+    .bind(WALLET_ID)
     .fetch_one(pool)
     .await?;
     Ok(CounterReport {
@@ -568,6 +617,7 @@ SELECT
         provider_monthly_outbox_rows: row.try_get("provider_monthly_outbox_rows")?,
         provider_monthly_used_usd: row.try_get("provider_monthly_used_usd")?,
         expected_provider_monthly_used_usd: (requests as f64) * COST_PER_REQUEST_USD,
+        wallet_consumed_usd: row.try_get("wallet_consumed_usd")?,
     })
 }
 

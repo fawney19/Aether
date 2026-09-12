@@ -423,6 +423,11 @@ async fn gateway_executes_claude_chat_sync_via_local_decision_gate_with_local_sy
             provider_catalog_repository,
             Arc::clone(&request_candidate_repository),
             DEVELOPMENT_ENCRYPTION_KEY,
+        )
+        .attach_proxy_node_repository_for_tests(
+            crate::tests::ai_execute::ai_execute_proxy_node_repository([
+                "proxy-node-claude-chat-local",
+            ]),
         ),
     );
     let gateway = build_router_with_state(gateway_state);
@@ -982,7 +987,7 @@ async fn gateway_returns_claude_chat_error_for_local_sync_failure_impl() {
         any(move |_request: Request| async move {
             Json(json!({
                 "request_id": "trace-claude-chat-local-error-123",
-                "status_code": 200,
+                "status_code": 429,
                 "headers": {
                     "content-type": "application/json"
                 },
@@ -1028,6 +1033,11 @@ async fn gateway_returns_claude_chat_error_for_local_sync_failure_impl() {
             provider_catalog_repository,
             Arc::clone(&request_candidate_repository),
             DEVELOPMENT_ENCRYPTION_KEY,
+        )
+        .attach_proxy_node_repository_for_tests(
+            crate::tests::ai_execute::ai_execute_proxy_node_repository([
+                "proxy-node-claude-chat-local",
+            ]),
         ),
     );
     let gateway = build_router_with_state(gateway_state);

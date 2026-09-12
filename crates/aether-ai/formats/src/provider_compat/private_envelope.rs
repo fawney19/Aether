@@ -256,6 +256,10 @@ fn transform_provider_private_stream_line_with_event_state(
 
 const CONNECT_FRAME_HEADER_BYTES: usize = 5;
 const MAX_CONNECT_JSON_FRAME_BYTES: usize = 16 * 1024 * 1024;
+// Keep malformed or incomplete provider streams from growing this parser's
+// carry buffer without bound when no complete SSE/Connect record arrives.
+const MAX_PRIVATE_STREAM_BUFFER_BYTES: usize =
+    MAX_CONNECT_JSON_FRAME_BYTES + CONNECT_FRAME_HEADER_BYTES;
 
 fn report_context_is_windsurf_envelope(report_context: &Value) -> bool {
     report_context
@@ -424,6 +428,18 @@ impl ProviderPrivateStreamNormalizer<'_> {
                 state.push_chunk(self.report_context, chunk)
             }
             ProviderPrivateStreamNormalizeMode::EnvelopeUnwrap => {
+                let next_len = self
+                    .buffered
+                    .len()
+                    .checked_add(chunk.len())
+                    .ok_or_else(|| {
+                        AiSurfaceFinalizeError::new("provider stream normalization buffer overflow")
+                    })?;
+                if next_len > MAX_PRIVATE_STREAM_BUFFER_BYTES {
+                    return Err(AiSurfaceFinalizeError::new(format!(
+                        "provider stream normalization buffer exceeds {MAX_PRIVATE_STREAM_BUFFER_BYTES} bytes"
+                    )));
+                }
                 self.buffered.extend_from_slice(chunk);
                 if report_context_is_windsurf_envelope(self.report_context)
                     && buffer_looks_like_connect_frame(&self.buffered)
@@ -1281,5 +1297,22 @@ data: {"type":"response.failed","response":{"status":"failed","error":{"message"
         assert!(output_text.contains("event: error"));
         assert!(output_text.contains("\"message\":\"rate limited\""));
         assert!(!output_text.contains("chat.completion.chunk"));
+    }
+
+    #[test]
+    fn private_stream_normalizer_rejects_unbounded_incomplete_buffer() {
+        let report_context = json!({
+            "has_envelope": true,
+            "envelope_name": "antigravity:v1internal",
+            "provider_api_format": "gemini:generate_content",
+        });
+        let mut normalizer = maybe_build_provider_private_stream_normalizer(Some(&report_context))
+            .expect("normalizer should exist");
+        let oversized = vec![b'x'; super::MAX_PRIVATE_STREAM_BUFFER_BYTES + 1];
+
+        let error = normalizer
+            .push_chunk(&oversized)
+            .expect_err("incomplete provider stream must be bounded");
+        assert!(error.0.contains("buffer exceeds"));
     }
 }

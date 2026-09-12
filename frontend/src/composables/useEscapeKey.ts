@@ -64,7 +64,7 @@ export function useEscapeKey(
         activeElement.tagName === 'INPUT' ||
         activeElement.tagName === 'TEXTAREA' ||
         activeElement.tagName === 'SELECT' ||
-        activeElement.contentEditable === 'true' ||
+        (activeElement instanceof HTMLElement && activeElement.isContentEditable) ||
         activeElement.getAttribute('role') === 'textbox' ||
         activeElement.getAttribute('role') === 'combobox'
       )

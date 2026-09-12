@@ -404,6 +404,7 @@ CREATE TABLE IF NOT EXISTS public.routing_groups (
     description text,
     enabled boolean DEFAULT true NOT NULL,
     is_system_default boolean DEFAULT false NOT NULL,
+    sort_order bigint DEFAULT 0 NOT NULL,
     config_json jsonb NOT NULL,
     version bigint DEFAULT 1 NOT NULL,
     created_at bigint NOT NULL,
@@ -414,6 +415,7 @@ CREATE TABLE IF NOT EXISTS public.routing_groups (
 ALTER TABLE ONLY public.routing_groups ADD CONSTRAINT routing_groups_pkey PRIMARY KEY (id);
 ALTER TABLE ONLY public.routing_groups ADD CONSTRAINT routing_groups_name_key UNIQUE (name);
 CREATE INDEX IF NOT EXISTS routing_groups_system_default_idx ON public.routing_groups USING btree (is_system_default, enabled);
+CREATE INDEX IF NOT EXISTS routing_groups_enabled_sort_idx ON public.routing_groups USING btree (enabled, sort_order, name, id);
 
 CREATE TABLE IF NOT EXISTS public.routing_group_bindings (
     id character varying(64) NOT NULL,

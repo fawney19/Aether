@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS public.users (
     email_verified boolean DEFAULT false NOT NULL,
     is_active boolean DEFAULT true NOT NULL,
     is_deleted boolean DEFAULT false NOT NULL,
+    security_version bigint DEFAULT 0 NOT NULL,
     allowed_models jsonb,
     allowed_models_mode character varying(32) DEFAULT 'unrestricted' NOT NULL,
     allowed_providers jsonb,
@@ -203,6 +204,7 @@ CREATE INDEX IF NOT EXISTS user_preferences_user_id_idx ON public.user_preferenc
 CREATE TABLE IF NOT EXISTS public.user_sessions (
     id character varying(64) NOT NULL,
     user_id character varying(64) NOT NULL,
+    security_version bigint DEFAULT 0 NOT NULL,
     client_device_id character varying(128) NOT NULL,
     device_label character varying(120),
     device_type character varying(20) DEFAULT 'unknown' NOT NULL,

@@ -1,0 +1,23 @@
+{
+  "name": "aether-vscodex",
+  "version": "0.4.0",
+  "private": true,
+  "description": "Synchronous VS Code Codex mirroring and asynchronous Codex control for local Web and Aether",
+  "type": "commonjs",
+  "main": "relay/server.js",
+  "scripts": {
+    "start": "node relay/server.js",
+    "start:cloud": "node cloud/server.js",
+    "build:web": "npm --prefix web run build",
+    "build:extension": "npm --prefix vscode-extension run build",
+    "build": "npm run build:web && npm run build:extension",
+    "test": "node --test test/*.test.js",
+    "test:web": "npm --prefix web test"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "ws": "^8.18.3"
+  }
+}

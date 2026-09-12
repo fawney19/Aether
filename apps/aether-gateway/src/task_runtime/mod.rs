@@ -8,7 +8,7 @@ use aether_data_contracts::repository::background_tasks::{
 use aether_runtime::task::spawn_named;
 use aether_task_runtime::{RetryPolicy, TaskDefinition, TaskKind};
 pub(crate) use aether_task_runtime::{TaskSupervisor, TaskSupervisorMetrics};
-use serde_json::{json, Value};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::task::JoinHandle;
 use tracing::warn;
@@ -56,7 +56,6 @@ const RETRY_ONCE: RetryPolicy = RetryPolicy { max_attempts: 1 };
 const RETRY_THREE: RetryPolicy = RetryPolicy { max_attempts: 3 };
 const BACKGROUND_TASK_RUN_ID_MAX_BYTES: usize = 64;
 const WORKER_BOOT_RUN_ID_HASH_HEX_BYTES: usize = 20;
-
 fn build_worker_boot_run_id(task_key: &str) -> String {
     let full_run_id = format!("boot:{task_key}");
     if full_run_id.len() <= BACKGROUND_TASK_RUN_ID_MAX_BYTES {
@@ -102,10 +101,6 @@ fn build_worker_boot_run(
         finished_at_unix_secs: None,
         updated_at_unix_secs: now,
     }
-}
-
-fn worker_boot_event_payload(gateway_instance_id: &str) -> Value {
-    json!({ "gateway_instance_id": gateway_instance_id })
 }
 
 pub(crate) fn spawn_singleton_worker<F, Fut>(
@@ -473,8 +468,11 @@ pub(crate) async fn upsert_run_with_logging(
 ) -> Option<StoredBackgroundTaskRun> {
     match app.upsert_background_task_run(run).await {
         Ok(result) => result,
-        Err(error) => {
-            warn!(error = ?error, "failed to upsert background task run");
+        Err(_) => {
+            warn!(
+                error_category = "task_run_persistence_failed",
+                "failed to upsert background task run"
+            );
             None
         }
     }
@@ -532,8 +530,12 @@ pub(crate) async fn append_event_with_logging(
         payload_json,
         created_at_unix_secs: now_unix_secs(),
     };
-    if let Err(error) = app.upsert_background_task_event(event).await {
-        warn!(error = ?error, run_id = %run_id, "failed to upsert background task event");
+    if app.upsert_background_task_event(event).await.is_err() {
+        warn!(
+            error_category = "task_event_persistence_failed",
+            run_id = %run_id,
+            "failed to upsert background task event"
+        );
     }
 }
 
@@ -545,7 +547,6 @@ pub(crate) fn spawn_record_worker_boot(
 ) -> JoinHandle<()> {
     spawn_named("task-runtime-record-worker-boot", async move {
         let now = now_unix_secs();
-        let gateway_instance_id = app.tunnel.local_instance_id().to_string();
         let run = build_worker_boot_run(task_key, kind, trigger, now);
         let run_id = run.id.clone();
         if upsert_run_with_logging(&app, run).await.is_none() {
@@ -556,7 +557,7 @@ pub(crate) fn spawn_record_worker_boot(
             &run_id,
             "worker_boot",
             "background worker supervisor started",
-            Some(worker_boot_event_payload(&gateway_instance_id)),
+            None,
         )
         .await;
     })
@@ -753,10 +754,11 @@ pub(crate) async fn submit_provider_delete_task(
                 )
                 .await;
             }
-            Err(err) => {
+            Err(_) => {
                 warn!(
-                    "gateway admin provider delete task failed for provider {}: {:?}",
-                    provider_id, err
+                    provider_id = %provider_id,
+                    error_category = "provider_delete_failed",
+                    "gateway admin provider delete task failed"
                 );
                 app.put_provider_delete_task(crate::LocalProviderDeleteTaskState {
                     task_id: run_id.clone(),
@@ -767,7 +769,7 @@ pub(crate) async fn submit_provider_delete_task(
                     deleted_keys: 0,
                     total_endpoints: 0,
                     deleted_endpoints: 0,
-                    message: format!("provider delete failed: {err:?}"),
+                    message: "provider delete failed".to_string(),
                 });
                 let _ = update_run_status(
                     &app,
@@ -776,7 +778,7 @@ pub(crate) async fn submit_provider_delete_task(
                     Some(100),
                     Some("provider delete task failed".to_string()),
                     None,
-                    Some(format!("{err:?}")),
+                    Some("provider_delete_failed".to_string()),
                     None,
                     Some(now_unix_secs()),
                 )
@@ -786,7 +788,9 @@ pub(crate) async fn submit_provider_delete_task(
                     &run_id,
                     "failed",
                     "provider delete task failed",
-                    Some(serde_json::json!({ "error": format!("{err:?}") })),
+                    Some(serde_json::json!({
+                        "error_code": "provider_delete_failed"
+                    })),
                 )
                 .await;
             }
@@ -802,21 +806,18 @@ pub(crate) async fn submit_provider_delete_task(
 
 #[cfg(test)]
 mod worker_boot_run_id_tests {
-    use std::collections::BTreeSet;
     use std::sync::Arc;
 
     use super::{
         build_worker_boot_run, build_worker_boot_run_id, spawn_record_worker_boot,
-        worker_boot_event_payload, BACKGROUND_TASK_RUN_ID_MAX_BYTES,
+        BACKGROUND_TASK_RUN_ID_MAX_BYTES,
     };
+    use crate::{data::GatewayDataState, AppState};
     use aether_data::repository::background_tasks::InMemoryBackgroundTaskRepository;
     use aether_data_contracts::repository::background_tasks::{
         BackgroundTaskKind, BackgroundTaskListQuery, BackgroundTaskReadRepository,
         BackgroundTaskStatus,
     };
-    use serde_json::json;
-
-    use crate::{data::GatewayDataState, AppState};
 
     #[test]
     fn worker_boot_run_id_is_keyed_only_by_task() {
@@ -883,16 +884,8 @@ mod worker_boot_run_id_tests {
         assert_eq!(run.updated_at_unix_secs, 123);
     }
 
-    #[test]
-    fn worker_boot_event_keeps_the_observing_gateway_instance() {
-        assert_eq!(
-            worker_boot_event_payload("gateway-a"),
-            json!({ "gateway_instance_id": "gateway-a" })
-        );
-    }
-
     #[tokio::test]
-    async fn worker_boot_registration_is_shared_but_events_keep_each_gateway() {
+    async fn worker_boot_registration_is_shared_without_instance_identifiers() {
         let repository = Arc::new(InMemoryBackgroundTaskRepository::default());
         let state_for = |gateway_instance_id: &str| {
             AppState::new()
@@ -943,20 +936,6 @@ mod worker_boot_run_id_tests {
             .expect("worker boot events should load");
         assert_eq!(events.len(), 2);
         assert!(events.iter().all(|event| event.event_type == "worker_boot"));
-        let gateway_instances = events
-            .iter()
-            .filter_map(|event| {
-                event
-                    .payload_json
-                    .as_ref()
-                    .and_then(|payload| payload.get("gateway_instance_id"))
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_string)
-            })
-            .collect::<BTreeSet<_>>();
-        assert_eq!(
-            gateway_instances,
-            BTreeSet::from(["gateway-a".to_string(), "gateway-b".to_string()])
-        );
+        assert!(events.iter().all(|event| event.payload_json.is_none()));
     }
 }

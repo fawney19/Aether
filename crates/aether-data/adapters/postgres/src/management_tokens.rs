@@ -2,10 +2,10 @@ use async_trait::async_trait;
 use sqlx::{postgres::PgRow, PgPool, Postgres, QueryBuilder, Row};
 
 use aether_data_contracts::repository::management_tokens::{
-    CreateManagementTokenRecord, ManagementTokenListQuery, ManagementTokenReadRepository,
-    ManagementTokenWriteRepository, RegenerateManagementTokenSecret, StoredManagementToken,
-    StoredManagementTokenListPage, StoredManagementTokenUserSummary, StoredManagementTokenWithUser,
-    UpdateManagementTokenRecord,
+    ActivateManagementTokenIfMatches, CreateManagementTokenRecord, ManagementTokenListQuery,
+    ManagementTokenReadRepository, ManagementTokenWriteRepository, RegenerateManagementTokenSecret,
+    StoredManagementToken, StoredManagementTokenListPage, StoredManagementTokenUserSummary,
+    StoredManagementTokenWithUser, UpdateManagementTokenRecord,
 };
 use aether_data_contracts::DataLayerError;
 use aether_data_query::{push_eq, push_limit, push_limit_offset, push_optional_eq, WhereClause};
@@ -39,6 +39,7 @@ JOIN users u ON u.id = mt.user_id
 const DELETE_MANAGEMENT_TOKEN_SQL: &str = r#"
 DELETE FROM management_tokens
 WHERE id = $1
+  AND ($2::text IS NULL OR user_id = $2)
 "#;
 
 const MANAGEMENT_TOKEN_JSON_COLUMN_TYPES_SQL: &str = r#"
@@ -97,23 +98,33 @@ RETURNING
 
 const UPDATE_MANAGEMENT_TOKEN_SQL_PREFIX: &str = r#"
 UPDATE management_tokens
-SET name = $2,
-    description = $3,
-    allowed_ips =
+SET name = COALESCE($2, name),
+    description = CASE
+      WHEN $3 THEN NULL
+      ELSE COALESCE($4, description)
+    END,
+    allowed_ips = CASE
+      WHEN $5 THEN NULL
+      ELSE COALESCE(
 "#;
 
 const UPDATE_MANAGEMENT_TOKEN_SQL_MIDDLE: &str = r#",
-    permissions =
+        allowed_ips)
+    END,
+    permissions = COALESCE(
 "#;
 
 const UPDATE_MANAGEMENT_TOKEN_SQL_SUFFIX: &str = r#",
+        permissions),
     expires_at = CASE
-      WHEN $6::bigint IS NULL THEN NULL
-      ELSE to_timestamp($6::double precision)
+      WHEN $8 THEN NULL
+      WHEN $9::bigint IS NOT NULL THEN to_timestamp($9::double precision)
+      ELSE expires_at
     END,
-    is_active = $7,
+    is_active = COALESCE($10, is_active),
     updated_at = NOW()
 WHERE id = $1
+  AND ($11::text IS NULL OR user_id = $11)
 RETURNING
   id,
   user_id,
@@ -136,6 +147,7 @@ UPDATE management_tokens
 SET is_active = $2,
     updated_at = NOW()
 WHERE id = $1
+  AND ($3::text IS NULL OR user_id = $3)
 RETURNING
   id,
   user_id,
@@ -153,12 +165,56 @@ RETURNING
   EXTRACT(EPOCH FROM updated_at)::bigint AS updated_at_unix_secs
 "#;
 
+const LOCK_ELIGIBLE_MANAGEMENT_TOKEN_ADMIN_SQL: &str = r#"
+SELECT id
+FROM users
+WHERE id = $1
+  AND is_active IS TRUE
+  AND is_deleted IS FALSE
+  AND LOWER(role::text) = 'admin'
+  AND security_version = $2
+FOR UPDATE
+"#;
+
+const LOCK_MANAGEMENT_TOKEN_ACTIVATION_SNAPSHOT_SQL: &str = r#"
+SELECT
+  id,
+  user_id,
+  token_hash,
+  name,
+  description,
+  token_prefix,
+  allowed_ips,
+  permissions,
+  EXTRACT(EPOCH FROM expires_at)::bigint AS expires_at_unix_secs,
+  EXTRACT(EPOCH FROM last_used_at)::bigint AS last_used_at_unix_secs,
+  last_used_ip,
+  COALESCE(usage_count, 0) AS usage_count,
+  is_active,
+  EXTRACT(EPOCH FROM created_at)::bigint AS created_at_unix_ms,
+  EXTRACT(EPOCH FROM updated_at)::bigint AS updated_at_unix_secs
+FROM management_tokens
+WHERE id = $1
+FOR UPDATE
+"#;
+
+const ACTIVATE_LOCKED_MANAGEMENT_TOKEN_SQL: &str = r#"
+UPDATE management_tokens
+SET is_active = TRUE,
+    updated_at = NOW()
+WHERE id = $1
+  AND token_hash = $2
+  AND is_active = FALSE
+  AND (expires_at IS NULL OR expires_at > to_timestamp($3::double precision))
+"#;
+
 const REGENERATE_MANAGEMENT_TOKEN_SECRET_SQL: &str = r#"
 UPDATE management_tokens
 SET token_hash = $2,
     token_prefix = $3,
     updated_at = NOW()
 WHERE id = $1
+  AND ($4::text IS NULL OR user_id = $4)
 RETURNING
   id,
   user_id,
@@ -271,6 +327,85 @@ impl SqlxManagementTokenRepository {
             )),
         }
     }
+
+    async fn update_management_token_scoped(
+        &self,
+        record: &UpdateManagementTokenRecord,
+        expected_user_id: Option<&str>,
+    ) -> Result<Option<StoredManagementToken>, DataLayerError> {
+        record.validate()?;
+        let json_column_types = self.json_column_types().await?;
+        let sql = update_management_token_sql(json_column_types);
+        let allowed_ips = json_to_string(record.allowed_ips.as_ref())?;
+        let permissions = json_to_string(record.permissions.as_ref())?;
+        let row = sqlx::query(sql.as_str())
+            .bind(&record.token_id)
+            .bind(record.name.as_deref())
+            .bind(record.clear_description)
+            .bind(record.description.as_deref())
+            .bind(record.clear_allowed_ips)
+            .bind(allowed_ips)
+            .bind(permissions)
+            .bind(record.clear_expires_at)
+            .bind(
+                record
+                    .expires_at_unix_secs
+                    .and_then(|value| i64::try_from(value).ok()),
+            )
+            .bind(record.is_active)
+            .bind(expected_user_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|err| map_management_token_write_error(err, record.name.as_deref()))?;
+        row.as_ref().map(map_token_row).transpose()
+    }
+
+    async fn delete_management_token_scoped(
+        &self,
+        token_id: &str,
+        expected_user_id: Option<&str>,
+    ) -> Result<bool, DataLayerError> {
+        let result = sqlx::query(DELETE_MANAGEMENT_TOKEN_SQL)
+            .bind(token_id)
+            .bind(expected_user_id)
+            .execute(&self.pool)
+            .await
+            .map_postgres_err()?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn set_management_token_active_scoped(
+        &self,
+        token_id: &str,
+        expected_user_id: Option<&str>,
+        is_active: bool,
+    ) -> Result<Option<StoredManagementToken>, DataLayerError> {
+        let row = sqlx::query(SET_MANAGEMENT_TOKEN_ACTIVE_SQL)
+            .bind(token_id)
+            .bind(is_active)
+            .bind(expected_user_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_postgres_err()?;
+        row.as_ref().map(map_token_row).transpose()
+    }
+
+    async fn regenerate_management_token_secret_scoped(
+        &self,
+        mutation: &RegenerateManagementTokenSecret,
+        expected_user_id: Option<&str>,
+    ) -> Result<Option<StoredManagementToken>, DataLayerError> {
+        mutation.validate()?;
+        let row = sqlx::query(REGENERATE_MANAGEMENT_TOKEN_SECRET_SQL)
+            .bind(&mutation.token_id)
+            .bind(&mutation.token_hash)
+            .bind(mutation.token_prefix.as_deref())
+            .bind(expected_user_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_postgres_err()?;
+        row.as_ref().map(map_token_row).transpose()
+    }
 }
 
 fn create_management_token_sql(types: ManagementTokenJsonColumnTypes) -> String {
@@ -285,7 +420,7 @@ fn create_management_token_sql(types: ManagementTokenJsonColumnTypes) -> String 
 
 fn update_management_token_sql(types: ManagementTokenJsonColumnTypes) -> String {
     format!(
-        "{} $4::text::{}{} $5::text::{}{}",
+        "{} $6::text::{}{} $7::text::{}{}",
         UPDATE_MANAGEMENT_TOKEN_SQL_PREFIX,
         types.allowed_ips.sql_type(),
         UPDATE_MANAGEMENT_TOKEN_SQL_MIDDLE,
@@ -423,70 +558,29 @@ impl ManagementTokenWriteRepository for SqlxManagementTokenRepository {
         &self,
         record: &UpdateManagementTokenRecord,
     ) -> Result<Option<StoredManagementToken>, DataLayerError> {
-        record.validate()?;
-        let Some(current) = self
-            .get_management_token_with_user(&record.token_id)
-            .await?
-        else {
-            return Ok(None);
-        };
-        let json_column_types = self.json_column_types().await?;
-        let sql = update_management_token_sql(json_column_types);
-        let name = record
-            .name
-            .as_deref()
-            .unwrap_or(current.token.name.as_str());
-        let description = if record.clear_description {
-            None
-        } else {
-            record
-                .description
-                .as_deref()
-                .or(current.token.description.as_deref())
-        };
-        let allowed_ips = if record.clear_allowed_ips {
-            None
-        } else {
-            record
-                .allowed_ips
-                .as_ref()
-                .or(current.token.allowed_ips.as_ref())
-        };
-        let permissions = record
-            .permissions
-            .as_ref()
-            .or(current.token.permissions.as_ref());
-        let expires_at_unix_secs = if record.clear_expires_at {
-            None
-        } else {
-            record
-                .expires_at_unix_secs
-                .or(current.token.expires_at_unix_secs)
-        };
-        let is_active = record.is_active.unwrap_or(current.token.is_active);
-        let allowed_ips = json_to_string(allowed_ips)?;
-        let permissions = json_to_string(permissions)?;
-        let row = sqlx::query(sql.as_str())
-            .bind(&record.token_id)
-            .bind(name)
-            .bind(description)
-            .bind(allowed_ips)
-            .bind(permissions)
-            .bind(expires_at_unix_secs.and_then(|value| i64::try_from(value).ok()))
-            .bind(is_active)
-            .fetch_optional(&self.pool)
+        self.update_management_token_scoped(record, None).await
+    }
+
+    async fn update_management_token_for_user(
+        &self,
+        record: &UpdateManagementTokenRecord,
+        user_id: &str,
+    ) -> Result<Option<StoredManagementToken>, DataLayerError> {
+        self.update_management_token_scoped(record, Some(user_id))
             .await
-            .map_err(|err| map_management_token_write_error(err, record.name.as_deref()))?;
-        row.as_ref().map(map_token_row).transpose()
     }
 
     async fn delete_management_token(&self, token_id: &str) -> Result<bool, DataLayerError> {
-        let result = sqlx::query(DELETE_MANAGEMENT_TOKEN_SQL)
-            .bind(token_id)
-            .execute(&self.pool)
+        self.delete_management_token_scoped(token_id, None).await
+    }
+
+    async fn delete_management_token_for_user(
+        &self,
+        token_id: &str,
+        user_id: &str,
+    ) -> Result<bool, DataLayerError> {
+        self.delete_management_token_scoped(token_id, Some(user_id))
             .await
-            .map_postgres_err()?;
-        Ok(result.rows_affected() > 0)
     }
 
     async fn set_management_token_active(
@@ -494,28 +588,125 @@ impl ManagementTokenWriteRepository for SqlxManagementTokenRepository {
         token_id: &str,
         is_active: bool,
     ) -> Result<Option<StoredManagementToken>, DataLayerError> {
-        let row = sqlx::query(SET_MANAGEMENT_TOKEN_ACTIVE_SQL)
-            .bind(token_id)
-            .bind(is_active)
-            .fetch_optional(&self.pool)
+        self.set_management_token_active_scoped(token_id, None, is_active)
+            .await
+    }
+
+    async fn set_management_token_active_for_user(
+        &self,
+        token_id: &str,
+        user_id: &str,
+        is_active: bool,
+    ) -> Result<Option<StoredManagementToken>, DataLayerError> {
+        self.set_management_token_active_scoped(token_id, Some(user_id), is_active)
+            .await
+    }
+
+    async fn activate_management_token_if_matches(
+        &self,
+        mutation: &ActivateManagementTokenIfMatches,
+    ) -> Result<bool, DataLayerError> {
+        mutation.validate()?;
+        let mut tx = self.pool.begin().await.map_postgres_err()?;
+        let eligible_user =
+            sqlx::query_scalar::<_, String>(LOCK_ELIGIBLE_MANAGEMENT_TOKEN_ADMIN_SQL)
+                .bind(&mutation.expected_token.user_id)
+                .bind(mutation.expected_user_security_version)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_postgres_err()?;
+        if eligible_user.is_none() {
+            tx.rollback().await.map_postgres_err()?;
+            return Ok(false);
+        }
+
+        let locked = sqlx::query(LOCK_MANAGEMENT_TOKEN_ACTIVATION_SNAPSHOT_SQL)
+            .bind(&mutation.expected_token.id)
+            .fetch_optional(&mut *tx)
             .await
             .map_postgres_err()?;
-        row.as_ref().map(map_token_row).transpose()
+        let snapshot_matches = match locked.as_ref() {
+            Some(row) => {
+                let token_hash: String = row.try_get("token_hash").map_postgres_err()?;
+                let token = map_token_row(row)?;
+                mutation.matches_locked_token_snapshot(&token, &token_hash)
+            }
+            None => false,
+        };
+        if !snapshot_matches {
+            tx.rollback().await.map_postgres_err()?;
+            return Ok(false);
+        }
+
+        let result = sqlx::query(ACTIVATE_LOCKED_MANAGEMENT_TOKEN_SQL)
+            .bind(&mutation.expected_token.id)
+            .bind(&mutation.token_hash)
+            .bind(i64::try_from(mutation.now_unix_secs).unwrap_or(i64::MAX))
+            .execute(&mut *tx)
+            .await
+            .map_postgres_err()?;
+        if result.rows_affected() != 1 {
+            tx.rollback().await.map_postgres_err()?;
+            return Ok(false);
+        }
+        tx.commit().await.map_postgres_err()?;
+        Ok(true)
+    }
+
+    async fn delete_inactive_management_token_if_matches(
+        &self,
+        mutation: &ActivateManagementTokenIfMatches,
+    ) -> Result<bool, DataLayerError> {
+        mutation.validate()?;
+        let mut tx = self.pool.begin().await.map_postgres_err()?;
+        let locked = sqlx::query(LOCK_MANAGEMENT_TOKEN_ACTIVATION_SNAPSHOT_SQL)
+            .bind(&mutation.expected_token.id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_postgres_err()?;
+        let snapshot_matches = match locked.as_ref() {
+            Some(row) => {
+                let token_hash: String = row.try_get("token_hash").map_postgres_err()?;
+                let token = map_token_row(row)?;
+                mutation.matches_locked_token_snapshot(&token, &token_hash)
+            }
+            None => false,
+        };
+        if !snapshot_matches {
+            tx.rollback().await.map_postgres_err()?;
+            return Ok(false);
+        }
+        let result = sqlx::query(
+            "DELETE FROM management_tokens WHERE id = $1 AND token_hash = $2 AND is_active = FALSE",
+        )
+        .bind(&mutation.expected_token.id)
+        .bind(&mutation.token_hash)
+        .execute(&mut *tx)
+        .await
+        .map_postgres_err()?;
+        if result.rows_affected() != 1 {
+            tx.rollback().await.map_postgres_err()?;
+            return Ok(false);
+        }
+        tx.commit().await.map_postgres_err()?;
+        Ok(true)
     }
 
     async fn regenerate_management_token_secret(
         &self,
         mutation: &RegenerateManagementTokenSecret,
     ) -> Result<Option<StoredManagementToken>, DataLayerError> {
-        mutation.validate()?;
-        let row = sqlx::query(REGENERATE_MANAGEMENT_TOKEN_SECRET_SQL)
-            .bind(&mutation.token_id)
-            .bind(&mutation.token_hash)
-            .bind(mutation.token_prefix.as_deref())
-            .fetch_optional(&self.pool)
+        self.regenerate_management_token_secret_scoped(mutation, None)
             .await
-            .map_postgres_err()?;
-        row.as_ref().map(map_token_row).transpose()
+    }
+
+    async fn regenerate_management_token_secret_for_user(
+        &self,
+        mutation: &RegenerateManagementTokenSecret,
+        user_id: &str,
+    ) -> Result<Option<StoredManagementToken>, DataLayerError> {
+        self.regenerate_management_token_secret_scoped(mutation, Some(user_id))
+            .await
     }
 
     async fn record_management_token_usage(
@@ -533,8 +724,18 @@ impl ManagementTokenWriteRepository for SqlxManagementTokenRepository {
     }
 }
 
-fn optional_unix_secs(value: Option<i64>) -> Option<u64> {
-    value.and_then(|value| u64::try_from(value).ok())
+fn non_negative_u64(value: i64, field_name: &str) -> Result<u64, DataLayerError> {
+    u64::try_from(value).map_err(|_| {
+        DataLayerError::UnexpectedValue(format!(
+            "management_tokens.{field_name} must not be negative"
+        ))
+    })
+}
+
+fn optional_unix_secs(value: Option<i64>, field_name: &str) -> Result<Option<u64>, DataLayerError> {
+    value
+        .map(|value| non_negative_u64(value, field_name))
+        .transpose()
 }
 
 fn json_to_string(value: Option<&serde_json::Value>) -> Result<Option<String>, DataLayerError> {
@@ -588,15 +789,30 @@ fn map_token_row(row: &PgRow) -> Result<StoredManagementToken, DataLayerError> {
     )
     .with_permissions(row.try_get("permissions").map_postgres_err()?)
     .with_runtime_fields(
-        optional_unix_secs(row.try_get("expires_at_unix_secs").map_postgres_err()?),
-        optional_unix_secs(row.try_get("last_used_at_unix_secs").map_postgres_err()?),
+        optional_unix_secs(
+            row.try_get("expires_at_unix_secs").map_postgres_err()?,
+            "expires_at",
+        )?,
+        optional_unix_secs(
+            row.try_get("last_used_at_unix_secs").map_postgres_err()?,
+            "last_used_at",
+        )?,
         row.try_get("last_used_ip").map_postgres_err()?,
-        u64::try_from(row.try_get::<i64, _>("usage_count").map_postgres_err()?).unwrap_or(0),
+        non_negative_u64(
+            row.try_get::<i64, _>("usage_count").map_postgres_err()?,
+            "usage_count",
+        )?,
         row.try_get("is_active").map_postgres_err()?,
     )
     .with_timestamps(
-        optional_unix_secs(row.try_get("created_at_unix_ms").map_postgres_err()?),
-        optional_unix_secs(row.try_get("updated_at_unix_secs").map_postgres_err()?),
+        optional_unix_secs(
+            row.try_get("created_at_unix_ms").map_postgres_err()?,
+            "created_at",
+        )?,
+        optional_unix_secs(
+            row.try_get("updated_at_unix_secs").map_postgres_err()?,
+            "updated_at",
+        )?,
     ))
 }
 
@@ -619,8 +835,10 @@ fn map_token_with_user_row(row: &PgRow) -> Result<StoredManagementTokenWithUser,
 #[cfg(test)]
 mod tests {
     use super::{
-        create_management_token_sql, update_management_token_sql, JsonColumnType,
-        ManagementTokenJsonColumnTypes, SqlxManagementTokenRepository,
+        create_management_token_sql, non_negative_u64, optional_unix_secs,
+        update_management_token_sql, JsonColumnType, ManagementTokenJsonColumnTypes,
+        SqlxManagementTokenRepository, LOCK_ELIGIBLE_MANAGEMENT_TOKEN_ADMIN_SQL,
+        LOCK_MANAGEMENT_TOKEN_ACTIVATION_SNAPSHOT_SQL,
     };
     use crate::{PostgresPoolConfig, PostgresPoolFactory};
 
@@ -643,7 +861,48 @@ mod tests {
     }
 
     #[test]
-    fn repository_sql_casts_json_fields_to_detected_column_types_without_json_case() {
+    fn postgres_install_activation_locks_admin_identity_and_token_snapshot() {
+        for predicate in [
+            "is_active IS TRUE",
+            "is_deleted IS FALSE",
+            "LOWER(role::text) = 'admin'",
+            "security_version = $2",
+            "FOR UPDATE",
+        ] {
+            assert!(LOCK_ELIGIBLE_MANAGEMENT_TOKEN_ADMIN_SQL.contains(predicate));
+        }
+        for column in [
+            "token_hash",
+            "name",
+            "description",
+            "token_prefix",
+            "allowed_ips",
+            "permissions",
+            "expires_at_unix_secs",
+            "last_used_at_unix_secs",
+            "last_used_ip",
+            "usage_count",
+            "is_active",
+            "created_at_unix_ms",
+            "updated_at_unix_secs",
+            "FOR UPDATE",
+        ] {
+            assert!(LOCK_MANAGEMENT_TOKEN_ACTIVATION_SNAPSHOT_SQL.contains(column));
+        }
+    }
+
+    #[test]
+    fn postgres_management_token_mapping_rejects_negative_integer_state() {
+        assert!(optional_unix_secs(Some(-1), "expires_at").is_err());
+        assert_eq!(
+            optional_unix_secs(None, "expires_at").expect("SQL NULL should remain optional"),
+            None
+        );
+        assert!(non_negative_u64(-1, "usage_count").is_err());
+    }
+
+    #[test]
+    fn repository_sql_casts_json_fields_and_applies_atomic_field_patches() {
         let jsonb_types = ManagementTokenJsonColumnTypes {
             allowed_ips: JsonColumnType::Jsonb,
             permissions: JsonColumnType::Jsonb,
@@ -659,24 +918,20 @@ mod tests {
 
         assert!(jsonb_create_sql.contains("$7::text::jsonb"));
         assert!(jsonb_create_sql.contains("$8::text::jsonb"));
-        assert!(jsonb_update_sql.contains("allowed_ips =\n $4::text::jsonb"));
-        assert!(jsonb_update_sql.contains("permissions =\n $5::text::jsonb"));
+        assert!(jsonb_update_sql.contains("$6::text::jsonb"));
+        assert!(jsonb_update_sql.contains("$7::text::jsonb"));
 
         assert!(json_create_sql.contains("$7::text::json"));
         assert!(json_create_sql.contains("$8::text::json"));
-        assert!(json_update_sql.contains("allowed_ips =\n $4::text::json"));
-        assert!(json_update_sql.contains("permissions =\n $5::text::json"));
+        assert!(json_update_sql.contains("$6::text::json"));
+        assert!(json_update_sql.contains("$7::text::json"));
 
-        for sql in [
-            jsonb_create_sql.as_str(),
-            jsonb_update_sql.as_str(),
-            json_create_sql.as_str(),
-            json_update_sql.as_str(),
-        ] {
-            assert!(!sql.contains("allowed_ips = CASE"));
-            assert!(!sql.contains("permissions = CASE"));
-            assert!(!sql.contains("$6::json IS NULL"));
-            assert!(!sql.contains("COALESCE($7::json"));
+        for sql in [jsonb_update_sql.as_str(), json_update_sql.as_str()] {
+            assert!(sql.contains("name = COALESCE($2, name)"));
+            assert!(sql.contains("allowed_ips = CASE"));
+            assert!(sql.contains("permissions = COALESCE("));
+            assert!(sql.contains("is_active = COALESCE($10, is_active)"));
+            assert!(sql.contains("($11::text IS NULL OR user_id = $11)"));
         }
     }
 }

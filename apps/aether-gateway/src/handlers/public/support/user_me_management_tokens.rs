@@ -20,6 +20,7 @@ use super::{
     GatewayPublicRequestContext,
 };
 use crate::control::normalize_assignable_management_token_permissions;
+use crate::handlers::public::support::mark_sensitive_response_no_store;
 use crate::handlers::shared::{generate_gateway_secret_plaintext, parse_json_ip_rules};
 use crate::LocalMutationOutcome;
 
@@ -33,6 +34,10 @@ const USERS_ME_MANAGEMENT_TOKEN_READ_UNAVAILABLE_DETAIL: &str =
     "用户 Management Token 数据暂不可用";
 const USERS_ME_MANAGEMENT_TOKEN_WRITE_UNAVAILABLE_DETAIL: &str =
     "用户 Management Token 写入暂不可用";
+
+fn users_me_management_token_secret_response(response: Response<Body>) -> Response<Body> {
+    mark_sensitive_response_no_store(response)
+}
 
 #[derive(Debug, Clone)]
 struct UsersMeManagementTokenCreateInput {
@@ -141,10 +146,10 @@ fn hash_users_me_management_token(value: &str) -> String {
 
 fn users_me_management_token_prefix(value: &str) -> Option<String> {
     (!value.is_empty()).then(|| {
-        value[..value
-            .len()
-            .min(USERS_ME_MANAGEMENT_TOKEN_DISPLAY_PREFIX_LEN)]
-            .to_string()
+        value
+            .chars()
+            .take(USERS_ME_MANAGEMENT_TOKEN_DISPLAY_PREFIX_LEN)
+            .collect()
     })
 }
 
@@ -160,6 +165,18 @@ fn build_users_me_management_token_writer_unavailable_response() -> Response<Bod
     build_auth_error_response(
         http::StatusCode::SERVICE_UNAVAILABLE,
         USERS_ME_MANAGEMENT_TOKEN_WRITE_UNAVAILABLE_DETAIL,
+        false,
+    )
+}
+
+fn users_me_management_token_write_allowed(role: &str) -> bool {
+    crate::roles::can_write_admin_console(role)
+}
+
+fn build_users_me_management_token_write_forbidden_response(action: &str) -> Response<Body> {
+    build_auth_error_response(
+        http::StatusCode::FORBIDDEN,
+        format!("仅管理员可以{action} Management Token"),
         false,
     )
 }
@@ -446,12 +463,8 @@ pub(super) async fn handle_users_me_management_token_create(
         Ok(value) => value,
         Err(response) => return response,
     };
-    if !auth.user.role.eq_ignore_ascii_case("admin") {
-        return build_auth_error_response(
-            http::StatusCode::FORBIDDEN,
-            "仅管理员可以创建 Management Token",
-            false,
-        );
+    if !users_me_management_token_write_allowed(&auth.user.role) {
+        return build_users_me_management_token_write_forbidden_response("创建");
     }
     let Some(request_body) = request_body else {
         return build_auth_error_response(http::StatusCode::BAD_REQUEST, "缺少请求体", false);
@@ -513,15 +526,17 @@ pub(super) async fn handle_users_me_management_token_create(
     };
 
     match state.create_management_token(&record).await {
-        Ok(LocalMutationOutcome::Applied(token)) => (
-            http::StatusCode::CREATED,
-            Json(json!({
-                "message": "Management Token 创建成功",
-                "token": raw_token,
-                "data": build_management_token_payload(&token, None),
-            })),
-        )
-            .into_response(),
+        Ok(LocalMutationOutcome::Applied(token)) => users_me_management_token_secret_response(
+            (
+                http::StatusCode::CREATED,
+                Json(json!({
+                    "message": "Management Token 创建成功",
+                    "token": raw_token,
+                    "data": build_management_token_payload(&token, None),
+                })),
+            )
+                .into_response(),
+        ),
         Ok(LocalMutationOutcome::Invalid(detail)) => {
             build_auth_error_response(http::StatusCode::BAD_REQUEST, detail, false)
         }
@@ -578,6 +593,9 @@ pub(super) async fn handle_users_me_management_token_update(
         Ok(value) => value,
         Err(response) => return response,
     };
+    if !users_me_management_token_write_allowed(&auth.user.role) {
+        return build_users_me_management_token_write_forbidden_response("管理");
+    }
     let Some(token_id) = users_me_management_token_id_from_path(&request_context.request_path)
     else {
         return build_auth_error_response(
@@ -646,7 +664,10 @@ pub(super) async fn handle_users_me_management_token_update(
         is_active: None,
     };
 
-    match state.update_management_token(&record).await {
+    match state
+        .update_management_token_for_user(&record, &auth.user.id)
+        .await
+    {
         Ok(LocalMutationOutcome::Applied(token)) => Json(json!({
             "message": "更新成功",
             "data": build_management_token_payload(&token, None),
@@ -684,6 +705,9 @@ pub(super) async fn handle_users_me_management_token_delete(
         Ok(value) => value,
         Err(response) => return response,
     };
+    if !users_me_management_token_write_allowed(&auth.user.role) {
+        return build_users_me_management_token_write_forbidden_response("管理");
+    }
     let Some(token_id) = users_me_management_token_id_from_path(&request_context.request_path)
     else {
         return build_auth_error_response(
@@ -696,7 +720,10 @@ pub(super) async fn handle_users_me_management_token_delete(
         Ok(value) => value,
         Err(response) => return response,
     };
-    match state.delete_management_token(&existing.token.id).await {
+    match state
+        .delete_management_token_for_user(&existing.token.id, &auth.user.id)
+        .await
+    {
         Ok(true) => Json(json!({ "message": "删除成功" })).into_response(),
         Ok(false) => build_auth_error_response(
             http::StatusCode::NOT_FOUND,
@@ -724,6 +751,9 @@ pub(super) async fn handle_users_me_management_token_toggle(
         Ok(value) => value,
         Err(response) => return response,
     };
+    if !users_me_management_token_write_allowed(&auth.user.role) {
+        return build_users_me_management_token_write_forbidden_response("管理");
+    }
     let Some(token_id) =
         users_me_management_token_status_id_from_path(&request_context.request_path)
     else {
@@ -738,7 +768,11 @@ pub(super) async fn handle_users_me_management_token_toggle(
         Err(response) => return response,
     };
     match state
-        .set_management_token_active(&existing.token.id, !existing.token.is_active)
+        .set_management_token_active_for_user(
+            &existing.token.id,
+            &auth.user.id,
+            !existing.token.is_active,
+        )
         .await
     {
         Ok(Some(token)) => Json(json!({
@@ -772,6 +806,9 @@ pub(super) async fn handle_users_me_management_token_regenerate(
         Ok(value) => value,
         Err(response) => return response,
     };
+    if !users_me_management_token_write_allowed(&auth.user.role) {
+        return build_users_me_management_token_write_forbidden_response("管理");
+    }
     let Some(token_id) =
         users_me_management_token_regenerate_id_from_path(&request_context.request_path)
     else {
@@ -792,13 +829,18 @@ pub(super) async fn handle_users_me_management_token_regenerate(
         token_prefix: users_me_management_token_prefix(&raw_token),
     };
 
-    match state.regenerate_management_token_secret(&mutation).await {
-        Ok(LocalMutationOutcome::Applied(token)) => Json(json!({
-            "message": "Token 已重新生成",
-            "token": raw_token,
-            "data": build_management_token_payload(&token, None),
-        }))
-        .into_response(),
+    match state
+        .regenerate_management_token_secret_for_user(&mutation, &auth.user.id)
+        .await
+    {
+        Ok(LocalMutationOutcome::Applied(token)) => users_me_management_token_secret_response(
+            Json(json!({
+                "message": "Token 已重新生成",
+                "token": raw_token,
+                "data": build_management_token_payload(&token, None),
+            }))
+            .into_response(),
+        ),
         Ok(LocalMutationOutcome::NotFound) => build_auth_error_response(
             http::StatusCode::NOT_FOUND,
             "Management Token 不存在",
@@ -815,5 +857,33 @@ pub(super) async fn handle_users_me_management_token_regenerate(
             format!("management token regenerate failed: {err:?}"),
             false,
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn management_token_writes_require_the_current_full_admin_role() {
+        assert!(users_me_management_token_write_allowed("admin"));
+        assert!(!users_me_management_token_write_allowed("audit_admin"));
+        assert!(!users_me_management_token_write_allowed("user"));
+    }
+
+    #[test]
+    fn plaintext_management_token_responses_are_never_cacheable() {
+        let response = users_me_management_token_secret_response(
+            Json(json!({ "token": "ae-secret" })).into_response(),
+        );
+
+        assert_eq!(
+            response.headers().get(http::header::CACHE_CONTROL),
+            Some(&http::HeaderValue::from_static("no-store"))
+        );
+        assert_eq!(
+            response.headers().get(http::header::PRAGMA),
+            Some(&http::HeaderValue::from_static("no-cache"))
+        );
     }
 }

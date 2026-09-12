@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use aether_admin::observability::usage::admin_usage_safe_metadata_value;
 use aether_data::repository::audit::AuditLogListQuery;
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
@@ -43,8 +44,8 @@ impl AppState {
                     "description": record.description,
                     "ip_address": record.ip_address,
                     "status_code": record.status_code,
-                    "error_message": record.error_message,
-                    "metadata": record.metadata,
+                    "error_message": record.error_message.as_ref().map(|_| "audit_event_failed"),
+                    "metadata": sanitize_admin_audit_metadata(record.metadata.as_ref()),
                     "created_at": record.created_at_rfc3339(),
                 })
             })
@@ -72,7 +73,7 @@ impl AppState {
                     "user_id": record.user_id,
                     "description": record.description,
                     "ip_address": record.ip_address,
-                    "metadata": record.metadata,
+                    "metadata": sanitize_admin_audit_metadata(record.metadata.as_ref()),
                     "created_at": record.created_at_rfc3339(),
                 })
             })
@@ -133,4 +134,42 @@ impl AppState {
 
 fn cutoff_unix_secs(cutoff_time: DateTime<Utc>) -> u64 {
     cutoff_time.timestamp().max(0) as u64
+}
+
+fn sanitize_admin_audit_metadata(metadata: Option<&Value>) -> Value {
+    metadata
+        .map(admin_usage_safe_metadata_value)
+        .unwrap_or(Value::Null)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_admin_audit_metadata;
+    use serde_json::json;
+
+    #[test]
+    fn admin_audit_metadata_drops_credentials_and_url_components() {
+        let metadata = sanitize_admin_audit_metadata(Some(&json!({
+            "category": "security",
+            "authorization": "Bearer audit-secret",
+            "nested": {
+                "refresh_token": "refresh-secret",
+                "endpoint_url": "https://user:password@example.test/v1?token=query-secret#fragment",
+                "safe_count": 2
+            }
+        })));
+
+        assert_eq!(metadata["category"], "security");
+        assert!(metadata.get("authorization").is_none());
+        assert!(metadata["nested"].get("refresh_token").is_none());
+        assert_eq!(
+            metadata["nested"]["endpoint_url"],
+            "https://example.test/v1"
+        );
+        assert_eq!(metadata["nested"]["safe_count"], 2);
+        let encoded = metadata.to_string();
+        for secret in ["audit-secret", "refresh-secret", "password", "query-secret"] {
+            assert!(!encoded.contains(secret), "leaked {secret}");
+        }
+    }
 }

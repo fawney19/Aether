@@ -1,3 +1,5 @@
+use std::sync::LazyLock;
+
 use async_trait::async_trait;
 use futures_util::{future::BoxFuture, stream::TryStream, TryStreamExt};
 use sqlx::{postgres::PgRow, PgPool, Postgres, QueryBuilder, Row};
@@ -6,7 +8,8 @@ use uuid::Uuid;
 use aether_data_contracts::repository::candidates::{
     PublicHealthStatusCount, PublicHealthTimelineBucket, RequestCandidateReadRepository,
     RequestCandidateStatus, RequestCandidateWriteRepository, StoredRequestCandidate,
-    UpsertRequestCandidateRecord,
+    UpsertRequestCandidateRecord, REQUEST_CANDIDATE_ERROR_TYPES,
+    REQUEST_CANDIDATE_ERROR_TYPE_ALIASES, REQUEST_CANDIDATE_SKIP_REASONS,
 };
 use aether_data_contracts::DataLayerError;
 use aether_data_query::{push_eq, push_in, push_limit, WhereClause};
@@ -64,7 +67,22 @@ GROUP BY
   FLOOR(EXTRACT(EPOCH FROM (created_at - TO_TIMESTAMP($2))) / $4)::BIGINT
 "#;
 
-const UPSERT_SQL: &str = r#"
+const RUNTIME_CANDIDATE_COLUMNS: &str = r#"
+SELECT
+  id, request_id, user_id, api_key_id,
+  NULL::text AS username, NULL::text AS api_key_name,
+  candidate_index, retry_index, provider_id, endpoint_id, key_id, status,
+  NULL::text AS skip_reason, is_cached, status_code,
+  NULL::text AS error_type, NULL::text AS error_message,
+  latency_ms, concurrent_requests,
+  NULL::jsonb AS extra_data, NULL::jsonb AS required_capabilities,
+  CAST(EXTRACT(EPOCH FROM created_at) * 1000 AS BIGINT) AS created_at_unix_ms,
+  CAST(EXTRACT(EPOCH FROM started_at) * 1000 AS BIGINT) AS started_at_unix_ms,
+  CAST(EXTRACT(EPOCH FROM finished_at) * 1000 AS BIGINT) AS finished_at_unix_ms
+FROM request_candidates
+"#;
+
+const UPSERT_SQL_TEMPLATE: &str = r#"
 INSERT INTO request_candidates (
   id,
   request_id,
@@ -126,16 +144,16 @@ VALUES (
 )
 ON CONFLICT (request_id, candidate_index, retry_index)
 DO UPDATE SET
-  user_id = COALESCE(EXCLUDED.user_id, request_candidates.user_id),
-  api_key_id = COALESCE(EXCLUDED.api_key_id, request_candidates.api_key_id),
-  username = COALESCE(EXCLUDED.username, request_candidates.username),
-  api_key_name = COALESCE(EXCLUDED.api_key_name, request_candidates.api_key_name),
-  provider_id = COALESCE(EXCLUDED.provider_id, request_candidates.provider_id),
-  endpoint_id = COALESCE(EXCLUDED.endpoint_id, request_candidates.endpoint_id),
-  key_id = COALESCE(EXCLUDED.key_id, request_candidates.key_id),
+  user_id = COALESCE(request_candidates.user_id, EXCLUDED.user_id),
+  api_key_id = COALESCE(request_candidates.api_key_id, EXCLUDED.api_key_id),
+  username = COALESCE(request_candidates.username, EXCLUDED.username),
+  api_key_name = COALESCE(request_candidates.api_key_name, EXCLUDED.api_key_name),
+  provider_id = COALESCE(request_candidates.provider_id, EXCLUDED.provider_id),
+  endpoint_id = COALESCE(request_candidates.endpoint_id, EXCLUDED.endpoint_id),
+  key_id = COALESCE(request_candidates.key_id, EXCLUDED.key_id),
   status = CASE
     WHEN request_candidates.status IN ('success', 'failed', 'cancelled', 'skipped')
-      AND EXCLUDED.status IN ('available', 'unused', 'pending', 'streaming')
+      AND EXCLUDED.status <> request_candidates.status
       THEN request_candidates.status
     WHEN request_candidates.status = 'pending' AND EXCLUDED.status IN ('available', 'unused')
       THEN request_candidates.status
@@ -143,11 +161,11 @@ DO UPDATE SET
       THEN request_candidates.status
     ELSE EXCLUDED.status
   END,
-  skip_reason = COALESCE(EXCLUDED.skip_reason, request_candidates.skip_reason),
+  skip_reason = COALESCE(EXCLUDED.skip_reason, __AETHER_SANITIZED_LEGACY_SKIP_REASON__),
   is_cached = COALESCE($14, request_candidates.is_cached),
   status_code = CASE
     WHEN request_candidates.status IN ('success', 'failed', 'cancelled', 'skipped')
-      AND EXCLUDED.status IN ('available', 'unused', 'pending', 'streaming')
+      AND EXCLUDED.status <> request_candidates.status
       THEN request_candidates.status_code
     WHEN request_candidates.status = 'pending' AND EXCLUDED.status IN ('available', 'unused')
       THEN request_candidates.status_code
@@ -156,28 +174,23 @@ DO UPDATE SET
     ELSE COALESCE(EXCLUDED.status_code, request_candidates.status_code)
   END,
   error_type = CASE
-    WHEN request_candidates.status IN ('success', 'failed', 'cancelled', 'skipped')
-      AND EXCLUDED.status IN ('available', 'unused', 'pending', 'streaming')
-      THEN request_candidates.error_type
-    WHEN request_candidates.status = 'pending' AND EXCLUDED.status IN ('available', 'unused')
-      THEN request_candidates.error_type
-    WHEN request_candidates.status = 'streaming' AND EXCLUDED.status IN ('available', 'unused', 'pending')
-      THEN request_candidates.error_type
-    ELSE COALESCE(EXCLUDED.error_type, request_candidates.error_type)
+    WHEN (
+      request_candidates.status IN ('success', 'failed', 'cancelled', 'skipped')
+      AND EXCLUDED.status <> request_candidates.status
+    ) OR (
+      request_candidates.status = 'pending'
+      AND EXCLUDED.status IN ('available', 'unused')
+    ) OR (
+      request_candidates.status = 'streaming'
+      AND EXCLUDED.status IN ('available', 'unused', 'pending')
+    ) OR EXCLUDED.error_type IS NULL
+      THEN __AETHER_SANITIZED_LEGACY_ERROR_TYPE__
+    ELSE EXCLUDED.error_type
   END,
-  error_message = CASE
-    WHEN request_candidates.status IN ('success', 'failed', 'cancelled', 'skipped')
-      AND EXCLUDED.status IN ('available', 'unused', 'pending', 'streaming')
-      THEN request_candidates.error_message
-    WHEN request_candidates.status = 'pending' AND EXCLUDED.status IN ('available', 'unused')
-      THEN request_candidates.error_message
-    WHEN request_candidates.status = 'streaming' AND EXCLUDED.status IN ('available', 'unused', 'pending')
-      THEN request_candidates.error_message
-    ELSE COALESCE(EXCLUDED.error_message, request_candidates.error_message)
-  END,
+  error_message = __AETHER_CANDIDATE_ERROR_MESSAGE__,
   latency_ms = CASE
     WHEN request_candidates.status IN ('success', 'failed', 'cancelled', 'skipped')
-      AND EXCLUDED.status IN ('available', 'unused', 'pending', 'streaming')
+      AND EXCLUDED.status <> request_candidates.status
       THEN request_candidates.latency_ms
     WHEN request_candidates.status = 'pending' AND EXCLUDED.status IN ('available', 'unused')
       THEN request_candidates.latency_ms
@@ -186,41 +199,17 @@ DO UPDATE SET
     ELSE COALESCE(EXCLUDED.latency_ms, request_candidates.latency_ms)
   END,
   concurrent_requests = COALESCE(EXCLUDED.concurrent_requests, request_candidates.concurrent_requests),
-  extra_data = CASE
-    WHEN request_candidates.extra_data IS NULL THEN EXCLUDED.extra_data
-    WHEN EXCLUDED.extra_data IS NULL THEN regexp_replace(
-      request_candidates.extra_data::text,
-      $aether_nul$(?<!\\)((?:\\\\)*)\\u0000$aether_nul$,
-      $aether_replacement$\1\\ufffd$aether_replacement$,
-      'g'
-    )::json
-    WHEN json_typeof(request_candidates.extra_data) = 'object'
-      AND json_typeof(EXCLUDED.extra_data) = 'object'
-      THEN (
-        regexp_replace(
-          request_candidates.extra_data::text,
-          $aether_nul$(?<!\\)((?:\\\\)*)\\u0000$aether_nul$,
-          $aether_replacement$\1\\ufffd$aether_replacement$,
-          'g'
-        )::jsonb || EXCLUDED.extra_data::jsonb
-      )::json
-    ELSE EXCLUDED.extra_data
-  END,
-  required_capabilities = regexp_replace(
-    COALESCE(EXCLUDED.required_capabilities, request_candidates.required_capabilities)::text,
-    $aether_nul$(?<!\\)((?:\\\\)*)\\u0000$aether_nul$,
-    $aether_replacement$\1\\ufffd$aether_replacement$,
-    'g'
-  )::json,
+  extra_data = __AETHER_CANDIDATE_EXTRA_DATA__,
+  required_capabilities = EXCLUDED.required_capabilities,
   created_at = CASE
     WHEN request_candidates.created_at <= TO_TIMESTAMP(1)
       THEN EXCLUDED.created_at
     ELSE request_candidates.created_at
   END,
-  started_at = COALESCE(EXCLUDED.started_at, request_candidates.started_at),
+  started_at = COALESCE(request_candidates.started_at, EXCLUDED.started_at),
   finished_at = CASE
     WHEN request_candidates.status IN ('success', 'failed', 'cancelled', 'skipped')
-      AND EXCLUDED.status IN ('available', 'unused', 'pending', 'streaming')
+      AND EXCLUDED.status <> request_candidates.status
       THEN request_candidates.finished_at
     WHEN request_candidates.status = 'pending' AND EXCLUDED.status IN ('available', 'unused')
       THEN request_candidates.finished_at
@@ -255,19 +244,19 @@ RETURNING
   CAST(EXTRACT(EPOCH FROM finished_at) * 1000 AS BIGINT) AS finished_at_unix_ms
 "#;
 
-const UPSERT_CONFLICT_SQL: &str = r#"
+const UPSERT_CONFLICT_SQL_TEMPLATE: &str = r#"
 ON CONFLICT (request_id, candidate_index, retry_index)
 DO UPDATE SET
-  user_id = COALESCE(EXCLUDED.user_id, request_candidates.user_id),
-  api_key_id = COALESCE(EXCLUDED.api_key_id, request_candidates.api_key_id),
-  username = COALESCE(EXCLUDED.username, request_candidates.username),
-  api_key_name = COALESCE(EXCLUDED.api_key_name, request_candidates.api_key_name),
-  provider_id = COALESCE(EXCLUDED.provider_id, request_candidates.provider_id),
-  endpoint_id = COALESCE(EXCLUDED.endpoint_id, request_candidates.endpoint_id),
-  key_id = COALESCE(EXCLUDED.key_id, request_candidates.key_id),
+  user_id = COALESCE(request_candidates.user_id, EXCLUDED.user_id),
+  api_key_id = COALESCE(request_candidates.api_key_id, EXCLUDED.api_key_id),
+  username = COALESCE(request_candidates.username, EXCLUDED.username),
+  api_key_name = COALESCE(request_candidates.api_key_name, EXCLUDED.api_key_name),
+  provider_id = COALESCE(request_candidates.provider_id, EXCLUDED.provider_id),
+  endpoint_id = COALESCE(request_candidates.endpoint_id, EXCLUDED.endpoint_id),
+  key_id = COALESCE(request_candidates.key_id, EXCLUDED.key_id),
   status = CASE
     WHEN request_candidates.status IN ('success', 'failed', 'cancelled', 'skipped')
-      AND EXCLUDED.status IN ('available', 'unused', 'pending', 'streaming')
+      AND EXCLUDED.status <> request_candidates.status
       THEN request_candidates.status
     WHEN request_candidates.status = 'pending' AND EXCLUDED.status IN ('available', 'unused')
       THEN request_candidates.status
@@ -275,11 +264,11 @@ DO UPDATE SET
       THEN request_candidates.status
     ELSE EXCLUDED.status
   END,
-  skip_reason = COALESCE(EXCLUDED.skip_reason, request_candidates.skip_reason),
+  skip_reason = COALESCE(EXCLUDED.skip_reason, __AETHER_SANITIZED_LEGACY_SKIP_REASON__),
   is_cached = COALESCE(EXCLUDED.is_cached, request_candidates.is_cached),
   status_code = CASE
     WHEN request_candidates.status IN ('success', 'failed', 'cancelled', 'skipped')
-      AND EXCLUDED.status IN ('available', 'unused', 'pending', 'streaming')
+      AND EXCLUDED.status <> request_candidates.status
       THEN request_candidates.status_code
     WHEN request_candidates.status = 'pending' AND EXCLUDED.status IN ('available', 'unused')
       THEN request_candidates.status_code
@@ -288,28 +277,23 @@ DO UPDATE SET
     ELSE COALESCE(EXCLUDED.status_code, request_candidates.status_code)
   END,
   error_type = CASE
-    WHEN request_candidates.status IN ('success', 'failed', 'cancelled', 'skipped')
-      AND EXCLUDED.status IN ('available', 'unused', 'pending', 'streaming')
-      THEN request_candidates.error_type
-    WHEN request_candidates.status = 'pending' AND EXCLUDED.status IN ('available', 'unused')
-      THEN request_candidates.error_type
-    WHEN request_candidates.status = 'streaming' AND EXCLUDED.status IN ('available', 'unused', 'pending')
-      THEN request_candidates.error_type
-    ELSE COALESCE(EXCLUDED.error_type, request_candidates.error_type)
+    WHEN (
+      request_candidates.status IN ('success', 'failed', 'cancelled', 'skipped')
+      AND EXCLUDED.status <> request_candidates.status
+    ) OR (
+      request_candidates.status = 'pending'
+      AND EXCLUDED.status IN ('available', 'unused')
+    ) OR (
+      request_candidates.status = 'streaming'
+      AND EXCLUDED.status IN ('available', 'unused', 'pending')
+    ) OR EXCLUDED.error_type IS NULL
+      THEN __AETHER_SANITIZED_LEGACY_ERROR_TYPE__
+    ELSE EXCLUDED.error_type
   END,
-  error_message = CASE
-    WHEN request_candidates.status IN ('success', 'failed', 'cancelled', 'skipped')
-      AND EXCLUDED.status IN ('available', 'unused', 'pending', 'streaming')
-      THEN request_candidates.error_message
-    WHEN request_candidates.status = 'pending' AND EXCLUDED.status IN ('available', 'unused')
-      THEN request_candidates.error_message
-    WHEN request_candidates.status = 'streaming' AND EXCLUDED.status IN ('available', 'unused', 'pending')
-      THEN request_candidates.error_message
-    ELSE COALESCE(EXCLUDED.error_message, request_candidates.error_message)
-  END,
+  error_message = __AETHER_CANDIDATE_ERROR_MESSAGE__,
   latency_ms = CASE
     WHEN request_candidates.status IN ('success', 'failed', 'cancelled', 'skipped')
-      AND EXCLUDED.status IN ('available', 'unused', 'pending', 'streaming')
+      AND EXCLUDED.status <> request_candidates.status
       THEN request_candidates.latency_ms
     WHEN request_candidates.status = 'pending' AND EXCLUDED.status IN ('available', 'unused')
       THEN request_candidates.latency_ms
@@ -318,41 +302,17 @@ DO UPDATE SET
     ELSE COALESCE(EXCLUDED.latency_ms, request_candidates.latency_ms)
   END,
   concurrent_requests = COALESCE(EXCLUDED.concurrent_requests, request_candidates.concurrent_requests),
-  extra_data = CASE
-    WHEN request_candidates.extra_data IS NULL THEN EXCLUDED.extra_data
-    WHEN EXCLUDED.extra_data IS NULL THEN regexp_replace(
-      request_candidates.extra_data::text,
-      $aether_nul$(?<!\\)((?:\\\\)*)\\u0000$aether_nul$,
-      $aether_replacement$\1\\ufffd$aether_replacement$,
-      'g'
-    )::json
-    WHEN json_typeof(request_candidates.extra_data) = 'object'
-      AND json_typeof(EXCLUDED.extra_data) = 'object'
-      THEN (
-        regexp_replace(
-          request_candidates.extra_data::text,
-          $aether_nul$(?<!\\)((?:\\\\)*)\\u0000$aether_nul$,
-          $aether_replacement$\1\\ufffd$aether_replacement$,
-          'g'
-        )::jsonb || EXCLUDED.extra_data::jsonb
-      )::json
-    ELSE EXCLUDED.extra_data
-  END,
-  required_capabilities = regexp_replace(
-    COALESCE(EXCLUDED.required_capabilities, request_candidates.required_capabilities)::text,
-    $aether_nul$(?<!\\)((?:\\\\)*)\\u0000$aether_nul$,
-    $aether_replacement$\1\\ufffd$aether_replacement$,
-    'g'
-  )::json,
+  extra_data = __AETHER_CANDIDATE_EXTRA_DATA__,
+  required_capabilities = EXCLUDED.required_capabilities,
   created_at = CASE
     WHEN request_candidates.created_at <= TO_TIMESTAMP(1)
       THEN EXCLUDED.created_at
     ELSE request_candidates.created_at
   END,
-  started_at = COALESCE(EXCLUDED.started_at, request_candidates.started_at),
+  started_at = COALESCE(request_candidates.started_at, EXCLUDED.started_at),
   finished_at = CASE
     WHEN request_candidates.status IN ('success', 'failed', 'cancelled', 'skipped')
-      AND EXCLUDED.status IN ('available', 'unused', 'pending', 'streaming')
+      AND EXCLUDED.status <> request_candidates.status
       THEN request_candidates.finished_at
     WHEN request_candidates.status = 'pending' AND EXCLUDED.status IN ('available', 'unused')
       THEN request_candidates.finished_at
@@ -362,19 +322,19 @@ DO UPDATE SET
   END
 "#;
 
-const UPSERT_CONFLICT_INHERIT_IS_CACHED_SQL: &str = r#"
+const UPSERT_CONFLICT_INHERIT_IS_CACHED_SQL_TEMPLATE: &str = r#"
 ON CONFLICT (request_id, candidate_index, retry_index)
 DO UPDATE SET
-  user_id = COALESCE(EXCLUDED.user_id, request_candidates.user_id),
-  api_key_id = COALESCE(EXCLUDED.api_key_id, request_candidates.api_key_id),
-  username = COALESCE(EXCLUDED.username, request_candidates.username),
-  api_key_name = COALESCE(EXCLUDED.api_key_name, request_candidates.api_key_name),
-  provider_id = COALESCE(EXCLUDED.provider_id, request_candidates.provider_id),
-  endpoint_id = COALESCE(EXCLUDED.endpoint_id, request_candidates.endpoint_id),
-  key_id = COALESCE(EXCLUDED.key_id, request_candidates.key_id),
+  user_id = COALESCE(request_candidates.user_id, EXCLUDED.user_id),
+  api_key_id = COALESCE(request_candidates.api_key_id, EXCLUDED.api_key_id),
+  username = COALESCE(request_candidates.username, EXCLUDED.username),
+  api_key_name = COALESCE(request_candidates.api_key_name, EXCLUDED.api_key_name),
+  provider_id = COALESCE(request_candidates.provider_id, EXCLUDED.provider_id),
+  endpoint_id = COALESCE(request_candidates.endpoint_id, EXCLUDED.endpoint_id),
+  key_id = COALESCE(request_candidates.key_id, EXCLUDED.key_id),
   status = CASE
     WHEN request_candidates.status IN ('success', 'failed', 'cancelled', 'skipped')
-      AND EXCLUDED.status IN ('available', 'unused', 'pending', 'streaming')
+      AND EXCLUDED.status <> request_candidates.status
       THEN request_candidates.status
     WHEN request_candidates.status = 'pending' AND EXCLUDED.status IN ('available', 'unused')
       THEN request_candidates.status
@@ -382,11 +342,11 @@ DO UPDATE SET
       THEN request_candidates.status
     ELSE EXCLUDED.status
   END,
-  skip_reason = COALESCE(EXCLUDED.skip_reason, request_candidates.skip_reason),
+  skip_reason = COALESCE(EXCLUDED.skip_reason, __AETHER_SANITIZED_LEGACY_SKIP_REASON__),
   is_cached = request_candidates.is_cached,
   status_code = CASE
     WHEN request_candidates.status IN ('success', 'failed', 'cancelled', 'skipped')
-      AND EXCLUDED.status IN ('available', 'unused', 'pending', 'streaming')
+      AND EXCLUDED.status <> request_candidates.status
       THEN request_candidates.status_code
     WHEN request_candidates.status = 'pending' AND EXCLUDED.status IN ('available', 'unused')
       THEN request_candidates.status_code
@@ -395,28 +355,23 @@ DO UPDATE SET
     ELSE COALESCE(EXCLUDED.status_code, request_candidates.status_code)
   END,
   error_type = CASE
-    WHEN request_candidates.status IN ('success', 'failed', 'cancelled', 'skipped')
-      AND EXCLUDED.status IN ('available', 'unused', 'pending', 'streaming')
-      THEN request_candidates.error_type
-    WHEN request_candidates.status = 'pending' AND EXCLUDED.status IN ('available', 'unused')
-      THEN request_candidates.error_type
-    WHEN request_candidates.status = 'streaming' AND EXCLUDED.status IN ('available', 'unused', 'pending')
-      THEN request_candidates.error_type
-    ELSE COALESCE(EXCLUDED.error_type, request_candidates.error_type)
+    WHEN (
+      request_candidates.status IN ('success', 'failed', 'cancelled', 'skipped')
+      AND EXCLUDED.status <> request_candidates.status
+    ) OR (
+      request_candidates.status = 'pending'
+      AND EXCLUDED.status IN ('available', 'unused')
+    ) OR (
+      request_candidates.status = 'streaming'
+      AND EXCLUDED.status IN ('available', 'unused', 'pending')
+    ) OR EXCLUDED.error_type IS NULL
+      THEN __AETHER_SANITIZED_LEGACY_ERROR_TYPE__
+    ELSE EXCLUDED.error_type
   END,
-  error_message = CASE
-    WHEN request_candidates.status IN ('success', 'failed', 'cancelled', 'skipped')
-      AND EXCLUDED.status IN ('available', 'unused', 'pending', 'streaming')
-      THEN request_candidates.error_message
-    WHEN request_candidates.status = 'pending' AND EXCLUDED.status IN ('available', 'unused')
-      THEN request_candidates.error_message
-    WHEN request_candidates.status = 'streaming' AND EXCLUDED.status IN ('available', 'unused', 'pending')
-      THEN request_candidates.error_message
-    ELSE COALESCE(EXCLUDED.error_message, request_candidates.error_message)
-  END,
+  error_message = __AETHER_CANDIDATE_ERROR_MESSAGE__,
   latency_ms = CASE
     WHEN request_candidates.status IN ('success', 'failed', 'cancelled', 'skipped')
-      AND EXCLUDED.status IN ('available', 'unused', 'pending', 'streaming')
+      AND EXCLUDED.status <> request_candidates.status
       THEN request_candidates.latency_ms
     WHEN request_candidates.status = 'pending' AND EXCLUDED.status IN ('available', 'unused')
       THEN request_candidates.latency_ms
@@ -425,41 +380,17 @@ DO UPDATE SET
     ELSE COALESCE(EXCLUDED.latency_ms, request_candidates.latency_ms)
   END,
   concurrent_requests = COALESCE(EXCLUDED.concurrent_requests, request_candidates.concurrent_requests),
-  extra_data = CASE
-    WHEN request_candidates.extra_data IS NULL THEN EXCLUDED.extra_data
-    WHEN EXCLUDED.extra_data IS NULL THEN regexp_replace(
-      request_candidates.extra_data::text,
-      $aether_nul$(?<!\\)((?:\\\\)*)\\u0000$aether_nul$,
-      $aether_replacement$\1\\ufffd$aether_replacement$,
-      'g'
-    )::json
-    WHEN json_typeof(request_candidates.extra_data) = 'object'
-      AND json_typeof(EXCLUDED.extra_data) = 'object'
-      THEN (
-        regexp_replace(
-          request_candidates.extra_data::text,
-          $aether_nul$(?<!\\)((?:\\\\)*)\\u0000$aether_nul$,
-          $aether_replacement$\1\\ufffd$aether_replacement$,
-          'g'
-        )::jsonb || EXCLUDED.extra_data::jsonb
-      )::json
-    ELSE EXCLUDED.extra_data
-  END,
-  required_capabilities = regexp_replace(
-    COALESCE(EXCLUDED.required_capabilities, request_candidates.required_capabilities)::text,
-    $aether_nul$(?<!\\)((?:\\\\)*)\\u0000$aether_nul$,
-    $aether_replacement$\1\\ufffd$aether_replacement$,
-    'g'
-  )::json,
+  extra_data = __AETHER_CANDIDATE_EXTRA_DATA__,
+  required_capabilities = EXCLUDED.required_capabilities,
   created_at = CASE
     WHEN request_candidates.created_at <= TO_TIMESTAMP(1)
       THEN EXCLUDED.created_at
     ELSE request_candidates.created_at
   END,
-  started_at = COALESCE(EXCLUDED.started_at, request_candidates.started_at),
+  started_at = COALESCE(request_candidates.started_at, EXCLUDED.started_at),
   finished_at = CASE
     WHEN request_candidates.status IN ('success', 'failed', 'cancelled', 'skipped')
-      AND EXCLUDED.status IN ('available', 'unused', 'pending', 'streaming')
+      AND EXCLUDED.status <> request_candidates.status
       THEN request_candidates.finished_at
     WHEN request_candidates.status = 'pending' AND EXCLUDED.status IN ('available', 'unused')
       THEN request_candidates.finished_at
@@ -497,6 +428,81 @@ INSERT INTO request_candidates (
   finished_at
 )
 "#;
+
+const LEGACY_SKIP_REASON_PLACEHOLDER: &str = "__AETHER_SANITIZED_LEGACY_SKIP_REASON__";
+const LEGACY_ERROR_TYPE_PLACEHOLDER: &str = "__AETHER_SANITIZED_LEGACY_ERROR_TYPE__";
+
+static UPSERT_SQL: LazyLock<String> =
+    LazyLock::new(|| postgres_candidate_upsert_sql(UPSERT_SQL_TEMPLATE));
+static UPSERT_CONFLICT_SQL: LazyLock<String> =
+    LazyLock::new(|| postgres_candidate_upsert_sql(UPSERT_CONFLICT_SQL_TEMPLATE));
+static UPSERT_CONFLICT_INHERIT_IS_CACHED_SQL: LazyLock<String> =
+    LazyLock::new(|| postgres_candidate_upsert_sql(UPSERT_CONFLICT_INHERIT_IS_CACHED_SQL_TEMPLATE));
+
+fn postgres_candidate_upsert_sql(template: &str) -> String {
+    template
+        .replace(
+            LEGACY_SKIP_REASON_PLACEHOLDER,
+            postgres_sanitized_legacy_diagnostic_sql(
+                "request_candidates.skip_reason",
+                REQUEST_CANDIDATE_SKIP_REASONS,
+                &[],
+                "unclassified_skip",
+            )
+            .as_str(),
+        )
+        .replace(
+            LEGACY_ERROR_TYPE_PLACEHOLDER,
+            postgres_sanitized_legacy_diagnostic_sql(
+                "request_candidates.error_type",
+                REQUEST_CANDIDATE_ERROR_TYPES,
+                REQUEST_CANDIDATE_ERROR_TYPE_ALIASES,
+                "unclassified_error",
+            )
+            .as_str(),
+        )
+        .replace(
+            "__AETHER_CANDIDATE_ERROR_MESSAGE__",
+            "CASE WHEN request_candidates.status IN ('success', 'failed', 'cancelled', 'skipped') \
+             AND EXCLUDED.status <> request_candidates.status \
+             THEN request_candidates.error_message \
+             WHEN request_candidates.status = 'pending' AND EXCLUDED.status IN ('available', 'unused') \
+             THEN request_candidates.error_message \
+             WHEN request_candidates.status = 'streaming' AND EXCLUDED.status IN ('available', 'unused', 'pending') \
+             THEN request_candidates.error_message \
+             ELSE COALESCE(EXCLUDED.error_message, request_candidates.error_message) END",
+        )
+        .replace(
+            "__AETHER_CANDIDATE_EXTRA_DATA__",
+            "CASE WHEN request_candidates.status IN ('success', 'failed', 'cancelled', 'skipped') \
+             AND (EXCLUDED.status <> request_candidates.status OR EXCLUDED.extra_data IS NULL) \
+             THEN request_candidates.extra_data ELSE EXCLUDED.extra_data END",
+        )
+}
+
+fn postgres_sanitized_legacy_diagnostic_sql(
+    column: &str,
+    allowed: &[&str],
+    aliases: &[(&str, &str)],
+    fallback: &str,
+) -> String {
+    let normalized = format!("LOWER(BTRIM({column}))");
+    let mut sql = format!("(CASE WHEN {column} IS NULL THEN NULL");
+    for (alias, canonical) in aliases {
+        sql.push_str(format!(" WHEN {normalized} = '{alias}' THEN '{canonical}'").as_str());
+    }
+    sql.push_str(format!(" WHEN {normalized} IN (").as_str());
+    for (index, value) in allowed.iter().enumerate() {
+        if index > 0 {
+            sql.push_str(", ");
+        }
+        sql.push('\'');
+        sql.push_str(value);
+        sql.push('\'');
+    }
+    sql.push_str(format!(") THEN {normalized} ELSE '{fallback}' END)").as_str());
+    sql
+}
 
 const MAX_POSTGRES_REQUEST_CANDIDATE_UPSERT_ROWS: usize = 1_000;
 
@@ -571,11 +577,28 @@ impl SqlxRequestCandidateReadRepository {
         &self,
         limit: usize,
     ) -> Result<Vec<StoredRequestCandidate>, DataLayerError> {
+        self.list_recent_with_columns(limit, candidate_columns())
+            .await
+    }
+
+    pub async fn list_recent_runtime(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<StoredRequestCandidate>, DataLayerError> {
+        self.list_recent_with_columns(limit, RUNTIME_CANDIDATE_COLUMNS)
+            .await
+    }
+
+    async fn list_recent_with_columns(
+        &self,
+        limit: usize,
+        columns: &'static str,
+    ) -> Result<Vec<StoredRequestCandidate>, DataLayerError> {
         if limit == 0 {
             return Ok(Vec::new());
         }
 
-        let mut builder = QueryBuilder::<Postgres>::new(candidate_columns());
+        let mut builder = QueryBuilder::<Postgres>::new(columns);
         builder.push(" ORDER BY created_at DESC");
         push_limit(
             &mut builder,
@@ -782,7 +805,7 @@ impl SqlxRequestCandidateReadRepository {
         self.tx_runner
             .run_read_write(|tx| {
                 Box::pin(async move {
-                    let row = sqlx::query(UPSERT_SQL)
+                    let row = sqlx::query(UPSERT_SQL.as_str())
                         .bind(if candidate.id.trim().is_empty() {
                             Uuid::new_v4().to_string()
                         } else {
@@ -1048,9 +1071,9 @@ fn split_request_candidate_upsert_batches(
 
 fn upsert_many_conflict_sql(overwrite_is_cached: bool) -> &'static str {
     if overwrite_is_cached {
-        UPSERT_CONFLICT_SQL
+        UPSERT_CONFLICT_SQL.as_str()
     } else {
-        UPSERT_CONFLICT_INHERIT_IS_CACHED_SQL
+        UPSERT_CONFLICT_INHERIT_IS_CACHED_SQL.as_str()
     }
 }
 
@@ -1075,6 +1098,13 @@ impl RequestCandidateReadRepository for SqlxRequestCandidateReadRepository {
         limit: usize,
     ) -> Result<Vec<StoredRequestCandidate>, DataLayerError> {
         Self::list_recent(self, limit).await
+    }
+
+    async fn list_recent_runtime(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<StoredRequestCandidate>, DataLayerError> {
+        Self::list_recent_runtime(self, limit).await
     }
 
     async fn list_finalized_by_endpoint_ids_since(
@@ -1230,6 +1260,7 @@ fn to_i32_u64(value: u64) -> Result<i32, DataLayerError> {
 }
 
 fn sanitize_request_candidate_for_postgres(candidate: &mut UpsertRequestCandidateRecord) -> usize {
+    candidate.sanitize_for_persistence();
     let mut replacements = 0usize;
     for value in [
         &mut candidate.username,
@@ -1310,7 +1341,8 @@ fn replace_nul_characters(value: &mut String) -> usize {
 mod tests {
     use super::{
         sanitize_request_candidate_for_postgres, SqlxRequestCandidateReadRepository,
-        UPSERT_CONFLICT_INHERIT_IS_CACHED_SQL, UPSERT_CONFLICT_SQL, UPSERT_SQL,
+        UPSERT_CONFLICT_INHERIT_IS_CACHED_SQL, UPSERT_CONFLICT_INHERIT_IS_CACHED_SQL_TEMPLATE,
+        UPSERT_CONFLICT_SQL, UPSERT_CONFLICT_SQL_TEMPLATE, UPSERT_SQL, UPSERT_SQL_TEMPLATE,
     };
     use crate::error::SqlxResultExt;
     use crate::{PostgresPoolConfig, PostgresPoolFactory};
@@ -1321,29 +1353,43 @@ mod tests {
 
     #[test]
     fn upsert_sql_does_not_default_missing_or_epoch_created_at_to_epoch() {
-        assert!(!UPSERT_SQL.contains("COALESCE($22, 0)"));
-        assert!(UPSERT_SQL.contains("WHEN $22 IS NOT NULL AND $22 > 1000.0"));
-        assert!(UPSERT_SQL.contains("TO_TIMESTAMP($22 / 1000.0)"));
-        assert!(UPSERT_SQL.contains("TO_TIMESTAMP($23 / 1000.0)"));
-        assert!(UPSERT_SQL.contains("TO_TIMESTAMP($24 / 1000.0)"));
-        assert!(UPSERT_SQL.contains("NOW()"));
-        assert!(UPSERT_SQL.contains("request_candidates.created_at <= TO_TIMESTAMP(1)"));
-        assert!(UPSERT_SQL.contains("THEN EXCLUDED.created_at"));
+        assert!(!UPSERT_SQL_TEMPLATE.contains("COALESCE($22, 0)"));
+        assert!(UPSERT_SQL_TEMPLATE.contains("WHEN $22 IS NOT NULL AND $22 > 1000.0"));
+        assert!(UPSERT_SQL_TEMPLATE.contains("TO_TIMESTAMP($22 / 1000.0)"));
+        assert!(UPSERT_SQL_TEMPLATE.contains("TO_TIMESTAMP($23 / 1000.0)"));
+        assert!(UPSERT_SQL_TEMPLATE.contains("TO_TIMESTAMP($24 / 1000.0)"));
+        assert!(UPSERT_SQL_TEMPLATE.contains("NOW()"));
+        assert!(UPSERT_SQL_TEMPLATE.contains("request_candidates.created_at <= TO_TIMESTAMP(1)"));
+        assert!(UPSERT_SQL_TEMPLATE.contains("THEN EXCLUDED.created_at"));
     }
 
     #[test]
-    fn upsert_sql_keeps_candidate_lifecycle_monotonic_when_events_arrive_late() {
+    fn upsert_sql_preserves_first_identity_and_terminal_fact_when_events_arrive_late() {
         for sql in [
-            UPSERT_SQL,
-            UPSERT_CONFLICT_SQL,
-            UPSERT_CONFLICT_INHERIT_IS_CACHED_SQL,
+            UPSERT_SQL_TEMPLATE,
+            UPSERT_CONFLICT_SQL_TEMPLATE,
+            UPSERT_CONFLICT_INHERIT_IS_CACHED_SQL_TEMPLATE,
         ] {
+            for column in [
+                "user_id",
+                "api_key_id",
+                "username",
+                "api_key_name",
+                "provider_id",
+                "endpoint_id",
+                "key_id",
+            ] {
+                let expected =
+                    format!("{column} = COALESCE(request_candidates.{column}, EXCLUDED.{column})");
+                assert!(
+                    sql.contains(&expected),
+                    "missing immutable identity merge: {expected}"
+                );
+            }
             assert!(sql.contains(
                 "request_candidates.status IN ('success', 'failed', 'cancelled', 'skipped')"
             ));
-            assert!(
-                sql.contains("EXCLUDED.status IN ('available', 'unused', 'pending', 'streaming')")
-            );
+            assert!(sql.contains("EXCLUDED.status <> request_candidates.status"));
             assert!(sql.contains(
                 "request_candidates.status = 'streaming' AND EXCLUDED.status IN ('available', 'unused', 'pending')"
             ));
@@ -1356,7 +1402,7 @@ mod tests {
     }
 
     #[test]
-    fn postgres_candidate_sanitizer_replaces_nul_in_text_and_nested_json() {
+    fn postgres_candidate_sanitizer_discards_unapproved_diagnostics_before_nul_repair() {
         let mut extra_data = Map::new();
         extra_data.insert(
             "bad\0key".to_string(),
@@ -1391,32 +1437,35 @@ mod tests {
             finished_at_unix_ms: Some(2),
         };
 
-        assert_eq!(sanitize_request_candidate_for_postgres(&mut candidate), 9);
-        assert_eq!(candidate.username.as_deref(), Some("user�name"));
-        assert_eq!(candidate.api_key_name.as_deref(), Some("key�name"));
-        assert_eq!(candidate.skip_reason.as_deref(), Some("skip�reason"));
-        assert_eq!(candidate.error_type.as_deref(), Some("upstream�error"));
+        assert_eq!(sanitize_request_candidate_for_postgres(&mut candidate), 1);
+        assert!(candidate.username.is_none());
+        assert!(candidate.api_key_name.is_none());
+        assert_eq!(candidate.skip_reason.as_deref(), Some("unclassified_skip"));
+        assert_eq!(candidate.error_type.as_deref(), Some("unclassified_error"));
         assert_eq!(candidate.error_message.as_deref(), Some("bad�message"));
-        assert_eq!(
-            candidate.extra_data,
-            Some(json!({"bad�key": {"nested": ["bad�value", {"literal": "\\u0000"}]}}))
-        );
-        assert_eq!(
-            candidate.required_capabilities,
-            Some(json!({"cap�key": "cap�value"}))
-        );
+        assert!(candidate.extra_data.is_none());
+        assert!(candidate.required_capabilities.is_none());
     }
 
     #[test]
-    fn every_postgres_candidate_conflict_path_repairs_legacy_json_nul_escapes() {
+    fn every_postgres_candidate_conflict_path_preserves_errors_without_unrelated_legacy_data() {
         for sql in [
-            UPSERT_SQL,
-            UPSERT_CONFLICT_SQL,
-            UPSERT_CONFLICT_INHERIT_IS_CACHED_SQL,
+            UPSERT_SQL.as_str(),
+            UPSERT_CONFLICT_SQL.as_str(),
+            UPSERT_CONFLICT_INHERIT_IS_CACHED_SQL.as_str(),
         ] {
-            assert!(sql.contains("regexp_replace("));
-            assert!(sql.contains(r"(?<!\\)((?:\\\\)*)\\u0000"));
-            assert!(sql.contains(r"\1\\ufffd"));
+            assert!(
+                sql.contains("COALESCE(EXCLUDED.error_message, request_candidates.error_message)")
+            );
+            assert!(sql.contains("THEN request_candidates.extra_data ELSE EXCLUDED.extra_data END"));
+            assert!(sql.contains("required_capabilities = EXCLUDED.required_capabilities"));
+            assert!(!sql.contains("COALESCE(request_candidates.extra_data"));
+            assert!(!sql.contains("request_candidates.required_capabilities"));
+            assert!(sql.contains("ELSE 'unclassified_skip' END"));
+            assert!(sql.contains("ELSE 'unclassified_error' END"));
+            assert!(sql.contains("THEN 'first_byte_timeout'"));
+            assert!(!sql.contains("__AETHER_SANITIZED_LEGACY_"));
+            assert!(!sql.contains("__AETHER_CANDIDATE_"));
         }
     }
 
@@ -1442,7 +1491,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires AETHER_TEST_DATABASE_URL and PostgreSQL migrations"]
-    async fn live_postgres_candidate_nul_is_sanitized_and_legacy_json_is_repaired() {
+    async fn live_postgres_candidate_nul_is_sanitized_and_legacy_json_is_discarded() {
         let database_url = std::env::var("AETHER_TEST_DATABASE_URL")
             .expect("AETHER_TEST_DATABASE_URL must point at the test database");
         let factory = PostgresPoolFactory::new(PostgresPoolConfig {
@@ -1483,15 +1532,18 @@ mod tests {
                 r#"
 INSERT INTO request_candidates (
   id, request_id, candidate_index, retry_index, status,
-  extra_data, required_capabilities, created_at
+  skip_reason, error_type, extra_data, required_capabilities, error_message, created_at
 )
-VALUES ($1, $2, 0, 0, 'pending', $3::json, $4::json, NOW())
+VALUES ($1, $2, 0, 0, 'pending', $3, $4, $5::json, $6::json, $7, NOW())
 "#,
             )
             .bind(uuid::Uuid::new_v4().to_string())
             .bind(request_id)
+            .bind("legacy skip reason with tenant-secret")
+            .bind("legacy_error_type_with_token")
             .bind(legacy_extra)
             .bind(legacy_capabilities)
+            .bind("Bearer legacy-secret")
             .execute(repository.pool())
             .await
             .expect("legacy JSON poison seed should persist in the json column");
@@ -1530,16 +1582,53 @@ VALUES ($1, $2, 0, 0, 'pending', $3::json, $4::json, NOW())
                 uuid::Uuid::new_v4().to_string(),
             ))
             .await
-            .expect("single conflict should sanitize incoming and legacy JSON");
+            .expect("single conflict should discard legacy diagnostics");
         repository
             .upsert_many(vec![
                 candidate(&batch_request_id, uuid::Uuid::new_v4().to_string()),
                 candidate(&healthy_request_id, uuid::Uuid::new_v4().to_string()),
             ])
             .await
-            .expect("batch conflict should sanitize poison without blocking a healthy peer");
+            .expect("batch conflict should discard legacy diagnostics without blocking a peer");
 
         for request_id in [&single_request_id, &batch_request_id] {
+            let raw = sqlx::query(
+                "SELECT skip_reason, error_type, error_message, extra_data, required_capabilities FROM request_candidates WHERE request_id = $1",
+            )
+            .bind(request_id)
+            .fetch_one(repository.pool())
+            .await
+            .expect("raw candidate diagnostics should load");
+            assert_eq!(
+                sqlx::Row::try_get::<Option<String>, _>(&raw, "error_message")
+                    .expect("error_message should decode")
+                    .as_deref(),
+                Some("bad�message")
+            );
+            assert_eq!(
+                sqlx::Row::try_get::<Option<String>, _>(&raw, "skip_reason")
+                    .expect("skip_reason should decode")
+                    .as_deref(),
+                Some("unclassified_skip")
+            );
+            assert_eq!(
+                sqlx::Row::try_get::<Option<String>, _>(&raw, "error_type")
+                    .expect("error_type should decode")
+                    .as_deref(),
+                Some("unclassified_error")
+            );
+            assert!(
+                sqlx::Row::try_get::<Option<serde_json::Value>, _>(&raw, "extra_data")
+                    .expect("extra_data should decode")
+                    .is_none()
+            );
+            assert!(sqlx::Row::try_get::<Option<serde_json::Value>, _>(
+                &raw,
+                "required_capabilities"
+            )
+            .expect("required_capabilities should decode")
+            .is_none());
+
             let rows = repository
                 .list_by_request_id(request_id)
                 .await
@@ -1547,20 +1636,8 @@ VALUES ($1, $2, 0, 0, 'pending', $3::json, $4::json, NOW())
             assert_eq!(rows.len(), 1);
             assert_eq!(rows[0].status, RequestCandidateStatus::Success);
             assert_eq!(rows[0].error_message.as_deref(), Some("bad�message"));
-            assert_eq!(
-                rows[0].extra_data,
-                Some(json!({
-                    "old�key": "old�value",
-                    "literal": "\\u0000",
-                    "adjacent": "��",
-                    "new": true,
-                    "nested": "new�value"
-                }))
-            );
-            assert_eq!(
-                rows[0].required_capabilities,
-                Some(json!({"cap�key": "cap�value"}))
-            );
+            assert!(rows[0].extra_data.is_none());
+            assert!(rows[0].required_capabilities.is_none());
         }
         assert_eq!(
             repository
@@ -1571,14 +1648,157 @@ VALUES ($1, $2, 0, 0, 'pending', $3::json, $4::json, NOW())
             1
         );
 
+        let mut cleanup_request_ids = vec![single_request_id, batch_request_id, healthy_request_id];
+        for write_path in 0..3 {
+            let request_id = uuid::Uuid::new_v4().to_string();
+            cleanup_request_ids.push(request_id.clone());
+            let mut failed = candidate(&request_id, uuid::Uuid::new_v4().to_string());
+            failed.status = RequestCandidateStatus::Failed;
+            failed.status_code = Some(400);
+            failed.error_message = Some("original upstream failure".to_string());
+            failed.is_cached = (write_path != 2).then_some(false);
+            failed.extra_data = Some(json!({
+                "upstream_response": {
+                    "status_code": 400,
+                    "headers": {"x-request-id": "original-upstream-id"},
+                    "body": {"error": {"message": "original upstream failure", "param": "model"}}
+                },
+                "error_flow": {"status_code": 400, "message": "original upstream failure"}
+            }));
+            let mut pending = failed.clone();
+            pending.status = RequestCandidateStatus::Pending;
+            pending.status_code = None;
+            pending.error_message = None;
+            pending.extra_data = None;
+            repository
+                .upsert(pending.clone())
+                .await
+                .expect("pending seed should persist");
+            if write_path == 0 {
+                repository
+                    .upsert(failed)
+                    .await
+                    .expect("single failure should persist");
+            } else {
+                repository
+                    .upsert_many(vec![failed])
+                    .await
+                    .expect("batch failure should persist");
+            }
+            pending.status_code = Some(200);
+            pending.error_message = Some("late unrelated error".to_string());
+            pending.extra_data = Some(json!({
+                "upstream_response": {"status_code": 200, "body": "late unrelated response"}
+            }));
+            if write_path == 0 {
+                repository
+                    .upsert(pending)
+                    .await
+                    .expect("late update should persist");
+            } else {
+                repository
+                    .upsert_many(vec![pending])
+                    .await
+                    .expect("late batch should persist");
+            }
+            let stored = repository
+                .list_by_request_id(&request_id)
+                .await
+                .expect("failure should read");
+            assert_eq!(stored[0].status, RequestCandidateStatus::Failed);
+            assert_eq!(stored[0].status_code, Some(400));
+            assert_eq!(
+                stored[0].error_message.as_deref(),
+                Some("original upstream failure")
+            );
+            let extra = stored[0]
+                .extra_data
+                .as_ref()
+                .expect("failure details should remain");
+            assert_eq!(extra["upstream_response"]["status_code"], 400);
+            assert_eq!(
+                extra["upstream_response"]["headers"]["x-request-id"],
+                "original-upstream-id"
+            );
+            assert_eq!(
+                extra["upstream_response"]["body"]["error"]["param"],
+                "model"
+            );
+            assert_eq!(extra["error_flow"]["message"], "original upstream failure");
+            let mut public = stored[0].clone();
+            public.sanitize_sensitive_diagnostics();
+            assert!(!serde_json::to_string(&public)
+                .expect("public record should serialize")
+                .contains("original upstream failure"));
+        }
+
         sqlx::query("DELETE FROM request_candidates WHERE request_id = ANY($1)")
-            .bind(vec![
-                single_request_id,
-                batch_request_id,
-                healthy_request_id,
-            ])
+            .bind(cleanup_request_ids)
             .execute(repository.pool())
             .await
             .expect("candidate NUL test rows should clean up");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires isolated AETHER_TEST_DATABASE_URL; uses a connection-local table"]
+    async fn live_postgres_candidate_runtime_projection_preserves_metadata_and_admin_rows() {
+        let database_url =
+            std::env::var("AETHER_TEST_DATABASE_URL").expect("isolated test database");
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&database_url)
+            .await
+            .unwrap();
+        sqlx::query(
+            r#"
+CREATE TEMP TABLE request_candidates (
+  id text, request_id text, user_id text, api_key_id text,
+  username text, api_key_name text, candidate_index integer, retry_index integer,
+  provider_id text, endpoint_id text, key_id text, status text, skip_reason text,
+  is_cached boolean, status_code integer, error_type text, error_message text,
+  latency_ms integer, concurrent_requests integer, extra_data jsonb, required_capabilities jsonb,
+  created_at timestamptz, started_at timestamptz, finished_at timestamptz
+)
+"#,
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        for index in 0..3 {
+            sqlx::query(
+                r#"
+INSERT INTO request_candidates VALUES (
+  $1, $2, 'user', 'api-key', NULL, NULL, $3, 0,
+  'provider', 'endpoint', 'key', 'failed', NULL, false, 500,
+  'upstream_error', 'admin diagnostic', 20, 17, $4, '{"vision": true}'::jsonb,
+  TO_TIMESTAMP(100 + $3), TO_TIMESTAMP(101 + $3), TO_TIMESTAMP(102 + $3)
+)
+"#,
+            )
+            .bind(format!("candidate-{index}"))
+            .bind(format!("request-{index}"))
+            .bind(index)
+            .bind(json!({"upstream_response": {"body": "x".repeat(32_768)}}))
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let repository = SqlxRequestCandidateReadRepository::new(pool.clone());
+        let full = repository.list_recent(2).await.unwrap();
+        let runtime = repository.list_recent_runtime(2).await.unwrap();
+        assert_eq!(
+            runtime,
+            full.iter()
+                .map(|row| row.runtime_snapshot())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(runtime[0].id, "candidate-2");
+        assert_eq!(runtime[0].concurrent_requests, Some(17));
+        assert!(runtime[0].extra_data.is_none());
+        assert!(runtime[0].error_message.is_none());
+        assert!(full[0].extra_data.is_some());
+        assert_eq!(repository.list_recent(2).await.unwrap(), full);
+        assert!(repository.list_recent_runtime(0).await.unwrap().is_empty());
+        pool.close().await;
     }
 }

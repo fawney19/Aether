@@ -5,6 +5,7 @@ use super::{
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::handlers::shared::query_param_value;
 use crate::GatewayError;
+use aether_admin::provider::redaction::admin_provider_metadata_bucket_safe_json;
 use aether_data_contracts::repository::pool_scores::{
     ListPoolMemberScoresQuery, PoolMemberHardState, PoolMemberProbeStatus,
     POOL_KIND_PROVIDER_KEY_POOL, POOL_SCORE_CAPABILITY_ACCOUNT, POOL_SCORE_SCOPE_KIND_ACCOUNT,
@@ -114,7 +115,10 @@ pub(super) async fn build_admin_pool_scores_response(
                 "score": score.score,
                 "hard_state": score.hard_state.as_database(),
                 "score_version": score.score_version,
-                "score_reason": score.score_reason,
+                "score_reason": admin_provider_metadata_bucket_safe_json(
+                    "pool_score",
+                    Some(&score.score_reason),
+                ),
                 "last_ranked_at": score.last_ranked_at,
                 "last_scheduled_at": score.last_scheduled_at,
                 "last_success_at": score.last_success_at,

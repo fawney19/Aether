@@ -8,7 +8,8 @@ use std::time::{Duration, Instant};
 use aether_gateway::tunnel_protocol as protocol;
 use aether_testkit::{
     fetch_prometheus_samples, find_metric_value_u64, init_test_runtime_for,
-    BenchmarkRuntimeSampler, BenchmarkRuntimeSnapshot, TunnelHarness, TunnelHarnessConfig,
+    insert_tunnel_harness_auth_headers, BenchmarkRuntimeSampler, BenchmarkRuntimeSnapshot,
+    TunnelHarness, TunnelHarnessConfig,
 };
 use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt};
@@ -317,8 +318,13 @@ struct ProtocolPeer {
     stats: Arc<PeerStats>,
 }
 
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let _log_shutdown = aether_runtime::LogShutdownGuard::new();
+    run()
+}
+
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn run() -> Result<(), Box<dyn std::error::Error>> {
     init_test_runtime_for("llm-stream-stability-baseline");
     let config = parse_args(std::env::args().skip(1).collect())?;
     config.validate().map_err(std::io::Error::other)?;
@@ -341,6 +347,7 @@ async fn run_suite(
     let chunks_per_stream = config.effective_chunks_per_stream();
     let config = Arc::new(config);
     let tunnel = TunnelHarness::start(TunnelHarnessConfig {
+        node_id: config.node_id.clone(),
         max_streams: config.tunnel_max_streams,
         ping_interval: config.ping_interval,
         outbound_queue_capacity: config.outbound_queue_capacity,
@@ -633,10 +640,7 @@ async fn connect_protocol_peer(
     );
     let request = ws_url.into_client_request()?;
     let mut request = request;
-    request.headers_mut().insert(
-        "x-node-id",
-        http::HeaderValue::from_str(config.node_id.as_str())?,
-    );
+    insert_tunnel_harness_auth_headers(request.headers_mut(), config.node_id.as_str())?;
     request.headers_mut().insert(
         aether_contracts::tunnel::TUNNEL_PROTOCOL_VERSION_HEADER,
         http::HeaderValue::from_static(

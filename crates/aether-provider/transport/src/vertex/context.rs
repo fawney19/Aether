@@ -5,6 +5,26 @@ use super::super::snapshot::GatewayProviderTransportSnapshot;
 
 const VERTEX_AI_HOST: &str = "aiplatform.googleapis.com";
 
+/// Vertex regions are interpolated into regional service hostnames and path
+/// segments. Keep them to one DNS label so imported credential metadata cannot
+/// redirect bearer-token requests to another origin.
+pub fn is_valid_vertex_region(value: &str) -> bool {
+    let value = value.trim();
+    !value.is_empty()
+        && value.len() <= 63
+        && value
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphanumeric)
+        && value
+            .as_bytes()
+            .last()
+            .is_some_and(u8::is_ascii_alphanumeric)
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+}
+
 pub fn looks_like_vertex_ai_host(base_url: &str) -> bool {
     let trimmed = base_url.trim();
     if trimmed.is_empty() {
@@ -14,6 +34,20 @@ pub fn looks_like_vertex_ai_host(base_url: &str) -> bool {
     let Ok(parsed) = Url::parse(trimmed) else {
         return false;
     };
+    // A service-account bearer token must never be sent over plaintext HTTP
+    // or to a URL carrying userinfo/alternate ports.  Host matching alone is
+    // insufficient because an imported endpoint can still select those URL
+    // forms.
+    if parsed.scheme() != "https"
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.port().is_some()
+    {
+        return false;
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return false;
+    }
     let Some(host) = parsed
         .host_str()
         .map(|value| value.trim().to_ascii_lowercase())
@@ -22,8 +56,9 @@ pub fn looks_like_vertex_ai_host(base_url: &str) -> bool {
     };
 
     host == VERTEX_AI_HOST
-        || host.ends_with(&format!(".{VERTEX_AI_HOST}"))
-        || host.ends_with(&format!("-{VERTEX_AI_HOST}"))
+        || host
+            .strip_suffix(&format!("-{VERTEX_AI_HOST}"))
+            .is_some_and(is_valid_vertex_region)
 }
 
 pub fn is_vertex_api_key_transport_context(transport: &GatewayProviderTransportSnapshot) -> bool {
@@ -101,8 +136,9 @@ fn looks_like_vertex_openai_compat_base(base_url: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_vertex_api_key_transport_context, is_vertex_service_account_transport_context,
-        is_vertex_transport_context, looks_like_vertex_ai_host, uses_vertex_api_key_query_auth,
+        is_valid_vertex_region, is_vertex_api_key_transport_context,
+        is_vertex_service_account_transport_context, is_vertex_transport_context,
+        looks_like_vertex_ai_host, uses_vertex_api_key_query_auth,
     };
     use crate::snapshot::{
         GatewayProviderTransportEndpoint, GatewayProviderTransportKey,
@@ -174,7 +210,39 @@ mod tests {
         assert!(looks_like_vertex_ai_host(
             "https://us-central1-aiplatform.googleapis.com"
         ));
+        assert!(!looks_like_vertex_ai_host(
+            "https://foo.bar-aiplatform.googleapis.com"
+        ));
+        assert!(!looks_like_vertex_ai_host(
+            "https://us-central1-aiplatform.googleapis.com?token=secret"
+        ));
+        assert!(!looks_like_vertex_ai_host(
+            "https://us-central1-aiplatform.googleapis.com."
+        ));
+        assert!(!looks_like_vertex_ai_host(
+            "http://us-central1-aiplatform.googleapis.com"
+        ));
+        assert!(!looks_like_vertex_ai_host(
+            "https://user@us-central1-aiplatform.googleapis.com"
+        ));
+        assert!(!looks_like_vertex_ai_host(
+            "https://us-central1-aiplatform.googleapis.com:8443"
+        ));
         assert!(!looks_like_vertex_ai_host("https://example.com"));
+    }
+
+    #[test]
+    fn rejects_vertex_region_url_syntax() {
+        for value in [
+            "attacker.example/",
+            "us-central1?x=1",
+            "us.central1",
+            "-bad",
+        ] {
+            assert!(!is_valid_vertex_region(value));
+        }
+        assert!(is_valid_vertex_region("us-central1"));
+        assert!(is_valid_vertex_region("global"));
     }
 
     #[test]

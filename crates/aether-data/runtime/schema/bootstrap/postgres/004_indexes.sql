@@ -102,6 +102,14 @@ CREATE INDEX IF NOT EXISTS idx_payment_orders_gateway_order_id ON public.payment
 
 
 --
+-- Name: uq_payment_orders_payment_method_gateway_order_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_payment_orders_payment_method_gateway_order_id ON public.payment_orders USING btree (payment_method, gateway_order_id);
+
+
+
+--
 -- Name: idx_payment_orders_kind_status; Type: INDEX; Schema: public; Owner: -
 --
 

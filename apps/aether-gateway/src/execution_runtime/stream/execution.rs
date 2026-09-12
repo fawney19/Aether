@@ -21,11 +21,12 @@ use aether_data_contracts::repository::usage::UsageBodyCaptureState;
 use aether_scheduler_core::{
     parse_request_candidate_report_context, SchedulerRequestCandidateStatusUpdate,
 };
+#[cfg(test)]
+use aether_usage_runtime::DEFAULT_USAGE_RESPONSE_BODY_CAPTURE_LIMIT_BYTES;
 use aether_usage_runtime::{
     build_lifecycle_usage_seed, build_stream_terminal_usage_payload_seed,
     build_sync_terminal_usage_payload_seed, build_terminal_usage_context_seed, LifecycleUsageSeed,
     SyncTerminalUsagePayloadSeed, TerminalUsageContextSeed, UsageRequestRecordLevel,
-    DEFAULT_USAGE_RESPONSE_BODY_CAPTURE_LIMIT_BYTES,
 };
 use async_stream::stream;
 use axum::body::{Body, Bytes};
@@ -41,6 +42,7 @@ use tokio::time::MissedTickBehavior;
 use tokio_util::codec::{FramedRead, LinesCodec};
 use tracing::{debug, info, warn};
 
+use super::capture_budget::StreamBodyCapture;
 use super::commit_policy::{
     anthropic_error_status_code, find_sse_record_boundary, StreamCommitGate, StreamCommitPolicy,
     StreamPrecommitObservation,
@@ -52,6 +54,7 @@ use super::error::{
     stream_client_error_status_code_for_upstream_status, synthetic_error_response_headers,
     StreamPrefetchInspection,
 };
+use super::usage_fallback::StreamUsageFallback;
 #[path = "execution_failures.rs"]
 mod execution_failures;
 use self::execution_failures::{
@@ -71,12 +74,15 @@ use crate::ai_serving::api::{
     UPSTREAM_IS_STREAM_KEY,
 };
 use crate::ai_serving::is_openai_responses_family_format;
+use crate::ai_serving::record_local_runtime_candidate_skip_reason;
 use crate::api::response::{
     attach_control_metadata_headers, build_client_response, build_client_response_from_parts,
+    build_client_response_from_parts_with_mutator,
 };
 use crate::clock::current_unix_ms as current_request_candidate_unix_ms;
 use crate::constants::{CONTROL_CANDIDATE_ID_HEADER, CONTROL_REQUEST_ID_HEADER};
 use crate::control::GatewayControlDecision;
+use crate::execution_runtime::attempt_cancellation::AttemptCancellationGuard;
 use crate::execution_runtime::build_direct_execution_frame_stream;
 use crate::execution_runtime::chatgpt_web_image::maybe_execute_chatgpt_web_image_stream;
 use crate::execution_runtime::grok::maybe_execute_grok_stream;
@@ -91,11 +97,15 @@ use crate::execution_runtime::kiro_web_search::maybe_execute_kiro_web_search_str
 use crate::execution_runtime::oauth_retry::refresh_oauth_plan_auth_for_retry;
 #[cfg(test)]
 use crate::execution_runtime::remote_compat::post_stream_plan_to_remote_execution_runtime;
+use crate::execution_runtime::stream_read_timeout::{
+    await_stream_idle_read, resolve_stream_idle_timeout, stream_idle_timeout_message,
+};
 use crate::execution_runtime::submission::{
     resolve_core_error_background_report_kind, resolve_local_sync_error_status_code,
     strip_utf8_bom_and_ws, submit_local_core_error_or_sync_finalize,
 };
 use crate::execution_runtime::transport::{
+    decode_base64_body_with_limit, direct_upstream_response_byte_stream,
     execute_stream_plan_via_local_tunnel, format_hyper_error_chain, format_upstream_request_error,
     format_wreq_upstream_request_error, record_manual_proxy_request_failure,
     record_manual_proxy_request_success, record_manual_proxy_stream_error,
@@ -117,8 +127,7 @@ use crate::execution_runtime::{
 use crate::log_ids::short_request_id;
 use crate::orchestration::{
     apply_local_execution_effect, build_local_error_flow_metadata, classify_failure_disposition,
-    cyber_continue_failover_enabled, spawn_local_oauth_success_effect,
-    trace_upstream_response_body, with_error_flow_report_context,
+    spawn_local_oauth_success_effect, trace_upstream_response_body, with_error_flow_report_context,
     with_upstream_response_report_context, FailureDisposition, FailureTokenAction,
     LocalAdaptiveRateLimitEffect, LocalAdaptiveSuccessEffect, LocalAttemptFailureEffect,
     LocalExecutionEffect, LocalExecutionEffectContext, LocalFailoverAnalysis,
@@ -126,7 +135,7 @@ use crate::orchestration::{
     LocalOAuthSuccessEffect, LocalPoolErrorEffect,
 };
 use crate::provider_pool_demand::{
-    acquire_provider_pool_in_flight_guard, ProviderPoolInFlightGuard,
+    acquire_provider_pool_execution_guard, ProviderPoolInFlightAdmission, ProviderPoolInFlightGuard,
 };
 use crate::request_candidate_runtime::{
     ensure_execution_request_candidate_slot, persist_local_request_candidate_status_record,
@@ -149,6 +158,11 @@ use crate::{
     AppState, GatewayError, GEMINI_FILES_DOWNLOAD_PLAN_KIND, OPENAI_VIDEO_CONTENT_PLAN_KIND,
 };
 
+/// Settlement labels for a stream attempt whose future is dropped before the
+/// transport reaches a terminal state.
+const STREAM_ATTEMPT_CANCELLED_ERROR_TYPE: &str = "local_stream_attempt_cancelled";
+const STREAM_ATTEMPT_CANCELLED_ERROR_MESSAGE: &str = "Local stream attempt was dropped before terminal finalization, usually because the client disconnected or the request task was cancelled.";
+
 const SSE_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 const SSE_KEEPALIVE_BYTES: &[u8] = b": aether-keepalive\n\n";
 const SSE_CONTROL_FILTER_MAX_BUFFER_BYTES: usize = 1024 * 1024;
@@ -156,6 +170,7 @@ const SSE_TERMINAL_DETECTOR_MAX_LINE_BYTES: usize = 1024 * 1024;
 const SSE_TERMINAL_DETECTOR_MAX_RECORD_BYTES: usize = SSE_TERMINAL_DETECTOR_MAX_LINE_BYTES;
 const PROVIDER_STREAM_ERROR_INSPECTION_MAX_BYTES: usize = SSE_TERMINAL_DETECTOR_MAX_LINE_BYTES;
 const BASIC_STREAM_BODY_ANALYSIS_LIMIT_BYTES: usize = 5 * 1024 * 1024;
+const MAX_EXECUTION_STREAM_DATA_CHUNK_BYTES: usize = 64 * 1024 * 1024;
 const STREAM_IDLE_LOG_INTERVAL: Duration = Duration::from_secs(60);
 const STREAM_IDLE_LOG_INTERVAL_MS: u64 = 60_000;
 const REWRITTEN_STREAM_PREFETCH_TIMEOUT: Duration = Duration::from_millis(750);
@@ -183,7 +198,47 @@ impl ProviderStreamErrorInspection {
         if chunk.is_empty() {
             return None;
         }
-        if let Some(error_body) = extract_provider_private_stream_error_body(report_context, chunk)
+
+        // A transport implementation may deliver a very large chunk. Keep
+        // every parser invocation bounded: inspect the prefix (including the
+        // previous rolling tail for events split across chunks) and suffix,
+        // while retaining only the bounded suffix for the next observation.
+        // The middle of an oversized chunk is deliberately skipped because
+        // this observer is best-effort and must never duplicate the client
+        // stream or turn a single upstream read into an unbounded parse.
+        if chunk.len() > PROVIDER_STREAM_ERROR_INSPECTION_MAX_BYTES {
+            let prefix_len = PROVIDER_STREAM_ERROR_INSPECTION_MAX_BYTES
+                .saturating_sub(self.buffered.len())
+                .min(chunk.len());
+            let mut boundary = Vec::with_capacity(
+                self.buffered
+                    .len()
+                    .saturating_add(prefix_len)
+                    .min(PROVIDER_STREAM_ERROR_INSPECTION_MAX_BYTES),
+            );
+            boundary.extend_from_slice(&self.buffered);
+            boundary.extend_from_slice(&chunk[..prefix_len]);
+            if let Some(error_body) =
+                extract_provider_private_stream_error_body(report_context, &boundary)
+            {
+                return Some(error_body);
+            }
+
+            let prefix = &chunk[..PROVIDER_STREAM_ERROR_INSPECTION_MAX_BYTES];
+            if let Some(error_body) =
+                extract_provider_private_stream_error_body(report_context, prefix)
+            {
+                return Some(error_body);
+            }
+
+            let suffix_start = chunk.len() - PROVIDER_STREAM_ERROR_INSPECTION_MAX_BYTES;
+            if let Some(error_body) =
+                extract_provider_private_stream_error_body(report_context, &chunk[suffix_start..])
+            {
+                return Some(error_body);
+            }
+        } else if let Some(error_body) =
+            extract_provider_private_stream_error_body(report_context, chunk)
         {
             return Some(error_body);
         }
@@ -350,7 +405,7 @@ fn direct_passthrough_mode() -> DirectPassthroughMode {
 fn stream_body_buffer_limit_for_record_level(record_level: UsageRequestRecordLevel) -> usize {
     match record_level {
         UsageRequestRecordLevel::Basic => BASIC_STREAM_BODY_ANALYSIS_LIMIT_BYTES,
-        UsageRequestRecordLevel::Full => DEFAULT_USAGE_RESPONSE_BODY_CAPTURE_LIMIT_BYTES,
+        UsageRequestRecordLevel::Full => crate::execution_runtime::MAX_STREAM_BODY_CAPTURE_BYTES,
     }
 }
 
@@ -365,15 +420,15 @@ async fn resolve_stream_body_buffer_limit(state: &AppState) -> usize {
         .await
     {
         Ok(policy) => stream_body_buffer_limit_for_record_level(policy.record_level),
-        Err(error) => {
+        Err(_error) => {
             warn!(
                 event_name = "stream_body_capture_policy_read_failed",
                 log_type = "ops",
-                error = %error,
-                fallback = "full",
+                error_category = "capture_policy_read_failed",
+                fallback = "basic",
                 "gateway could not resolve stream body capture policy"
             );
-            DEFAULT_USAGE_RESPONSE_BODY_CAPTURE_LIMIT_BYTES
+            BASIC_STREAM_BODY_ANALYSIS_LIMIT_BYTES
         }
     }
 }
@@ -431,7 +486,9 @@ async fn record_sync_terminal_usage_with_handoff_after_spawn<F>(
     let (context_seed, payload_seed) =
         build_sync_terminal_usage_seeds(plan, report_context, payload);
     let state = state.clone();
+    let usage_producer = state.usage_runtime.track_producer();
     let task = tokio::spawn(async move {
+        let _usage_producer = usage_producer;
         before_dispatch.await;
         state
             .usage_runtime
@@ -442,11 +499,11 @@ async fn record_sync_terminal_usage_with_handoff_after_spawn<F>(
             )
             .await;
     });
-    if let Err(err) = task.await {
+    if let Err(_err) = task.await {
         warn!(
             event_name = "sync_terminal_usage_handoff_failed",
             log_type = "ops",
-            error = %err,
+            error_category = "terminal_usage_handoff_failed",
             "gateway sync terminal usage handoff task failed"
         );
     }
@@ -582,11 +639,24 @@ fn build_stream_body_capture(
     body: &[u8],
     truncated: bool,
 ) -> (Option<String>, Option<UsageBodyCaptureState>) {
+    build_stream_body_capture_with_limit(
+        body,
+        truncated,
+        crate::execution_runtime::MAX_STREAM_BODY_CAPTURE_BYTES,
+    )
+}
+
+fn build_stream_body_capture_with_limit(
+    body: &[u8],
+    truncated: bool,
+    max_bytes: usize,
+) -> (Option<String>, Option<UsageBodyCaptureState>) {
+    let captured = &body[..body.len().min(max_bytes)];
     let body_base64 =
-        (!body.is_empty()).then(|| base64::engine::general_purpose::STANDARD.encode(body));
-    let body_state = Some(if truncated {
+        (!captured.is_empty()).then(|| base64::engine::general_purpose::STANDARD.encode(captured));
+    let body_state = Some(if truncated || captured.len() < body.len() {
         UsageBodyCaptureState::Truncated
-    } else if body.is_empty() {
+    } else if captured.is_empty() {
         UsageBodyCaptureState::None
     } else {
         UsageBodyCaptureState::Inline
@@ -597,7 +667,7 @@ fn build_stream_body_capture(
 fn wrap_non_json_binary_stream_error_for_client(
     plan_kind: &str,
     headers: &BTreeMap<String, String>,
-    error_body: &[u8],
+    _error_body: &[u8],
 ) -> Result<Option<Value>, GatewayError> {
     let content_type = headers
         .get("content-type")
@@ -609,7 +679,7 @@ fn wrap_non_json_binary_stream_error_for_client(
 
     let body = match plan_kind {
         GEMINI_FILES_DOWNLOAD_PLAN_KIND => json!({
-            "error": String::from_utf8_lossy(error_body).to_string(),
+            "error": "File download failed",
         }),
         OPENAI_VIDEO_CONTENT_PLAN_KIND => json!({
             "error": {
@@ -617,7 +687,12 @@ fn wrap_non_json_binary_stream_error_for_client(
                 "message": "Video not available",
             }
         }),
-        _ => return Ok(None),
+        _ => json!({
+            "error": {
+                "type": "upstream_error",
+                "message": "Upstream request failed",
+            }
+        }),
     };
     Ok(Some(body))
 }
@@ -733,13 +808,13 @@ async fn seed_kiro_simulated_cache_enabled(
             .is_some_and(|provider| {
                 kiro_simulated_cache_enabled_from_provider_config(provider.config.as_ref())
             }),
-        Err(err) => {
+        Err(_err) => {
             warn!(
                 event_name = "kiro_simulated_cache_config_read_failed",
                 log_type = "event",
                 request_id = %plan.request_id,
                 provider_id = %plan.provider_id,
-                error = ?err,
+                error_category = "provider_catalog_read_failed",
                 "failed to read Kiro simulated cache provider config; defaulting disabled"
             );
             false
@@ -972,12 +1047,39 @@ fn append_stream_capture_bytes(
     }
 }
 
+fn append_budgeted_stream_capture_bytes(
+    buffer: &mut StreamBodyCapture,
+    chunk: &[u8],
+    max_bytes: usize,
+    truncated: &mut bool,
+) {
+    buffer.append(chunk, max_bytes, truncated);
+}
+
+struct StreamUsageObservationBuffer {
+    line: Vec<u8>,
+    fallback: StreamUsageFallback,
+    recovered_usage_after_parser_error: bool,
+}
+
+impl StreamUsageObservationBuffer {
+    fn new(record_limit: usize) -> Self {
+        Self {
+            line: Vec::new(),
+            fallback: StreamUsageFallback::new(record_limit),
+            recovered_usage_after_parser_error: false,
+        }
+    }
+}
+
 fn observe_stream_usage_bytes(
     observer: &mut StreamingStandardTerminalObserver,
     report_context: &Value,
-    buffered: &mut Vec<u8>,
+    buffer: &mut StreamUsageObservationBuffer,
     chunk: &[u8],
 ) {
+    buffer.fallback.observe(report_context, chunk);
+    let buffered = &mut buffer.line;
     if chunk.is_empty()
         || observer
             .latest_summary()
@@ -997,16 +1099,16 @@ fn observe_stream_usage_bytes(
             observer.disable_with_error(format!(
                 "stream usage event exceeded {SSE_TERMINAL_DETECTOR_MAX_LINE_BYTES} bytes"
             ));
-            buffered.clear();
+            *buffered = Vec::new();
             return;
         }
         buffered.extend_from_slice(&remaining[..line_part_len]);
         remaining = &remaining[line_part_len..];
         if buffered.last() == Some(&b'\n') {
             let line = std::mem::take(buffered);
-            if let Err(err) = observer.push_line(report_context, line) {
-                observer.disable_with_error(err.to_string());
-                buffered.clear();
+            if let Err(_err) = observer.push_line(report_context, line) {
+                observer.disable_with_error("stream usage parsing failed");
+                *buffered = Vec::new();
                 return;
             }
         }
@@ -1016,26 +1118,67 @@ fn observe_stream_usage_bytes(
 fn finalize_stream_usage_observer(
     observer: &mut Option<StreamingStandardTerminalObserver>,
     report_context: Option<&Value>,
-    buffered: &mut Vec<u8>,
+    buffer: &mut StreamUsageObservationBuffer,
 ) -> Option<ExecutionStreamTerminalSummary> {
     let (Some(observer), Some(report_context)) = (observer.as_mut(), report_context) else {
         return None;
     };
 
+    let buffered = &mut buffer.line;
     if !buffered.is_empty() {
         let line = std::mem::take(buffered);
-        if let Err(err) = observer.push_line(report_context, line) {
-            observer.disable_with_error(err.to_string());
+        if let Err(_err) = observer.push_line(report_context, line) {
+            observer.disable_with_error("stream usage parsing failed");
         }
     }
 
-    match observer.finish(report_context) {
+    let mut summary = match observer.finish(report_context) {
         Ok(summary) => summary,
-        Err(err) => {
-            observer.disable_with_error(err.to_string());
+        Err(_err) => {
+            observer.disable_with_error("stream usage parsing failed");
             observer.latest_summary().cloned()
         }
+    };
+    let mut fallback_usage = buffer.fallback.finish(report_context);
+    let fallback_tier = buffer.fallback.take_service_tier();
+    if let Some(summary) = summary.as_mut() {
+        if summary.parser_error.is_some() && fallback_usage.is_some() {
+            // A disabled parser can retain an earlier usage snapshot. Later
+            // complete fallback events remain authoritative even when their
+            // signal score is unchanged or an explicit zero reduces it.
+            summary.standardized_usage = fallback_usage.take();
+            buffer.recovered_usage_after_parser_error = true;
+        }
+        if summary.provider_actual_service_tier.is_none() {
+            summary.provider_actual_service_tier = fallback_tier.clone();
+        }
     }
+    let fallback = fallback_usage.map(|usage| ExecutionStreamTerminalSummary {
+        standardized_usage: Some(usage),
+        provider_actual_service_tier: summary.is_none().then_some(fallback_tier).flatten(),
+        ..ExecutionStreamTerminalSummary::default()
+    });
+    merge_stream_terminal_summary(summary, fallback)
+}
+
+fn merge_observed_stream_terminal_summary(
+    current: Option<ExecutionStreamTerminalSummary>,
+    observed: Option<ExecutionStreamTerminalSummary>,
+    usage_buffer: &StreamUsageObservationBuffer,
+) -> Option<ExecutionStreamTerminalSummary> {
+    let recovered_usage = usage_buffer
+        .recovered_usage_after_parser_error
+        .then(|| {
+            observed
+                .as_ref()
+                .and_then(|summary| summary.standardized_usage.clone())
+        })
+        .flatten();
+    let mut summary = merge_stream_terminal_summary(current, observed);
+    if let (Some(summary), Some(usage)) = (summary.as_mut(), recovered_usage) {
+        summary.standardized_usage = Some(usage);
+    }
+    summary
 }
 
 fn merge_stream_terminal_summary(
@@ -1346,6 +1489,7 @@ async fn prefetch_direct_anthropic_stream_failure(
     }
 
     let mut gate = StreamCommitGate::new(policy);
+    let mut semantic_commit_observed = false;
     let precommit_started_at = Instant::now();
     let max_wait = policy.max_precommit_wait()?;
     let mut observed_first_body = execution
@@ -1396,7 +1540,10 @@ async fn prefetch_direct_anthropic_stream_failure(
         execution.prefetched_body.push_back(Ok(chunk.clone()));
         match gate.observe_provider_bytes(&chunk) {
             StreamPrecommitObservation::Pending => {}
-            StreamPrecommitObservation::Commit => break,
+            StreamPrecommitObservation::Commit => {
+                semantic_commit_observed = true;
+                break;
+            }
             StreamPrecommitObservation::UpstreamError {
                 status_code,
                 body_json,
@@ -1410,7 +1557,7 @@ async fn prefetch_direct_anthropic_stream_failure(
             }
         }
     }
-    execution.stream_precommit_committed = !gate.is_uncommitted();
+    execution.stream_precommit_committed = semantic_commit_observed;
     None
 }
 
@@ -1622,43 +1769,6 @@ fn should_use_direct_sse_passthrough(
 
 type DirectUpstreamByteStream = BoxStream<'static, Result<Bytes, String>>;
 
-fn direct_upstream_response_byte_stream(
-    prefetched_body: VecDeque<Result<Bytes, String>>,
-    response: DirectUpstreamResponse,
-) -> DirectUpstreamByteStream {
-    let response_stream = match response {
-        DirectUpstreamResponse::Reqwest(response) => response
-            .bytes_stream()
-            .map(|item| item.map_err(|err| format_upstream_request_error(&err)))
-            .boxed(),
-        DirectUpstreamResponse::HyperH2c(response) => response
-            .into_body()
-            .into_data_stream()
-            .map(|item| item.map_err(|err| format_hyper_error_chain(&err)))
-            .boxed(),
-        DirectUpstreamResponse::BrowserWreq(response) => response
-            .bytes_stream()
-            .map(|item| item.map_err(|err| format_wreq_upstream_request_error(&err)))
-            .boxed(),
-        DirectUpstreamResponse::LocalTunnel(mut response) => stream! {
-            loop {
-                match response.next_chunk().await {
-                    Ok(Some(chunk)) => yield Ok(chunk),
-                    Ok(None) => break,
-                    Err(err) => {
-                        yield Err(err);
-                        break;
-                    }
-                }
-            }
-        }
-        .boxed(),
-    };
-    futures_stream::iter(prefetched_body)
-        .chain(response_stream)
-        .boxed()
-}
-
 async fn await_direct_passthrough_first_item<T, F>(
     future: F,
     started_at: Instant,
@@ -1690,7 +1800,7 @@ async fn forward_direct_passthrough_client_chunk(
     client_stream_completion_tracker: &mut ClientVisibleStreamCompletionTracker,
     observe_stream_completion: bool,
     client_stream_bytes: &mut u64,
-    buffered_body: &mut Vec<u8>,
+    buffered_body: &mut StreamBodyCapture,
     client_body_truncated: &mut bool,
     max_stream_body_buffer_bytes: usize,
     stream_started_at: Instant,
@@ -1703,7 +1813,7 @@ async fn forward_direct_passthrough_client_chunk(
     if chunk.is_empty() {
         return false;
     }
-    append_stream_capture_bytes(
+    append_budgeted_stream_capture_bytes(
         buffered_body,
         chunk.as_ref(),
         max_stream_body_buffer_bytes,
@@ -1768,11 +1878,11 @@ struct DirectPassthroughFinalizerCore {
     headers: BTreeMap<String, String>,
     stream_usage_report_context: Option<Value>,
     stream_usage_observer: Option<StreamingStandardTerminalObserver>,
-    stream_usage_observer_buffered: Vec<u8>,
+    stream_usage_observer_buffered: StreamUsageObservationBuffer,
     provider_error_inspection: ProviderStreamErrorInspection,
     max_stream_body_buffer_bytes: usize,
-    provider_buffered_body: Vec<u8>,
-    buffered_body: Vec<u8>,
+    provider_buffered_body: StreamBodyCapture,
+    buffered_body: StreamBodyCapture,
     provider_body_truncated: bool,
     client_body_truncated: bool,
     client_stream_completion_tracker: ClientVisibleStreamCompletionTracker,
@@ -1864,7 +1974,7 @@ impl DirectPassthroughFinalizer {
             && core.terminal_failure.is_none()
     }
 
-    fn log_terminal_error_event_encode_failed(&self, err: impl std::fmt::Debug) {
+    fn log_terminal_error_event_encode_failed(&self, _err: impl std::fmt::Debug) {
         let core = self.core();
         warn!(
             event_name = "direct_passthrough_terminal_error_event_encode_failed",
@@ -1872,7 +1982,7 @@ impl DirectPassthroughFinalizer {
             trace_id = %core.trace_id,
             request_id = %core.request_id_for_log,
             candidate_id = ?core.candidate_id.as_deref(),
-            error = ?err,
+            error_category = "terminal_error_event_encode_failed",
             "gateway direct passthrough failed to encode terminal SSE error event"
         );
     }
@@ -1918,7 +2028,7 @@ impl DirectPassthroughFinalizer {
         core.provider_stream_bytes = core
             .provider_stream_bytes
             .saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
-        append_stream_capture_bytes(
+        append_budgeted_stream_capture_bytes(
             &mut core.provider_buffered_body,
             chunk.as_ref(),
             core.max_stream_body_buffer_bytes,
@@ -1956,7 +2066,7 @@ impl DirectPassthroughFinalizer {
             return;
         }
         let core = self.core_mut();
-        append_stream_capture_bytes(
+        append_budgeted_stream_capture_bytes(
             &mut core.buffered_body,
             chunk.as_ref(),
             core.max_stream_body_buffer_bytes,
@@ -2024,14 +2134,16 @@ impl DirectPassthroughFinalizer {
         // client disconnect or an execution timeout may cancel this body
         // future while terminal admission is backpressured; the handoff must
         // continue independently so the usage row cannot remain streaming.
+        let usage_producer = core.state.usage_runtime.track_producer();
         let task = tokio::spawn(async move {
+            let _usage_producer = usage_producer;
             core.finalize(downstream_dropped).await;
         });
-        if let Err(err) = task.await {
+        if let Err(_err) = task.await {
             warn!(
                 event_name = "direct_passthrough_terminal_handoff_failed",
                 log_type = "ops",
-                error = %err,
+                error_category = "terminal_handoff_failed",
                 "gateway direct passthrough terminal handoff task failed"
             );
         }
@@ -2045,7 +2157,9 @@ impl Drop for DirectPassthroughFinalizer {
         };
         observe_gateway_stage_ms("stream_finalizer_enqueue", 0);
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let usage_producer = core.state.usage_runtime.track_producer();
             handle.spawn(async move {
+                let _usage_producer = usage_producer;
                 core.finalize(true).await;
             });
         }
@@ -2432,7 +2546,7 @@ impl DirectPassthroughFinalizerCore {
         .await;
 
         if should_submit_report {
-            if let Err(err) = submit_stream_report(&state, usage_payload).await {
+            if let Err(_err) = submit_stream_report(&state, usage_payload).await {
                 warn!(
                     event_name = "execution_report_submit_failed",
                     log_type = "ops",
@@ -2440,7 +2554,7 @@ impl DirectPassthroughFinalizerCore {
                     request_id = %request_id_for_log,
                     candidate_id = ?candidate_id.as_deref(),
                     report_scope = "direct_passthrough_stream",
-                    error = ?err,
+                    error_category = "stream_report_submit_failed",
                     "gateway failed to submit direct passthrough stream execution report"
                 );
             }
@@ -2471,6 +2585,7 @@ struct DirectPassthroughInlineBodyState {
     upstream_control_filter: Option<SseControlBlockFilter>,
     upstream_started_at: Instant,
     stream_first_byte_timeout: Option<Duration>,
+    stream_idle_timeout: Option<Duration>,
     observed_first_body_poll: bool,
     observed_first_client_yield: bool,
     upstream_done: bool,
@@ -2487,6 +2602,7 @@ impl DirectPassthroughInlineBodyState {
         upstream_started_at: Instant,
         stream_first_byte_timeout: Option<Duration>,
     ) -> Self {
+        let stream_idle_timeout = resolve_stream_idle_timeout(&finalizer.core().plan);
         Self {
             finalizer: Some(finalizer),
             upstream: Some(direct_upstream_response_byte_stream(
@@ -2496,6 +2612,7 @@ impl DirectPassthroughInlineBodyState {
             upstream_control_filter: Some(SseControlBlockFilter::default()),
             upstream_started_at,
             stream_first_byte_timeout,
+            stream_idle_timeout,
             observed_first_body_poll: false,
             observed_first_client_yield: false,
             upstream_done: false,
@@ -2651,7 +2768,28 @@ impl DirectPassthroughInlineBodyState {
                 }
             }
         } else {
-            upstream.next().await
+            match await_stream_idle_read(upstream.next(), self.stream_idle_timeout).await {
+                Ok(item) => item,
+                Err(timeout) => {
+                    self.upstream.take();
+                    if let Some(finalizer) = self.finalizer.as_mut() {
+                        if finalizer.terminal_failure().is_none()
+                            && !finalizer
+                                .core()
+                                .client_stream_completion_tracker
+                                .successful_completion()
+                        {
+                            finalizer.set_terminal_failure(build_stream_transport_failure_report(
+                                "read_timeout",
+                                stream_idle_timeout_message(timeout),
+                                504,
+                            ));
+                        }
+                        finalizer.core_mut()._provider_pool_in_flight_guard.take();
+                    }
+                    None
+                }
+            }
         }
     }
 
@@ -2680,7 +2818,7 @@ impl DirectPassthroughInlineBodyState {
                 trace_id = %core.trace_id,
                 request_id = %core.request_id_for_log,
                 candidate_id = ?core.candidate_id.as_deref(),
-                error = %message,
+                error_category = "upstream_body_read_failed",
                 "gateway ignored direct passthrough teardown error after Anthropic message_stop"
             );
             return;
@@ -2693,7 +2831,7 @@ impl DirectPassthroughInlineBodyState {
             request_id = %core.request_id_for_log,
             candidate_id = ?core.candidate_id.as_deref(),
             upstream_bytes = core.provider_stream_bytes,
-            error = %message,
+            error_category = "upstream_body_read_failed",
             "gateway direct passthrough upstream body read failed"
         );
         finalizer.set_terminal_failure(build_stream_transport_failure_report(
@@ -2728,7 +2866,12 @@ impl Drop for DirectPassthroughInlineBodyState {
         if let Some(finalizer) = self.finalizer.take() {
             observe_gateway_stage_ms("stream_finalizer_enqueue", 0);
             if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                let usage_producer = finalizer
+                    .core
+                    .as_ref()
+                    .map(|core| core.state.usage_runtime.track_producer());
                 handle.spawn(async move {
+                    let _usage_producer = usage_producer;
                     let mut finalizer = finalizer;
                     finalizer.finalize(true).await;
                 });
@@ -2820,6 +2963,7 @@ async fn execute_stream_from_direct_passthrough(
         candidate_id: _,
         status_code,
         mut headers,
+        upstream_content_length: _,
         provider_api_format: _,
         stream_summary_report_context: _,
         prefetched_body,
@@ -2828,6 +2972,7 @@ async fn execute_stream_from_direct_passthrough(
         started_at: upstream_started_at,
         response_observation,
         stream_first_byte_timeout,
+        stream_idle_timeout,
         upstream_target_permit,
     } = execution;
 
@@ -2963,11 +3108,13 @@ async fn execute_stream_from_direct_passthrough(
             headers: headers_for_report,
             stream_usage_report_context,
             stream_usage_observer,
-            stream_usage_observer_buffered: Vec::new(),
+            stream_usage_observer_buffered: StreamUsageObservationBuffer::new(
+                max_stream_body_buffer_bytes,
+            ),
             provider_error_inspection: ProviderStreamErrorInspection::default(),
             max_stream_body_buffer_bytes,
-            provider_buffered_body: Vec::new(),
-            buffered_body: Vec::new(),
+            provider_buffered_body: StreamBodyCapture::default(),
+            buffered_body: StreamBodyCapture::default(),
             provider_body_truncated: false,
             client_body_truncated: false,
             client_stream_completion_tracker: ClientVisibleStreamCompletionTracker::default(),
@@ -3029,7 +3176,9 @@ async fn execute_stream_from_direct_passthrough(
     let candidate_id_for_report = candidate_id.clone();
     let provider_pool_in_flight_guard_for_report = in_flight_guard;
     record_stream_pre_first_byte_spawn();
+    let usage_producer = state_for_report.usage_runtime.track_producer();
     tokio::spawn(async move {
+        let _usage_producer = usage_producer;
         let mut stage_trace_for_report = stage_trace_for_report;
         let _stream_total_guard =
             StageElapsedGuard::from_started_at("stream_total", stream_started_at_for_report);
@@ -3045,10 +3194,11 @@ async fn execute_stream_from_direct_passthrough(
         let mut stream_usage_observer = stream_usage_report_context
             .as_ref()
             .map(|_| StreamingStandardTerminalObserver::default());
-        let mut stream_usage_observer_buffered = Vec::new();
+        let mut stream_usage_observer_buffered =
+            StreamUsageObservationBuffer::new(max_stream_body_buffer_bytes);
         let mut provider_error_inspection = ProviderStreamErrorInspection::default();
-        let mut provider_buffered_body = Vec::new();
-        let mut buffered_body = Vec::new();
+        let mut provider_buffered_body = StreamBodyCapture::default();
+        let mut buffered_body = StreamBodyCapture::default();
         let mut provider_body_truncated = false;
         let mut client_body_truncated = false;
         let mut upstream_control_filter = Some(SseControlBlockFilter::default());
@@ -3107,7 +3257,20 @@ async fn execute_stream_from_direct_passthrough(
                         downstream_dropped = true;
                         break;
                     }
-                    item = upstream.next() => item,
+                    result = await_stream_idle_read(upstream.next(), stream_idle_timeout) => {
+                        match result {
+                            Ok(item) => item,
+                            Err(timeout) => {
+                                if terminal_failure.is_none()
+                                    && !client_stream_completion_tracker.successful_completion() {
+                                    terminal_failure = Some(build_stream_transport_failure_report(
+                                        "read_timeout", stream_idle_timeout_message(timeout), 504,
+                                    ));
+                                }
+                                break;
+                            }
+                        }
+                    },
                 }
             };
 
@@ -3124,7 +3287,7 @@ async fn execute_stream_from_direct_passthrough(
                             trace_id = %trace_id_owned,
                             request_id = %request_id_for_report_log,
                             candidate_id = ?candidate_id_for_report.as_deref(),
-                            error = %message,
+                            error_category = "upstream_body_read_failed",
                             "gateway ignored direct passthrough teardown error after Anthropic message_stop"
                         );
                         break;
@@ -3136,7 +3299,7 @@ async fn execute_stream_from_direct_passthrough(
                         request_id = %request_id_for_report_log,
                         candidate_id = ?candidate_id_for_report.as_deref(),
                         upstream_bytes = provider_stream_bytes,
-                        error = %message,
+                        error_category = "upstream_body_read_failed",
                         "gateway direct passthrough upstream body read failed"
                     );
                     terminal_failure = Some(build_stream_transport_failure_report(
@@ -3231,7 +3394,7 @@ async fn execute_stream_from_direct_passthrough(
 
             provider_stream_bytes = provider_stream_bytes
                 .saturating_add(u64::try_from(provider_chunk.len()).unwrap_or(u64::MAX));
-            append_stream_capture_bytes(
+            append_budgeted_stream_capture_bytes(
                 &mut provider_buffered_body,
                 provider_chunk.as_ref(),
                 max_stream_body_buffer_bytes,
@@ -3335,14 +3498,14 @@ async fn execute_stream_from_direct_passthrough(
                     )
                     .await;
                 }
-                Err(err) => {
+                Err(_err) => {
                     warn!(
                         event_name = "direct_passthrough_terminal_error_event_encode_failed",
                         log_type = "ops",
                         trace_id = %trace_id_owned,
                         request_id = %request_id_for_report_log,
                         candidate_id = ?candidate_id_for_report.as_deref(),
-                        error = ?err,
+                        error_category = "terminal_error_event_encode_failed",
                         "gateway direct passthrough failed to encode terminal SSE error event"
                     );
                 }
@@ -3613,7 +3776,7 @@ async fn execute_stream_from_direct_passthrough(
         .await;
 
         if should_submit_report {
-            if let Err(err) = submit_stream_report(&state_for_report, usage_payload).await {
+            if let Err(_err) = submit_stream_report(&state_for_report, usage_payload).await {
                 warn!(
                     event_name = "execution_report_submit_failed",
                     log_type = "ops",
@@ -3621,7 +3784,7 @@ async fn execute_stream_from_direct_passthrough(
                     request_id = %request_id_for_report_log,
                     candidate_id = ?candidate_id_for_report.as_deref(),
                     report_scope = "direct_passthrough_stream",
-                    error = ?err,
+                    error_category = "stream_report_submit_failed",
                     "gateway failed to submit direct passthrough stream execution report"
                 );
             }
@@ -3655,17 +3818,30 @@ pub(crate) fn execute_execution_runtime_stream<'a>(
     report_kind: Option<String>,
     report_context: Option<serde_json::Value>,
 ) -> Pin<Box<dyn Future<Output = Result<Option<Response<Body>>, GatewayError>> + Send + 'a>> {
-    Box::pin(execute_execution_runtime_stream_inner(
-        state,
-        plan,
-        trace_id,
-        decision,
-        plan_kind,
-        report_kind,
-        report_context,
-        None,
-        None,
-    ))
+    Box::pin(async move {
+        let mut cancellation_guard = AttemptCancellationGuard::disarmed(
+            state,
+            STREAM_ATTEMPT_CANCELLED_ERROR_TYPE,
+            STREAM_ATTEMPT_CANCELLED_ERROR_MESSAGE,
+        );
+        let result = execute_execution_runtime_stream_inner(
+            state,
+            plan,
+            trace_id,
+            decision,
+            plan_kind,
+            report_kind,
+            report_context,
+            None,
+            None,
+            &mut cancellation_guard,
+        )
+        .await;
+        // The attempt reached its own terminal path, or handed settlement to the
+        // stream finalizer that now lives in the response body.
+        cancellation_guard.disarm();
+        result
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3687,7 +3863,12 @@ pub(crate) fn execute_execution_runtime_stream_with_retry_scope<'a>(
     Box::pin(async move {
         let mut retry_scope = AiAttemptRetryScope::Candidate;
         let mut fallback_response = None;
-        let response = execute_execution_runtime_stream_inner(
+        let mut cancellation_guard = AttemptCancellationGuard::disarmed(
+            state,
+            STREAM_ATTEMPT_CANCELLED_ERROR_TYPE,
+            STREAM_ATTEMPT_CANCELLED_ERROR_MESSAGE,
+        );
+        let result = execute_execution_runtime_stream_inner(
             state,
             plan,
             trace_id,
@@ -3697,8 +3878,13 @@ pub(crate) fn execute_execution_runtime_stream_with_retry_scope<'a>(
             report_context,
             Some(&mut retry_scope),
             Some(&mut fallback_response),
+            &mut cancellation_guard,
         )
-        .await?;
+        .await;
+        // The attempt reached its own terminal path, or handed settlement to the
+        // stream finalizer that now lives in the response body.
+        cancellation_guard.disarm();
+        let response = result?;
         Ok(match response {
             Some(response) => AiAttemptExecutionOutcome::Responded(response),
             None => AiAttemptExecutionOutcome::Retry {
@@ -3744,6 +3930,7 @@ async fn maybe_build_stream_transport_error_stop_response(
     .map(Some)
 }
 
+#[allow(clippy::too_many_arguments)] // internal function, grouping would add unnecessary indirection
 async fn execute_execution_runtime_stream_inner(
     state: &AppState,
     mut plan: ExecutionPlan,
@@ -3754,6 +3941,7 @@ async fn execute_execution_runtime_stream_inner(
     mut report_context: Option<serde_json::Value>,
     mut retry_scope_out: Option<&mut AiAttemptRetryScope>,
     mut retry_fallback_out: Option<&mut Option<Response<Body>>>,
+    cancellation_guard: &mut AttemptCancellationGuard,
 ) -> Result<Option<Response<Body>>, GatewayError> {
     let stream_started_at = Instant::now();
     let mut stage_trace = RequestStageTrace::from_env();
@@ -3772,6 +3960,46 @@ async fn execute_execution_runtime_stream_inner(
         plan_kind,
         report_context.as_ref(),
     );
+    let candidate_started_unix_secs = current_request_candidate_unix_ms();
+    let provider_in_flight_started_at = Instant::now();
+    let mut provider_pool_in_flight_guard =
+        match acquire_provider_pool_execution_guard(state, &plan).await? {
+            ProviderPoolInFlightAdmission::Acquired(guard) => guard,
+            ProviderPoolInFlightAdmission::Saturated { limit } => {
+                record_local_runtime_candidate_skip_reason(
+                    state,
+                    trace_id,
+                    "provider_key_concurrency_limit_reached",
+                );
+                if let Some(retry_scope) = retry_scope_out.as_deref_mut() {
+                    *retry_scope = AiAttemptRetryScope::Candidate;
+                }
+                if let Some(snapshot) = request_candidate_status_snapshot.as_ref() {
+                    record_local_request_candidate_status_snapshot(
+                        state,
+                        snapshot,
+                        SchedulerRequestCandidateStatusUpdate {
+                            status: RequestCandidateStatus::Skipped,
+                            status_code: Some(http::StatusCode::TOO_MANY_REQUESTS.as_u16()),
+                            error_type: Some("provider_key_concurrency_limit_reached".to_string()),
+                            error_message: Some(format!(
+                                "provider key concurrency limit reached: {limit}"
+                            )),
+                            latency_ms: Some(0),
+                            started_at_unix_ms: Some(candidate_started_unix_secs),
+                            finished_at_unix_ms: Some(candidate_started_unix_secs),
+                        },
+                    )
+                    .await;
+                }
+                return Ok(None);
+            }
+        };
+    observe_gateway_stage_trace_ms(
+        &mut stage_trace,
+        "stream_provider_in_flight",
+        provider_in_flight_started_at.elapsed().as_millis() as u64,
+    );
     // Inline passthrough records its lifecycle seed after upstream headers are
     // available. Avoid constructing a throwaway seed on the common path.
     let mut lifecycle_seed = (!defer_stream_pending_for_direct_inline)
@@ -3781,7 +4009,6 @@ async fn execute_execution_runtime_stream_inner(
         record_stream_pending_lifecycle(state, seed, &mut stage_trace).await;
         lifecycle_pending_recorded = true;
     }
-    let candidate_started_unix_secs = current_request_candidate_unix_ms();
     if let Some(snapshot) = request_candidate_status_snapshot.clone() {
         record_local_request_candidate_status_snapshot(
             state,
@@ -3798,6 +4025,16 @@ async fn execute_execution_runtime_stream_inner(
         )
         .await;
     }
+    // From here the attempt owns non-terminal rows, and everything that could
+    // settle them runs inside the downstream request future. Arm the guard so a
+    // client disconnect before the stream finalizer exists still settles them.
+    cancellation_guard.arm(
+        &plan,
+        report_context.as_ref(),
+        request_candidate_status_snapshot.as_ref(),
+        candidate_started_unix_secs,
+        stream_started_at,
+    );
     let plan_request_id_for_log = short_request_id(plan.request_id.as_str());
     let provider_name = plan
         .provider_name
@@ -3810,20 +4047,6 @@ async fn execute_execution_runtime_stream_inner(
         .and_then(|context| context.candidate_index)
         .map(|value| value.to_string())
         .unwrap_or_else(|| "-".to_string());
-    let provider_in_flight_started_at = Instant::now();
-    let mut provider_pool_in_flight_guard = acquire_provider_pool_in_flight_guard(
-        state.runtime_state.clone(),
-        &plan.provider_id,
-        plan.request_id.as_str(),
-        plan.candidate_id.as_deref(),
-        key_id.as_str(),
-    )
-    .await;
-    observe_gateway_stage_trace_ms(
-        &mut stage_trace,
-        "stream_provider_in_flight",
-        provider_in_flight_started_at.elapsed().as_millis() as u64,
-    );
     match maybe_execute_grok_stream(&plan, report_context.as_ref()).await {
         Ok(Some(grok_stream)) => {
             return execute_stream_from_frame_stream_with_retry_scope(
@@ -3848,8 +4071,8 @@ async fn execute_execution_runtime_stream_inner(
             .await;
         }
         Ok(None) => {}
-        Err(err) => {
-            let transport_error_message = err.to_string();
+        Err(_err) => {
+            let transport_error_message = "Grok stream execution unavailable".to_string();
             info!(
                 event_name = "grok_execution_unavailable",
                 log_type = "ops",
@@ -3861,7 +4084,7 @@ async fn execute_execution_runtime_stream_inner(
                 key_id = %key_id,
                 model_name = model_name.as_str(),
                 candidate_index = candidate_index.as_str(),
-                error = %err,
+                error_category = "grok_execution_unavailable",
                 "gateway Grok stream execution unavailable"
             );
             let terminal_unix_secs = current_request_candidate_unix_ms();
@@ -3921,8 +4144,8 @@ async fn execute_execution_runtime_stream_inner(
             .await;
         }
         Ok(None) => {}
-        Err(err) => {
-            let transport_error_message = err.to_string();
+        Err(_err) => {
+            let transport_error_message = "Windsurf stream execution unavailable".to_string();
             info!(
                 event_name = "windsurf_native_execution_unavailable",
                 log_type = "ops",
@@ -3934,7 +4157,7 @@ async fn execute_execution_runtime_stream_inner(
                 key_id = %key_id,
                 model_name = model_name.as_str(),
                 candidate_index = candidate_index.as_str(),
-                error = %err,
+                error_category = "windsurf_execution_unavailable",
                 "gateway native Windsurf stream execution unavailable"
             );
             let terminal_unix_secs = current_request_candidate_unix_ms();
@@ -3994,8 +4217,8 @@ async fn execute_execution_runtime_stream_inner(
             .await;
         }
         Ok(None) => {}
-        Err(err) => {
-            let transport_error_message = err.to_string();
+        Err(_err) => {
+            let transport_error_message = "Kiro web search execution unavailable".to_string();
             info!(
                 event_name = "kiro_web_search_mcp_unavailable",
                 log_type = "ops",
@@ -4007,7 +4230,7 @@ async fn execute_execution_runtime_stream_inner(
                 key_id = %key_id,
                 model_name = model_name.as_str(),
                 candidate_index = candidate_index.as_str(),
-                error = %err,
+                error_category = "kiro_web_search_unavailable",
                 "gateway Kiro web_search MCP execution unavailable"
             );
             let terminal_unix_secs = current_request_candidate_unix_ms();
@@ -4067,8 +4290,8 @@ async fn execute_execution_runtime_stream_inner(
             .await;
         }
         Ok(None) => {}
-        Err(err) => {
-            let transport_error_message = err.to_string();
+        Err(_err) => {
+            let transport_error_message = "ChatGPT-Web image execution unavailable".to_string();
             info!(
                 event_name = "chatgpt_web_image_execution_unavailable",
                 log_type = "ops",
@@ -4080,7 +4303,7 @@ async fn execute_execution_runtime_stream_inner(
                 key_id = %key_id,
                 model_name = model_name.as_str(),
                 candidate_index = candidate_index.as_str(),
-                error = %err,
+                error_category = "chatgpt_web_image_execution_unavailable",
                 "gateway ChatGPT-Web image stream execution unavailable"
             );
             let terminal_unix_secs = current_request_candidate_unix_ms();
@@ -4141,8 +4364,8 @@ async fn execute_execution_runtime_stream_inner(
                 }
                 return Err(err);
             }
-            Err(InProcessStreamExecutionError::Transport(err)) => {
-                let transport_error_message = err.to_string();
+            Err(InProcessStreamExecutionError::Transport(_err)) => {
+                let transport_error_message = "Execution runtime unavailable".to_string();
                 info!(
                     event_name = "stream_execution_runtime_unavailable",
                     log_type = "ops",
@@ -4154,7 +4377,7 @@ async fn execute_execution_runtime_stream_inner(
                     key_id,
                     model_name,
                     candidate_index = candidate_index.as_str(),
-                    error = %err,
+                    error_category = "execution_runtime_unavailable",
                     "gateway in-process stream execution unavailable"
                 );
                 let terminal_unix_secs = current_request_candidate_unix_ms();
@@ -4281,8 +4504,8 @@ async fn execute_execution_runtime_stream_inner(
                     }
                     return Err(err);
                 }
-                Err(InProcessStreamExecutionError::Transport(err)) => {
-                    let transport_error_message = err.to_string();
+                Err(InProcessStreamExecutionError::Transport(_err)) => {
+                    let transport_error_message = "Execution runtime unavailable".to_string();
                     info!(
                         event_name = "stream_execution_runtime_unavailable",
                         log_type = "ops",
@@ -4294,7 +4517,7 @@ async fn execute_execution_runtime_stream_inner(
                         key_id,
                         model_name,
                         candidate_index = candidate_index.as_str(),
-                        error = %err,
+                        error_category = "execution_runtime_unavailable",
                         "gateway in-process stream execution unavailable"
                     );
                     let terminal_unix_secs = current_request_candidate_unix_ms();
@@ -4409,15 +4632,15 @@ async fn execute_execution_runtime_stream_inner(
         .await
         {
             Ok(response) => response,
-            Err(err) => {
-                let transport_error_message = format!("{err:?}");
+            Err(_err) => {
+                let transport_error_message = "Remote execution runtime unavailable".to_string();
                 warn!(
                     event_name = "stream_execution_runtime_remote_unavailable",
                     log_type = "ops",
                     trace_id = %trace_id,
                     request_id = %plan_request_id_for_log,
                     candidate_id = ?plan.candidate_id,
-                    error = ?err,
+                    error_category = "execution_runtime_unavailable",
                     "gateway remote execution runtime stream unavailable"
                 );
                 let terminal_unix_secs = current_request_candidate_unix_ms();
@@ -4506,8 +4729,8 @@ async fn execute_execution_runtime_stream_inner(
             frame_stream,
             false,
             provider_pool_in_flight_guard.take(),
-            retry_scope_out.as_deref_mut(),
-            retry_fallback_out.as_deref_mut(),
+            retry_scope_out,
+            retry_fallback_out,
             Some(remote_fallback_observation),
         )
         .await;
@@ -4518,12 +4741,25 @@ fn decode_stream_data_chunk(
     chunk_b64: Option<&str>,
     text: Option<&str>,
 ) -> Result<Vec<u8>, GatewayError> {
+    decode_stream_data_chunk_with_limit(chunk_b64, text, MAX_EXECUTION_STREAM_DATA_CHUNK_BYTES)
+}
+
+fn decode_stream_data_chunk_with_limit(
+    chunk_b64: Option<&str>,
+    text: Option<&str>,
+    max_bytes: usize,
+) -> Result<Vec<u8>, GatewayError> {
     if let Some(chunk_b64) = chunk_b64 {
-        return base64::engine::general_purpose::STANDARD
-            .decode(chunk_b64)
+        return decode_base64_body_with_limit(chunk_b64, max_bytes)
             .map_err(|err| GatewayError::Internal(err.to_string()));
     }
-    Ok(text.unwrap_or_default().as_bytes().to_vec())
+    let text = text.unwrap_or_default().as_bytes();
+    if text.len() > max_bytes {
+        return Err(GatewayError::Internal(format!(
+            "execution runtime stream data chunk exceeds {max_bytes} bytes"
+        )));
+    }
+    Ok(text.to_vec())
 }
 
 fn response_headers_indicate_sse(headers: &BTreeMap<String, String>) -> bool {
@@ -4611,6 +4847,31 @@ fn normalize_declared_stream_response_headers(headers: &mut BTreeMap<String, Str
 fn parse_prefetched_sync_json_body(body: &[u8]) -> Option<Value> {
     let stripped = strip_utf8_bom_and_ws(body);
     serde_json::from_slice::<Value>(stripped).ok()
+}
+
+fn success_failover_matchable_body<'body>(
+    headers: &BTreeMap<String, String>,
+    body: &'body [u8],
+) -> Option<&'body [u8]> {
+    if body.is_empty() {
+        return None;
+    }
+    if response_headers_indicate_sse(headers) {
+        let mut complete_end = 0;
+        while let Some((record_end, separator_len)) =
+            find_sse_record_boundary(&body[complete_end..])
+        {
+            complete_end += record_end + separator_len;
+        }
+        return (complete_end > 0).then_some(&body[..complete_end]);
+    }
+    let stripped = strip_utf8_bom_and_ws(body);
+    if stripped.starts_with(b"{") || stripped.starts_with(b"[") {
+        if serde_json::from_slice::<Value>(stripped).is_err_and(|error| error.is_eof()) {
+            return None;
+        }
+    }
+    Some(body)
 }
 
 fn resolve_provider_stream_error_status_code(
@@ -4994,7 +5255,7 @@ enum SseTerminalPolicy {
 }
 
 #[derive(Default)]
-struct ClientVisibleStreamCompletionTracker {
+pub(crate) struct ClientVisibleStreamCompletionTracker {
     line_buffer: Vec<u8>,
     event_type: Option<String>,
     data_payload: String,
@@ -5004,11 +5265,20 @@ struct ClientVisibleStreamCompletionTracker {
     discarded_line_nonempty: bool,
     skip_next_lf: bool,
     completed: bool,
+    successfully_completed: bool,
 }
 
 impl ClientVisibleStreamCompletionTracker {
-    fn observe_chunk(&mut self, chunk: &[u8]) -> bool {
+    pub(crate) fn observe_chunk(&mut self, chunk: &[u8]) -> bool {
         self.observe_chunk_terminal_end(chunk);
+        self.completed
+    }
+
+    pub(crate) fn successful_completion(&self) -> bool {
+        self.successfully_completed
+    }
+
+    pub(crate) fn observed_terminal(&self) -> bool {
         self.completed
     }
 
@@ -5099,6 +5369,9 @@ impl ClientVisibleStreamCompletionTracker {
 
         if line.is_empty() {
             self.completed = self.current_event_is_terminal(policy);
+            if self.completed {
+                self.successfully_completed = self.current_event_is_successful();
+            }
             self.reset_current_event();
             self.record_bytes = 0;
             return;
@@ -5162,6 +5435,37 @@ impl ClientVisibleStreamCompletionTracker {
         self.event_type = None;
         self.data_payload.clear();
         self.has_data_payload = false;
+    }
+
+    fn current_event_is_successful(&self) -> bool {
+        let payload = self
+            .has_data_payload
+            .then(|| serde_json::from_str::<Value>(&self.data_payload).ok())
+            .flatten();
+        let payload_type = payload
+            .as_ref()
+            .and_then(|value| value.get("type"))
+            .and_then(Value::as_str);
+        if [self.event_type.as_deref(), payload_type]
+            .into_iter()
+            .flatten()
+            .any(|kind| matches!(kind, "response.failed" | "response.incomplete" | "error"))
+        {
+            return false;
+        }
+        if payload
+            .as_ref()
+            .and_then(|value| value.pointer("/response/status"))
+            .and_then(Value::as_str)
+            .is_some_and(|status| status != "completed")
+        {
+            return false;
+        }
+        self.data_payload == "[DONE]"
+            || matches!(
+                payload_type.or(self.event_type.as_deref()),
+                Some("message_stop" | "response.completed")
+            )
     }
 }
 
@@ -5367,6 +5671,10 @@ fn serialized_stream_frame_len(frame: &StreamFrame) -> usize {
     serde_json::to_vec(frame).map_or(usize::MAX, |encoded| encoded.len())
 }
 
+fn execution_stream_frame_codec() -> LinesCodec {
+    LinesCodec::new_with_max_length(crate::execution_runtime::MAX_EXECUTION_STREAM_FRAME_LINE_BYTES)
+}
+
 fn should_refresh_stream_usage_telemetry(
     previous: Option<&ExecutionTelemetry>,
     next: &ExecutionTelemetry,
@@ -5550,6 +5858,30 @@ fn should_probe_success_failover_before_stream(headers: &BTreeMap<String, String
     content_type.contains("json") || content_type.ends_with("+json")
 }
 
+async fn record_prefetch_success_failover(
+    state: &AppState,
+    plan: &ExecutionPlan,
+    report_context: Option<&Value>,
+    elapsed_ms: u64,
+) {
+    let finished_at = current_request_candidate_unix_ms();
+    record_local_request_candidate_status(
+        state,
+        plan,
+        report_context,
+        SchedulerRequestCandidateStatusUpdate {
+            status: RequestCandidateStatus::Failed,
+            status_code: Some(200),
+            error_type: Some("success_failover_pattern".to_string()),
+            error_message: Some("HTTP 200 response matched a precommit failover rule".to_string()),
+            latency_ms: Some(elapsed_ms),
+            started_at_unix_ms: None,
+            finished_at_unix_ms: Some(finished_at),
+        },
+    )
+    .await;
+}
+
 async fn probe_local_stream_success_failover_text<R>(
     buffered_frames: &mut VecDeque<ObservedStreamFrame>,
     lines: &mut FramedRead<R, LinesCodec>,
@@ -5653,7 +5985,7 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
         .map(|value| value.to_string())
         .unwrap_or_else(|| "-".to_string());
     let reader = PostStopLimitedStreamReader::new(frame_stream, PostStopFrameReadBudget::new());
-    let mut lines = FramedRead::new(reader, LinesCodec::new());
+    let mut lines = FramedRead::new(reader, execution_stream_frame_codec());
 
     let first_frame_started_at = Instant::now();
     let first_frame = read_next_frame(&mut lines).await?.ok_or_else(|| {
@@ -5707,7 +6039,11 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
     }
     let mut buffered_frames = VecDeque::new();
     let mut stream_terminal_summary: Option<ExecutionStreamTerminalSummary> = None;
-    if status_code == 200 && should_probe_success_failover_before_stream(&headers) {
+    let direct_stream_finalize_kind = resolve_core_stream_direct_finalize_report_kind(plan_kind);
+    if status_code == 200
+        && direct_stream_finalize_kind.is_none()
+        && should_probe_success_failover_before_stream(&headers)
+    {
         let success_probe_text =
             probe_local_stream_success_failover_text(&mut buffered_frames, &mut lines).await?;
         if should_retry_next_local_candidate_stream(
@@ -6092,20 +6428,38 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                 candidate_id,
             )?));
         }
-        return Ok(Some(attach_control_metadata_headers(
+        let response = if (300..400).contains(&status_code) {
+            build_client_response_from_parts_with_mutator(
+                client_status_code,
+                &client_response_headers,
+                Body::from(client_error_body),
+                trace_id,
+                Some(decision),
+                |headers| {
+                    headers.insert(
+                        http::HeaderName::from_static("x-aether-upstream-status"),
+                        http::HeaderValue::from_str(&status_code.to_string())
+                            .map_err(|error| GatewayError::Internal(error.to_string()))?,
+                    );
+                    Ok(())
+                },
+            )?
+        } else {
             build_client_response_from_parts(
                 client_status_code,
                 &client_response_headers,
                 Body::from(client_error_body),
                 trace_id,
                 Some(decision),
-            )?,
+            )?
+        };
+        return Ok(Some(attach_control_metadata_headers(
+            response,
             Some(request_id),
             candidate_id,
         )?));
     }
 
-    let direct_stream_finalize_kind = resolve_core_stream_direct_finalize_report_kind(plan_kind);
     let normalized_stream_report_context =
         normalize_provider_private_report_context(report_context.as_ref());
     let upstream_headers = headers.clone();
@@ -6147,7 +6501,33 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
     }
     let prefetch_for_cyber_failover =
         is_openai_responses_family_format(plan.provider_api_format.as_str())
-            && cyber_continue_failover_enabled(state).await;
+            && crate::orchestration::routing_execution_policy_from_report_context(
+                report_context.as_ref(),
+            )
+            .is_some_and(|policy| policy.cyber_continue_failover);
+    let prefetch_failover_policy =
+        crate::orchestration::resolve_local_failover_policy(state, &plan, report_context.as_ref())
+            .await;
+    let prefetch_success_patterns = prefetch_failover_policy
+        .routing_rules
+        .success_failover_patterns
+        .iter()
+        .map(|rule| (&rule.pattern, &rule.status_codes))
+        .chain(
+            prefetch_failover_policy
+                .success_failover_patterns
+                .iter()
+                .map(|rule| (&rule.pattern, &rule.status_codes)),
+        )
+        .filter(|_| {
+            !crate::execution_runtime::fallback::openai_image_success_disables_local_success_failover(
+                &plan,
+                status_code,
+            )
+        })
+        .filter(|(_, status_codes)| status_codes.is_empty() || status_codes.contains(&200))
+        .filter_map(|(pattern, _)| regex::Regex::new(pattern.trim()).ok())
+        .collect::<Vec<_>>();
     let stream_commit_policy = StreamCommitPolicy::for_response(
         direct_stream_finalize_kind.is_some(),
         upstream_content_type,
@@ -6155,15 +6535,24 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
         plan.client_api_format.as_str(),
         private_stream_normalizer.is_some(),
         local_stream_rewriter.is_some(),
-        prefetch_for_cyber_failover,
-    );
-    let reuse_committed_precommit =
-        stream_precommit_committed && stream_commit_policy.is_native_anthropic();
+        prefetch_for_cyber_failover || !prefetch_success_patterns.is_empty(),
+    )
+    .with_precommit_wait(Duration::from_millis(
+        plan.timeouts
+            .as_ref()
+            .and_then(|timeouts| timeouts.first_byte_ms)
+            .unwrap_or(30_000)
+            .max(1),
+    ));
+    let reuse_committed_precommit = stream_precommit_committed
+        && stream_commit_policy.is_native_anthropic()
+        && prefetch_success_patterns.is_empty();
     let skip_direct_finalize_prefetch =
         stream_commit_policy.commits_on_response_headers() || reuse_committed_precommit;
     let limit_direct_finalize_prefetch =
         should_limit_direct_finalize_prefetch(plan_kind, local_stream_rewriter.is_some())
-            || stream_commit_policy.requires_bounded_frame_wait();
+            || stream_commit_policy.requires_bounded_frame_wait()
+            || !prefetch_success_patterns.is_empty();
     let mut stream_commit_gate = StreamCommitGate::new(stream_commit_policy);
     let mut prefetch_client_completion_tracker = ClientVisibleStreamCompletionTracker::default();
     let mut prefetched_client_visible_stream_completed = false;
@@ -6215,7 +6604,8 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                     .max_precommit_wait()
                     .map(|max_wait| max_wait.saturating_sub(precommit_started_at.elapsed()))
                     .unwrap_or(REWRITTEN_STREAM_PREFETCH_TIMEOUT);
-                if prefetch_timeout.is_zero() {
+                if prefetch_timeout.is_zero() && !stream_commit_policy.requires_bounded_frame_wait()
+                {
                     stream_commit_gate.commit();
                     debug!(
                         event_name = "execution_runtime_stream_prefetch_limited",
@@ -6246,6 +6636,29 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                 {
                     Ok(result) => result,
                     Err(_) => {
+                        if stream_commit_policy.requires_bounded_frame_wait() {
+                            let failure = build_stream_transport_failure_report(
+                                "first_byte_timeout", "Upstream did not produce a semantic event before the first byte deadline", 504,
+                            );
+                            return handle_prefetch_stream_failure(
+                                state,
+                                trace_id,
+                                decision,
+                                &plan,
+                                report_context,
+                                request_id,
+                                candidate_id,
+                                report_kind,
+                                headers,
+                                prefetched_usage_telemetry.clone(),
+                                &provider_prefetched_body,
+                                candidate_started_unix_secs,
+                                stream_elapsed_ms_since(stream_started_at),
+                                failure,
+                                retry_scope_out.as_deref_mut(),
+                            )
+                            .await;
+                        }
                         stream_commit_gate.commit();
                         debug!(
                             event_name = "execution_runtime_stream_prefetch_limited",
@@ -6300,10 +6713,11 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                     .await;
                 }
             }) else {
-                if stream_commit_policy.is_native_anthropic() && stream_commit_gate.is_uncommitted()
+                if stream_commit_policy.requires_bounded_frame_wait()
+                    && stream_commit_gate.is_uncommitted()
                 {
                     let error_body_json = anthropic_premature_eof_error_body(
-                        "upstream Anthropic stream ended before the first semantic event",
+                        "upstream stream ended before the first semantic event",
                     );
                     let error_status_code = anthropic_error_status_code(&error_body_json);
                     return handle_prefetch_provider_private_stream_error(
@@ -6342,6 +6756,12 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                             &mut stage_trace,
                             "stream_first_data",
                             stream_elapsed_ms_at(stream_started_at, frame_observed_at),
+                        );
+                        state.usage_runtime.record_stream_started(
+                            state.usage_lifecycle_data_state().as_ref(),
+                            &lifecycle_seed,
+                            status_code,
+                            prefetched_usage_telemetry.as_ref(),
                         );
                     }
                     let mut chunk =
@@ -6408,7 +6828,7 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                         &mut prefetched_inspection_body_truncated,
                     );
 
-                    let anthropic_commit_ready =
+                    let semantic_commit_ready =
                         match stream_commit_gate.observe_provider_bytes(&chunk) {
                             StreamPrecommitObservation::Pending => false,
                             StreamPrecommitObservation::Commit => true,
@@ -6416,6 +6836,14 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                                 status_code: error_status_code,
                                 body_json: error_body_json,
                             } => {
+                                let error_status_code = if plan
+                                    .provider_api_format
+                                    .eq_ignore_ascii_case("claude:messages")
+                                {
+                                    anthropic_error_status_code(&error_body_json)
+                                } else {
+                                    error_status_code
+                                };
                                 return handle_prefetch_provider_private_stream_error(
                                     state,
                                     trace_id,
@@ -6438,7 +6866,7 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                             }
                         };
 
-                    if !anthropic_commit_ready {
+                    if !semantic_commit_ready || private_stream_normalizer.is_some() {
                         if let Some(error_body_json) = extract_provider_private_stream_error_body(
                             report_context.as_ref(),
                             &prefetched_inspection_body,
@@ -6470,7 +6898,7 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                         }
                     }
 
-                    let inspection = if stream_commit_policy.is_native_anthropic() {
+                    let inspection = if stream_commit_policy.requires_bounded_frame_wait() {
                         StreamPrefetchInspection::NeedMore
                     } else {
                         inspect_prefetched_stream_body(
@@ -6480,58 +6908,60 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                     };
                     match inspection {
                         StreamPrefetchInspection::EmbeddedError(body_json) => {
-                            debug!(
-                                event_name = "execution_runtime_stream_prefetch_embedded_error_detected",
-                                log_type = "debug",
-                                trace_id = %trace_id,
-                                request_id = %request_id_for_log,
-                                candidate_id = ?candidate_id,
-                                plan_kind,
-                                report_kind,
-                                provider_name,
-                                endpoint_id = %plan.endpoint_id,
-                                key_id = %plan.key_id,
-                                model_name,
-                                candidate_index = candidate_index.as_str(),
-                                provider_prefetched_body_bytes = provider_prefetched_body.len(),
-                                "gateway detected embedded error while prefetching execution runtime stream"
-                            );
-                            let request_diagnostics = current_request_diagnostics();
-                            let terminal_report_context = report_context_with_request_diagnostics(
-                                report_context,
-                                request_diagnostics.as_ref(),
-                                stream_started_at,
-                                prefetched_usage_telemetry.as_ref(),
-                            );
-                            let payload = build_stream_sync_payload(
-                                trace_id,
-                                report_kind.clone(),
-                                terminal_report_context,
+                            let error_status_code = resolve_provider_stream_error_status_code(
+                                plan.provider_api_format.as_str(),
                                 status_code,
-                                headers,
-                                Some(body_json),
-                                None,
-                                prefetched_usage_telemetry.clone(),
+                                &body_json,
                             );
-                            record_sync_terminal_usage_with_handoff(
+                            return handle_prefetch_provider_private_stream_error(
                                 state,
+                                trace_id,
+                                decision,
                                 &plan,
-                                payload.report_context.as_ref(),
-                                &payload,
+                                report_context,
+                                request_id,
+                                candidate_id,
+                                report_kind,
+                                headers,
+                                prefetched_usage_telemetry.clone(),
+                                &provider_prefetched_body,
+                                status_code,
+                                error_status_code,
+                                body_json,
+                                retry_scope_out.as_deref_mut(),
+                                retry_fallback_out.as_deref_mut(),
                             )
                             .await;
-                            let response = submit_local_core_error_or_sync_finalize(
-                                state, trace_id, decision, payload,
-                            )
-                            .await?;
-                            return Ok(Some(attach_control_metadata_headers(
-                                response,
-                                Some(request_id),
-                                candidate_id,
-                            )?));
                         }
                         StreamPrefetchInspection::NeedMore => {}
                         StreamPrefetchInspection::NonError => {}
+                    }
+
+                    if !prefetch_success_patterns.is_empty()
+                        && crate::orchestration::attempt_identity_from_report_context(
+                            report_context.as_ref(),
+                        )
+                        .is_some()
+                    {
+                        if let Some(matchable_body) = success_failover_matchable_body(
+                            &upstream_headers,
+                            &prefetched_inspection_body,
+                        ) {
+                            let response_text = String::from_utf8_lossy(matchable_body);
+                            if prefetch_success_patterns.iter().any(|pattern| pattern.is_match(&response_text))
+                                && crate::orchestration::classify_local_failover(
+                                    &prefetch_failover_policy,
+                                    crate::orchestration::LocalFailoverInput::new(status_code, Some(&response_text)),
+                                ) == crate::orchestration::LocalFailoverClassification::RetrySuccessPattern
+                            {
+                                record_prefetch_success_failover(state, &plan, report_context.as_ref(), stream_elapsed_ms_since(stream_started_at)).await;
+                                if let Some(retry_scope) = retry_scope_out.as_deref_mut() {
+                                    *retry_scope = AiAttemptRetryScope::Candidate;
+                                }
+                                warn!(event_name = "local_stream_candidate_retry_scheduled", log_type = "event", trace_id, request_id, status_code, "gateway retrying after a precommit success pattern match");
+                                return Ok(None);
+                            }
+                        }
                     }
 
                     if !response_headers_indicate_sse(&upstream_headers)
@@ -6549,8 +6979,7 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                                 Ok(Some(outcome)) => {
                                     if let Some(record) = outcome.response_history_record {
                                         crate::ai_serving::persist_response_history_record(
-                                            state.runtime_state(),
-                                            record,
+                                            state, record,
                                         )
                                         .await;
                                     }
@@ -6673,8 +7102,12 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                         prefetched_chunks.push(Bytes::from(rewritten_chunk));
                     }
 
-                    if anthropic_commit_ready
+                    if semantic_commit_ready
                         || (matches!(inspection, StreamPrefetchInspection::NonError)
+                            && (prefetch_success_patterns.is_empty()
+                                || response_headers_indicate_sse(&upstream_headers)
+                                || parse_prefetched_sync_json_body(&prefetched_inspection_body)
+                                    .is_some())
                             && (!prefetch_for_cyber_failover
                                 || prefetched_openai_responses_body_has_output_boundary(
                                     &prefetched_inspection_body,
@@ -6689,11 +7122,11 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                     prefetched_telemetry = Some(frame_telemetry);
                 }
                 StreamFramePayload::Eof { summary } => {
-                    if stream_commit_policy.is_native_anthropic()
+                    if stream_commit_policy.requires_bounded_frame_wait()
                         && stream_commit_gate.is_uncommitted()
                     {
                         let error_body_json = anthropic_premature_eof_error_body(
-                            "upstream Anthropic stream ended before the first semantic event",
+                            "upstream stream ended before the first semantic event",
                         );
                         let error_status_code = anthropic_error_status_code(&error_body_json);
                         return handle_prefetch_provider_private_stream_error(
@@ -6729,7 +7162,9 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                         trace_id = %trace_id,
                         request_id,
                         candidate_id = ?candidate_id,
-                        error = %error.message,
+                        error_kind = ?error.kind,
+                        error_phase = ?error.phase,
+                        upstream_status = ?error.upstream_status,
                         "execution runtime stream emitted error frame during prefetch"
                     );
                     return handle_prefetch_stream_failure(
@@ -6762,7 +7197,7 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
         .as_mut()
         .and_then(|rewriter| rewriter.take_response_history_record())
     {
-        crate::ai_serving::persist_response_history_record(state.runtime_state(), record).await;
+        crate::ai_serving::persist_response_history_record(state, record).await;
         true
     } else {
         false
@@ -6832,7 +7267,7 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
     let native_anthropic_stream_for_report = stream_commit_policy.is_native_anthropic();
     let plan_for_report = plan;
     let emit_passthrough_sse_terminal_error = (skip_direct_finalize_prefetch
-        || stream_commit_policy.is_native_anthropic()
+        || stream_commit_policy.requires_bounded_frame_wait()
         || normalized_declared_stream_headers)
         && (response_headers_indicate_sse(&upstream_headers) || normalized_declared_stream_headers)
         && !is_openai_image_stream_for_report;
@@ -6846,13 +7281,15 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
     let stage_trace_for_report = stage_trace;
     let request_diagnostics_for_report = current_request_diagnostics();
     let provider_pool_in_flight_guard_for_report = in_flight_guard;
+    let usage_producer = state_for_report.usage_runtime.track_producer();
     tokio::spawn(async move {
+        let _usage_producer = usage_producer;
         let mut stage_trace_for_report = stage_trace_for_report;
         let _stream_total_guard =
             StageElapsedGuard::from_started_at("stream_total", stream_started_at_for_report);
         let _provider_pool_in_flight_guard = provider_pool_in_flight_guard_for_report;
-        let mut provider_buffered_body = Vec::new();
-        let mut buffered_body = Vec::new();
+        let mut provider_buffered_body = StreamBodyCapture::default();
+        let mut buffered_body = StreamBodyCapture::default();
         let mut provider_body_truncated = false;
         let mut client_body_truncated = false;
         let mut private_stream_normalizer = if sync_json_stream_bridge_active_for_report {
@@ -6876,15 +7313,16 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
             .as_ref()
             .filter(|_| !sync_json_stream_bridge_active_for_report)
             .map(|_| StreamingStandardTerminalObserver::default());
-        let mut stream_usage_observer_buffered = Vec::new();
+        let mut stream_usage_observer_buffered =
+            StreamUsageObservationBuffer::new(max_stream_body_buffer_bytes);
         let mut provider_error_inspection = ProviderStreamErrorInspection::default();
-        append_stream_capture_bytes(
+        append_budgeted_stream_capture_bytes(
             &mut provider_buffered_body,
             &provider_prefetched_body_for_report,
             max_stream_body_buffer_bytes,
             &mut provider_body_truncated,
         );
-        append_stream_capture_bytes(
+        append_budgeted_stream_capture_bytes(
             &mut buffered_body,
             &prefetched_body_for_report,
             max_stream_body_buffer_bytes,
@@ -7038,7 +7476,7 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                             trace_id = %trace_id_owned,
                             request_id = %request_id_for_report_log,
                             candidate_id = ?candidate_id_for_report.as_deref(),
-                            error = ?err,
+                            error_category = "stream_normalization_restore_failed",
                             "gateway failed to restore private stream normalization state after prefetch"
                         );
                         terminal_failure = Some(build_stream_failure_report(
@@ -7091,7 +7529,7 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                             trace_id = %trace_id_owned,
                             request_id = %request_id_for_report_log,
                             candidate_id = ?candidate_id_for_report.as_deref(),
-                            error = ?err,
+                            error_category = "stream_rewrite_restore_failed",
                             "gateway failed to restore local stream rewrite state after prefetch"
                         );
                         terminal_failure = Some(build_stream_failure_report(
@@ -7110,6 +7548,12 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                 }
             }
         }
+
+        // These buffers restore parser/rewriter state above. Audit capture owns
+        // its budgeted copies; retaining semantic prefetch duplicates for the
+        // rest of the stream would bypass the capture memory limit.
+        drop(provider_prefetched_body_for_report);
+        drop(prefetched_body_for_report);
 
         if terminal_failure.is_none() && !reached_eof {
             loop {
@@ -7157,7 +7601,7 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                                 trace_id = %trace_id_owned,
                                 request_id = %request_id_for_report_log,
                                 candidate_id = ?candidate_id_for_report.as_deref(),
-                                error = ?err,
+                                error_category = "stream_frame_decode_failed",
                                 "gateway ignored execution runtime teardown error after Anthropic message_stop"
                             );
                             break;
@@ -7168,7 +7612,7 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                             trace_id = %trace_id_owned,
                             request_id = %request_id_for_report_log,
                             candidate_id = ?candidate_id_for_report.as_deref(),
-                            error = ?err,
+                            error_category = "stream_frame_decode_failed",
                             "gateway failed to decode execution runtime stream frame"
                         );
                         terminal_failure = Some(build_stream_failure_report(
@@ -7256,7 +7700,7 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                                         trace_id = %trace_id_owned,
                                         request_id = %request_id_for_report_log,
                                         candidate_id = ?candidate_id_for_report.as_deref(),
-                                        error = ?err,
+                                        error_category = "stream_chunk_decode_failed",
                                         "gateway failed to decode execution runtime chunk"
                                     );
                                     terminal_failure = Some(build_stream_failure_report(
@@ -7291,7 +7735,7 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                             u64::try_from(chunk.len()).unwrap_or(u64::MAX),
                             Ordering::Relaxed,
                         );
-                        append_stream_capture_bytes(
+                        append_budgeted_stream_capture_bytes(
                             &mut provider_buffered_body,
                             &chunk,
                             max_stream_body_buffer_bytes,
@@ -7309,7 +7753,7 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                                         trace_id = %trace_id_owned,
                                         request_id = %request_id_for_report_log,
                                         candidate_id = ?candidate_id_for_report.as_deref(),
-                                        error = ?err,
+                                        error_category = "stream_chunk_normalize_failed",
                                         "gateway failed to normalize execution runtime stream chunk"
                                     );
                                     terminal_failure = Some(build_stream_failure_report(
@@ -7347,7 +7791,7 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                                         trace_id = %trace_id_owned,
                                         request_id = %request_id_for_report_log,
                                         candidate_id = ?candidate_id_for_report.as_deref(),
-                                        error = ?err,
+                                        error_category = "stream_chunk_rewrite_failed",
                                         "gateway failed to rewrite execution runtime stream chunk"
                                     );
                                     terminal_failure = Some(build_stream_failure_report(
@@ -7368,7 +7812,7 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                                 .and_then(|rewriter| rewriter.take_response_history_record())
                             {
                                 crate::ai_serving::persist_response_history_record(
-                                    state_for_report.runtime_state(),
+                                    &state_for_report,
                                     record,
                                 )
                                 .await;
@@ -7392,7 +7836,7 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                             continue;
                         }
 
-                        append_stream_capture_bytes(
+                        append_budgeted_stream_capture_bytes(
                             &mut buffered_body,
                             &rewritten_chunk,
                             max_stream_body_buffer_bytes,
@@ -7482,7 +7926,9 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                                 trace_id = %trace_id_owned,
                                 request_id = %request_id_for_report_log,
                                 candidate_id = ?candidate_id_for_report.as_deref(),
-                                error = %error.message,
+                                error_kind = ?error.kind,
+                                error_phase = ?error.phase,
+                                upstream_status = ?error.upstream_status,
                                 "gateway ignored execution runtime error frame after Anthropic message_stop"
                             );
                             continue;
@@ -7493,7 +7939,9 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                             trace_id = %trace_id_owned,
                             request_id = %request_id_for_report_log,
                             candidate_id = ?candidate_id_for_report.as_deref(),
-                            error = %error.message,
+                            error_kind = ?error.kind,
+                            error_phase = ?error.phase,
+                            upstream_status = ?error.upstream_status,
                             "execution runtime stream emitted error frame"
                         );
                         terminal_failure = Some(build_stream_failure_from_execution_error(&error));
@@ -7551,7 +7999,7 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                                         trace_id = %trace_id_owned,
                                         request_id = %request_id_for_report_log,
                                         candidate_id = ?candidate_id_for_report.as_deref(),
-                                        error = ?err,
+                                        error_category = "stream_flush_rewrite_failed",
                                         "gateway failed to rewrite normalized private stream chunk during flush"
                                     );
                                     let failure = build_stream_failure_report(
@@ -7572,14 +8020,14 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                                 .and_then(|rewriter| rewriter.take_response_history_record())
                             {
                                 crate::ai_serving::persist_response_history_record(
-                                    state_for_report.runtime_state(),
+                                    &state_for_report,
                                     record,
                                 )
                                 .await;
                             }
                         }
                         if !rewritten_chunk.is_empty() {
-                            append_stream_capture_bytes(
+                            append_budgeted_stream_capture_bytes(
                                 &mut buffered_body,
                                 &rewritten_chunk,
                                 max_stream_body_buffer_bytes,
@@ -7636,7 +8084,7 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                         trace_id = %trace_id_owned,
                         request_id = %request_id_for_report_log,
                         candidate_id = ?candidate_id_for_report.as_deref(),
-                        error = ?err,
+                        error_category = "stream_normalization_flush_failed",
                         "gateway failed to flush private stream normalization"
                     );
                     terminal_failure.get_or_insert_with(|| {
@@ -7653,15 +8101,12 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
             if let Some(rewriter) = local_stream_rewriter.as_mut() {
                 let finish_result = rewriter.finish();
                 if let Some(record) = rewriter.take_response_history_record() {
-                    crate::ai_serving::persist_response_history_record(
-                        state_for_report.runtime_state(),
-                        record,
-                    )
-                    .await;
+                    crate::ai_serving::persist_response_history_record(&state_for_report, record)
+                        .await;
                 }
                 match finish_result {
                     Ok(flushed_chunk) if !flushed_chunk.is_empty() => {
-                        append_stream_capture_bytes(
+                        append_budgeted_stream_capture_bytes(
                             &mut buffered_body,
                             &flushed_chunk,
                             max_stream_body_buffer_bytes,
@@ -7702,7 +8147,7 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                             trace_id = %trace_id_owned,
                             request_id = %request_id_for_report_log,
                             candidate_id = ?candidate_id_for_report.as_deref(),
-                            error = ?err,
+                            error_category = "stream_rewrite_flush_failed",
                             "gateway failed to flush local stream rewrite"
                         );
                         terminal_failure.get_or_insert_with(|| {
@@ -7722,11 +8167,7 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                 .as_mut()
                 .and_then(|rewriter| rewriter.take_response_history_record())
             {
-                crate::ai_serving::persist_response_history_record(
-                    state_for_report.runtime_state(),
-                    record,
-                )
-                .await;
+                crate::ai_serving::persist_response_history_record(&state_for_report, record).await;
             }
         }
 
@@ -7751,7 +8192,7 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                         Ok(error_event) => {
                             let error_event_len =
                                 u64::try_from(error_event.len()).unwrap_or(u64::MAX);
-                            append_stream_capture_bytes(
+                            append_budgeted_stream_capture_bytes(
                                 &mut buffered_body,
                                 error_event.as_ref(),
                                 max_stream_body_buffer_bytes,
@@ -7779,14 +8220,14 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                                 );
                             }
                         }
-                        Err(err) => {
+                        Err(_err) => {
                             warn!(
                             event_name = "stream_execution_terminal_error_event_encode_failed",
                             log_type = "ops",
                             trace_id = %trace_id_owned,
                             request_id = %request_id_for_report_log,
                             candidate_id = ?candidate_id_for_report.as_deref(),
-                            error = ?err,
+                            error_category = "terminal_error_event_encode_failed",
                                 "gateway failed to encode terminal SSE error event"
                             );
                         }
@@ -7799,13 +8240,15 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
         idle_monitor_done.store(true, Ordering::Relaxed);
         idle_monitor_handle.abort();
 
-        stream_terminal_summary = merge_stream_terminal_summary(
+        let observed_terminal_summary = finalize_stream_usage_observer(
+            &mut stream_usage_observer,
+            stream_usage_report_context.as_ref(),
+            &mut stream_usage_observer_buffered,
+        );
+        stream_terminal_summary = merge_observed_stream_terminal_summary(
             stream_terminal_summary,
-            finalize_stream_usage_observer(
-                &mut stream_usage_observer,
-                stream_usage_report_context.as_ref(),
-                &mut stream_usage_observer_buffered,
-            ),
+            observed_terminal_summary,
+            &stream_usage_observer_buffered,
         );
 
         if downstream_dropped && client_visible_stream_completed && terminal_failure.is_none() {
@@ -8075,7 +8518,7 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
         .await;
 
         if should_submit_report {
-            if let Err(err) = submit_stream_report(&state_for_report, usage_payload).await {
+            if let Err(_err) = submit_stream_report(&state_for_report, usage_payload).await {
                 warn!(
                     event_name = "execution_report_submit_failed",
                     log_type = "ops",
@@ -8083,7 +8526,7 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                     request_id = %request_id_for_report_log,
                     candidate_id = ?candidate_id_for_report.as_deref(),
                     report_scope = "stream",
-                    error = ?err,
+                    error_category = "stream_report_submit_failed",
                     "gateway failed to submit stream execution report"
                 );
             }
@@ -8144,6 +8587,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use aether_ai_serving::{AiAttemptExecutionOutcome, AiAttemptRetryScope};
+    use aether_contracts::tunnel_security::TUNNEL_SECURITY_NON_TLS_REQUIRED;
     use aether_contracts::{
         ExecutionError, ExecutionErrorKind, ExecutionPhase, ExecutionPlan,
         ExecutionStreamTerminalSummary, ExecutionTelemetry, ExecutionTimeouts, RequestBody,
@@ -8151,6 +8595,7 @@ mod tests {
     };
     use aether_data::repository::candidates::InMemoryRequestCandidateRepository;
     use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
+    use aether_data::repository::proxy_nodes::{InMemoryProxyNodeRepository, StoredProxyNode};
     use aether_data::repository::usage::InMemoryUsageReadRepository;
     use aether_data_contracts::repository::candidates::{
         PublicHealthStatusCount, PublicHealthTimelineBucket, RequestCandidateReadRepository,
@@ -8195,9 +8640,10 @@ mod tests {
         ensure_stream_terminal_summary_for_missing_observed_finish,
         execute_execution_runtime_stream, execute_in_process_stream_with_oauth_retry,
         execute_stream_from_frame_stream, execute_stream_from_frame_stream_with_retry_scope,
-        maybe_apply_kiro_prompt_cache_usage_to_stream_summary, merge_stream_terminal_summary,
-        normalize_declared_stream_response_headers, parse_direct_passthrough_mode,
-        prefetch_direct_stream_error_body, prefetched_openai_responses_body_has_output_boundary,
+        execution_stream_frame_codec, maybe_apply_kiro_prompt_cache_usage_to_stream_summary,
+        merge_stream_terminal_summary, normalize_declared_stream_response_headers,
+        parse_direct_passthrough_mode, prefetch_direct_stream_error_body,
+        prefetched_openai_responses_body_has_output_boundary,
         record_sync_terminal_usage_with_handoff,
         record_sync_terminal_usage_with_handoff_after_spawn,
         resolve_provider_stream_error_status_code, select_direct_anthropic_prefetch_wait,
@@ -8207,11 +8653,13 @@ mod tests {
         stream_terminal_summary_missing_observed_finish,
         stream_terminal_summary_missing_observed_finish_with_requirement,
         stream_terminal_summary_represents_failure_with_requirement,
-        ClientVisibleStreamCompletionTracker, DirectPassthroughFinalizer,
-        DirectPassthroughFinalizerCore, DirectPassthroughInlineBodyState, DirectPassthroughMode,
-        PostStopFrameReadBudget, PostStopLimitedStreamReader, ProviderStreamErrorInspection,
+        wrap_non_json_binary_stream_error_for_client, ClientVisibleStreamCompletionTracker,
+        DirectPassthroughFinalizer, DirectPassthroughFinalizerCore,
+        DirectPassthroughInlineBodyState, DirectPassthroughMode, PostStopFrameReadBudget,
+        PostStopLimitedStreamReader, ProviderStreamErrorInspection,
         ANTHROPIC_POST_STOP_DRAIN_MAX_BYTES, GEMINI_FILES_DOWNLOAD_PLAN_KIND,
-        OPENAI_CHAT_STREAM_PLAN_KIND, POST_STOP_MAX_EMPTY_CHUNKS_PER_POLL,
+        OPENAI_CHAT_STREAM_PLAN_KIND, OPENAI_RESPONSES_STREAM_PLAN_KIND,
+        POST_STOP_MAX_EMPTY_CHUNKS_PER_POLL, PROVIDER_STREAM_ERROR_INSPECTION_MAX_BYTES,
     };
     use crate::control::GatewayControlDecision;
     use crate::stage_metrics::RequestStageTrace;
@@ -8236,6 +8684,19 @@ mod tests {
         plan: &ExecutionPlan,
         provider_config: Option<Value>,
     ) -> InMemoryProviderCatalogReadRepository {
+        let credential_state = AppState::new()
+            .expect("credential state should build")
+            .with_data_state_for_tests(
+                crate::data::GatewayDataState::disabled()
+                    .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+            );
+        let encrypted_api_key = credential_state
+            .seal_provider_catalog_key_api_key(
+                &plan.provider_id,
+                &plan.key_id,
+                "plain-upstream-key",
+            )
+            .expect("api key should encrypt");
         let provider_type = plan.provider_name.as_deref().unwrap_or("custom");
         let provider = StoredProviderCatalogProvider::new(
             plan.provider_id.clone(),
@@ -8286,7 +8747,7 @@ mod tests {
         .expect("key should build")
         .with_transport_fields(
             Some(json!([plan.provider_api_format.clone()])),
-            "plain-upstream-key".to_string(),
+            encrypted_api_key,
             None,
             None,
             Some(json!({ "openai:chat": 1 })),
@@ -8298,6 +8759,22 @@ mod tests {
         .expect("key transport should build");
 
         InMemoryProviderCatalogReadRepository::seed(vec![provider], vec![endpoint], vec![key])
+    }
+
+    #[test]
+    fn non_json_upstream_error_body_is_not_projected_to_clients() {
+        let secret = b"Bearer upstream-secret https://user:password@example.test/private";
+        let body = wrap_non_json_binary_stream_error_for_client(
+            "openai_chat_stream",
+            &BTreeMap::from([("content-type".to_string(), "text/plain".to_string())]),
+            secret,
+        )
+        .expect("error body projection should succeed")
+        .expect("non-JSON errors should receive a client projection");
+
+        assert_eq!(body["error"]["message"], "Upstream request failed");
+        assert!(!body.to_string().contains("upstream-secret"));
+        assert!(!body.to_string().contains("password"));
     }
 
     fn provider_catalog_for_stream_auth_plan(
@@ -8470,16 +8947,8 @@ mod tests {
         let provider_catalog = provider_catalog_for_plan(&plan, None);
         let data_state = crate::data::GatewayDataState::with_provider_transport_reader_for_tests(
             Arc::new(provider_catalog),
-            "development-key",
+            DEVELOPMENT_ENCRYPTION_KEY,
         );
-        let data_state = if continue_failover {
-            data_state.with_system_config_values_for_tests([(
-                crate::orchestration::CYBER_CONTINUE_FAILOVER_CONFIG_KEY.to_string(),
-                json!(true),
-            )])
-        } else {
-            data_state
-        };
         let state = AppState::new()
             .expect("app state should build")
             .with_data_state_for_tests(data_state);
@@ -8528,7 +8997,10 @@ mod tests {
                 "candidate_index": 0,
                 "retry_index": 0,
                 "provider_api_format": "openai:responses",
-                "client_api_format": "openai:responses"
+                "client_api_format": "openai:responses",
+                "routing_execution_policy": {
+                    "cyber_continue_failover": continue_failover
+                }
             })),
             crate::clock::current_unix_ms(),
             Instant::now(),
@@ -8560,7 +9032,7 @@ mod tests {
         let provider_catalog = provider_catalog_for_plan(&plan, provider_config);
         let data_state = crate::data::GatewayDataState::with_provider_transport_reader_for_tests(
             Arc::new(provider_catalog),
-            "development-key",
+            DEVELOPMENT_ENCRYPTION_KEY,
         );
         let state = AppState::new()
             .expect("app state should build")
@@ -8653,7 +9125,7 @@ mod tests {
         );
         let data_state = crate::data::GatewayDataState::with_provider_transport_reader_for_tests(
             Arc::new(provider_catalog),
-            "development-key",
+            DEVELOPMENT_ENCRYPTION_KEY,
         );
         let state = AppState::new()
             .expect("app state should build")
@@ -8724,6 +9196,345 @@ mod tests {
         }
     }
 
+    async fn execute_generic_sse_precommit(
+        chunks: Vec<&str>,
+        routing_policy: Value,
+        provider_config: Option<Value>,
+        stall: bool,
+    ) -> Option<axum::http::Response<Body>> {
+        execute_generic_stream_precommit(
+            chunks,
+            routing_policy,
+            provider_config,
+            stall,
+            "text/event-stream",
+        )
+        .await
+    }
+
+    async fn execute_generic_stream_precommit(
+        chunks: Vec<&str>,
+        routing_policy: Value,
+        provider_config: Option<Value>,
+        stall: bool,
+        content_type: &str,
+    ) -> Option<axum::http::Response<Body>> {
+        execute_stream_precommit_for_format(
+            chunks,
+            routing_policy,
+            provider_config,
+            stall,
+            content_type,
+            "openai:responses",
+        )
+        .await
+    }
+
+    async fn execute_stream_precommit_for_format(
+        chunks: Vec<&str>,
+        routing_policy: Value,
+        provider_config: Option<Value>,
+        stall: bool,
+        content_type: &str,
+        api_format: &str,
+    ) -> Option<axum::http::Response<Body>> {
+        let request_id = format!("generic-precommit-{}", uuid::Uuid::new_v4());
+        let mut plan = native_anthropic_stream_plan(&request_id);
+        plan.provider_api_format = api_format.to_string();
+        plan.client_api_format = api_format.to_string();
+        plan.timeouts = Some(ExecutionTimeouts {
+            first_byte_ms: Some(20),
+            ..Default::default()
+        });
+        let provider_catalog = provider_catalog_for_plan(&plan, provider_config);
+        let data_state = crate::data::GatewayDataState::with_provider_transport_reader_for_tests(
+            Arc::new(provider_catalog),
+            DEVELOPMENT_ENCRYPTION_KEY,
+        );
+        let state = AppState::new()
+            .unwrap()
+            .with_data_state_for_tests(data_state);
+        let chunks = chunks.into_iter().map(str::to_string).collect::<Vec<_>>();
+        let content_type = content_type.to_string();
+        let frames = stream! {
+            yield Ok::<Bytes, std::io::Error>(ndjson_frame(StreamFrame {
+                frame_type: StreamFrameType::Headers,
+                payload: StreamFramePayload::Headers {
+                    status_code: 200,
+                    headers: BTreeMap::from([("content-type".to_string(), content_type)]),
+                    response_observation: None,
+                },
+            }));
+            for chunk in chunks {
+                yield Ok(ndjson_frame(StreamFrame {
+                    frame_type: StreamFrameType::Data,
+                    payload: StreamFramePayload::Data { text: Some(chunk), chunk_b64: None },
+                }));
+            }
+            if stall { std::future::pending::<()>().await; }
+            yield Ok(ndjson_frame(StreamFrame {
+                frame_type: StreamFrameType::Eof,
+                payload: StreamFramePayload::Eof { summary: None },
+            }));
+        }
+        .boxed();
+        let mut scope = AiAttemptRetryScope::Provider;
+        let plan_kind = if api_format == "openai:image" {
+            "openai_image_stream"
+        } else {
+            "openai_responses_stream"
+        };
+        execute_stream_from_frame_stream_with_retry_scope(
+            &state,
+            plan,
+            "trace-generic-precommit",
+            &test_decision(),
+            plan_kind,
+            Some(format!("{plan_kind}_success")),
+            Some(json!({
+                "request_id": request_id, "candidate_id": format!("candidate-{request_id}"),
+                "candidate_index": 0, "retry_index": 0,
+                "provider_api_format": api_format, "client_api_format": api_format,
+                "routing_execution_policy": routing_policy,
+            })),
+            crate::clock::current_unix_ms(),
+            Instant::now(),
+            RequestStageTrace::from_env(),
+            true,
+            frames,
+            false,
+            None,
+            Some(&mut scope),
+            None,
+            None,
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn generic_stream_success_regex_matches_fragmented_plain_body() {
+        for chunks in [
+            vec!["upstream CAPACITY ", "exhausted"],
+            vec!["[upstream] CAPACITY ", "exhausted"],
+        ] {
+            assert!(execute_generic_stream_precommit(
+                chunks,
+                json!({"failover_rules": {"success_failover_patterns": [{"pattern": "(?i)capacity.*exhausted"}]}}),
+                None,
+                false,
+                "text/plain",
+            ).await.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn generic_stream_200_json_error_obeys_global_stop_rules() {
+        for stop in [false, true] {
+            let response = execute_generic_stream_precommit(
+                vec![r#"{"error":{"type":"server_error","message":"do not retry"}}"#],
+                if stop { json!({"failover_rules": {"error_stop_patterns": [{"pattern": "do not retry"}]}}) } else { json!({}) },
+                None,
+                false,
+                "application/json",
+            ).await;
+            assert_eq!(response.is_some(), stop);
+            if let Some(response) = response {
+                assert!(response.status().is_server_error());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn generic_sse_200_setup_then_error_retries_before_client_output() {
+        let response = execute_generic_sse_precommit(vec![
+            "event: response.created\ndata: {\"type\":\"response.created\"}\n\n",
+            "event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"error\":{\"type\":\"server_error\",\"message\":\"capacity exhausted\"}}}\n\n",
+        ], json!({}), None, false).await;
+        assert!(response.is_none());
+    }
+
+    #[tokio::test]
+    async fn generic_sse_global_stop_rule_overrides_retryable_embedded_error() {
+        let response = execute_generic_sse_precommit(vec![
+            "event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"error\":{\"type\":\"server_error\",\"message\":\"capacity exhausted\"}}}\n\n",
+        ], json!({ "failover_rules": { "error_stop_patterns": [{ "pattern": "capacity" }] } }), None, false).await;
+        let response = response.expect("global stop must return a terminal response");
+        assert!(response.status().is_server_error());
+        to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn generic_image_success_is_not_replayed_by_global_or_provider_success_regex() {
+        let rule = json!({ "success_failover_patterns": [{ "pattern": "b64_json" }] });
+        for (routing_policy, provider_config) in [
+            (json!({ "failover_rules": rule }), None),
+            (json!({}), Some(json!({ "failover_rules": rule }))),
+        ] {
+            let response = execute_stream_precommit_for_format(
+                vec![r#"{"created":1,"data":[{"b64_json":"aGVsbG8="}]}"#],
+                routing_policy,
+                provider_config,
+                false,
+                "application/json",
+                "openai:image",
+            )
+            .await
+            .expect("successful image responses must retain their no-replay protection");
+            assert_eq!(response.status(), axum::http::StatusCode::OK);
+            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            assert!(String::from_utf8_lossy(&body).contains("aGVsbG8="));
+        }
+    }
+
+    #[tokio::test]
+    async fn generic_complete_setup_events_and_json_bodies_still_match_success_regex() {
+        for (content_type, chunks) in [
+            (
+                "text/event-stream",
+                vec![
+                    "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"metadata\":{\"warning\":\"capacity",
+                    " exhausted\"}}}\n\n",
+                ],
+            ),
+            (
+                "application/json",
+                vec!["{\"warning\":\"capacity", " exhausted\"}"],
+            ),
+        ] {
+            assert!(execute_generic_stream_precommit(
+                chunks,
+                json!({ "failover_rules": {
+                    "success_failover_patterns": [{ "pattern": "capacity.*exhausted" }],
+                } }),
+                None,
+                false,
+                content_type,
+            )
+            .await
+            .is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn generic_fragmented_errors_apply_stop_rules_before_success_regex() {
+        for (content_type, chunks) in [
+            (
+                "text/event-stream",
+                vec![
+                    "event: response.created\ndata: {\"type\":\"response.created\"}\n\n",
+                    "event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"error\":{\"type\":\"server_error\",\"message\":\"capacity",
+                    " exhausted\"}}}\n\n",
+                ],
+            ),
+            (
+                "application/json",
+                vec![
+                    "{\"error\":{\"type\":\"server_error\",\"message\":\"capacity",
+                    " exhausted\"}}",
+                ],
+            ),
+            (
+                "application/json",
+                vec![r#"{"error":{"type":"server_error","message":"capacity exhausted"}}"#],
+            ),
+        ] {
+            let response = execute_generic_stream_precommit(
+                chunks,
+                json!({ "failover_rules": {
+                    "success_failover_patterns": [{ "pattern": "capacity" }],
+                    "error_stop_patterns": [{ "status_codes": [500], "pattern": "capacity" }],
+                } }),
+                None,
+                false,
+                content_type,
+            )
+            .await
+            .unwrap_or_else(|| panic!("partial errors must be parsed before applying success regex rules ({content_type})"));
+            assert!(response.status().is_server_error());
+            to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn generic_sse_global_error_stop_precedes_global_or_provider_success_regex() {
+        let success_rules = json!({ "success_failover_patterns": [{ "pattern": "capacity" }] });
+        let stop_rule = json!([{ "status_codes": [500], "pattern": "capacity" }]);
+        for (routing_policy, provider_config) in [
+            (
+                json!({ "failover_rules": {
+                    "success_failover_patterns": success_rules["success_failover_patterns"],
+                    "error_stop_patterns": stop_rule,
+                } }),
+                None,
+            ),
+            (
+                json!({ "failover_rules": { "error_stop_patterns": stop_rule } }),
+                Some(json!({ "failover_rules": success_rules })),
+            ),
+        ] {
+            let response = execute_generic_sse_precommit(
+                vec!["event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"error\":{\"type\":\"server_error\",\"message\":\"capacity exhausted\"}}}\n\n"],
+                routing_policy,
+                provider_config,
+                false,
+            )
+            .await
+            .expect("a matching global stop rule must win over a 200 success regex");
+            assert!(response.status().is_server_error());
+            to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn generic_sse_success_regex_applies_to_global_and_provider_rules() {
+        let rule = json!({ "success_failover_patterns": [{ "pattern": "(?i)CAPACITY" }] });
+        for (global, provider) in [
+            (json!({ "failover_rules": rule.clone() }), None),
+            (json!({}), Some(json!({ "failover_rules": rule }))),
+        ] {
+            let response = execute_generic_sse_precommit(vec![
+                "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"capacity exhausted\"}\n\n",
+            ], global, provider, false).await;
+            assert!(response.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn generic_sse_late_error_does_not_replay_committed_content() {
+        let response = execute_generic_sse_precommit(vec![
+            "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n",
+            "event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"error\":{\"type\":\"server_error\",\"message\":\"late failure\"}}}\n\n",
+        ], json!({}), None, false).await.expect("committed stream must not retry");
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert!(String::from_utf8_lossy(&body).contains("hello"));
+    }
+
+    #[tokio::test]
+    async fn generic_sse_setup_timeout_ignores_removed_global_transport_stop_flag() {
+        let response = execute_generic_sse_precommit(
+            vec!["event: response.created\ndata: {\"type\":\"response.created\"}\n\n"],
+            json!({ "failover_rules": { "stop_on_transport_errors": true } }),
+            None,
+            true,
+        )
+        .await;
+        assert!(response.is_none());
+    }
+
+    #[tokio::test]
+    async fn generic_sse_setup_timeout_always_retries() {
+        let response = execute_generic_sse_precommit(
+            vec!["event: response.created\ndata: {\"type\":\"response.created\"}\n\n"],
+            json!({}),
+            None,
+            true,
+        )
+        .await;
+        assert!(response.is_none());
+    }
+
     fn native_anthropic_stream_plan(request_id: &str) -> ExecutionPlan {
         ExecutionPlan {
             request_id: request_id.to_string(),
@@ -8750,6 +9561,36 @@ mod tests {
             client_api_format: "claude:messages".to_string(),
             provider_api_format: "claude:messages".to_string(),
             model_name: Some("claude-sonnet-4-6".to_string()),
+            proxy: None,
+            transport_profile: None,
+            timeouts: None,
+        }
+    }
+
+    fn antigravity_gemini_stream_plan(request_id: &str) -> ExecutionPlan {
+        ExecutionPlan {
+            request_id: request_id.to_string(),
+            candidate_id: Some(format!("candidate-{request_id}")),
+            provider_name: Some("antigravity".to_string()),
+            provider_id: format!("provider-{request_id}"),
+            endpoint_id: format!("endpoint-{request_id}"),
+            key_id: format!("key-{request_id}"),
+            method: "POST".to_string(),
+            url: "https://cloudcode-pa.googleapis.com/v1internal:streamGenerateContent".to_string(),
+            headers: BTreeMap::from([
+                ("content-type".to_string(), "application/json".to_string()),
+                ("accept".to_string(), "text/event-stream".to_string()),
+            ]),
+            content_type: Some("application/json".to_string()),
+            content_encoding: None,
+            body: RequestBody::from_json(json!({
+                "model": "gemini-3.7-flash-tiered",
+                "contents": [{"role": "user", "parts": [{"text": "validate"}]}]
+            })),
+            stream: true,
+            client_api_format: "openai:responses".to_string(),
+            provider_api_format: "gemini:generate_content".to_string(),
+            model_name: Some("gemini-3.7-flash-tiered".to_string()),
             proxy: None,
             transport_profile: None,
             timeouts: None,
@@ -8790,11 +9631,13 @@ mod tests {
             )]),
             stream_usage_report_context: None,
             stream_usage_observer: None,
-            stream_usage_observer_buffered: Vec::new(),
+            stream_usage_observer_buffered: super::StreamUsageObservationBuffer::new(
+                super::DEFAULT_USAGE_RESPONSE_BODY_CAPTURE_LIMIT_BYTES,
+            ),
             provider_error_inspection: ProviderStreamErrorInspection::default(),
             max_stream_body_buffer_bytes: super::DEFAULT_USAGE_RESPONSE_BODY_CAPTURE_LIMIT_BYTES,
-            provider_buffered_body: Vec::new(),
-            buffered_body: Vec::new(),
+            provider_buffered_body: super::StreamBodyCapture::default(),
+            buffered_body: super::StreamBodyCapture::default(),
             provider_body_truncated: false,
             client_body_truncated: false,
             client_stream_completion_tracker: ClientVisibleStreamCompletionTracker::default(),
@@ -8830,12 +9673,379 @@ mod tests {
             upstream_control_filter: Some(super::SseControlBlockFilter::default()),
             upstream_started_at: Instant::now(),
             stream_first_byte_timeout: None,
+            stream_idle_timeout: None,
             observed_first_body_poll: false,
             observed_first_client_yield: false,
             upstream_done: false,
             control_filter_flushed: false,
             terminal_error_sent: false,
             finalized: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_capture_budget_exhaustion_preserves_inline_bytes_and_terminal_usage() {
+        use super::super::capture_budget::{StreamBodyCapture, StreamCaptureBudget};
+
+        let chunks = [
+            Bytes::from_static(b"data: {\"id\":\"x\",\"model\":\"gpt\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\n\n"),
+            Bytes::from_static(b"data: {\"id\":\"x\",\"model\":\"gpt\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":7,\"prompt_tokens_details\":{\"cached_tokens\":3}}}\n\n"),
+            Bytes::from_static(b"data: [DONE]\n\n"),
+        ];
+        for budget_bytes in [0, 64] {
+            let budget = StreamCaptureBudget::new(budget_bytes);
+            let mut state = direct_anthropic_inline_state(
+                "capture-budget-inline",
+                chunks.iter().cloned().map(Ok).collect(),
+            );
+            let core = state.finalizer.as_mut().unwrap().core_mut();
+            core.requires_anthropic_message_stop = false;
+            core.plan.provider_api_format = "openai:chat".to_string();
+            core.plan.client_api_format = "openai:chat".to_string();
+            core.stream_usage_report_context = Some(json!({
+                "provider_api_format": "openai:chat", "client_api_format": "openai:chat"
+            }));
+            core.stream_usage_observer = Some(super::StreamingStandardTerminalObserver::default());
+            core.provider_buffered_body = StreamBodyCapture::with_budget(Arc::clone(&budget));
+            core.buffered_body = StreamBodyCapture::with_budget(budget);
+            for expected in &chunks {
+                let (actual, next) = state.next_item().await.expect("streamed chunk");
+                assert_eq!(actual.unwrap(), *expected);
+                state = next;
+            }
+            let core = state.finalizer.as_mut().unwrap().core_mut();
+            assert!(core.terminal_failure.is_none());
+            assert!(core.client_visible_stream_completed);
+            assert!(core.provider_body_truncated);
+            assert!(core.client_body_truncated);
+            assert!(core.provider_buffered_body.len() + core.buffered_body.len() <= budget_bytes);
+            let summary = super::finalize_stream_usage_observer(
+                &mut core.stream_usage_observer,
+                core.stream_usage_report_context.as_ref(),
+                &mut core.stream_usage_observer_buffered,
+            )
+            .unwrap();
+            assert!(summary.observed_finish);
+            assert!(summary.parser_error.is_none());
+            let payload = super::build_stream_usage_payload(
+                "capture-budget-inline".to_string(),
+                "openai_chat_stream".to_string(),
+                core.stream_usage_report_context.clone(),
+                200,
+                BTreeMap::new(),
+                &core.provider_buffered_body,
+                core.provider_body_truncated,
+                &core.buffered_body,
+                core.client_body_truncated,
+                Some(summary),
+                None,
+            );
+            let seed = aether_usage_runtime::build_stream_terminal_usage_payload_seed(&payload);
+            let usage = seed.standardized_usage.unwrap();
+            assert_eq!(usage.input_tokens, 11);
+            assert_eq!(usage.output_tokens, 7);
+            assert_eq!(usage.cache_read_tokens, 3);
+            assert_eq!(
+                payload.provider_body_state,
+                Some(UsageBodyCaptureState::Truncated)
+            );
+            assert_eq!(
+                payload.client_body_state,
+                Some(UsageBodyCaptureState::Truncated)
+            );
+            discard_direct_test_finalizer(&mut state);
+        }
+    }
+
+    #[test]
+    fn stream_capture_fallback_after_disabled_observer_updates_tokens_zero_cache_and_tier() {
+        let context = json!({"provider_api_format": "openai:chat"});
+        let mut observer = Some(super::StreamingStandardTerminalObserver::default());
+        let mut buffer =
+            super::StreamUsageObservationBuffer::new(super::BASIC_STREAM_BODY_ANALYSIS_LIMIT_BYTES);
+        super::observe_stream_usage_bytes(observer.as_mut().unwrap(), &context, &mut buffer,
+            b"data: {\"id\":\"x\",\"model\":\"gpt\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":10,\"prompt_tokens_details\":{\"cached_tokens\":30}}}\n\n");
+        let oversized = format!(
+            "data: {{\"content\":\"{}\"}}\n\n",
+            "x".repeat(super::SSE_TERMINAL_DETECTOR_MAX_LINE_BYTES)
+        );
+        for part in oversized.as_bytes().chunks(4096) {
+            super::observe_stream_usage_bytes(
+                observer.as_mut().unwrap(),
+                &context,
+                &mut buffer,
+                part,
+            );
+        }
+        super::observe_stream_usage_bytes(observer.as_mut().unwrap(), &context, &mut buffer,
+            b"data: {\"\\u0075sage\":{\"prompt_tokens\":100,\"completion_tokens\":500,\"prompt_tokens_details\":{\"cached_tokens\":0}},\"service_tier\":\"priority\"}\n\n");
+        let summary =
+            super::finalize_stream_usage_observer(&mut observer, Some(&context), &mut buffer)
+                .unwrap();
+        assert!(summary
+            .parser_error
+            .as_deref()
+            .unwrap()
+            .contains("exceeded"));
+        assert!(summary.observed_finish);
+        assert_eq!(
+            summary.provider_actual_service_tier.as_deref(),
+            Some("priority")
+        );
+        let usage = summary.standardized_usage.as_ref().unwrap();
+        assert_eq!(usage.input_tokens, 100);
+        assert_eq!(usage.output_tokens, 500);
+        assert_eq!(usage.cache_read_tokens, 0);
+
+        let eof_summary = ExecutionStreamTerminalSummary {
+            standardized_usage: Some(StandardizedUsage {
+                input_tokens: 100,
+                output_tokens: 10,
+                cache_read_tokens: 30,
+                ..StandardizedUsage::new()
+            }),
+            response_id: Some("authoritative-eof-id".to_string()),
+            finish_reason: Some("stop".to_string()),
+            observed_finish: true,
+            ..ExecutionStreamTerminalSummary::default()
+        };
+        let merged = super::merge_observed_stream_terminal_summary(
+            Some(eof_summary),
+            Some(summary),
+            &buffer,
+        )
+        .unwrap();
+        assert_eq!(merged.response_id.as_deref(), Some("authoritative-eof-id"));
+        assert_eq!(merged.finish_reason.as_deref(), Some("stop"));
+        assert!(merged.observed_finish);
+        assert!(merged.parser_error.as_deref().unwrap().contains("exceeded"));
+        let usage = merged.standardized_usage.unwrap();
+        assert_eq!(usage.input_tokens, 100);
+        assert_eq!(usage.output_tokens, 500);
+        assert_eq!(usage.cache_read_tokens, 0);
+    }
+
+    #[test]
+    fn stream_capture_budget_zero_preserves_conversion_bytes_and_usage() {
+        use super::super::capture_budget::{StreamBodyCapture, StreamCaptureBudget};
+
+        let context = json!({
+            "provider_api_format": "openai:chat",
+            "client_api_format": "claude:messages",
+            "needs_conversion": true,
+        });
+        let chunks: [&[u8]; 3] = [
+            b"data: {\"id\":\"x\",\"model\":\"gpt\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hello\"},\"finish_reason\":null}]}\n\n",
+            b"data: {\"id\":\"x\",\"model\":\"gpt\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":7,\"prompt_tokens_details\":{\"cached_tokens\":3}}}\n\n",
+            b"data: [DONE]\n\n",
+        ];
+        let mut expected = None;
+        for bytes in [32 * 1024, 0] {
+            let budget = StreamCaptureBudget::new(bytes);
+            let mut provider = StreamBodyCapture::with_budget(Arc::clone(&budget));
+            let mut client = StreamBodyCapture::with_budget(budget);
+            let mut provider_truncated = false;
+            let mut client_truncated = false;
+            let mut observer = Some(super::StreamingStandardTerminalObserver::default());
+            let mut buffer = super::StreamUsageObservationBuffer::new(32 * 1024);
+            let mut rewriter = super::maybe_build_stream_response_rewriter(Some(&context)).unwrap();
+            let mut delivered = Vec::new();
+            for chunk in chunks {
+                provider.append(chunk, 32 * 1024, &mut provider_truncated);
+                super::observe_stream_usage_bytes(
+                    observer.as_mut().unwrap(),
+                    &context,
+                    &mut buffer,
+                    chunk,
+                );
+                let output = rewriter.push_chunk(chunk).unwrap();
+                client.append(&output, 32 * 1024, &mut client_truncated);
+                delivered.extend(output);
+            }
+            let tail = rewriter.finish().unwrap();
+            client.append(&tail, 32 * 1024, &mut client_truncated);
+            delivered.extend(tail);
+            let summary =
+                super::finalize_stream_usage_observer(&mut observer, Some(&context), &mut buffer)
+                    .unwrap();
+            assert!(summary.observed_finish);
+            assert!(summary.parser_error.is_none());
+            let payload = super::build_stream_usage_payload(
+                "capture-budget-conversion".to_string(),
+                "claude_chat_stream".to_string(),
+                Some(context.clone()),
+                200,
+                BTreeMap::new(),
+                &provider,
+                provider_truncated,
+                &client,
+                client_truncated,
+                Some(summary),
+                None,
+            );
+            let seed = aether_usage_runtime::build_stream_terminal_usage_payload_seed(&payload);
+            let usage = seed.standardized_usage.unwrap();
+            assert_eq!(usage.input_tokens, 11);
+            assert_eq!(usage.output_tokens, 7);
+            assert_eq!(usage.cache_read_tokens, 3);
+            assert!(String::from_utf8_lossy(&delivered).contains("message_stop"));
+            if let Some(expected) = &expected {
+                assert_eq!(&delivered, expected);
+                assert_eq!(
+                    payload.provider_body_state,
+                    Some(UsageBodyCaptureState::Truncated)
+                );
+                assert_eq!(
+                    payload.client_body_state,
+                    Some(UsageBodyCaptureState::Truncated)
+                );
+            } else {
+                expected = Some(delivered);
+            }
+        }
+    }
+
+    #[test]
+    fn stream_capture_budget_zero_preserves_sync_json_bridge_terminal_usage_and_tier() {
+        use super::super::capture_budget::{StreamBodyCapture, StreamCaptureBudget};
+
+        let response = json!({
+            "id": "chatcmpl-capture", "object": "chat.completion", "model": "gpt",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "hello"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18,
+                "prompt_tokens_details": {"cached_tokens": 3}},
+            "service_tier": "priority",
+        });
+        let outcome = super::maybe_bridge_standard_sync_json_to_stream(
+            &response,
+            "openai:chat",
+            "openai:chat",
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        let delivered = outcome.sse_body;
+        assert!(String::from_utf8_lossy(&delivered).contains("hello"));
+        assert!(String::from_utf8_lossy(&delivered).contains("[DONE]"));
+        let budget = StreamCaptureBudget::new(0);
+        let mut provider = StreamBodyCapture::with_budget(Arc::clone(&budget));
+        let mut client = StreamBodyCapture::with_budget(budget);
+        let mut provider_truncated = false;
+        let mut client_truncated = false;
+        provider.append(
+            &serde_json::to_vec(&response).unwrap(),
+            32 * 1024,
+            &mut provider_truncated,
+        );
+        client.append(&delivered, 32 * 1024, &mut client_truncated);
+        let summary = outcome.terminal_summary.unwrap();
+        assert!(summary.observed_finish);
+        assert!(summary.parser_error.is_none());
+        assert_eq!(
+            summary.provider_actual_service_tier.as_deref(),
+            Some("priority")
+        );
+        let payload = super::build_stream_usage_payload(
+            "capture-budget-sync-bridge".to_string(),
+            "openai_chat_stream".to_string(),
+            None,
+            200,
+            BTreeMap::new(),
+            &provider,
+            provider_truncated,
+            &client,
+            client_truncated,
+            Some(summary),
+            None,
+        );
+        assert!(payload.provider_body_base64.is_none());
+        assert!(payload.client_body_base64.is_none());
+        assert_eq!(
+            payload.provider_body_state,
+            Some(UsageBodyCaptureState::Truncated)
+        );
+        let seed = aether_usage_runtime::build_stream_terminal_usage_payload_seed(&payload);
+        let usage = seed.standardized_usage.unwrap();
+        assert_eq!(usage.input_tokens, 11);
+        assert_eq!(usage.output_tokens, 7);
+        assert_eq!(usage.cache_read_tokens, 3);
+        assert_eq!(
+            seed.provider_actual_service_tier.as_deref(),
+            Some("priority")
+        );
+    }
+
+    #[tokio::test]
+    async fn direct_inline_idle_timeout_after_first_chunk_emits_terminal_read_timeout() {
+        let message_start = Bytes::from_static(
+            b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{}}\n\n",
+        );
+        let mut state = direct_anthropic_inline_state("req-inline-idle-timeout", Vec::new());
+        state.stream_idle_timeout = Some(Duration::from_millis(5));
+        state.upstream = Some(
+            futures_util::stream::iter(vec![Ok(message_start.clone())])
+                .chain(futures_util::stream::pending())
+                .boxed(),
+        );
+        let (first, state) = state.next_item().await.expect("first chunk should stream");
+        assert_eq!(first.expect("first chunk"), message_start);
+        let (error, mut state) = tokio::time::timeout(Duration::from_secs(1), state.next_item())
+            .await
+            .expect("idle timeout should complete")
+            .expect("terminal error should stream");
+        let error =
+            String::from_utf8(error.expect("terminal error should encode").to_vec()).unwrap();
+        assert!(error.starts_with("event: error\n"));
+        let failure = state
+            .finalizer
+            .as_ref()
+            .unwrap()
+            .terminal_failure()
+            .unwrap();
+        assert_eq!(failure.error_type, "read_timeout");
+        assert_eq!(failure.status_code, 504);
+        assert!(
+            state.upstream.is_none(),
+            "timeout should drop the upstream before settlement"
+        );
+        discard_direct_test_finalizer(&mut state);
+    }
+
+    #[tokio::test]
+    async fn direct_inline_idle_timeout_preserves_successful_protocol_completion() {
+        for terminal in [
+            "data: [DONE]\n\n",
+            "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n",
+        ] {
+            let mut state = direct_anthropic_inline_state("req-inline-idle-completed", Vec::new());
+            state.finalizer.as_mut().unwrap().core_mut().requires_anthropic_message_stop = false;
+            state.stream_idle_timeout = Some(Duration::from_millis(5));
+            state.upstream = Some(futures_util::stream::iter(vec![Ok(Bytes::from(terminal))])
+                .chain(futures_util::stream::pending()).boxed());
+            let (first, mut state) = state.next_item().await.expect("terminal chunk should stream");
+            assert_eq!(first.unwrap(), Bytes::from(terminal));
+            assert!(state.finalizer.as_ref().unwrap().core().client_stream_completion_tracker.successful_completion());
+            let item = tokio::time::timeout(Duration::from_secs(1), state.next_upstream_item())
+                .await.expect("teardown idle should finish");
+            assert!(item.is_none());
+            assert!(state.upstream.is_none());
+            assert!(state.finalizer.as_ref().unwrap().terminal_failure().is_none(),
+                "successful protocol terminal must not become a read timeout");
+            discard_direct_test_finalizer(&mut state);
+        }
+    }
+
+    #[test]
+    fn idle_timeout_completion_tracker_does_not_treat_failure_as_success() {
+        for terminal in [
+            "event: response.failed\ndata: {\"type\":\"response.failed\"}\n\n",
+            "event: response.incomplete\ndata: {\"type\":\"response.incomplete\"}\n\n",
+            "event: error\ndata: {\"type\":\"error\"}\n\n",
+            "event: response.completed\ndata: {\"type\":\"response.failed\"}\n\n",
+        ] {
+            let mut tracker = ClientVisibleStreamCompletionTracker::default();
+            assert!(tracker.observe_chunk(terminal.as_bytes()));
+            assert!(!tracker.successful_completion());
         }
     }
 
@@ -8855,7 +10065,7 @@ mod tests {
         let provider_catalog = provider_catalog_for_plan(&plan, None);
         let data_state = crate::data::GatewayDataState::with_provider_transport_reader_for_tests(
             Arc::new(provider_catalog),
-            "development-key",
+            DEVELOPMENT_ENCRYPTION_KEY,
         );
         let state = AppState::new()
             .expect("app state should build")
@@ -9245,14 +10455,15 @@ mod tests {
         assert!(execution.prefetched_body.is_empty());
         assert_eq!(upstream_hits.load(Ordering::SeqCst), 2);
         assert_eq!(task_registration_hits.load(Ordering::SeqCst), 1);
-        let authorizations = observed_authorization
-            .lock()
-            .expect("authorization mutex should lock");
-        assert_eq!(authorizations.len(), 2);
-        assert_eq!(authorizations[0], initial_authorization);
-        assert!(authorizations[1].starts_with("AgentAssertion "));
-        assert_ne!(authorizations[1], authorizations[0]);
-        drop(authorizations);
+        {
+            let authorizations = observed_authorization
+                .lock()
+                .expect("authorization mutex should lock");
+            assert_eq!(authorizations.len(), 2);
+            assert_eq!(authorizations[0], initial_authorization);
+            assert!(authorizations[1].starts_with("AgentAssertion "));
+            assert_ne!(authorizations[1], authorizations[0]);
+        }
         let replayed = collect_direct_execution_body(execution)
             .await
             .expect("retried response body should read");
@@ -9909,11 +11120,13 @@ mod tests {
             headers: BTreeMap::new(),
             stream_usage_report_context: None,
             stream_usage_observer: None,
-            stream_usage_observer_buffered: Vec::new(),
+            stream_usage_observer_buffered: super::StreamUsageObservationBuffer::new(
+                super::DEFAULT_USAGE_RESPONSE_BODY_CAPTURE_LIMIT_BYTES,
+            ),
             provider_error_inspection: ProviderStreamErrorInspection::default(),
             max_stream_body_buffer_bytes: super::DEFAULT_USAGE_RESPONSE_BODY_CAPTURE_LIMIT_BYTES,
-            provider_buffered_body: Vec::new(),
-            buffered_body: Vec::new(),
+            provider_buffered_body: super::StreamBodyCapture::default(),
+            buffered_body: super::StreamBodyCapture::default(),
             provider_body_truncated: false,
             client_body_truncated: false,
             client_stream_completion_tracker: ClientVisibleStreamCompletionTracker::default(),
@@ -9941,6 +11154,7 @@ mod tests {
             upstream_control_filter: None,
             upstream_started_at: stream_started_at,
             stream_first_byte_timeout: None,
+            stream_idle_timeout: None,
             observed_first_body_poll: true,
             observed_first_client_yield: false,
             upstream_done: false,
@@ -10329,12 +11543,37 @@ mod tests {
     }
 
     #[test]
-    fn stream_capture_policy_keeps_full_unbounded_and_caps_basic_analysis_buffer() {
+    fn stream_capture_encoding_defensively_caps_an_oversized_slice() {
+        let (body, state) = super::build_stream_body_capture_with_limit(b"abcdef", false, 3);
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(body.expect("bounded capture should be encoded"))
+            .expect("capture should be valid base64");
+
+        assert_eq!(decoded, b"abc");
+        assert_eq!(state, Some(UsageBodyCaptureState::Truncated));
+    }
+
+    #[test]
+    fn execution_stream_data_chunk_decode_is_bounded_before_allocation() {
+        assert_eq!(
+            super::decode_stream_data_chunk_with_limit(Some("YWJj"), None, 3)
+                .expect("three decoded bytes"),
+            b"abc"
+        );
+        assert!(super::decode_stream_data_chunk_with_limit(Some("YWJjZA=="), None, 3).is_err());
+        assert!(super::decode_stream_data_chunk_with_limit(None, Some("abcd"), 3).is_err());
+    }
+
+    #[test]
+    fn stream_capture_policy_hard_caps_full_and_basic_analysis_buffers() {
         let oversized_chunk = vec![b'x'; super::BASIC_STREAM_BODY_ANALYSIS_LIMIT_BYTES + 1];
 
         let full_limit =
             super::stream_body_buffer_limit_for_record_level(UsageRequestRecordLevel::Full);
-        assert_eq!(full_limit, usize::MAX);
+        assert_eq!(
+            full_limit,
+            crate::execution_runtime::MAX_STREAM_BODY_CAPTURE_BYTES
+        );
         let mut full_buffer = Vec::new();
         let mut full_truncated = false;
         super::append_stream_capture_bytes(
@@ -10446,17 +11685,65 @@ mod tests {
         assert_eq!(detected.pointer("/error/param"), Some(&json!("input")));
     }
 
+    #[test]
+    fn provider_error_inspection_bounds_oversized_chunks_and_keeps_boundary_detection() {
+        let error_event = concat!(
+            "event: response.failed\n",
+            "data: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"code\":\"cyber_policy_violation\"}}}\n\n",
+        )
+        .as_bytes();
+
+        let mut prefix_chunk = vec![b'x'; PROVIDER_STREAM_ERROR_INSPECTION_MAX_BYTES + 64];
+        prefix_chunk[..error_event.len()].copy_from_slice(error_event);
+        let mut inspection = ProviderStreamErrorInspection::default();
+        let detected = inspection
+            .observe(None, &prefix_chunk)
+            .expect("error at the bounded chunk prefix should be detected");
+        assert_eq!(
+            detected.pointer("/error/code"),
+            Some(&json!("cyber_policy_violation"))
+        );
+
+        let mut suffix_chunk = vec![b'x'; PROVIDER_STREAM_ERROR_INSPECTION_MAX_BYTES + 64];
+        let suffix_start = suffix_chunk.len() - error_event.len();
+        suffix_chunk[suffix_start..].copy_from_slice(error_event);
+        let mut inspection = ProviderStreamErrorInspection::default();
+        let detected = inspection
+            .observe(None, &suffix_chunk)
+            .expect("error at the bounded chunk suffix should be detected");
+        assert_eq!(
+            detected.pointer("/error/code"),
+            Some(&json!("cyber_policy_violation"))
+        );
+
+        // The JSON payload is split across chunks. The previous rolling tail
+        // must still be combined with the prefix of the oversized chunk.
+        let split = b"event: response.failed\ndata: {".len();
+        let mut inspection = ProviderStreamErrorInspection::default();
+        assert!(inspection.observe(None, &error_event[..split]).is_none());
+        let mut continuation = vec![b'x'; PROVIDER_STREAM_ERROR_INSPECTION_MAX_BYTES + 64];
+        let continuation_len = error_event.len() - split;
+        continuation[..continuation_len].copy_from_slice(&error_event[split..]);
+        let detected = inspection
+            .observe(None, &continuation)
+            .expect("error split across an oversized chunk boundary should be detected");
+        assert_eq!(
+            detected.pointer("/error/code"),
+            Some(&json!("cyber_policy_violation"))
+        );
+    }
+
     #[tokio::test]
     async fn prefetched_codex_cyber_policy_violation_stops_failover_by_default() {
         let response = execute_prefetched_codex_cyber_policy_failure(false)
             .await
             .expect("default Codex cyber policy handling should return the provider error");
 
-        assert_eq!(response.status().as_u16(), 200);
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
-    async fn prefetched_codex_cyber_policy_violation_retries_when_system_setting_is_enabled() {
+    async fn prefetched_codex_cyber_policy_violation_retries_when_routing_strategy_is_enabled() {
         assert!(
             execute_prefetched_codex_cyber_policy_failure(true)
                 .await
@@ -10504,6 +11791,117 @@ mod tests {
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 
+    #[tokio::test]
+    async fn malformed_antigravity_function_call_streams_thought_then_fails_in_band() {
+        let request_id = "req-antigravity-malformed-function-call";
+        let plan = antigravity_gemini_stream_plan(request_id);
+        let provider_catalog = provider_catalog_for_plan(
+            &plan,
+            Some(json!({
+                "failover_rules": {
+                    "continue_status_codes": [502]
+                }
+            })),
+        );
+        let data_state = crate::data::GatewayDataState::with_provider_transport_reader_for_tests(
+            Arc::new(provider_catalog),
+            "development-key",
+        );
+        let state = AppState::new()
+            .expect("app state should build")
+            .with_data_state_for_tests(data_state);
+        let frame_stream = stream! {
+            yield Ok::<Bytes, std::io::Error>(ndjson_frame(StreamFrame {
+                frame_type: StreamFrameType::Headers,
+                payload: StreamFramePayload::Headers {
+                    status_code: 200,
+                    headers: BTreeMap::from([(
+                        "content-type".to_string(),
+                        "text/event-stream".to_string(),
+                    )]),
+                    response_observation: None,
+                },
+            }));
+            for chunk in [
+                r#"data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"thought":true,"text":"Validating the document."}]} }],"modelVersion":"gemini-3.7-flash-tiered"}}
+
+"#,
+                r#"data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"thoughtSignature":"signature","text":""}]},"finishReason":"MALFORMED_FUNCTION_CALL","finishMessage":"Malformed function call: Function call is empty - no input to parse."}],"modelVersion":"gemini-3.7-flash-tiered"}}
+
+"#,
+            ] {
+                yield Ok::<Bytes, std::io::Error>(ndjson_frame(StreamFrame {
+                    frame_type: StreamFrameType::Data,
+                    payload: StreamFramePayload::Data {
+                        chunk_b64: None,
+                        text: Some(chunk.to_string()),
+                    },
+                }));
+            }
+            yield Ok::<Bytes, std::io::Error>(ndjson_frame(StreamFrame::eof()));
+        }
+        .boxed();
+        let mut retry_scope = AiAttemptRetryScope::Provider;
+
+        let response = execute_stream_from_frame_stream_with_retry_scope(
+            &state,
+            plan,
+            "trace-antigravity-malformed-function-call",
+            &test_decision(),
+            OPENAI_RESPONSES_STREAM_PLAN_KIND,
+            Some("openai_responses_stream_success".to_string()),
+            Some(json!({
+                "request_id": request_id,
+                "candidate_id": format!("candidate-{request_id}"),
+                "candidate_index": 0,
+                "retry_index": 0,
+                "provider_api_format": "gemini:generate_content",
+                "client_api_format": "openai:responses",
+                "needs_conversion": true
+            })),
+            crate::clock::current_unix_ms(),
+            Instant::now(),
+            RequestStageTrace::from_env(),
+            true,
+            frame_stream,
+            false,
+            None,
+            Some(&mut retry_scope),
+            None,
+            None,
+        )
+        .await
+        .expect("malformed Antigravity stream should return a client stream")
+        .expect("the first reasoning delta should commit the selected candidate");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body should read");
+        let body = String::from_utf8(body.to_vec()).expect("response body should be utf8");
+        assert!(
+            body.contains("event: response.reasoning_summary_text.delta\n"),
+            "{body}"
+        );
+        assert!(
+            body.contains("\"delta\":\"Validating the document.\""),
+            "{body}"
+        );
+        assert!(body.contains("event: response.failed\n"), "{body}");
+        assert!(
+            body.contains("\"code\":\"MALFORMED_FUNCTION_CALL\""),
+            "{body}"
+        );
+        assert!(
+            body.contains(
+                "\"message\":\"Malformed function call: Function call is empty - no input to parse.\""
+            ),
+            "{body}"
+        );
+        assert!(!body.contains("unsupported_finish_reason"), "{body}");
+        assert_eq!(retry_scope, AiAttemptRetryScope::Provider);
+    }
+
     fn tunnel_proxy_snapshot(base_url: String) -> aether_contracts::ProxySnapshot {
         aether_contracts::ProxySnapshot {
             enabled: Some(true),
@@ -10513,6 +11911,66 @@ mod tests {
             url: None,
             extra: Some(json!({"tunnel_base_url": base_url})),
         }
+    }
+
+    const LOCAL_TUNNEL_TEST_PSK: &str = "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=";
+    const LOCAL_TUNNEL_TEST_GENERATION: &str = "stream-test-generation-1";
+
+    fn authenticated_local_tunnel_test_state() -> AppState {
+        let node = StoredProxyNode::new(
+            "node-1".to_string(),
+            "Node 1".to_string(),
+            "127.0.0.1".to_string(),
+            0,
+            false,
+            "online".to_string(),
+            30,
+            1,
+            0,
+            0,
+            0,
+            0,
+            true,
+            true,
+            1,
+        )
+        .expect("tunnel node should build")
+        .with_runtime_fields(
+            None,
+            None,
+            None,
+            None,
+            Some(json!({
+                "tunnel_security": {
+                    "mode": TUNNEL_SECURITY_NON_TLS_REQUIRED,
+                    "encryption_key": LOCAL_TUNNEL_TEST_PSK,
+                }
+            })),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .with_tunnel_generation(LOCAL_TUNNEL_TEST_GENERATION.to_string());
+        let data = crate::data::GatewayDataState::with_proxy_node_repository_for_tests(Arc::new(
+            InMemoryProxyNodeRepository::seed([node]),
+        ))
+        .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY);
+        AppState::new()
+            .expect("app state should build")
+            .with_data_state_for_tests(data)
+    }
+
+    async fn recv_tunnel_test_frame(
+        proxy_rx: &mut aether_runtime::BoundedQueueReceiver<Message>,
+        description: &str,
+    ) -> Message {
+        tokio::time::timeout(Duration::from_secs(5), proxy_rx.recv())
+            .await
+            .unwrap_or_else(|_| panic!("timed out waiting for {description}"))
+            .unwrap_or_else(|| panic!("proxy channel closed before {description}"))
     }
 
     fn connect_json_frame(flags: u8, payload: &[u8]) -> Vec<u8> {
@@ -10527,6 +11985,14 @@ mod tests {
         let mut bytes = serde_json::to_vec(&frame).expect("stream frame should serialize");
         bytes.push(b'\n');
         Bytes::from(bytes)
+    }
+
+    #[test]
+    fn execution_stream_frame_codec_has_a_bounded_line_length() {
+        assert_eq!(
+            execution_stream_frame_codec().max_length(),
+            crate::execution_runtime::MAX_EXECUTION_STREAM_FRAME_LINE_BYTES
+        );
     }
 
     #[test]
@@ -10577,8 +12043,7 @@ mod tests {
         let frame_stream =
             futures_util::stream::iter([Ok::<Bytes, std::io::Error>(Bytes::from(combined))]);
         let reader = PostStopLimitedStreamReader::new(frame_stream, PostStopFrameReadBudget::new());
-        let mut lines =
-            tokio_util::codec::FramedRead::new(reader, tokio_util::codec::LinesCodec::new());
+        let mut lines = tokio_util::codec::FramedRead::new(reader, execution_stream_frame_codec());
 
         super::read_next_frame(&mut lines)
             .await
@@ -10612,8 +12077,7 @@ mod tests {
     fn post_stop_activation_releases_over_limit_framed_buffer() {
         let frame_stream = futures_util::stream::empty::<Result<Bytes, std::io::Error>>();
         let reader = PostStopLimitedStreamReader::new(frame_stream, PostStopFrameReadBudget::new());
-        let mut lines =
-            tokio_util::codec::FramedRead::new(reader, tokio_util::codec::LinesCodec::new());
+        let mut lines = tokio_util::codec::FramedRead::new(reader, execution_stream_frame_codec());
         lines
             .read_buffer_mut()
             .resize(ANTHROPIC_POST_STOP_DRAIN_MAX_BYTES + 1, b'x');
@@ -11511,7 +12975,8 @@ mod tests {
         assert!(event.starts_with("event: error\ndata: "));
         assert!(event.contains("\"type\":\"error\""));
         assert!(event.contains("\"type\":\"api_error\""));
-        assert!(event.contains("upstream disconnected"));
+        assert!(event.contains("Upstream response stream failed"));
+        assert!(!event.contains("upstream disconnected"));
         assert!(!event.contains("[DONE]"));
     }
 
@@ -11593,6 +13058,8 @@ mod tests {
         let raw = concat!(
             "event: message_start\n",
             "data: {\"type\":\"message_start\",\"message\":{}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}\n\n",
             "event: error\n",
             "data: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"late\"}}\n\n",
         );
@@ -11616,6 +13083,8 @@ mod tests {
         let message_start = concat!(
             "event: message_start\n",
             "data: {\"type\":\"message_start\",\"message\":{}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}\n\n",
         );
         let original_error = "upstream disconnected after message_start";
         let outcome = execute_native_anthropic_prefetch_stream_with_terminal_error(
@@ -11635,7 +13104,8 @@ mod tests {
         assert!(body.starts_with(message_start));
         assert!(body.contains("event: error\ndata: {\"type\":\"error\""));
         assert!(body.contains("\"type\":\"api_error\""));
-        assert!(body.contains(original_error));
+        assert!(body.contains("Execution runtime stream protocol failed"));
+        assert!(!body.contains(original_error));
         assert!(!body.contains("[DONE]"));
     }
 
@@ -11644,6 +13114,8 @@ mod tests {
         let message_start = concat!(
             "event: message_start\n",
             "data: {\"type\":\"message_start\",\"message\":{}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}\n\n",
         );
         let outcome = execute_native_anthropic_prefetch_stream(
             "req-anthropic-postcommit-eof",
@@ -11669,6 +13141,8 @@ mod tests {
         let message_start = concat!(
             "event: message_start\n",
             "data: {\"type\":\"message_start\",\"message\":{}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}\n\n",
         );
         let done = "data: [DONE]\n\n";
         let outcome = execute_native_anthropic_prefetch_stream(
@@ -11677,7 +13151,7 @@ mod tests {
         )
         .await;
         let AiAttemptExecutionOutcome::Responded(response) = outcome else {
-            panic!("message_start should commit the selected candidate")
+            panic!("text output should commit the selected candidate")
         };
         let body = to_bytes(response.into_body(), usize::MAX)
             .await
@@ -11703,7 +13177,7 @@ mod tests {
                     &usage_repository,
                 ))
                 .with_provider_catalog_reader(Arc::new(provider_catalog))
-                .with_encryption_key_for_tests("development-key"),
+                .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
             )
             .with_usage_runtime_for_tests(UsageRuntimeConfig {
                 enabled: true,
@@ -11828,7 +13302,7 @@ mod tests {
                     &usage_repository,
                 ))
                 .with_provider_catalog_reader(Arc::new(provider_catalog))
-                .with_encryption_key_for_tests("development-key"),
+                .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
             )
             .with_usage_runtime_for_tests(UsageRuntimeConfig {
                 enabled: true,
@@ -12269,8 +13743,8 @@ mod tests {
     }
 
     #[test]
-    fn skips_prefetch_for_event_streams_even_when_cross_format_or_rewritten() {
-        assert!(should_skip_direct_finalize_prefetch(
+    fn keeps_prefetch_for_event_streams_even_when_cross_format_or_rewritten() {
+        assert!(!should_skip_direct_finalize_prefetch(
             Some("claude_cli_sync_finalize"),
             Some("text/event-stream"),
             "openai:chat",
@@ -12748,7 +14222,8 @@ mod tests {
         assert!(!body_text.contains("event: message_stop"));
         assert!(!body_text.contains("\"stop_reason\":\"tool_use\""));
         assert!(body_text.contains("\"error\""));
-        assert!(body_text.contains("unexpected internal error encountered"));
+        assert!(body_text.contains("Execution runtime stream failed"));
+        assert!(!body_text.contains("unexpected internal error encountered"));
         assert!(body_text.contains("data: [DONE]"));
 
         let candidates = tokio::time::timeout(Duration::from_secs(1), async {
@@ -12905,7 +14380,7 @@ mod tests {
                 Arc::clone(&usage_repository),
             )
             .with_provider_catalog_reader(Arc::new(provider_catalog_stop_429_for_plan(&plan)))
-            .with_encryption_key_for_tests("development-key"),
+            .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
         );
         let trailer_error = connect_json_frame(
             2,
@@ -13044,7 +14519,7 @@ mod tests {
                 Arc::clone(&usage_repository),
             )
             .with_provider_catalog_reader(Arc::new(provider_catalog_stop_429_for_plan(&plan)))
-            .with_encryption_key_for_tests("development-key"),
+            .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
         );
         let connect_error = connect_json_frame(
             2,
@@ -13120,22 +14595,19 @@ mod tests {
         .await
         .expect("usage should be written");
         assert_eq!(record.status_code, Some(429));
-        assert_eq!(
-            record
-                .response_body
-                .as_ref()
-                .and_then(|body| body.get("error"))
-                .and_then(|error| error.get("code")),
-            Some(&json!("resource_exhausted"))
-        );
+        assert!(record.response_body.is_none());
         assert!(record.response_body_ref.is_none());
+        assert!(record.client_response_body.is_none());
+        assert!(record.client_response_body_ref.is_none());
     }
 
     #[tokio::test]
-    async fn execute_stream_from_frame_stream_cancels_upstream_when_client_drops_body() {
-        let usage_repository = Arc::new(InMemoryUsageReadRepository::default());
-        let request_candidate_repository = Arc::new(InMemoryRequestCandidateRepository::default());
-        let state = AppState::new()
+    async fn execute_stream_from_frame_stream_honors_client_disconnect_policy() {
+        for cancel_on_client_disconnect in [false, true] {
+            let usage_repository = Arc::new(InMemoryUsageReadRepository::default());
+            let request_candidate_repository =
+                Arc::new(InMemoryRequestCandidateRepository::default());
+            let state = AppState::new()
             .expect("app state should build")
             .with_data_state_for_tests(
                 crate::data::GatewayDataState::with_request_candidate_and_usage_repository_for_tests(
@@ -13147,39 +14619,39 @@ mod tests {
                 enabled: true,
                 ..UsageRuntimeConfig::default()
             });
-        let plan = ExecutionPlan {
-            request_id: "req-client-drop-cancels-upstream".into(),
-            candidate_id: Some("cand-client-drop-cancels-upstream".into()),
-            provider_name: Some("openai".into()),
-            provider_id: "prov-1".into(),
-            endpoint_id: "ep-1".into(),
-            key_id: "key-1".into(),
-            method: "POST".into(),
-            url: "https://example.com/v1/chat/completions".into(),
-            headers: BTreeMap::from([
-                ("content-type".into(), "application/json".into()),
-                ("accept".into(), "text/event-stream".into()),
-            ]),
-            content_type: Some("application/json".into()),
-            content_encoding: None,
-            body: RequestBody::from_json(json!({
-                "model": "gpt-5.4",
-                "messages": [],
-                "stream": true
-            })),
-            stream: true,
-            client_api_format: "openai:chat".into(),
-            provider_api_format: "openai:chat".into(),
-            model_name: Some("gpt-5.4".into()),
-            proxy: None,
-            transport_profile: None,
-            timeouts: None,
-        };
-        let release_terminal = Arc::new(Notify::new());
-        let terminal_frame_drained = Arc::new(Notify::new());
-        let release_terminal_for_stream = Arc::clone(&release_terminal);
-        let terminal_frame_drained_for_stream = Arc::clone(&terminal_frame_drained);
-        let frame_stream = stream! {
+            let plan = ExecutionPlan {
+                request_id: "req-client-drop-cancels-upstream".into(),
+                candidate_id: Some("cand-client-drop-cancels-upstream".into()),
+                provider_name: Some("openai".into()),
+                provider_id: "prov-1".into(),
+                endpoint_id: "ep-1".into(),
+                key_id: "key-1".into(),
+                method: "POST".into(),
+                url: "https://example.com/v1/chat/completions".into(),
+                headers: BTreeMap::from([
+                    ("content-type".into(), "application/json".into()),
+                    ("accept".into(), "text/event-stream".into()),
+                ]),
+                content_type: Some("application/json".into()),
+                content_encoding: None,
+                body: RequestBody::from_json(json!({
+                    "model": "gpt-5.4",
+                    "messages": [],
+                    "stream": true
+                })),
+                stream: true,
+                client_api_format: "openai:chat".into(),
+                provider_api_format: "openai:chat".into(),
+                model_name: Some("gpt-5.4".into()),
+                proxy: None,
+                transport_profile: None,
+                timeouts: None,
+            };
+            let release_terminal = Arc::new(Notify::new());
+            let terminal_frame_drained = Arc::new(Notify::new());
+            let release_terminal_for_stream = Arc::clone(&release_terminal);
+            let terminal_frame_drained_for_stream = Arc::clone(&terminal_frame_drained);
+            let frame_stream = stream! {
             yield Ok::<Bytes, std::io::Error>(Bytes::from_static(
                 b"{\"type\":\"headers\",\"payload\":{\"kind\":\"headers\",\"status_code\":200,\"headers\":{\"content-type\":\"text/event-stream\"}}}\n",
             ));
@@ -13194,119 +14666,157 @@ mod tests {
         }
         .boxed();
 
-        let response = execute_stream_from_frame_stream(
-            &state,
-            plan,
-            "trace-client-drop-cancels-upstream",
-            &test_decision(),
-            "openai_chat_stream",
-            None,
-            Some(json!({
-                "request_id": "req-client-drop-cancels-upstream",
-                "candidate_id": "cand-client-drop-cancels-upstream",
-                "candidate_index": 0,
-                "retry_index": 0,
-                "provider_api_format": "openai:chat",
-                "client_api_format": "openai:chat"
-            })),
-            crate::clock::current_unix_ms(),
-            Instant::now(),
-            RequestStageTrace::from_env(),
-            true,
-            frame_stream,
-            None,
-        )
-        .await
-        .expect("execution should succeed")
-        .expect("execution should return a client response");
+            let response = crate::request_lifecycle::run_request(async move {
+                crate::request_lifecycle::configure_client_disconnect(
+                    aether_routing_core::RoutingExecutionPolicy {
+                        cancel_on_client_disconnect,
+                        ..Default::default()
+                    },
+                );
+                execute_stream_from_frame_stream(
+                    &state,
+                    plan,
+                    "trace-client-drop-cancels-upstream",
+                    &test_decision(),
+                    "openai_chat_stream",
+                    None,
+                    Some(json!({
+                        "request_id": "req-client-drop-cancels-upstream",
+                        "candidate_id": "cand-client-drop-cancels-upstream",
+                        "candidate_index": 0,
+                        "retry_index": 0,
+                        "provider_api_format": "openai:chat",
+                        "client_api_format": "openai:chat"
+                    })),
+                    crate::clock::current_unix_ms(),
+                    Instant::now(),
+                    RequestStageTrace::from_env(),
+                    true,
+                    frame_stream,
+                    None,
+                )
+                .await
+                .map(|response| response.expect("execution should return a client response"))
+            })
+            .await
+            .expect("execution should succeed");
 
-        let mut body_stream = response.into_body().into_data_stream();
-        let first = tokio::time::timeout(Duration::from_secs(1), async {
-            loop {
-                let chunk = body_stream
-                    .next()
-                    .await
-                    .expect("body should yield first chunk")
-                    .expect("first chunk should be ok");
-                if chunk.as_ref() != b": aether-keepalive\n\n" {
-                    break chunk;
+            let mut body_stream = response.into_body().into_data_stream();
+            let first = tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    let chunk = body_stream
+                        .next()
+                        .await
+                        .expect("body should yield first chunk")
+                        .expect("first chunk should be ok");
+                    if chunk.as_ref() != b": aether-keepalive\n\n" {
+                        break chunk;
+                    }
                 }
-            }
-        })
-        .await
-        .expect("first business chunk should arrive");
-        assert_eq!(
+            })
+            .await
+            .expect("first business chunk should arrive");
+            assert_eq!(
             first.as_ref(),
             b"data: {\"id\":\"first\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"}}]}\n\n"
         );
-        tokio::time::sleep(Duration::from_millis(30)).await;
-        drop(body_stream);
-        let candidates = tokio::time::timeout(Duration::from_secs(1), async {
-            loop {
-                let candidates = request_candidate_repository
-                    .list_by_request_id("req-client-drop-cancels-upstream")
-                    .await
-                    .expect("request candidates should read");
-                if candidates
-                    .first()
-                    .is_some_and(|candidate| candidate.status == RequestCandidateStatus::Cancelled)
-                {
-                    break candidates;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            drop(body_stream);
+            if !cancel_on_client_disconnect {
+                release_terminal.notify_one();
             }
-        })
-        .await
-        .expect("candidate should be marked cancelled");
-        assert_eq!(candidates[0].status_code, Some(499));
-        assert_eq!(
-            candidates[0].error_type.as_deref(),
-            Some("downstream_disconnect")
-        );
-
-        let stored_usage = tokio::time::timeout(Duration::from_secs(1), async {
-            loop {
-                let usage = usage_repository
-                    .find_by_request_id("req-client-drop-cancels-upstream")
-                    .await
-                    .expect("usage should read");
-                if usage
-                    .as_ref()
-                    .is_some_and(|usage| usage.status == "cancelled")
-                {
-                    break usage.expect("cancelled usage should exist");
+            let expected_candidate_status = if cancel_on_client_disconnect {
+                RequestCandidateStatus::Cancelled
+            } else {
+                RequestCandidateStatus::Success
+            };
+            let expected_usage_status = if cancel_on_client_disconnect {
+                "cancelled"
+            } else {
+                "completed"
+            };
+            let candidates = tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    let candidates = request_candidate_repository
+                        .list_by_request_id("req-client-drop-cancels-upstream")
+                        .await
+                        .expect("request candidates should read");
+                    if candidates
+                        .first()
+                        .is_some_and(|candidate| candidate.status == expected_candidate_status)
+                    {
+                        break candidates;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
                 }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("usage should be marked cancelled");
-        assert_eq!(stored_usage.billing_status, "void");
-        assert_eq!(stored_usage.status_code, Some(499));
-        assert_eq!(stored_usage.input_tokens, 0);
-        assert_eq!(stored_usage.output_tokens, 0);
-        assert_eq!(stored_usage.total_tokens, 0);
-        let first_byte_time_ms = stored_usage
-            .first_byte_time_ms
-            .expect("cancelled stream should retain first byte time");
-        let response_time_ms = stored_usage
-            .response_time_ms
-            .expect("cancelled stream should record terminal duration");
-        assert!(
-            response_time_ms > first_byte_time_ms,
-            "terminal duration should include time after the first byte"
-        );
-
-        release_terminal.notify_one();
-        assert!(
-            tokio::time::timeout(
-                Duration::from_millis(100),
-                terminal_frame_drained.notified()
-            )
+            })
             .await
-            .is_err(),
-            "upstream frame stream should stop when the client disconnects"
-        );
+            .expect("candidate should be marked cancelled");
+            assert_eq!(
+                candidates[0].status_code,
+                Some(if cancel_on_client_disconnect {
+                    499
+                } else {
+                    200
+                })
+            );
+            assert_eq!(
+                candidates[0].error_type.as_deref(),
+                cancel_on_client_disconnect.then_some("downstream_disconnect")
+            );
+
+            let stored_usage = tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    let usage = usage_repository
+                        .find_by_request_id("req-client-drop-cancels-upstream")
+                        .await
+                        .expect("usage should read");
+                    if usage
+                        .as_ref()
+                        .is_some_and(|usage| usage.status == expected_usage_status)
+                    {
+                        break usage.expect("cancelled usage should exist");
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("usage should be marked cancelled");
+            if !cancel_on_client_disconnect {
+                assert_ne!(stored_usage.billing_status, "void");
+                assert_eq!(stored_usage.status_code, Some(200));
+                assert_eq!(stored_usage.input_tokens, 7);
+                assert_eq!(stored_usage.output_tokens, 11);
+                assert_eq!(stored_usage.total_tokens, 18);
+                continue;
+            }
+            assert_eq!(stored_usage.billing_status, "void");
+            assert_eq!(stored_usage.status_code, Some(499));
+            assert_eq!(stored_usage.input_tokens, 0);
+            assert_eq!(stored_usage.output_tokens, 0);
+            assert_eq!(stored_usage.total_tokens, 0);
+            let first_byte_time_ms = stored_usage
+                .first_byte_time_ms
+                .expect("cancelled stream should retain first byte time");
+            let response_time_ms = stored_usage
+                .response_time_ms
+                .expect("cancelled stream should record terminal duration");
+            assert!(
+                response_time_ms > first_byte_time_ms,
+                "terminal duration should include time after the first byte"
+            );
+
+            release_terminal.notify_one();
+            assert!(
+                tokio::time::timeout(
+                    Duration::from_millis(100),
+                    terminal_frame_drained.notified()
+                )
+                .await
+                .is_err(),
+                "upstream frame stream should stop when the client disconnects"
+            );
+        }
     }
 
     #[tokio::test]
@@ -13868,21 +15378,21 @@ mod tests {
         )
         .with_execution_runtime_candidate(true);
 
-        let response = execute_execution_runtime_stream(
-            &state,
-            plan,
-            "trace-live-stream-first-event",
-            &decision,
-            "openai_chat_stream",
-            None,
-            Some(json!({
-                "provider_api_format": "openai:chat",
-                "client_api_format": "openai:chat",
-            })),
-        )
-        .await
-        .expect("execution should succeed")
-        .expect("execution should return a client response");
+        let execution_task = tokio::spawn(async move {
+            execute_execution_runtime_stream(
+                &state,
+                plan,
+                "trace-live-stream-first-event",
+                &decision,
+                "openai_chat_stream",
+                None,
+                Some(json!({
+                    "provider_api_format": "openai:chat",
+                    "client_api_format": "openai:chat",
+                })),
+            )
+            .await
+        });
 
         first_event_seen.notified().await;
         let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
@@ -13903,9 +15413,16 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         };
         assert!(first_event_usage.first_byte_time_ms.is_some());
+        assert!(!execution_task.is_finished());
 
         release_text.notify_one();
         text_seen.notified().await;
+        let response = tokio::time::timeout(Duration::from_secs(1), execution_task)
+            .await
+            .expect("semantic text should commit the response")
+            .expect("execution task should complete")
+            .expect("execution should succeed")
+            .expect("execution should return a client response");
 
         release_terminal.notify_one();
         let body = to_bytes(response.into_body(), usize::MAX)
@@ -14060,7 +15577,11 @@ mod tests {
                 crate::data::GatewayDataState::with_request_candidate_and_usage_repository_for_tests(
                     Arc::clone(&request_candidate_repository),
                     Arc::clone(&usage_repository),
-                ),
+                )
+                .with_system_config_values_for_tests([(
+                    "request_record_level".to_string(),
+                    json!("full"),
+                )]),
             )
             .with_usage_runtime_for_tests(UsageRuntimeConfig {
                 enabled: true,
@@ -14181,35 +15702,20 @@ mod tests {
 
         assert_eq!(usage.status_code, Some(302));
         assert_eq!(usage.error_category.as_deref(), Some("redirect"));
-        assert!(usage
-            .error_message
-            .as_deref()
-            .is_some_and(|value| value.contains("non-success status 302")));
+        assert!(usage.error_message.is_none());
         assert_eq!(
-            usage
-                .client_response_headers
-                .as_ref()
-                .and_then(|headers| headers.get("x-aether-upstream-status")),
-            Some(&json!("302"))
+            usage.client_response_headers.as_ref().unwrap()["content-type"],
+            json!("application/json")
         );
         assert_eq!(
-            usage
-                .response_headers
-                .as_ref()
-                .and_then(|headers| headers.get("location")),
-            Some(&json!("/"))
+            usage.response_headers.as_ref().unwrap()["content-type"],
+            json!("text/html")
         );
         assert!(
             usage.response_body.is_none(),
             "upstream redirect did not include a body"
         );
-        assert_eq!(
-            usage
-                .client_response_body
-                .as_ref()
-                .and_then(|body| body.pointer("/error/upstream_status")),
-            Some(&json!(302))
-        );
+        assert_eq!(usage.client_response_body.as_ref(), Some(&body_json));
         let candidates = request_candidate_repository
             .list_by_request_id("req-remote-runtime-stream-redirect")
             .await
@@ -14224,7 +15730,7 @@ mod tests {
         );
         assert_eq!(
             candidate_extra["upstream_response"]["headers"]["location"],
-            json!("/")
+            "/"
         );
         assert!(candidate_extra["upstream_response"].get("body").is_none());
         assert!(candidate_extra.get("client_response").is_none());
@@ -14346,21 +15852,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn execute_execution_runtime_stream_returns_client_error_with_local_tunnel_message_before_first_data(
-    ) {
-        let state = AppState::new().expect("app state should build");
+    async fn execute_execution_runtime_stream_sanitizes_local_tunnel_error_before_first_data() {
+        let state = authenticated_local_tunnel_test_state();
         let tunnel_app = state.tunnel.app_state();
         let (proxy_tx, mut proxy_rx) = aether_runtime::bounded_queue(8);
         let (proxy_close_tx, _) = watch::channel(false);
-        tunnel_app.hub.register_proxy(Arc::new(TunnelProxyConn::new(
-            901,
-            "node-1".to_string(),
-            "Node 1".to_string(),
-            proxy_tx,
-            proxy_close_tx,
-            16,
-            2,
-        )));
+        tunnel_app.hub.register_proxy(Arc::new(
+            TunnelProxyConn::new(
+                901,
+                "node-1".to_string(),
+                "Node 1".to_string(),
+                proxy_tx,
+                proxy_close_tx,
+                16,
+                2,
+            )
+            .with_tunnel_generation(LOCAL_TUNNEL_TEST_GENERATION.to_string())
+            .with_authenticated_key(LOCAL_TUNNEL_TEST_PSK.to_string()),
+        ));
 
         let plan = ExecutionPlan {
             request_id: "req-client-stream-error-1".into(),
@@ -14408,7 +15917,7 @@ mod tests {
             .await
         });
 
-        let request_headers = match proxy_rx.recv().await.expect("headers frame should arrive") {
+        let request_headers = match recv_tunnel_test_frame(&mut proxy_rx, "headers frame").await {
             Message::Binary(data) => data,
             other => panic!("unexpected message: {other:?}"),
         };
@@ -14416,7 +15925,7 @@ mod tests {
             .expect("request header frame should parse");
         assert_eq!(request_header.msg_type, tunnel_protocol::REQUEST_HEADERS);
 
-        let request_body = match proxy_rx.recv().await.expect("body frame should arrive") {
+        let request_body = match recv_tunnel_test_frame(&mut proxy_rx, "body frame").await {
             Message::Binary(data) => data,
             other => panic!("unexpected message: {other:?}"),
         };
@@ -14469,28 +15978,29 @@ mod tests {
             .and_then(Value::as_str)
             .expect("response body should contain error.message");
 
-        assert_eq!(error_message, original_error);
-        assert!(
-            !error_message.contains("unexpected EOF during chunk size line"),
-            "client-facing response should preserve the original local tunnel error"
-        );
+        assert_eq!(error_message, "Upstream response stream failed");
+        assert!(!error_message.contains(original_error));
     }
 
     #[tokio::test]
     async fn execute_execution_runtime_stream_emits_terminal_sse_error_event_after_body_started() {
-        let state = AppState::new().expect("app state should build");
+        let state = authenticated_local_tunnel_test_state();
         let tunnel_app = state.tunnel.app_state();
         let (proxy_tx, mut proxy_rx) = aether_runtime::bounded_queue(8);
         let (proxy_close_tx, _) = watch::channel(false);
-        tunnel_app.hub.register_proxy(Arc::new(TunnelProxyConn::new(
-            902,
-            "node-1".to_string(),
-            "Node 1".to_string(),
-            proxy_tx,
-            proxy_close_tx,
-            16,
-            2,
-        )));
+        tunnel_app.hub.register_proxy(Arc::new(
+            TunnelProxyConn::new(
+                902,
+                "node-1".to_string(),
+                "Node 1".to_string(),
+                proxy_tx,
+                proxy_close_tx,
+                16,
+                2,
+            )
+            .with_tunnel_generation(LOCAL_TUNNEL_TEST_GENERATION.to_string())
+            .with_authenticated_key(LOCAL_TUNNEL_TEST_PSK.to_string()),
+        ));
 
         let plan = ExecutionPlan {
             request_id: "req-client-stream-sse-error-1".into(),
@@ -14538,7 +16048,7 @@ mod tests {
             .await
         });
 
-        let request_headers = match proxy_rx.recv().await.expect("headers frame should arrive") {
+        let request_headers = match recv_tunnel_test_frame(&mut proxy_rx, "headers frame").await {
             Message::Binary(data) => data,
             other => panic!("unexpected message: {other:?}"),
         };
@@ -14546,7 +16056,7 @@ mod tests {
             .expect("request header frame should parse");
         assert_eq!(request_header.msg_type, tunnel_protocol::REQUEST_HEADERS);
 
-        let request_body = match proxy_rx.recv().await.expect("body frame should arrive") {
+        let request_body = match recv_tunnel_test_frame(&mut proxy_rx, "body frame").await {
             Message::Binary(data) => data,
             other => panic!("unexpected message: {other:?}"),
         };
@@ -14613,11 +16123,8 @@ mod tests {
         let body = body_task.await.expect("body task should complete");
         assert!(body.contains("data: hello\n\n"));
         assert!(body.contains("data: {\"error\":"));
-        assert!(body.contains(original_error));
+        assert!(body.contains("Upstream response stream failed"));
+        assert!(!body.contains(original_error));
         assert!(body.contains("data: [DONE]\n\n"));
-        assert!(
-            !body.contains("unexpected EOF during chunk size line"),
-            "same-format SSE path should surface the original terminal error event"
-        );
     }
 }

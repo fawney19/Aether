@@ -138,12 +138,12 @@ pub(super) async fn execute_admin_provider_oauth_kiro_batch_import(
         .await
         {
             Ok(config) => config,
-            Err(err) => {
+            Err(_) => {
                 failed += 1;
                 results.push(json!({
                     "index": index,
                     "status": "error",
-                    "error": format!("Token 验证失败: {err}"),
+                    "error": "Token 验证失败",
                     "replaced": false,
                 }));
                 maybe_report_admin_provider_oauth_batch_import_progress(

@@ -51,11 +51,12 @@ pub(in super::super) fn normalize_admin_wallet_optional_text(
 pub(in super::super) fn normalize_admin_wallet_payment_method(
     value: String,
 ) -> Result<String, String> {
-    let normalized = value.trim();
-    if normalized.is_empty() {
-        return Err("payment_method 不能为空".to_string());
+    let normalized = aether_data::repository::wallet::canonicalize_payment_method(&value)
+        .map_err(|detail| format!("payment_method 无效: {detail}"))?;
+    if normalized.chars().count() > 30 {
+        return Err("payment_method 长度不能超过 30".to_string());
     }
-    Ok(normalized.chars().take(30).collect())
+    Ok(normalized)
 }
 
 pub(in super::super) fn normalize_admin_wallet_balance_type(

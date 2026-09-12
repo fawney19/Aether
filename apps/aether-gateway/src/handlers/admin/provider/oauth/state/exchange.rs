@@ -4,8 +4,9 @@ use super::super::errors::{
 use crate::handlers::admin::request::{AdminAppState, AdminProviderOAuthTemplate};
 use aether_contracts::ProxySnapshot;
 use aether_oauth::provider::providers::{
-    ClaudeCodeProviderOAuthAdapter, GenericProviderOAuthAdapter, CLAUDE_CODE_PROVIDER_TYPE,
-    CLAUDE_CODE_TOKEN_URL, CLAUDE_CODE_WEB_BASE_URL,
+    AntigravityProviderOAuthAdapter, ClaudeCodeProviderOAuthAdapter, GenericProviderOAuthAdapter,
+    ANTIGRAVITY_USER_INFO_URL, CLAUDE_CODE_PROVIDER_TYPE, CLAUDE_CODE_TOKEN_URL,
+    CLAUDE_CODE_WEB_BASE_URL,
 };
 use aether_oauth::provider::{
     ProviderOAuthCookieAuthorizationInput, ProviderOAuthService, ProviderOAuthTransportContext,
@@ -13,12 +14,8 @@ use aether_oauth::provider::{
 use axum::{body::Body, http, response::Response};
 use std::sync::Arc;
 
-fn provider_oauth_transport_error_detail(prefix: &str, error: &str) -> String {
-    let error = error.trim();
-    if error.is_empty() {
-        return prefix.to_string();
-    }
-    format!("{prefix}: {error}")
+fn provider_oauth_transport_error_detail(prefix: &str, _error: &str) -> String {
+    prefix.to_string()
 }
 
 fn provider_oauth_exchange_context(
@@ -43,7 +40,19 @@ fn provider_oauth_exchange_context(
 fn provider_oauth_service_for_template(
     template: AdminProviderOAuthTemplate,
     token_url: String,
+    antigravity_user_info_url: String,
 ) -> Result<ProviderOAuthService, Response<Body>> {
+    if template.provider_type.eq_ignore_ascii_case("antigravity") {
+        let adapter = AntigravityProviderOAuthAdapter::default()
+            .with_token_url_override(token_url)
+            .with_user_info_url_override(antigravity_user_info_url);
+        #[cfg(test)]
+        let adapter = adapter.with_oauth_credentials_for_tests(
+            "gateway-test-antigravity-client-id",
+            "gateway-test-antigravity-client-secret",
+        );
+        return Ok(ProviderOAuthService::new().with_adapter(Arc::new(adapter)));
+    }
     GenericProviderOAuthAdapter::for_provider_type(template.provider_type)
         .map(|adapter| adapter.with_token_url_override(token_url))
         .map(|adapter| ProviderOAuthService::new().with_adapter(Arc::new(adapter)))
@@ -75,7 +84,10 @@ pub(crate) async fn exchange_admin_provider_oauth_code(
     proxy: Option<ProxySnapshot>,
 ) -> Result<serde_json::Value, Response<Body>> {
     let token_url = state.provider_oauth_token_url(template.provider_type, template.token_url);
-    let service = provider_oauth_service_for_template(template, token_url)?;
+    let antigravity_user_info_url =
+        state.provider_oauth_token_url("antigravity_user_info", ANTIGRAVITY_USER_INFO_URL);
+    let service =
+        provider_oauth_service_for_template(template, token_url, antigravity_user_info_url)?;
     let ctx = provider_oauth_exchange_context(template.provider_type, proxy);
     let executor = crate::oauth::GatewayOAuthHttpExecutor::new(*state);
     let result = service
@@ -103,7 +115,10 @@ pub(crate) async fn exchange_admin_provider_oauth_refresh_token(
     proxy: Option<ProxySnapshot>,
 ) -> Result<serde_json::Value, Response<Body>> {
     let token_url = state.provider_oauth_token_url(template.provider_type, template.token_url);
-    let service = provider_oauth_service_for_template(template, token_url)?;
+    let antigravity_user_info_url =
+        state.provider_oauth_token_url("antigravity_user_info", ANTIGRAVITY_USER_INFO_URL);
+    let service =
+        provider_oauth_service_for_template(template, token_url, antigravity_user_info_url)?;
     let ctx = provider_oauth_exchange_context(template.provider_type, proxy);
     let executor = crate::oauth::GatewayOAuthHttpExecutor::new(*state);
     let input = aether_oauth::provider::ProviderOAuthImportInput {
@@ -181,4 +196,21 @@ pub(crate) async fn authorize_admin_provider_oauth_with_cookie(
             "Claude Cookie 授权返回缺少 access_token",
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::provider_oauth_transport_error_detail;
+
+    #[test]
+    fn provider_oauth_transport_error_does_not_reflect_network_details() {
+        let detail = provider_oauth_transport_error_detail(
+            "token exchange 失败",
+            "request failed for https://user:pass@example.test/token?secret=value authorization=Bearer upstream-secret",
+        );
+
+        assert_eq!(detail, "token exchange 失败");
+        assert!(!detail.contains("upstream-secret"));
+        assert!(!detail.contains("user:pass"));
+    }
 }

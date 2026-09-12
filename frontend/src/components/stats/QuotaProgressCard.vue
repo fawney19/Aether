@@ -59,6 +59,7 @@
 
 <script setup lang="ts">
 import { Card } from '@/components/ui'
+import { getI18nLocale } from '@/i18n'
 import { EmptyState, LoadingState } from '@/components/common'
 import { formatCurrency } from '@/utils/format'
 import type { QuotaUsageProvider } from '@/api/admin'
@@ -76,6 +77,6 @@ withDefaults(defineProps<Props>(), {
 })
 
 function formatDate(value: string) {
-  return new Date(value).toLocaleDateString()
+  return new Date(value).toLocaleDateString(getI18nLocale())
 }
 </script>

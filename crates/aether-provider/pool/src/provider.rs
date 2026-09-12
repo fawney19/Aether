@@ -7,8 +7,9 @@ use serde_json::{Map, Value};
 use crate::capability::{ProviderPoolCapabilities, ProviderPoolCapability};
 use crate::plan::{derive_plan_tier, normalize_provider_plan_tier};
 use crate::quota::{
-    provider_pool_account_blocked, provider_pool_quota_reset_seconds,
-    provider_pool_quota_snapshot_exhausted_decision, provider_pool_quota_usage_ratio,
+    provider_pool_account_blocked, provider_pool_model_quota_exhausted,
+    provider_pool_quota_reset_seconds, provider_pool_quota_snapshot_exhausted_decision,
+    provider_pool_quota_usage_ratio,
 };
 
 #[derive(Debug, Clone)]
@@ -16,6 +17,11 @@ pub struct ProviderPoolMemberInput<'a> {
     pub provider_type: &'a str,
     pub key: &'a StoredProviderCatalogKey,
     pub auth_config: Option<&'a Map<String, Value>>,
+    /// The provider-side model selected for the current request.  Quota
+    /// snapshots may contain several independent windows, so adapters use
+    /// this value to select the applicable bucket instead of treating the
+    /// whole account as one quota.
+    pub provider_model_name: Option<&'a str>,
 }
 
 pub trait ProviderPoolAdapter: Send + Sync {
@@ -70,6 +76,11 @@ pub trait ProviderPoolAdapter: Send + Sync {
     }
 
     fn quota_exhausted(&self, input: &ProviderPoolMemberInput<'_>) -> bool {
+        if let Some(exhausted) = input.provider_model_name.and_then(|model| {
+            provider_pool_model_quota_exhausted(input.key, input.provider_type, model)
+        }) {
+            return exhausted;
+        }
         provider_pool_quota_snapshot_exhausted_decision(input.key, input.provider_type)
             .unwrap_or(false)
     }

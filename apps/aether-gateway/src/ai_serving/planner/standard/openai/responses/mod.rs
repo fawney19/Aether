@@ -729,117 +729,6 @@ fn update_normalization_codex_capabilities_digest(
     update_normalization_string_vec_digest(digest, &capabilities.supported_service_tiers);
 }
 
-#[cfg(test)]
-mod continuation_fingerprint_tests {
-    use http::HeaderValue;
-    use serde_json::json;
-
-    use super::ResponsesWebSocketBodyNormalization;
-    use crate::ai_serving::OpenAiResponsesReasoningReplayPolicy;
-
-    #[test]
-    fn normalization_fingerprint_is_stable_for_json_object_key_order() {
-        let first = ResponsesWebSocketBodyNormalization::for_tests("provider-model")
-            .with_model_directive_patch_for_tests(json!({"reasoning": {"effort": "high"}, "x": 1}));
-        let second = ResponsesWebSocketBodyNormalization::for_tests("provider-model")
-            .with_model_directive_patch_for_tests(json!({"x": 1, "reasoning": {"effort": "high"}}));
-        assert_eq!(
-            first.continuation_fingerprint(),
-            second.continuation_fingerprint()
-        );
-    }
-
-    #[test]
-    fn normalization_fingerprint_changes_with_effective_contract() {
-        let base = ResponsesWebSocketBodyNormalization::for_tests("provider-model");
-        let changed_policy = base.clone().with_reasoning_replay_policy_for_tests(
-            OpenAiResponsesReasoningReplayPolicy::DeepSeekOpaque,
-        );
-        assert_ne!(
-            base.continuation_fingerprint(),
-            changed_policy.continuation_fingerprint()
-        );
-
-        let changed_patch = base
-            .clone()
-            .with_model_directive_patch_for_tests(json!({"reasoning": {"effort": "low"}}));
-        assert_ne!(
-            base.continuation_fingerprint(),
-            changed_patch.continuation_fingerprint()
-        );
-    }
-
-    #[test]
-    fn normalization_fingerprint_ignores_unrelated_volatile_request_headers() {
-        let body_rules = json!([{
-            "action": "set",
-            "path": "store",
-            "value": false,
-            "condition": {
-                "source": "request_headers",
-                "path": "x-contract",
-                "op": "eq",
-                "value": "enabled"
-            }
-        }]);
-        let mut first = ResponsesWebSocketBodyNormalization::for_tests("provider-model")
-            .with_body_rules_for_tests(body_rules);
-        first
-            .request_headers
-            .insert("x-contract", HeaderValue::from_static("enabled"));
-        first
-            .request_headers
-            .insert("x-request-id", HeaderValue::from_static("request-1"));
-        first
-            .request_headers
-            .insert("cf-ray", HeaderValue::from_static("edge-1"));
-        let mut second = first.clone();
-        second
-            .request_headers
-            .insert("x-request-id", HeaderValue::from_static("request-2"));
-        second
-            .request_headers
-            .insert("cf-ray", HeaderValue::from_static("edge-2"));
-
-        assert_eq!(
-            first.continuation_fingerprint(),
-            second.continuation_fingerprint(),
-            "headers that no body-rule condition reads must not invalidate a persisted continuation"
-        );
-    }
-
-    #[test]
-    fn normalization_fingerprint_tracks_headers_used_by_body_rule_conditions() {
-        let body_rules = json!([{
-            "action": "set",
-            "path": "store",
-            "value": false,
-            "condition": {
-                "source": "request_headers",
-                "path": "X-Contract",
-                "op": "eq",
-                "value": "enabled"
-            }
-        }]);
-        let mut first = ResponsesWebSocketBodyNormalization::for_tests("provider-model")
-            .with_body_rules_for_tests(body_rules.clone());
-        first
-            .request_headers
-            .insert("x-contract", HeaderValue::from_static("enabled"));
-        let mut second = ResponsesWebSocketBodyNormalization::for_tests("provider-model")
-            .with_body_rules_for_tests(body_rules);
-        second
-            .request_headers
-            .insert("x-contract", HeaderValue::from_static("disabled"));
-
-        assert_ne!(
-            first.continuation_fingerprint(),
-            second.continuation_fingerprint(),
-            "a header that controls an effective body-rule condition remains part of the contract"
-        );
-    }
-}
-
 /// Builds one upstream decision for a Responses WebSocket turn. The session
 /// reuses this decision for same-model turns and invokes the planner again when
 /// a later `response.create` changes the public model.
@@ -1005,6 +894,7 @@ pub(crate) async fn maybe_build_responses_websocket_decision(
                 reasoning_replay_policy: openai_responses_reasoning_replay_policy(
                     transport.provider.provider_type.as_str(),
                     transport.endpoint.base_url.as_str(),
+                    mapped_model.as_str(),
                 ),
                 model_directive_patch: input
                     .model_directive_policy
@@ -1055,5 +945,116 @@ async fn release_responses_websocket_planning_lease(
             );
             false
         }
+    }
+}
+
+#[cfg(test)]
+mod continuation_fingerprint_tests {
+    use http::HeaderValue;
+    use serde_json::json;
+
+    use super::ResponsesWebSocketBodyNormalization;
+    use crate::ai_serving::OpenAiResponsesReasoningReplayPolicy;
+
+    #[test]
+    fn normalization_fingerprint_is_stable_for_json_object_key_order() {
+        let first = ResponsesWebSocketBodyNormalization::for_tests("provider-model")
+            .with_model_directive_patch_for_tests(json!({"reasoning": {"effort": "high"}, "x": 1}));
+        let second = ResponsesWebSocketBodyNormalization::for_tests("provider-model")
+            .with_model_directive_patch_for_tests(json!({"x": 1, "reasoning": {"effort": "high"}}));
+        assert_eq!(
+            first.continuation_fingerprint(),
+            second.continuation_fingerprint()
+        );
+    }
+
+    #[test]
+    fn normalization_fingerprint_changes_with_effective_contract() {
+        let base = ResponsesWebSocketBodyNormalization::for_tests("provider-model");
+        let changed_policy = base.clone().with_reasoning_replay_policy_for_tests(
+            OpenAiResponsesReasoningReplayPolicy::DeepSeekOpaque,
+        );
+        assert_ne!(
+            base.continuation_fingerprint(),
+            changed_policy.continuation_fingerprint()
+        );
+
+        let changed_patch = base
+            .clone()
+            .with_model_directive_patch_for_tests(json!({"reasoning": {"effort": "low"}}));
+        assert_ne!(
+            base.continuation_fingerprint(),
+            changed_patch.continuation_fingerprint()
+        );
+    }
+
+    #[test]
+    fn normalization_fingerprint_ignores_unrelated_volatile_request_headers() {
+        let body_rules = json!([{
+            "action": "set",
+            "path": "store",
+            "value": false,
+            "condition": {
+                "source": "request_headers",
+                "path": "x-contract",
+                "op": "eq",
+                "value": "enabled"
+            }
+        }]);
+        let mut first = ResponsesWebSocketBodyNormalization::for_tests("provider-model")
+            .with_body_rules_for_tests(body_rules);
+        first
+            .request_headers
+            .insert("x-contract", HeaderValue::from_static("enabled"));
+        first
+            .request_headers
+            .insert("x-request-id", HeaderValue::from_static("request-1"));
+        first
+            .request_headers
+            .insert("cf-ray", HeaderValue::from_static("edge-1"));
+        let mut second = first.clone();
+        second
+            .request_headers
+            .insert("x-request-id", HeaderValue::from_static("request-2"));
+        second
+            .request_headers
+            .insert("cf-ray", HeaderValue::from_static("edge-2"));
+
+        assert_eq!(
+            first.continuation_fingerprint(),
+            second.continuation_fingerprint(),
+            "headers that no body-rule condition reads must not invalidate a persisted continuation"
+        );
+    }
+
+    #[test]
+    fn normalization_fingerprint_tracks_headers_used_by_body_rule_conditions() {
+        let body_rules = json!([{
+            "action": "set",
+            "path": "store",
+            "value": false,
+            "condition": {
+                "source": "request_headers",
+                "path": "X-Contract",
+                "op": "eq",
+                "value": "enabled"
+            }
+        }]);
+        let mut first = ResponsesWebSocketBodyNormalization::for_tests("provider-model")
+            .with_body_rules_for_tests(body_rules.clone());
+        first
+            .request_headers
+            .insert("x-contract", HeaderValue::from_static("enabled"));
+        let mut second = ResponsesWebSocketBodyNormalization::for_tests("provider-model")
+            .with_body_rules_for_tests(body_rules);
+        second
+            .request_headers
+            .insert("x-contract", HeaderValue::from_static("disabled"));
+
+        assert_ne!(
+            first.continuation_fingerprint(),
+            second.continuation_fingerprint(),
+            "a header that controls an effective body-rule condition remains part of the contract"
+        );
     }
 }

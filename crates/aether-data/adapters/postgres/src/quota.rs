@@ -15,25 +15,21 @@ fn quota_snapshot_select() -> SelectQuery<'static> {
             DialectSql::common("billing_type").with_postgres("CAST(billing_type AS TEXT)"),
         )
         .alias("billing_type"),
-        SelectColumn::expr(DialectSql::dialect(
+        SelectColumn::expr(DialectSql::common(
             "CAST(monthly_quota_usd AS DOUBLE PRECISION)",
-            "CAST(monthly_quota_usd AS REAL)",
         ))
         .alias("monthly_quota_usd"),
-        SelectColumn::expr(DialectSql::dialect(
+        SelectColumn::expr(DialectSql::common(
             "CAST(COALESCE(monthly_used_usd, 0) AS DOUBLE PRECISION)",
-            "CAST(COALESCE(monthly_used_usd, 0) AS REAL)",
         ))
         .alias("monthly_used_usd"),
         SelectColumn::expr("quota_reset_day"),
-        SelectColumn::expr(DialectSql::dialect(
+        SelectColumn::expr(DialectSql::common(
             "CAST(EXTRACT(EPOCH FROM quota_last_reset_at) AS BIGINT)",
-            "quota_last_reset_at",
         ))
         .alias("quota_last_reset_at_unix_secs"),
-        SelectColumn::expr(DialectSql::dialect(
+        SelectColumn::expr(DialectSql::common(
             "CAST(EXTRACT(EPOCH FROM quota_expires_at) AS BIGINT)",
-            "quota_expires_at",
         ))
         .alias("quota_expires_at_unix_secs"),
         SelectColumn::expr("is_active"),

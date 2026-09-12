@@ -48,6 +48,27 @@
           >
             {{ activeDistributionDesc }}
           </p>
+          <div
+            v-if="activeDistributionItem?.modeOptions.length"
+            data-testid="pool-cache-affinity-secondary-mode"
+            class="mt-2 flex w-fit flex-wrap gap-1 rounded-lg bg-muted/50 p-1"
+          >
+            <button
+              v-for="modeOpt in activeDistributionItem.modeOptions"
+              :key="modeOpt.value"
+              type="button"
+              :data-mode="modeOpt.value"
+              class="rounded-md px-2.5 py-1 text-xs font-medium transition-all"
+              :class="[
+                activeDistributionItem.mode === modeOpt.value
+                  ? 'bg-primary text-primary-foreground shadow-sm'
+                  : 'text-muted-foreground hover:bg-background/70 hover:text-foreground'
+              ]"
+              @click="setPresetModeByPreset(activeDistributionItem.preset, modeOpt.value)"
+            >
+              {{ modeOpt.label }}
+            </button>
+          </div>
         </div>
       </div>
 
@@ -267,13 +288,16 @@ const FALLBACK_PRESET_DEFS: PoolPresetMeta[] = [
   {
     name: 'cache_affinity',
     label: '缓存亲和',
-    description: '优先复用最近使用过的 Key，利用 Prompt Caching',
+    description: '同一用户持续复用 Key，首次分配可集中或轮转',
     mutex_group: DISTRIBUTION_GROUP,
-    evidence_hint: '依据 LRU 时间戳（最近使用优先，与 LRU 轮转相反）',
+    evidence_hint: '先复用用户粘性 Key，未命中时按所选二级模式分配',
     providers: [],
     default_enabled: true,
-    modes: null,
-    default_mode: null,
+    modes: [
+      { value: 'single_account', label: '单号优先' },
+      { value: 'lru', label: 'LRU 轮号' },
+    ],
+    default_mode: 'single_account',
   },
   {
     name: 'lru',
@@ -733,14 +757,17 @@ const activeDistributionPreset = computed(() => {
   return found?.item.preset ?? null
 })
 
-const activeDistributionDesc = computed(() => {
+const activeDistributionItem = computed(() => {
   const found = distributionItems.value.find(({ item }) => item.enabled && item.applicable)
-  return found?.item.desc ?? null
+  return found?.item ?? null
+})
+
+const activeDistributionDesc = computed(() => {
+  return activeDistributionItem.value?.desc ?? null
 })
 
 const activeDistributionLabel = computed(() => {
-  const found = distributionItems.value.find(({ item }) => item.enabled && item.applicable)
-  return found?.item.label ?? null
+  return activeDistributionItem.value?.label ?? null
 })
 
 const strategyItems = computed(() => {
@@ -853,7 +880,7 @@ async function handleSave() {
 
     const latestProvider = await getProvider(providerId)
     if (!props.modelValue || props.providerId !== providerId || dialogRevision !== revision) return
-    const latestAdvanced = (latestProvider as Record<string, unknown>).pool_advanced
+    const latestAdvanced = latestProvider.pool_advanced
     const mergedAdvanced = mergePoolAdvancedPatch(latestAdvanced, {
       scheduling_presets: schedulingPresets,
     })

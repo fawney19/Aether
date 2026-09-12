@@ -15,10 +15,10 @@
 import { onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import Card from '@/components/ui/card.vue'
-import apiClient from '@/api/client'
 import { useAuthStore } from '@/stores/auth'
 import { useToast } from '@/composables/useToast'
 import { useI18n } from '@/i18n'
+import { safeInternalNavigationPath } from '@/utils/navigationSecurity'
 
 const route = useRoute()
 const router = useRouter()
@@ -32,9 +32,8 @@ function consumeRedirectPath(): string | null {
   const redirectPath = sessionStorage.getItem('redirectPath')
   if (redirectPath) {
     sessionStorage.removeItem('redirectPath')
-    return redirectPath
   }
-  return null
+  return safeInternalNavigationPath(redirectPath)
 }
 
 function clearUrlState() {
@@ -87,23 +86,15 @@ onMounted(async () => {
     return
   }
 
-  // 3) 登录成功：解析 fragment token
-  const hash = window.location.hash.startsWith('#') ? window.location.hash.slice(1) : window.location.hash
-  const params = new URLSearchParams(hash)
-  const accessToken = params.get('access_token')
-
+  // 3) Login success: recover through the HttpOnly refresh cookie. Any
+  // legacy fragment is removed without reading or retaining its token.
   clearUrlState()
-
-  if (!accessToken) {
+  hint.value = t('site.auth.writing')
+  if (!(await authStore.restoreSession(false, true))) {
     showError(t('site.auth.noToken'))
     await router.replace('/')
     return
   }
-
-  hint.value = t('site.auth.writing')
-  apiClient.setToken(accessToken)
-
-  authStore.syncToken()
 
   hint.value = t('site.auth.fetchingUser')
   await authStore.fetchCurrentUser()

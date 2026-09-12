@@ -118,15 +118,34 @@ impl UsageBodyCaptureEngine {
     }
 
     pub fn apply_to_event(self, event: &mut UsageEvent) {
-        self.apply_to_payload(UsageBodyCapturePayloadMut::from_event(event));
+        let force_disabled = is_sensitive_oauth_exchange(
+            event.data.api_format.as_deref(),
+            event.data.endpoint_api_format.as_deref(),
+        );
+        self.apply_to_payload(
+            UsageBodyCapturePayloadMut::from_event(event),
+            force_disabled,
+        );
     }
 
     pub fn apply_to_record(self, record: &mut UpsertUsageRecord) {
-        self.apply_to_payload(UsageBodyCapturePayloadMut::from_record(record));
+        let force_disabled = is_sensitive_oauth_exchange(
+            record.api_format.as_deref(),
+            record.endpoint_api_format.as_deref(),
+        );
+        self.apply_to_payload(
+            UsageBodyCapturePayloadMut::from_record(record),
+            force_disabled,
+        );
     }
 
-    fn apply_to_payload(self, payload: UsageBodyCapturePayloadMut<'_>) {
-        if matches!(self.policy.record_level, UsageRequestRecordLevel::Basic) {
+    fn apply_to_payload(self, payload: UsageBodyCapturePayloadMut<'_>, force_disabled: bool) {
+        if force_disabled || matches!(self.policy.record_level, UsageRequestRecordLevel::Basic) {
+            let reason = if force_disabled {
+                "sensitive_oauth_exchange"
+            } else {
+                "request_record_level_basic"
+            };
             disable_usage_body_capture_field(
                 UsageBodyField::RequestBody,
                 "request",
@@ -134,6 +153,7 @@ impl UsageBodyCaptureEngine {
                 payload.request_body_ref,
                 payload.request_body_state,
                 payload.request_metadata,
+                reason,
             );
             disable_usage_body_capture_field(
                 UsageBodyField::ProviderRequestBody,
@@ -142,6 +162,7 @@ impl UsageBodyCaptureEngine {
                 payload.provider_request_body_ref,
                 payload.provider_request_body_state,
                 payload.request_metadata,
+                reason,
             );
             disable_usage_body_capture_field(
                 UsageBodyField::ResponseBody,
@@ -150,6 +171,7 @@ impl UsageBodyCaptureEngine {
                 payload.response_body_ref,
                 payload.response_body_state,
                 payload.request_metadata,
+                reason,
             );
             disable_usage_body_capture_field(
                 UsageBodyField::ClientResponseBody,
@@ -158,6 +180,7 @@ impl UsageBodyCaptureEngine {
                 payload.client_response_body_ref,
                 payload.client_response_body_state,
                 payload.request_metadata,
+                reason,
             );
             return;
         }
@@ -201,6 +224,22 @@ impl UsageBodyCaptureEngine {
     }
 }
 
+fn is_sensitive_oauth_exchange(
+    api_format: Option<&str>,
+    endpoint_api_format: Option<&str>,
+) -> bool {
+    [api_format, endpoint_api_format]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .any(|format| {
+            format.eq_ignore_ascii_case("oauth:exchange")
+                || format.eq_ignore_ascii_case("provider_oauth:exchange")
+                || format.eq_ignore_ascii_case("provider_oauth:local_refresh")
+                || format.eq_ignore_ascii_case("vertex_ai:service_account_token")
+        })
+}
+
 pub fn apply_usage_body_capture_policy_to_event(
     policy: UsageBodyCapturePolicy,
     event: &mut UsageEvent,
@@ -222,6 +261,7 @@ fn disable_usage_body_capture_field(
     body_ref: &mut Option<String>,
     state: &mut Option<UsageBodyCaptureState>,
     request_metadata: &mut Option<Value>,
+    reason: &'static str,
 ) {
     *body = None;
     *body_ref = None;
@@ -233,7 +273,7 @@ fn disable_usage_body_capture_field(
         Some(UsageBodyCaptureState::Disabled),
         None,
         None,
-        Some("request_record_level_basic"),
+        Some(reason),
     );
 }
 
@@ -583,6 +623,10 @@ fn append_body_capture_metadata_entry(
     );
 }
 
+pub(crate) fn mark_usage_event_capture_truncated(metadata: &mut Option<Value>, key: &str) {
+    aether_data_contracts::repository::usage::mark_usage_capture_memory_omitted(metadata, key);
+}
+
 fn upsert_body_capture_metadata_value_entry(
     metadata: &mut Option<Value>,
     key: &str,
@@ -712,17 +756,188 @@ fn usage_value_kind(value: &Value) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
+        apply_usage_body_capture_policy_to_event, apply_usage_body_capture_policy_to_record,
         build_plan_body_capture_metadata, sync_usage_body_ref_metadata,
         trim_owned_non_empty_string, truncate_usage_body_string,
         upsert_body_capture_metadata_value_entry,
     };
     use aether_data_contracts::repository::usage::UsageBodyCaptureState;
     use aether_data_contracts::repository::usage::UsageBodyField;
-    use serde_json::{Map, Value};
+    use serde_json::{json, Map, Value};
+
+    use crate::{
+        UsageBodyCapturePolicy, UsageEvent, UsageEventData, UsageEventType, UsageRequestRecordLevel,
+    };
+
+    fn sensitive_oauth_event(api_format: &str) -> UsageEvent {
+        UsageEvent::new(
+            UsageEventType::Completed,
+            "oauth-sensitive-request",
+            UsageEventData {
+                provider_name: "oauth".to_string(),
+                model: "oauth-exchange".to_string(),
+                api_format: Some(api_format.to_string()),
+                endpoint_api_format: Some(api_format.to_string()),
+                request_body: Some(json!({"client_secret":"request-secret"})),
+                request_body_ref: Some("usage://oauth/request".to_string()),
+                provider_request_body: Some(json!({"refresh_token":"refresh-secret"})),
+                provider_request_body_ref: Some("usage://oauth/provider-request".to_string()),
+                response_body: Some(json!({
+                    "access_token":"access-secret",
+                    "refresh_token":"rotated-refresh-secret"
+                })),
+                response_body_ref: Some("usage://oauth/response".to_string()),
+                client_response_body: Some(json!({"access_token":"client-access-secret"})),
+                client_response_body_ref: Some("usage://oauth/client-response".to_string()),
+                ..UsageEventData::default()
+            },
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn assert_sensitive_bodies_disabled(
+        request_body: &Option<Value>,
+        request_body_ref: &Option<String>,
+        request_body_state: Option<UsageBodyCaptureState>,
+        provider_request_body: &Option<Value>,
+        provider_request_body_ref: &Option<String>,
+        provider_request_body_state: Option<UsageBodyCaptureState>,
+        response_body: &Option<Value>,
+        response_body_ref: &Option<String>,
+        response_body_state: Option<UsageBodyCaptureState>,
+        client_response_body: &Option<Value>,
+        client_response_body_ref: &Option<String>,
+        client_response_body_state: Option<UsageBodyCaptureState>,
+        request_metadata: &Option<Value>,
+    ) {
+        assert!(request_body.is_none());
+        assert!(request_body_ref.is_none());
+        assert_eq!(request_body_state, Some(UsageBodyCaptureState::Disabled));
+        assert!(provider_request_body.is_none());
+        assert!(provider_request_body_ref.is_none());
+        assert_eq!(
+            provider_request_body_state,
+            Some(UsageBodyCaptureState::Disabled)
+        );
+        assert!(response_body.is_none());
+        assert!(response_body_ref.is_none());
+        assert_eq!(response_body_state, Some(UsageBodyCaptureState::Disabled));
+        assert!(client_response_body.is_none());
+        assert!(client_response_body_ref.is_none());
+        assert_eq!(
+            client_response_body_state,
+            Some(UsageBodyCaptureState::Disabled)
+        );
+        let body_capture = request_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("body_capture"))
+            .and_then(Value::as_object)
+            .expect("body capture metadata should exist");
+        for field in ["request", "provider_request", "response", "client_response"] {
+            assert_eq!(
+                body_capture
+                    .get(field)
+                    .and_then(|entry| entry.get("reason"))
+                    .and_then(Value::as_str),
+                Some("sensitive_oauth_exchange")
+            );
+        }
+    }
 
     #[test]
     fn build_plan_body_capture_metadata_returns_none_without_base64_body() {
         assert!(build_plan_body_capture_metadata(None).is_none());
+    }
+
+    #[test]
+    fn full_policy_never_captures_sensitive_oauth_event_bodies() {
+        let mut event = sensitive_oauth_event("oauth:exchange");
+
+        apply_usage_body_capture_policy_to_event(
+            UsageBodyCapturePolicy {
+                record_level: UsageRequestRecordLevel::Full,
+            },
+            &mut event,
+        );
+
+        assert_sensitive_bodies_disabled(
+            &event.data.request_body,
+            &event.data.request_body_ref,
+            event.data.request_body_state,
+            &event.data.provider_request_body,
+            &event.data.provider_request_body_ref,
+            event.data.provider_request_body_state,
+            &event.data.response_body,
+            &event.data.response_body_ref,
+            event.data.response_body_state,
+            &event.data.client_response_body,
+            &event.data.client_response_body_ref,
+            event.data.client_response_body_state,
+            &event.data.request_metadata,
+        );
+    }
+
+    #[test]
+    fn full_policy_never_captures_sensitive_oauth_record_bodies() {
+        let event = sensitive_oauth_event("provider_oauth:exchange");
+        let mut record = crate::record::build_upsert_usage_record_from_event(&event)
+            .expect("usage record should build");
+
+        apply_usage_body_capture_policy_to_record(
+            UsageBodyCapturePolicy {
+                record_level: UsageRequestRecordLevel::Full,
+            },
+            &mut record,
+        );
+
+        assert_sensitive_bodies_disabled(
+            &record.request_body,
+            &record.request_body_ref,
+            record.request_body_state,
+            &record.provider_request_body,
+            &record.provider_request_body_ref,
+            record.provider_request_body_state,
+            &record.response_body,
+            &record.response_body_ref,
+            record.response_body_state,
+            &record.client_response_body,
+            &record.client_response_body_ref,
+            record.client_response_body_state,
+            &record.request_metadata,
+        );
+    }
+
+    #[test]
+    fn full_policy_never_captures_refresh_or_service_account_token_bodies() {
+        for api_format in [
+            "provider_oauth:local_refresh",
+            "vertex_ai:service_account_token",
+        ] {
+            let mut event = sensitive_oauth_event(api_format);
+
+            apply_usage_body_capture_policy_to_event(
+                UsageBodyCapturePolicy {
+                    record_level: UsageRequestRecordLevel::Full,
+                },
+                &mut event,
+            );
+
+            assert_sensitive_bodies_disabled(
+                &event.data.request_body,
+                &event.data.request_body_ref,
+                event.data.request_body_state,
+                &event.data.provider_request_body,
+                &event.data.provider_request_body_ref,
+                event.data.provider_request_body_state,
+                &event.data.response_body,
+                &event.data.response_body_ref,
+                event.data.response_body_state,
+                &event.data.client_response_body,
+                &event.data.client_response_body_ref,
+                event.data.client_response_body_state,
+                &event.data.request_metadata,
+            );
+        }
     }
 
     #[test]

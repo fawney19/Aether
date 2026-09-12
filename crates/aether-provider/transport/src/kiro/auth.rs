@@ -1,21 +1,44 @@
 use super::super::snapshot::GatewayProviderTransportSnapshot;
 use super::credentials::{generate_machine_id, KiroAuthConfig};
+use std::fmt;
 
 pub const PROVIDER_TYPE: &str = "kiro";
 pub const KIRO_AUTH_HEADER: &str = "authorization";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct KiroBearerAuth {
     pub name: &'static str,
     pub value: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+impl fmt::Debug for KiroBearerAuth {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("KiroBearerAuth")
+            .field("name", &self.name)
+            .field("value", &"[REDACTED]")
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
 pub struct KiroRequestAuth {
     pub name: &'static str,
     pub value: String,
     pub auth_config: KiroAuthConfig,
     pub machine_id: String,
+}
+
+impl fmt::Debug for KiroRequestAuth {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("KiroRequestAuth")
+            .field("name", &self.name)
+            .field("value", &"[REDACTED]")
+            .field("auth_config", &self.auth_config)
+            .field("machine_id", &"[REDACTED]")
+            .finish()
+    }
 }
 
 pub fn is_kiro_provider_transport(transport: &GatewayProviderTransportSnapshot) -> bool {
@@ -222,6 +245,41 @@ mod tests {
         assert_eq!(auth.name, KIRO_AUTH_HEADER);
         assert_eq!(auth.value, "Bearer upstream-key");
         assert!(supports_local_kiro_auth_prerequisites(&sample_transport()));
+    }
+
+    #[test]
+    fn kiro_request_auth_debug_output_redacts_credentials_and_machine_identity() {
+        let bearer = resolve_local_kiro_bearer_auth(&sample_transport())
+            .expect("kiro bearer auth should resolve");
+        let bearer_debug = format!("{bearer:?}");
+        assert!(!bearer_debug.contains("upstream-key"));
+        assert!(bearer_debug.contains("[REDACTED]"));
+
+        let mut transport = sample_transport();
+        transport.key.decrypted_api_key = "__placeholder__".to_string();
+        transport.key.decrypted_auth_config = Some(
+            r#"{
+                "access_token":"kiro-request-access-canary",
+                "expires_at":4102444800,
+                "refresh_token":"kiro-request-refresh-canary................................................................................................",
+                "machine_id":"kiro-request-machine-canary",
+                "profile_arn":"kiro-request-profile-canary",
+                "api_region":"us-west-2"
+            }"#
+            .to_string(),
+        );
+        let request_auth =
+            resolve_local_kiro_request_auth(&transport).expect("kiro request auth should resolve");
+        let request_debug = format!("{request_auth:?}");
+        for secret in [
+            "kiro-request-access-canary",
+            "kiro-request-refresh-canary",
+            "kiro-request-machine-canary",
+            "kiro-request-profile-canary",
+        ] {
+            assert!(!request_debug.contains(secret), "debug leaked {secret}");
+        }
+        assert!(request_debug.contains("[REDACTED]"));
     }
 
     #[test]

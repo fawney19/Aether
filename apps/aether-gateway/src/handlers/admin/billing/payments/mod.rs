@@ -11,6 +11,7 @@ mod redeem_codes;
 mod routes;
 mod shared;
 
+pub(in crate::handlers::admin) use self::shared::admin_payment_gateway_response_projection;
 use self::shared::{
     admin_payment_operator_id, admin_payment_order_id_from_detail_path,
     admin_payment_order_id_from_suffix_path, build_admin_payment_callback_payload_from_record,
@@ -19,7 +20,8 @@ use self::shared::{
     build_admin_payments_bad_request_response, build_admin_payments_data_unavailable_response,
     normalize_admin_payment_currency, normalize_admin_payment_optional_string,
     normalize_admin_payment_positive_number, parse_admin_payments_limit,
-    parse_admin_payments_offset, AdminPaymentOrderCreditRequest,
+    parse_admin_payments_offset, prepare_admin_payment_gateway_response_for_storage,
+    AdminPaymentOrderCreditRequest,
 };
 
 pub(crate) async fn maybe_build_local_admin_payments_response(

@@ -5,6 +5,42 @@ use url::Url;
 
 pub(crate) const GATEWAY_CREDENTIAL_QUERY_KEYS: &[&str] = &["key"];
 
+pub(crate) fn encode_url_path_segment(value: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric()
+            || matches!(
+                byte,
+                b'-' | b'.'
+                    | b'_'
+                    | b'~'
+                    | b'!'
+                    | b'$'
+                    | b'&'
+                    | b'\''
+                    | b'('
+                    | b')'
+                    | b'*'
+                    | b'+'
+                    | b','
+                    | b';'
+                    | b'='
+                    | b':'
+                    | b'@'
+            )
+        {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push('%');
+            encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+            encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+        }
+    }
+    encoded
+}
+
 pub(crate) fn strip_gateway_credential_query_parameters(query: Option<&str>) -> Option<String> {
     let query = query.map(str::trim).filter(|value| !value.is_empty())?;
     let mut serializer = form_urlencoded::Serializer::new(String::new());
@@ -161,6 +197,7 @@ pub fn build_gemini_content_url(
     if trimmed_base_url.is_empty() || trimmed_model.is_empty() {
         return None;
     }
+    let encoded_model = encode_url_path_segment(trimmed_model);
 
     let operation = if stream {
         "streamGenerateContent"
@@ -168,12 +205,12 @@ pub fn build_gemini_content_url(
         "generateContent"
     };
     let mut url = if trimmed_base_url.ends_with("/v1") || trimmed_base_url.ends_with("/v1beta") {
-        format!("{trimmed_base_url}/models/{trimmed_model}:{operation}")
+        format!("{trimmed_base_url}/models/{encoded_model}:{operation}")
     } else if gemini_content_base_url_contains_model_path(trimmed_base_url) {
         let trimmed_base_url = strip_gemini_content_action(trimmed_base_url);
         format!("{trimmed_base_url}:{operation}")
     } else {
-        format!("{trimmed_base_url}/v1beta/models/{trimmed_model}:{operation}")
+        format!("{trimmed_base_url}/v1beta/models/{encoded_model}:{operation}")
     };
     append_merged_query(&mut url, base_query, None, query, &["key"]);
     Some(url)
@@ -221,13 +258,14 @@ pub fn build_gemini_video_predict_long_running_url(
     if trimmed_base_url.is_empty() || trimmed_model.is_empty() {
         return None;
     }
+    let encoded_model = encode_url_path_segment(trimmed_model);
 
     let mut url = if trimmed_base_url.ends_with("/v1") || trimmed_base_url.ends_with("/v1beta") {
-        format!("{trimmed_base_url}/models/{trimmed_model}:predictLongRunning")
+        format!("{trimmed_base_url}/models/{encoded_model}:predictLongRunning")
     } else if gemini_content_base_url_contains_model_path(trimmed_base_url) {
         format!("{trimmed_base_url}:predictLongRunning")
     } else {
-        format!("{trimmed_base_url}/v1beta/models/{trimmed_model}:predictLongRunning")
+        format!("{trimmed_base_url}/v1beta/models/{encoded_model}:predictLongRunning")
     };
     append_merged_query(&mut url, base_query, None, query, &["key"]);
     Some(url)
@@ -412,9 +450,27 @@ fn bigmodel_coding_models_base_is_supported(base_url: &str) -> bool {
 
 fn looks_like_vertex_ai_host(host: &str) -> bool {
     const VERTEX_AI_HOST: &str = "aiplatform.googleapis.com";
+    let host = host.trim().to_ascii_lowercase();
     host == VERTEX_AI_HOST
-        || host.ends_with(&format!(".{VERTEX_AI_HOST}"))
-        || host.ends_with(&format!("-{VERTEX_AI_HOST}"))
+        || host
+            .strip_suffix(&format!("-{VERTEX_AI_HOST}"))
+            .is_some_and(is_vertex_region_label)
+}
+
+fn is_vertex_region_label(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 63
+        && value
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphanumeric)
+        && value
+            .as_bytes()
+            .last()
+            .is_some_and(u8::is_ascii_alphanumeric)
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
 }
 
 fn split_path_query(path: &str) -> (&str, Option<&str>) {
@@ -504,7 +560,8 @@ mod tests {
         build_gemini_content_url, build_gemini_files_passthrough_url,
         build_gemini_video_predict_long_running_url, build_openai_chat_url,
         build_openai_compatible_models_url, build_openai_image_url, build_openai_responses_url,
-        build_openai_search_url, build_passthrough_path_url, normalize_gemini_content_action_path,
+        build_openai_search_url, build_passthrough_path_url, encode_url_path_segment,
+        normalize_gemini_content_action_path,
     };
 
     #[test]
@@ -867,5 +924,42 @@ mod tests {
                 "https://generativelanguage.googleapis.com/v1beta/models/veo-3.0-generate-preview:predictLongRunning?alt=sse&foo=bar"
             )
         );
+    }
+
+    #[test]
+    fn gemini_model_names_cannot_inject_path_query_or_fragment_components() {
+        let model = "model/../../admin?key=attacker#fragment";
+        assert_eq!(
+            build_gemini_content_url(
+                "https://generativelanguage.googleapis.com/v1beta",
+                model,
+                false,
+                None,
+            )
+            .as_deref(),
+            Some(
+                "https://generativelanguage.googleapis.com/v1beta/models/model%2F..%2F..%2Fadmin%3Fkey=attacker%23fragment:generateContent"
+            )
+        );
+        assert_eq!(
+            build_gemini_video_predict_long_running_url(
+                "https://generativelanguage.googleapis.com/v1beta",
+                model,
+                None,
+            )
+            .as_deref(),
+            Some(
+                "https://generativelanguage.googleapis.com/v1beta/models/model%2F..%2F..%2Fadmin%3Fkey=attacker%23fragment:predictLongRunning"
+            )
+        );
+    }
+
+    #[test]
+    fn dynamic_path_segment_encoding_keeps_raw_values_in_one_segment() {
+        assert_eq!(
+            encode_url_path_segment("gemini+2.5@preview~/model%2Fraw"),
+            "gemini+2.5@preview~%2Fmodel%252Fraw"
+        );
+        assert_eq!(encode_url_path_segment(".."), "..");
     }
 }

@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::fmt;
 
 use serde_json::Value;
 
@@ -9,7 +10,7 @@ use crate::rules::apply_local_header_rules_with_request_headers;
 use crate::snapshot::GatewayProviderTransportSnapshot;
 use crate::url::build_openai_image_url;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 pub struct ProviderOpenAiImageHeadersInput<'a> {
     pub transport: &'a GatewayProviderTransportSnapshot,
     pub headers: &'a http::HeaderMap,
@@ -19,6 +20,39 @@ pub struct ProviderOpenAiImageHeadersInput<'a> {
     pub header_rules: Option<&'a Value>,
     pub provider_request_body: &'a Value,
     pub original_request_body: &'a Value,
+}
+
+impl fmt::Debug for ProviderOpenAiImageHeadersInput<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProviderOpenAiImageHeadersInput")
+            .field("transport", &self.transport)
+            .field(
+                "request_header_names",
+                &self
+                    .headers
+                    .keys()
+                    .map(|name| name.as_str())
+                    .collect::<Vec<_>>(),
+            )
+            .field("auth_header", &self.auth_header)
+            .field("has_auth_value", &(!self.auth_value.is_empty()))
+            .field("accept", &self.accept)
+            .field("has_header_rules", &self.header_rules.is_some())
+            .field(
+                "provider_request_body_bytes",
+                &serde_json::to_vec(self.provider_request_body)
+                    .ok()
+                    .map(|bytes| bytes.len()),
+            )
+            .field(
+                "original_request_body_bytes",
+                &serde_json::to_vec(self.original_request_body)
+                    .ok()
+                    .map(|bytes| bytes.len()),
+            )
+            .finish()
+    }
 }
 
 pub fn openai_image_transport_unsupported_reason(
@@ -98,6 +132,12 @@ pub fn build_openai_image_headers(
     ) {
         return None;
     }
+    let declared_connection_headers =
+        crate::headers::declared_connection_header_names(input.headers, &BTreeMap::new());
+    crate::headers::remove_declared_connection_headers(
+        &mut provider_request_headers,
+        &declared_connection_headers,
+    );
     Some(provider_request_headers)
 }
 

@@ -198,7 +198,7 @@ fn sample_refund_record(
         payment_order_id: payment_order_id.map(ToOwned::to_owned),
         source_type: "payment_order".to_string(),
         source_id: payment_order_id.map(ToOwned::to_owned),
-        refund_mode: "original".to_string(),
+        refund_mode: "original_channel".to_string(),
         amount_usd,
         status: status.to_string(),
         reason: Some("用户申请退款".to_string()),
@@ -1300,6 +1300,29 @@ async fn gateway_handles_admin_wallets_process_refund_locally_with_trusted_admin
     assert_eq!(payload["transaction"]["reason_code"], json!("refund_out"));
     assert_eq!(payload["transaction"]["amount"], json!(-4.0));
     assert_eq!(payload["transaction"]["description"], json!("退款占款"));
+
+    let ledger_response = reqwest::Client::new()
+        .get(format!(
+            "{gateway_url}/api/admin/wallets/wallet-123/transactions?limit=20&offset=0"
+        ))
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .send()
+        .await
+        .expect("transaction list request should succeed");
+    assert_eq!(ledger_response.status(), StatusCode::OK);
+    let ledger_payload: serde_json::Value = ledger_response
+        .json()
+        .await
+        .expect("transaction list response should be json");
+    assert_eq!(ledger_payload["total"], json!(1));
+    assert_eq!(
+        ledger_payload["items"][0]["reason_code"],
+        json!("refund_out")
+    );
+    assert_eq!(ledger_payload["items"][0]["amount"], json!(-4.0));
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();
@@ -1425,7 +1448,7 @@ async fn gateway_handles_admin_wallets_complete_refund_locally_with_trusted_admi
 }
 
 #[tokio::test]
-async fn gateway_handles_admin_wallets_fail_refund_locally_with_trusted_admin_principal() {
+async fn gateway_rejects_admin_wallets_fail_processing_refund_with_trusted_admin_principal() {
     let upstream_hits = Arc::new(Mutex::new(0usize));
     let upstream_hits_clone = Arc::clone(&upstream_hits);
     let upstream = Router::new().route(
@@ -1485,20 +1508,115 @@ async fn gateway_handles_admin_wallets_fail_refund_locally_with_trusted_admin_pr
         .await
         .expect("request should succeed");
 
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(
+        payload["detail"],
+        json!("cannot fail refund while gateway settlement is processing")
+    );
+    assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
+
+    gateway_handle.abort();
+    upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_releases_offline_processing_refund_without_gateway_evidence() {
+    let upstream_hits = Arc::new(Mutex::new(0usize));
+    let upstream_hits_clone = Arc::clone(&upstream_hits);
+    let upstream = Router::new().route(
+        "/api/admin/wallets/wallet-123/refunds/refund-1/fail",
+        any(move |_request: Request| {
+            let upstream_hits_inner = Arc::clone(&upstream_hits_clone);
+            async move {
+                *upstream_hits_inner.lock().expect("mutex should lock") += 1;
+                (StatusCode::OK, Body::from("unexpected upstream hit"))
+            }
+        }),
+    );
+
+    let mut wallet = sample_wallet_snapshot("wallet-123", Some("user-1"), None, "finite");
+    wallet.balance = 8.5;
+    wallet.total_refunded = 7.0;
+    let mut refund = sample_refund_record(
+        "refund-1",
+        "wallet-123",
+        Some("user-1"),
+        Some("po-1"),
+        4.0,
+        "processing",
+        Some("admin-user-123"),
+        Some("admin-user-123"),
+        Some(1_710_000_500),
+    );
+    refund.refund_mode = "offline_payout".to_string();
+
+    let (upstream_url, upstream_handle) = start_server(upstream).await;
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_auth_wallets_for_tests([wallet])
+            .with_admin_wallet_payment_orders_for_tests([sample_payment_order_record(
+                "po-1",
+                "wallet-123",
+                Some("user-1"),
+                10.0,
+                5.0,
+                5.0,
+            )])
+            .with_admin_wallet_refunds_for_tests([refund]),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .post(format!(
+            "{gateway_url}/api/admin/wallets/wallet-123/refunds/refund-1/fail"
+        ))
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "reason": "线下退款未打款"
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+
     assert_eq!(response.status(), StatusCode::OK);
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
-    assert_eq!(payload["wallet"]["id"], json!("wallet-123"));
     assert_eq!(payload["wallet"]["balance"], json!(15.0));
     assert_eq!(payload["wallet"]["recharge_balance"], json!(12.5));
     assert_eq!(payload["wallet"]["total_refunded"], json!(3.0));
     assert_eq!(payload["refund"]["status"], json!("failed"));
-    assert_eq!(payload["refund"]["failure_reason"], json!("原路退款失败"));
     assert_eq!(
         payload["transaction"]["reason_code"],
         json!("refund_revert")
     );
     assert_eq!(payload["transaction"]["amount"], json!(4.0));
-    assert_eq!(payload["transaction"]["description"], json!("退款失败回补"));
+
+    let ledger_response = reqwest::Client::new()
+        .get(format!(
+            "{gateway_url}/api/admin/wallets/wallet-123/transactions?limit=20&offset=0"
+        ))
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .send()
+        .await
+        .expect("transaction list request should succeed");
+    assert_eq!(ledger_response.status(), StatusCode::OK);
+    let ledger_payload: serde_json::Value = ledger_response
+        .json()
+        .await
+        .expect("transaction list response should be json");
+    assert_eq!(ledger_payload["total"], json!(1));
+    assert_eq!(
+        ledger_payload["items"][0]["reason_code"],
+        json!("refund_revert")
+    );
+    assert_eq!(ledger_payload["items"][0]["amount"], json!(4.0));
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();

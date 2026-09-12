@@ -15,7 +15,7 @@ use axum::{
 };
 use futures_util::stream::{self, StreamExt};
 use serde_json::json;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub(super) async fn handle_admin_provider_ops_batch_balance(
     state: &AdminAppState<'_>,
@@ -166,12 +166,48 @@ fn parse_provider_ids(body: &Bytes) -> Result<Vec<String>, Response<Body>> {
             )
                 .into_response()
         })?;
+    let mut seen = HashSet::with_capacity(items.len());
+    let mut provider_ids = Vec::with_capacity(items.len());
+    for item in items {
+        let Some(provider_id) = item.as_str().map(str::trim) else {
+            return Err((
+                http::StatusCode::BAD_REQUEST,
+                Json(json!({ "detail": "provider_ids 必须是非空字符串数组" })),
+            )
+                .into_response());
+        };
+        if provider_id.is_empty() {
+            return Err((
+                http::StatusCode::BAD_REQUEST,
+                Json(json!({ "detail": "provider_ids 必须是非空字符串数组" })),
+            )
+                .into_response());
+        }
+        if seen.insert(provider_id) {
+            provider_ids.push(provider_id.to_string());
+        }
+    }
+    Ok(provider_ids)
+}
 
-    Ok(items
-        .iter()
-        .filter_map(serde_json::Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
-        .collect())
+#[cfg(test)]
+mod tests {
+    use super::parse_provider_ids;
+    use axum::body::Bytes;
+
+    #[test]
+    fn provider_ops_batch_ids_are_deduplicated_without_reordering() {
+        let body =
+            Bytes::from_static(br#"{"provider_ids":["provider-1"," provider-1 ","provider-2"]}"#);
+        assert_eq!(
+            parse_provider_ids(&body).expect("valid ids"),
+            vec!["provider-1".to_string(), "provider-2".to_string()]
+        );
+    }
+
+    #[test]
+    fn provider_ops_batch_ids_reject_non_string_entries() {
+        let body = Bytes::from_static(br#"{"provider_ids":["provider-1",42]}"#);
+        assert!(parse_provider_ids(&body).is_err());
+    }
 }

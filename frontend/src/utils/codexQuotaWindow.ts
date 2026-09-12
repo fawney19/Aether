@@ -41,7 +41,13 @@ export function getCodexQuotaWindowPresentation(
   const code = String(window.code || '').trim().toLowerCase()
   const isSpark = code.startsWith('spark_')
   const baseCode = isSpark ? code.slice('spark_'.length) : code
-  const rawLabel = String(window.label || '').trim().replace(/^Spark\s*/i, '')
+  const rawLabel = String(window.label || '').trim()
+  const modelLabel = String(window.scope || '').trim().toLowerCase() === 'model' && !isSpark
+    ? [rawLabel, window.model, window.quota_group_label, window.quota_group, window.code]
+      .map(value => String(value || '').trim())
+      .find(Boolean)
+    : undefined
+  const legacyLabel = isSpark ? rawLabel.replace(/^Spark\s*/i, '') : rawLabel || modelLabel || ''
   const hasExplicitWindowMinutes = window.window_minutes != null
   const windowMinutes = Number(window.window_minutes)
 
@@ -51,12 +57,19 @@ export function getCodexQuotaWindowPresentation(
 
   const period = hasExplicitWindowMinutes
     ? formatCodexQuotaPeriod(windowMinutes)
-    : getLegacyCodexQuotaPeriod(baseCode, rawLabel)
+    : getLegacyCodexQuotaPeriod(baseCode, legacyLabel)
   if (!period) return null
+
+  let label = period
+  if (isSpark) {
+    label = `Spark${period}`
+  } else if (modelLabel && modelLabel !== period) {
+    label = `${modelLabel} ${period}`
+  }
 
   const fallbackOrder = baseCode === '5h' ? 300 : baseCode === 'weekly' ? 10_080 : 1_000_000
   return {
-    label: isSpark ? `Spark${period}` : period,
+    label,
     sortOrder: (isSpark ? 10_000_000 : 0) + (hasExplicitWindowMinutes ? windowMinutes : fallbackOrder),
   }
 }

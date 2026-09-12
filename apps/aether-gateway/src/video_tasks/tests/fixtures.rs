@@ -55,6 +55,7 @@ pub(super) fn sample_auth_context() -> GatewayControlAuthContext {
         local_rejection: None,
         allowed_models: None,
         ip_rules: None,
+        verified_api_key_hash: None,
     }
 }
 

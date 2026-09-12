@@ -430,6 +430,15 @@ impl<'a> AdminAppState<'a> {
         self.app.update_provider_catalog_provider(provider).await
     }
 
+    pub(crate) async fn compare_and_swap_provider_catalog_provider_config(
+        &self,
+        update: &aether_data_contracts::repository::provider_catalog::ProviderCatalogProviderConfigCasUpdate,
+    ) -> Result<bool, GatewayError> {
+        self.app
+            .compare_and_swap_provider_catalog_provider_config(update)
+            .await
+    }
+
     pub(crate) async fn cleanup_deleted_provider_catalog_refs(
         &self,
         provider_id: &str,

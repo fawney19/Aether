@@ -1,5 +1,5 @@
 <template>
-  <div class="border-t border-border px-6 py-4 bg-muted/10 flex flex-row-reverse gap-3">
+  <div class="flex flex-col-reverse gap-3 border-t border-border bg-muted/10 px-4 py-4 [&>button]:min-h-min [&>button]:whitespace-normal [&>button]:py-2 sm:flex-row-reverse sm:flex-wrap sm:px-6">
     <slot />
   </div>
 </template>

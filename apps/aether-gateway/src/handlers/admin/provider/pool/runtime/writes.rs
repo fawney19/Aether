@@ -502,14 +502,12 @@ pub(crate) async fn record_admin_provider_pool_error(
                 .or_else(|| parse_google_quota_cooldown_seconds(error_body)),
             pool_config,
         );
-        set_pool_cooldown(
-            runtime,
-            provider_id,
-            key_id,
-            "rate_limited_429",
-            ttl_seconds,
-        )
-        .await;
+        let reason = if error_body_indicates_quota_exhaustion(error_body) {
+            "quota_exhausted_429"
+        } else {
+            "rate_limited_429"
+        };
+        set_pool_cooldown(runtime, provider_id, key_id, reason, ttl_seconds).await;
         return;
     }
 
@@ -546,6 +544,27 @@ pub(crate) async fn record_admin_provider_pool_error(
         );
         set_pool_cooldown(runtime, provider_id, key_id, &reason, ttl_seconds).await;
     }
+}
+
+fn error_body_indicates_quota_exhaustion(error_body: Option<&str>) -> bool {
+    let body = error_body.unwrap_or_default().to_ascii_lowercase();
+    [
+        "quota exhausted",
+        "quota_exhausted",
+        "quota exceeded",
+        "quota_exceeded",
+        "insufficient_quota",
+        "resource exhausted",
+        "resource has been exhausted",
+        "resource_exhausted",
+        "usage_limit_reached",
+        "limit_reached",
+        "quota limit reached",
+        "credits exhausted",
+        "insufficient credits",
+    ]
+    .iter()
+    .any(|marker| body.contains(marker))
 }
 
 pub(crate) async fn record_admin_provider_pool_stream_timeout(
@@ -589,9 +608,10 @@ pub(crate) async fn record_admin_provider_pool_stream_timeout(
 #[cfg(test)]
 mod tests {
     use super::{
-        admin_provider_pool_key_terminal_error_reason, parse_google_quota_cooldown_seconds_at,
-        record_admin_provider_pool_error, record_admin_provider_pool_stream_timeout,
-        record_admin_provider_pool_success, resolve_transient_cooldown_ttl,
+        admin_provider_pool_key_terminal_error_reason, error_body_indicates_quota_exhaustion,
+        parse_google_quota_cooldown_seconds_at, record_admin_provider_pool_error,
+        record_admin_provider_pool_stream_timeout, record_admin_provider_pool_success,
+        resolve_transient_cooldown_ttl,
     };
     use crate::handlers::admin::provider::pool::runtime::reads::read_admin_provider_pool_runtime_state;
     use crate::handlers::admin::provider::shared::support::{
@@ -801,6 +821,16 @@ mod tests {
             0
         );
         assert_eq!(resolve_transient_cooldown_ttl(500, None, &pool_config), 0);
+    }
+
+    #[test]
+    fn detects_quota_exhaustion_markers_in_429_bodies() {
+        assert!(error_body_indicates_quota_exhaustion(Some(
+            r#"{"error":{"status":"RESOURCE_EXHAUSTED","message":"quota exceeded"}}"#,
+        )));
+        assert!(!error_body_indicates_quota_exhaustion(Some(
+            r#"{"error":{"message":"temporary rate limit"}}"#,
+        )));
     }
 
     #[tokio::test]
@@ -1110,7 +1140,7 @@ mod tests {
                 .cooldown_reason_by_key
                 .get("key-google-429")
                 .map(String::as_str),
-            Some("rate_limited_429")
+            Some("quota_exhausted_429")
         );
         assert!(runtime
             .cooldown_ttl_by_key

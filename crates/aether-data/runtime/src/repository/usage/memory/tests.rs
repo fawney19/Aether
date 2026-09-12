@@ -66,6 +66,7 @@ fn sample_usage(request_id: &str, created_at_unix_ms: i64) -> StoredRequestUsage
 
 fn sample_upsert_usage_record(request_id: &str) -> UpsertUsageRecord {
     UpsertUsageRecord {
+        capture_retention: Default::default(),
         request_id: request_id.to_string(),
         user_id: None,
         api_key_id: None,
@@ -134,6 +135,76 @@ fn sample_upsert_usage_record(request_id: &str) -> UpsertUsageRecord {
         created_at_unix_ms: Some(1_700_000_000),
         updated_at_unix_secs: 1_700_000_000,
     }
+}
+
+#[tokio::test]
+async fn upsert_preserves_full_http_captures_across_lifecycle_updates() {
+    let repository = InMemoryUsageReadRepository::default();
+    let mut pending = sample_upsert_usage_record("req-full-capture");
+    pending.request_headers =
+        Some(json!({"content-type": "application/json", "authorization": "Bearer private"}));
+    pending.request_body =
+        Some(json!({"messages": [{"role": "user", "content": "original request"}]}));
+    pending.provider_request_body = Some(json!({"input": "provider request"}));
+    pending.request_body_state = Some(UsageBodyCaptureState::Inline);
+    pending.provider_request_body_state = Some(UsageBodyCaptureState::Inline);
+    let stored_pending = repository.upsert(pending.clone()).await.unwrap();
+    assert_eq!(stored_pending.request_body, pending.request_body);
+    assert_eq!(
+        stored_pending.provider_request_body,
+        pending.provider_request_body
+    );
+    assert_eq!(
+        stored_pending.request_headers,
+        Some(json!({"content-type": "application/json", "authorization": "Bearer private"}))
+    );
+
+    let mut streaming = sample_upsert_usage_record(&pending.request_id);
+    streaming.status = "streaming".to_string();
+    streaming.updated_at_unix_secs += 1;
+    let stored_streaming = repository.upsert(streaming).await.unwrap();
+    assert_eq!(stored_streaming.request_body, pending.request_body);
+    assert_eq!(
+        stored_streaming.provider_request_body,
+        pending.provider_request_body
+    );
+
+    let mut terminal = sample_upsert_usage_record(&pending.request_id);
+    terminal.status = "completed".to_string();
+    terminal.updated_at_unix_secs += 2;
+    terminal.finalized_at_unix_secs = Some(terminal.updated_at_unix_secs);
+    terminal.response_headers =
+        Some(json!({"content-type": "text/event-stream", "set-cookie": "private"}));
+    terminal.response_body = Some(json!("data: upstream response\n\ndata: [DONE]\n\n"));
+    terminal.client_response_body =
+        Some(json!({"choices": [{"message": {"content": "client response"}}]}));
+    let stored_terminal = repository.upsert(terminal.clone()).await.unwrap();
+    assert_eq!(stored_terminal.request_body, pending.request_body);
+    assert_eq!(
+        stored_terminal.provider_request_body,
+        pending.provider_request_body
+    );
+    assert_eq!(stored_terminal.response_body, terminal.response_body);
+    assert_eq!(
+        stored_terminal.client_response_body,
+        terminal.client_response_body
+    );
+    assert_eq!(
+        stored_terminal.response_headers,
+        Some(json!({"content-type": "text/event-stream", "set-cookie": "private"}))
+    );
+
+    let found = repository
+        .find_by_request_id(&pending.request_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(found.request_body, pending.request_body);
+    assert_eq!(found.response_body, terminal.response_body);
+    assert_eq!(
+        repository.upsert(pending).await.unwrap().response_body,
+        terminal.response_body
+    );
 }
 
 #[tokio::test]
@@ -465,6 +536,7 @@ async fn stale_pending_update_does_not_regress_finalized_usage() {
     let repository = InMemoryUsageReadRepository::default();
     repository
         .upsert(UpsertUsageRecord {
+            capture_retention: Default::default(),
             request_id: "req-finalized-1".to_string(),
             user_id: Some("user-1".to_string()),
             api_key_id: Some("api-key-1".to_string()),
@@ -538,6 +610,7 @@ async fn stale_pending_update_does_not_regress_finalized_usage() {
 
     repository
         .upsert(UpsertUsageRecord {
+            capture_retention: Default::default(),
             request_id: "req-finalized-1".to_string(),
             user_id: Some("user-1".to_string()),
             api_key_id: Some("api-key-1".to_string()),
@@ -625,6 +698,7 @@ async fn upsert_allows_completed_recovery_after_void_failure() {
     let repository = InMemoryUsageReadRepository::default();
     repository
         .upsert(UpsertUsageRecord {
+            capture_retention: Default::default(),
             request_id: "req-recover-1".to_string(),
             user_id: Some("user-1".to_string()),
             api_key_id: Some("api-key-1".to_string()),
@@ -698,6 +772,7 @@ async fn upsert_allows_completed_recovery_after_void_failure() {
 
     repository
         .upsert(UpsertUsageRecord {
+            capture_retention: Default::default(),
             request_id: "req-recover-1".to_string(),
             user_id: Some("user-1".to_string()),
             api_key_id: Some("api-key-1".to_string()),
@@ -786,6 +861,64 @@ async fn upsert_allows_completed_recovery_after_void_failure() {
         Some(json!({ "trace_id": "trace-recovered" }))
     );
     assert_eq!(stored.total_tokens, 10);
+}
+
+#[tokio::test]
+async fn stale_terminal_event_cannot_replace_usage_routing_or_counter_contribution() {
+    let auth_api_keys = sample_auth_api_key_repository(&["api-key-1"]);
+    let repository = InMemoryUsageReadRepository::default()
+        .with_auth_api_key_repository(Arc::clone(&auth_api_keys));
+
+    let mut newer = sample_upsert_usage_record("req-stale-terminal");
+    newer.api_key_id = Some("api-key-1".to_string());
+    newer.status = "completed".to_string();
+    newer.status_code = Some(200);
+    newer.total_tokens = Some(5);
+    newer.total_cost_usd = Some(0.5);
+    newer.candidate_id = Some("candidate-new".to_string());
+    newer.route_kind = Some("route-new".to_string());
+    newer.updated_at_unix_secs = 200;
+    newer.finalized_at_unix_secs = Some(200);
+    repository
+        .upsert(newer)
+        .await
+        .expect("newer terminal usage should upsert");
+
+    let mut stale = sample_upsert_usage_record("req-stale-terminal");
+    stale.api_key_id = Some("api-key-1".to_string());
+    stale.status = "failed".to_string();
+    stale.billing_status = "void".to_string();
+    stale.status_code = Some(503);
+    stale.total_tokens = Some(999);
+    stale.total_cost_usd = Some(99.0);
+    stale.candidate_id = Some("candidate-stale".to_string());
+    stale.route_kind = Some("route-stale".to_string());
+    stale.updated_at_unix_secs = 199;
+    stale.finalized_at_unix_secs = Some(199);
+    let stored = repository
+        .upsert(stale)
+        .await
+        .expect("stale terminal usage should be ignored");
+
+    assert_eq!(stored.status, "completed");
+    assert_eq!(stored.billing_status, "pending");
+    assert_eq!(stored.status_code, Some(200));
+    assert_eq!(stored.total_tokens, 5);
+    assert_eq!(stored.total_cost_usd, 0.5);
+    assert_eq!(stored.routing_candidate_id(), Some("candidate-new"));
+    assert_eq!(stored.routing_route_kind(), Some("route-new"));
+    assert_eq!(stored.updated_at_unix_secs, 200);
+
+    let key = auth_api_keys
+        .list_export_api_keys_by_ids(&["api-key-1".to_string()])
+        .await
+        .expect("api key stats should load")
+        .into_iter()
+        .next()
+        .expect("api key should exist");
+    assert_eq!(key.total_requests, 1);
+    assert_eq!(key.total_tokens, 5);
+    assert_eq!(key.total_cost_usd, 0.5);
 }
 
 #[tokio::test]
@@ -881,6 +1014,7 @@ async fn stale_pending_update_does_not_regress_streaming_usage() {
     let repository = InMemoryUsageReadRepository::default();
     repository
         .upsert(UpsertUsageRecord {
+            capture_retention: Default::default(),
             request_id: "req-streaming-1".to_string(),
             user_id: Some("user-1".to_string()),
             api_key_id: Some("api-key-1".to_string()),
@@ -956,6 +1090,7 @@ async fn stale_pending_update_does_not_regress_streaming_usage() {
 
     repository
         .upsert(UpsertUsageRecord {
+            capture_retention: Default::default(),
             request_id: "req-streaming-1".to_string(),
             user_id: Some("user-1".to_string()),
             api_key_id: Some("api-key-1".to_string()),
@@ -1190,10 +1325,28 @@ async fn detached_body_seed_moves_large_payloads_behind_usage_refs() {
 }
 
 #[tokio::test]
+async fn seed_discards_cross_request_and_cross_field_body_refs() {
+    let mut usage = sample_usage("req-ref-target", 100);
+    usage.request_body_ref = Some("usage://request/req-ref-owner/request_body".to_string());
+    usage.response_body_ref = Some("usage://request/req-ref-target/request_body".to_string());
+
+    let repository = InMemoryUsageReadRepository::seed(vec![usage]);
+    let stored = repository
+        .find_by_request_id("req-ref-target")
+        .await
+        .expect("find should succeed")
+        .expect("usage should exist");
+
+    assert!(stored.request_body_ref.is_none());
+    assert!(stored.response_body_ref.is_none());
+}
+
+#[tokio::test]
 async fn upsert_writes_usage_record() {
     let repository = InMemoryUsageReadRepository::default();
     let stored = repository
         .upsert(UpsertUsageRecord {
+            capture_retention: Default::default(),
             request_id: "req-upsert-1".to_string(),
             user_id: Some("user-1".to_string()),
             api_key_id: Some("key-1".to_string()),
@@ -1285,6 +1438,7 @@ async fn upsert_defaults_created_at_to_second_timestamp() {
     let repository = InMemoryUsageReadRepository::default();
     let stored = repository
         .upsert(UpsertUsageRecord {
+            capture_retention: Default::default(),
             request_id: "req-upsert-ms-default".to_string(),
             user_id: None,
             api_key_id: None,
@@ -1364,6 +1518,7 @@ async fn upsert_does_not_backfill_legacy_output_price_from_request_metadata() {
     let repository = InMemoryUsageReadRepository::default();
     let stored = repository
         .upsert(UpsertUsageRecord {
+            capture_retention: Default::default(),
             request_id: "req-upsert-price-metadata".to_string(),
             user_id: None,
             api_key_id: None,
@@ -1446,6 +1601,7 @@ async fn upsert_does_not_backfill_typed_body_refs_from_request_metadata() {
     let repository = InMemoryUsageReadRepository::default();
     let stored = repository
         .upsert(UpsertUsageRecord {
+            capture_retention: Default::default(),
             request_id: "req-upsert-body-ref-metadata".to_string(),
             user_id: None,
             api_key_id: None,
@@ -1520,12 +1676,7 @@ async fn upsert_does_not_backfill_typed_body_refs_from_request_metadata() {
         .expect("upsert should succeed");
 
     assert_eq!(stored.request_body_ref, None);
-    assert_eq!(
-        stored.request_metadata,
-        Some(json!({
-            "request_body_ref": "usage://request/req-upsert-body-ref-metadata/request_body"
-        }))
-    );
+    assert_eq!(stored.request_metadata, None);
 }
 
 #[tokio::test]
@@ -1533,6 +1684,7 @@ async fn upsert_keeps_typed_routing_fields_out_of_request_metadata() {
     let repository = InMemoryUsageReadRepository::default();
     let stored = repository
         .upsert(UpsertUsageRecord {
+            capture_retention: Default::default(),
             request_id: "req-upsert-routing-metadata".to_string(),
             user_id: None,
             api_key_id: None,
@@ -1631,6 +1783,7 @@ async fn upsert_does_not_persist_legacy_display_columns_for_new_rows() {
     let repository = InMemoryUsageReadRepository::default();
     let stored = repository
         .upsert(UpsertUsageRecord {
+            capture_retention: Default::default(),
             request_id: "req-upsert-display-columns".to_string(),
             user_id: Some("user-1".to_string()),
             api_key_id: Some("key-1".to_string()),
@@ -1781,6 +1934,7 @@ async fn upsert_preserves_existing_legacy_display_columns_when_new_write_omits_t
     }]);
     let stored = repository
         .upsert(UpsertUsageRecord {
+            capture_retention: Default::default(),
             request_id: "req-existing-display-columns".to_string(),
             user_id: Some("user-1".to_string()),
             api_key_id: Some("key-1".to_string()),

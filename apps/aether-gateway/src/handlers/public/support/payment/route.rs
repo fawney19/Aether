@@ -2,7 +2,8 @@ use axum::{body::Body, http, response::Response};
 
 use super::payment_gateway::{PaymentGatewayRegistry, VerifyCallbackInput};
 use super::payment_shared::{
-    payment_callback_payment_method_from_path, payment_callback_secret, PaymentCallbackRequest,
+    generic_payment_callback_method_allowed, payment_callback_payment_method_from_path,
+    payment_callback_secret, payment_callback_secret_matches, PaymentCallbackRequest,
     PAYMENT_CALLBACK_SIGNATURE_HEADER, PAYMENT_CALLBACK_TOKEN_HEADER,
 };
 use super::{
@@ -53,6 +54,23 @@ pub(super) async fn maybe_build_local_payment_callback_route_response(
         return None;
     }
 
+    let Some(payment_method) =
+        payment_callback_payment_method_from_path(&request_context.request_path)
+    else {
+        return Some(build_auth_error_response(
+            http::StatusCode::BAD_REQUEST,
+            "payment_method is required",
+            false,
+        ));
+    };
+    if !generic_payment_callback_method_allowed(&payment_method) {
+        return Some(build_auth_error_response(
+            http::StatusCode::NOT_FOUND,
+            "payment callback route not found",
+            false,
+        ));
+    }
+
     let Some(secret) = payment_callback_secret() else {
         return Some(build_auth_error_response(
             http::StatusCode::SERVICE_UNAVAILABLE,
@@ -69,7 +87,7 @@ pub(super) async fn maybe_build_local_payment_callback_route_response(
             false,
         ));
     };
-    if provided_token.trim() != secret {
+    if !payment_callback_secret_matches(&provided_token, &secret) {
         return Some(build_auth_error_response(
             http::StatusCode::UNAUTHORIZED,
             "invalid payment callback token",
@@ -101,15 +119,6 @@ pub(super) async fn maybe_build_local_payment_callback_route_response(
                 false,
             ));
         }
-    };
-    let Some(payment_method) =
-        payment_callback_payment_method_from_path(&request_context.request_path)
-    else {
-        return Some(build_auth_error_response(
-            http::StatusCode::BAD_REQUEST,
-            "payment_method is required",
-            false,
-        ));
     };
     let Some(adapter) = PaymentGatewayRegistry::get(&payment_method) else {
         return Some(build_auth_error_response(
@@ -163,5 +172,20 @@ pub(super) async fn maybe_build_local_payment_callback_route_response(
     #[cfg(not(test))]
     {
         Some(build_payment_callback_storage_unavailable_response())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::generic_payment_callback_method_allowed;
+
+    #[test]
+    fn generic_hmac_callback_excludes_official_direct_providers() {
+        for provider in ["alipay", "ALIPAY", " wxpay ", "Stripe", "epay"] {
+            assert!(!generic_payment_callback_method_allowed(provider));
+        }
+        for payment_method in ["manual", "wechat"] {
+            assert!(generic_payment_callback_method_allowed(payment_method));
+        }
     }
 }

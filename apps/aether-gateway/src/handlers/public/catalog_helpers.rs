@@ -1,13 +1,12 @@
 use crate::api::ai::public_api_format_local_path;
-use crate::handlers::shared::{
-    query_param_optional_bool, query_param_value, unix_ms_to_rfc3339, unix_secs_to_rfc3339,
-};
+use crate::handlers::shared::{query_param_value, unix_ms_to_rfc3339, unix_secs_to_rfc3339};
 use crate::provider_key_auth::{
     provider_key_configured_api_formats, provider_key_effective_api_formats,
 };
 use crate::AppState;
 use aether_data_contracts::repository::candidates::{
-    PublicHealthTimelineBucket, RequestCandidateStatus, StoredRequestCandidate,
+    sanitize_request_candidate_error_type, PublicHealthTimelineBucket, RequestCandidateStatus,
+    StoredRequestCandidate,
 };
 use aether_data_contracts::repository::global_models::{
     PublicCatalogModelListQuery, PublicCatalogModelSearchQuery, StoredPublicCatalogModel,
@@ -123,34 +122,401 @@ pub(crate) fn normalize_admin_base_url(base_url: &str) -> Result<String, String>
     if trimmed.is_empty() {
         return Err("base_url 不能为空".to_string());
     }
-    let normalized = trimmed.trim_end_matches('/');
-    let lower = normalized.to_ascii_lowercase();
-    if !lower.starts_with("http://") && !lower.starts_with("https://") {
+    let mut parsed = url::Url::parse(trimmed).map_err(|_| "base_url 不是有效 URL".to_string())?;
+    if !matches!(parsed.scheme(), "http" | "https") {
         return Err("URL 必须以 http:// 或 https:// 开头".to_string());
     }
-    Ok(normalized.to_string())
+    if parsed.host_str().is_none() {
+        return Err("base_url 必须包含有效主机".to_string());
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("base_url 不允许包含用户名或密码".to_string());
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err("base_url 不允许包含查询参数或片段".to_string());
+    }
+    parsed.set_query(None);
+    parsed.set_fragment(None);
+    let normalized = parsed.to_string();
+    Ok(normalized.trim_end_matches('/').to_string())
+}
+
+#[cfg(test)]
+mod normalize_admin_base_url_tests {
+    use super::normalize_admin_base_url;
+
+    #[test]
+    fn endpoint_base_url_rejects_embedded_credentials_and_hidden_suffixes() {
+        for value in [
+            "https://user:password@api.example.test/v1",
+            "https://api.example.test/v1?key=secret",
+            "https://api.example.test/v1#secret",
+            "http://user:password@api.example.test/v1",
+            "http://api.example.test/v1?key=secret",
+            "http://api.example.test/v1#secret",
+            "ftp://api.example.test/v1",
+            "file:///v1",
+            "api.example.test/v1",
+            "",
+            "https://",
+            "http://",
+            "https://api.example.test:invalid/v1",
+        ] {
+            assert!(normalize_admin_base_url(value).is_err(), "accepted {value}");
+        }
+    }
+
+    #[test]
+    fn endpoint_base_url_accepts_remote_http_hosts() {
+        for (raw_url, expected) in [
+            (
+                " HTTP://API.EXAMPLE.TEST:8080/v1/ ",
+                "http://api.example.test:8080/v1",
+            ),
+            ("http://8.8.8.8:8080/v1/", "http://8.8.8.8:8080/v1"),
+            ("http://10.0.0.1:8080/v1/", "http://10.0.0.1:8080/v1"),
+            (
+                "http://[2606:4700:4700::1111]:8080/v1/",
+                "http://[2606:4700:4700::1111]:8080/v1",
+            ),
+        ] {
+            assert_eq!(
+                normalize_admin_base_url(raw_url).expect("HTTP base URL should be accepted"),
+                expected,
+            );
+        }
+    }
+
+    #[test]
+    fn endpoint_base_url_is_parsed_and_normalized() {
+        assert_eq!(
+            normalize_admin_base_url(" HTTPS://API.EXAMPLE.TEST/v1/ ").expect("valid base URL"),
+            "https://api.example.test/v1"
+        );
+        assert_eq!(
+            normalize_admin_base_url("http://127.0.0.1:18181/v1/")
+                .expect("literal loopback HTTP should remain available"),
+            "http://127.0.0.1:18181/v1"
+        );
+        assert_eq!(
+            normalize_admin_base_url("http://[::1]:18181/v1/")
+                .expect("IPv6 loopback HTTP should remain available"),
+            "http://[::1]:18181/v1"
+        );
+    }
 }
 
 pub(crate) fn sanitize_public_model_config_for_user(
     config: Option<serde_json::Value>,
 ) -> Option<serde_json::Value> {
-    let Some(mut config) = config else {
+    let Some(config) = config else {
         return None;
     };
-    if let Some(object) = config.as_object_mut() {
-        for key in [
-            "model_mappings",
-            "model_mapping",
-            "global_model_mappings",
-            "provider_model_mappings",
-            "provider_model_aliases",
-            "mapping_preview",
-            "model_mapping_preview",
-        ] {
-            object.remove(key);
+    let object = config.as_object()?;
+    let mut public = serde_json::Map::new();
+
+    if let Some(description) = object
+        .get("description")
+        .and_then(serde_json::Value::as_str)
+    {
+        public.insert(
+            "description".to_string(),
+            serde_json::Value::String(description.to_string()),
+        );
+    }
+    for key in [
+        "streaming",
+        "image_generation",
+        "vision",
+        "function_calling",
+        "extended_thinking",
+        "embedding",
+        "rerank",
+    ] {
+        if let Some(value) = object.get(key).and_then(serde_json::Value::as_bool) {
+            public.insert(key.to_string(), serde_json::Value::Bool(value));
         }
     }
-    Some(config)
+    for key in ["model_type", "type"] {
+        if let Some(value) = object.get(key).and_then(serde_json::Value::as_str) {
+            public.insert(
+                key.to_string(),
+                serde_json::Value::String(value.to_string()),
+            );
+        }
+    }
+    for key in ["api_formats", "capabilities", "supported_capabilities"] {
+        if let Some(values) = public_string_array(object.get(key)) {
+            public.insert(key.to_string(), serde_json::Value::Array(values));
+        }
+    }
+    if let Some(video_billing) = public_video_billing(object.get("billing")) {
+        public.insert("billing".to_string(), video_billing);
+    }
+
+    (!public.is_empty()).then(|| serde_json::Value::Object(public))
+}
+
+pub(crate) fn sanitize_public_model_capabilities(
+    capabilities: Option<serde_json::Value>,
+) -> Option<serde_json::Value> {
+    public_string_array(capabilities.as_ref()).map(serde_json::Value::Array)
+}
+
+pub(crate) fn sanitize_public_tiered_pricing(
+    pricing: Option<serde_json::Value>,
+) -> Option<serde_json::Value> {
+    let pricing = pricing?.as_object()?.clone();
+    let mut public = serde_json::Map::new();
+
+    if let Some(tiers) = pricing.get("tiers").and_then(serde_json::Value::as_array) {
+        let tiers = tiers
+            .iter()
+            .filter_map(public_pricing_tier)
+            .collect::<Vec<_>>();
+        if !tiers.is_empty() {
+            public.insert("tiers".to_string(), serde_json::Value::Array(tiers));
+        }
+    }
+    copy_public_price(&pricing, &mut public, "image_output_price_default", false);
+    copy_public_price_matrix(&pricing, &mut public, "image_output_prices");
+    copy_public_price_ranges(&pricing, &mut public, "image_output_price_ranges");
+
+    if let Some(processing_tiers) = pricing
+        .get("processing_tiers")
+        .and_then(serde_json::Value::as_object)
+    {
+        let processing_tiers = processing_tiers
+            .iter()
+            .filter_map(|(name, pricing)| {
+                let mut pricing_without_nested_tiers = pricing.as_object()?.clone();
+                pricing_without_nested_tiers.remove("processing_tiers");
+                let mut sanitized = sanitize_public_tiered_pricing(Some(
+                    serde_json::Value::Object(pricing_without_nested_tiers),
+                ))
+                .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
+                let sanitized = sanitized.as_object_mut()?;
+                if let Some(multiplier) = pricing
+                    .get("price_multiplier")
+                    .and_then(nonnegative_finite_number)
+                {
+                    sanitized.insert("price_multiplier".to_string(), multiplier);
+                }
+                (!sanitized.is_empty())
+                    .then(|| (name.clone(), serde_json::Value::Object(sanitized.clone())))
+            })
+            .collect::<serde_json::Map<_, _>>();
+        if !processing_tiers.is_empty() {
+            public.insert(
+                "processing_tiers".to_string(),
+                serde_json::Value::Object(processing_tiers),
+            );
+        }
+    }
+
+    (!public.is_empty()).then(|| serde_json::Value::Object(public))
+}
+
+fn public_string_array(value: Option<&serde_json::Value>) -> Option<Vec<serde_json::Value>> {
+    let values = value?.as_array()?;
+    let values = values
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .map(|value| serde_json::Value::String(value.to_string()))
+        .collect::<Vec<_>>();
+    (!values.is_empty()).then_some(values)
+}
+
+fn public_pricing_tier(value: &serde_json::Value) -> Option<serde_json::Value> {
+    let value = value.as_object()?;
+    let mut public = serde_json::Map::new();
+    match value.get("up_to") {
+        Some(serde_json::Value::Null) => {
+            public.insert("up_to".to_string(), serde_json::Value::Null);
+        }
+        Some(value) => {
+            public.insert("up_to".to_string(), nonnegative_integer_number(value)?);
+        }
+        None => return None,
+    }
+    for key in [
+        "input_price_per_1m",
+        "output_price_per_1m",
+        "cache_creation_price_per_1m",
+        "cache_read_price_per_1m",
+    ] {
+        copy_public_price(value, &mut public, key, false);
+    }
+    if let Some(cache_ttl_pricing) = value
+        .get("cache_ttl_pricing")
+        .and_then(serde_json::Value::as_array)
+    {
+        let cache_ttl_pricing = cache_ttl_pricing
+            .iter()
+            .filter_map(public_cache_ttl_price)
+            .collect::<Vec<_>>();
+        if !cache_ttl_pricing.is_empty() {
+            public.insert(
+                "cache_ttl_pricing".to_string(),
+                serde_json::Value::Array(cache_ttl_pricing),
+            );
+        }
+    }
+    Some(serde_json::Value::Object(public))
+}
+
+fn public_cache_ttl_price(value: &serde_json::Value) -> Option<serde_json::Value> {
+    let value = value.as_object()?;
+    let mut public = serde_json::Map::new();
+    public.insert(
+        "ttl_minutes".to_string(),
+        nonnegative_integer_number(value.get("ttl_minutes")?)?,
+    );
+    for key in ["cache_creation_price_per_1m", "cache_read_price_per_1m"] {
+        copy_public_price(value, &mut public, key, false);
+    }
+    Some(serde_json::Value::Object(public))
+}
+
+fn copy_public_price(
+    source: &serde_json::Map<String, serde_json::Value>,
+    target: &mut serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    allow_null: bool,
+) {
+    match source.get(key) {
+        Some(serde_json::Value::Null) if allow_null => {
+            target.insert(key.to_string(), serde_json::Value::Null);
+        }
+        Some(value) => {
+            if let Some(value) = nonnegative_finite_number(value) {
+                target.insert(key.to_string(), value);
+            }
+        }
+        None => {}
+    }
+}
+
+fn copy_public_price_matrix(
+    source: &serde_json::Map<String, serde_json::Value>,
+    target: &mut serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) {
+    let Some(matrix) = source.get(key).and_then(serde_json::Value::as_object) else {
+        return;
+    };
+    let matrix = matrix
+        .iter()
+        .filter_map(|(size, prices)| {
+            let prices = prices.as_object()?;
+            let prices = prices
+                .iter()
+                .filter_map(|(quality, price)| {
+                    nonnegative_finite_number(price).map(|price| (quality.clone(), price))
+                })
+                .collect::<serde_json::Map<_, _>>();
+            (!prices.is_empty()).then(|| (size.clone(), serde_json::Value::Object(prices)))
+        })
+        .collect::<serde_json::Map<_, _>>();
+    if !matrix.is_empty() {
+        target.insert(key.to_string(), serde_json::Value::Object(matrix));
+    }
+}
+
+fn copy_public_price_ranges(
+    source: &serde_json::Map<String, serde_json::Value>,
+    target: &mut serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) {
+    let Some(ranges) = source.get(key).and_then(serde_json::Value::as_array) else {
+        return;
+    };
+    let ranges = ranges
+        .iter()
+        .filter_map(|range| {
+            let range = range.as_object()?;
+            let mut public = serde_json::Map::new();
+            match range.get("up_to_pixels") {
+                Some(serde_json::Value::Null) => {
+                    public.insert("up_to_pixels".to_string(), serde_json::Value::Null);
+                }
+                Some(value) => {
+                    public.insert(
+                        "up_to_pixels".to_string(),
+                        nonnegative_integer_number(value)?,
+                    );
+                }
+                None => return None,
+            }
+            if let Some(label) = range.get("label").and_then(serde_json::Value::as_str) {
+                public.insert(
+                    "label".to_string(),
+                    serde_json::Value::String(label.to_string()),
+                );
+            }
+            let prices = range.get("prices")?.as_object()?;
+            let prices = prices
+                .iter()
+                .filter_map(|(quality, price)| {
+                    nonnegative_finite_number(price).map(|price| (quality.clone(), price))
+                })
+                .collect::<serde_json::Map<_, _>>();
+            if prices.is_empty() {
+                return None;
+            }
+            public.insert("prices".to_string(), serde_json::Value::Object(prices));
+            Some(serde_json::Value::Object(public))
+        })
+        .collect::<Vec<_>>();
+    if !ranges.is_empty() {
+        target.insert(key.to_string(), serde_json::Value::Array(ranges));
+    }
+}
+
+fn nonnegative_integer_number(value: &serde_json::Value) -> Option<serde_json::Value> {
+    value
+        .as_u64()
+        .map(serde_json::Number::from)
+        .map(serde_json::Value::Number)
+}
+
+fn nonnegative_finite_number(value: &serde_json::Value) -> Option<serde_json::Value> {
+    value
+        .as_f64()
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .and_then(serde_json::Number::from_f64)
+        .map(serde_json::Value::Number)
+}
+
+fn public_video_billing(value: Option<&serde_json::Value>) -> Option<serde_json::Value> {
+    let prices = value?
+        .get("video")?
+        .get("price_per_second_by_resolution")?
+        .as_object()?;
+    let prices = prices
+        .iter()
+        .filter_map(|(resolution, price)| {
+            price
+                .as_f64()
+                .filter(|price| price.is_finite() && *price >= 0.0)
+                .map(|price| {
+                    (
+                        resolution.clone(),
+                        serde_json::Number::from_f64(price)
+                            .map(serde_json::Value::Number)
+                            .expect("finite price should serialize"),
+                    )
+                })
+        })
+        .collect::<serde_json::Map<_, _>>();
+    if prices.is_empty() {
+        return None;
+    }
+    Some(json!({
+        "video": {
+            "price_per_second_by_resolution": prices,
+        }
+    }))
 }
 
 pub(crate) fn admin_requested_force_stream(value: &serde_json::Value) -> bool {
@@ -192,7 +558,6 @@ pub(crate) async fn build_public_providers_payload(
         return None;
     }
 
-    let is_active = query_param_optional_bool(query, "is_active");
     let skip = query_param_value(query, "skip")
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(0);
@@ -201,15 +566,11 @@ pub(crate) async fn build_public_providers_payload(
         .filter(|value| *value > 0 && *value <= 1000)
         .unwrap_or(100);
 
-    let active_only = is_active.unwrap_or(true);
     let mut providers = state
-        .list_provider_catalog_providers(active_only)
+        .list_provider_catalog_providers(true)
         .await
         .ok()
         .unwrap_or_default();
-    if matches!(is_active, Some(false)) {
-        providers.retain(|provider| !provider.is_active);
-    }
     providers.sort_by(|left, right| {
         left.provider_priority
             .cmp(&right.provider_priority)
@@ -241,16 +602,14 @@ pub(crate) async fn build_public_providers_payload(
     let mut endpoints_count_by_provider = BTreeMap::<String, usize>::new();
     let mut active_endpoints_count_by_provider = BTreeMap::<String, usize>::new();
     let mut api_formats = BTreeSet::<String>::new();
-    for endpoint in &endpoints {
+    for endpoint in endpoints.iter().filter(|endpoint| endpoint.is_active) {
         *endpoints_count_by_provider
             .entry(endpoint.provider_id.clone())
             .or_default() += 1;
-        if endpoint.is_active {
-            *active_endpoints_count_by_provider
-                .entry(endpoint.provider_id.clone())
-                .or_default() += 1;
-            api_formats.insert(endpoint.api_format.clone());
-        }
+        *active_endpoints_count_by_provider
+            .entry(endpoint.provider_id.clone())
+            .or_default() += 1;
+        api_formats.insert(endpoint.api_format.clone());
     }
 
     let mut models_by_provider = BTreeMap::<String, BTreeSet<String>>::new();
@@ -621,19 +980,7 @@ pub(crate) async fn build_api_format_health_monitor_payload(
         let avg_first_byte_ms = model_health_average_first_byte_ms(&usage_events);
         let events = attempts
             .into_iter()
-            .filter_map(|candidate| {
-                let timestamp = candidate
-                    .finished_at_unix_ms
-                    .or(candidate.started_at_unix_ms)
-                    .unwrap_or(candidate.created_at_unix_ms);
-                Some(json!({
-                    "timestamp": unix_ms_to_rfc3339(timestamp)?,
-                    "status": request_candidate_status_label(candidate.status),
-                    "status_code": candidate.status_code,
-                    "latency_ms": candidate.latency_ms,
-                    "error_type": candidate.error_type,
-                }))
-            })
+            .filter_map(public_request_candidate_health_event)
             .collect::<Vec<_>>();
         let empty_timeline = BTreeMap::new();
         let timeline_source = timeline_by_format
@@ -685,6 +1032,22 @@ pub(crate) async fn build_api_format_health_monitor_payload(
     Some(json!({
         "generated_at": unix_secs_to_rfc3339(now_unix_secs),
         "formats": formats,
+    }))
+}
+
+fn public_request_candidate_health_event(
+    candidate: StoredRequestCandidate,
+) -> Option<serde_json::Value> {
+    let timestamp = candidate
+        .finished_at_unix_ms
+        .or(candidate.started_at_unix_ms)
+        .unwrap_or(candidate.created_at_unix_ms);
+    Some(json!({
+        "timestamp": unix_ms_to_rfc3339(timestamp)?,
+        "status": request_candidate_status_label(candidate.status),
+        "status_code": candidate.status_code,
+        "latency_ms": candidate.latency_ms,
+        "error_type": sanitize_request_candidate_error_type(candidate.error_type),
     }))
 }
 
@@ -1980,7 +2343,11 @@ pub(crate) fn api_format_display_name(api_format: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::request_candidate_event_unix_ms;
+    use super::{
+        public_request_candidate_health_event, request_candidate_event_unix_ms,
+        sanitize_public_model_capabilities, sanitize_public_model_config_for_user,
+        sanitize_public_tiered_pricing,
+    };
     use crate::handlers::shared::unix_ms_to_rfc3339;
     use aether_data_contracts::repository::candidates::{
         RequestCandidateStatus, StoredRequestCandidate,
@@ -2021,6 +2388,116 @@ mod tests {
         assert_eq!(
             unix_ms_to_rfc3339(event_unix_ms).as_deref(),
             Some("2023-11-14T22:13:20.123Z")
+        );
+    }
+
+    #[test]
+    fn public_candidate_health_event_classifies_untrusted_error_text() {
+        let mut candidate = StoredRequestCandidate::new(
+            "cand-unsafe".to_string(),
+            "req-1".to_string(),
+            None,
+            None,
+            None,
+            None,
+            0,
+            0,
+            Some("provider-1".to_string()),
+            Some("endpoint-1".to_string()),
+            Some("key-1".to_string()),
+            RequestCandidateStatus::Failed,
+            None,
+            false,
+            Some(500),
+            None,
+            None,
+            Some(42),
+            Some(1),
+            None,
+            None,
+            1_700_000_000_000,
+            Some(1_700_000_000_111),
+            Some(1_700_000_000_123),
+        )
+        .expect("candidate should build");
+        candidate.error_type = Some("Bearer public-health-secret".to_string());
+
+        let event = public_request_candidate_health_event(candidate)
+            .expect("candidate health event should build");
+
+        assert_eq!(event["error_type"], "unclassified_error");
+        assert!(!event.to_string().contains("public-health-secret"));
+    }
+
+    #[test]
+    fn public_model_metadata_uses_typed_allowlists() {
+        let config = sanitize_public_model_config_for_user(Some(serde_json::json!({
+            "description": "Public model",
+            "streaming": true,
+            "api_formats": ["openai:responses", {"secret": "nested"}],
+            "client_secret": "hidden",
+            "billing": {
+                "video": {
+                    "price_per_second_by_resolution": {
+                        "720p": 0.12,
+                        "internal": "hidden"
+                    },
+                    "private_key": "hidden"
+                }
+            }
+        })))
+        .expect("public config should remain");
+        assert_eq!(config["description"], "Public model");
+        assert_eq!(config["streaming"], true);
+        assert_eq!(
+            config["api_formats"],
+            serde_json::json!(["openai:responses"])
+        );
+        assert_eq!(
+            config["billing"]["video"]["price_per_second_by_resolution"],
+            serde_json::json!({"720p": 0.12})
+        );
+        assert!(config.get("client_secret").is_none());
+        assert!(config["billing"]["video"].get("private_key").is_none());
+
+        assert_eq!(
+            sanitize_public_model_capabilities(Some(serde_json::json!([
+                "vision",
+                {"secret": "hidden"}
+            ]))),
+            Some(serde_json::json!(["vision"]))
+        );
+
+        let pricing = sanitize_public_tiered_pricing(Some(serde_json::json!({
+            "tiers": [{
+                "up_to": null,
+                "input_price_per_1m": 3.0,
+                "output_price_per_1m": 15.0,
+                "internal_note": "hidden",
+                "cache_ttl_pricing": [{
+                    "ttl_minutes": 60,
+                    "cache_creation_price_per_1m": 4.0,
+                    "secret": "hidden"
+                }]
+            }],
+            "processing_tiers": {
+                "priority": {
+                    "price_multiplier": 1.5,
+                    "private_note": "hidden"
+                }
+            },
+            "internal_pricing": {"secret": "hidden"}
+        })))
+        .expect("public pricing should remain");
+        assert_eq!(pricing["tiers"][0]["input_price_per_1m"], 3.0);
+        assert!(pricing.get("internal_pricing").is_none());
+        assert!(pricing["tiers"][0].get("internal_note").is_none());
+        assert!(pricing["tiers"][0]["cache_ttl_pricing"][0]
+            .get("secret")
+            .is_none());
+        assert_eq!(
+            pricing["processing_tiers"]["priority"],
+            serde_json::json!({"price_multiplier": 1.5})
         );
     }
 }

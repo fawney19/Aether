@@ -124,11 +124,19 @@ export interface PaymentOrder {
   fulfillment_error?: string | null
   gateway_order_id: string | null
   gateway_response: Record<string, unknown> | null
+  has_gateway_response?: boolean
   status: string
   created_at: string
   paid_at: string | null
   credited_at: string | null
   expires_at: string | null
+}
+
+export interface WalletRechargeOrdersResponse extends WalletBalanceResponse {
+  items: PaymentOrder[]
+  total: number
+  limit: number
+  offset: number
 }
 
 export interface RefundRequest {
@@ -145,7 +153,7 @@ export interface RefundRequest {
   gateway_refund_id: string | null
   payout_method: string | null
   payout_reference: string | null
-  payout_proof: Record<string, unknown> | null
+  payout_proof?: Record<string, unknown> | null
   created_at: string
   updated_at: string
   processed_at: string | null
@@ -160,6 +168,7 @@ export interface WalletRechargeCreateRequest {
   pay_amount?: number
   pay_currency?: string
   exchange_rate?: number
+  idempotency_key?: string
 }
 
 export interface WalletRechargeOption {
@@ -177,9 +186,6 @@ export interface WalletRechargeOption {
 export interface WalletRefundCreateRequest {
   amount_usd: number
   payment_order_id?: string
-  source_type?: string
-  source_id?: string
-  refund_mode?: string
   reason?: string
   idempotency_key?: string
 }
@@ -224,7 +230,10 @@ export const walletApi = {
     order: PaymentOrder
     payment_instructions: Record<string, unknown>
   }> {
-    const response = await apiClient.post('/api/wallet/recharge', payload)
+    const response = await apiClient.post<{
+    order: PaymentOrder
+    payment_instructions: Record<string, unknown>
+  }>('/api/wallet/recharge', payload)
     return response.data
   },
 
@@ -233,18 +242,13 @@ export const walletApi = {
     return response.data
   },
 
-  async listRechargeOrders(params?: { limit?: number; offset?: number }): Promise<{
-    items: PaymentOrder[]
-    total: number
-    limit: number
-    offset: number
-  }> {
-    const response = await apiClient.get('/api/wallet/recharge', { params })
+  async listRechargeOrders(params?: { limit?: number; offset?: number }): Promise<WalletRechargeOrdersResponse> {
+    const response = await apiClient.get<WalletRechargeOrdersResponse>('/api/wallet/recharge', { params })
     return response.data
   },
 
   async getRechargeOrder(orderId: string): Promise<{ order: PaymentOrder }> {
-    const response = await apiClient.get(`/api/wallet/recharge/${orderId}`)
+    const response = await apiClient.get<{ order: PaymentOrder }>(`/api/wallet/recharge/${orderId}`)
     return response.data
   },
 
@@ -254,7 +258,12 @@ export const walletApi = {
     limit: number
     offset: number
   }> {
-    const response = await apiClient.get('/api/wallet/refunds', { params })
+    const response = await apiClient.get<{
+    items: RefundRequest[]
+    total: number
+    limit: number
+    offset: number
+  }>('/api/wallet/refunds', { params })
     return response.data
   },
 

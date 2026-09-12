@@ -19,6 +19,7 @@ use crate::ai_serving::{
     resolve_local_image_sync_spec as resolve_sync_spec,
 };
 use crate::{AiExecutionDecision, AppState, GatewayError};
+use aether_routing_core::RoutingExecutionPolicy;
 
 use self::decision::maybe_build_local_openai_image_decision_payload_for_candidate;
 use self::support::{
@@ -252,6 +253,13 @@ pub(crate) async fn build_local_image_stream_attempt_source_for_kind<'a>(
 
 #[async_trait]
 impl LocalExecutionAttemptSource<AiSyncAttempt> for LocalOpenAiImageSyncAttemptSource<'_> {
+    fn routing_execution_policy(&self) -> Option<RoutingExecutionPolicy> {
+        self.input
+            .routing_policy
+            .as_ref()
+            .map(|policy| policy.execution_policy.clone())
+    }
+
     async fn next_execution_attempt(&mut self) -> Result<Option<AiSyncAttempt>, GatewayError> {
         while let Some(attempt) = self.candidates.next_attempt().await? {
             match self.build_sync_attempt(attempt).await? {
@@ -290,6 +298,13 @@ impl LocalExecutionAttemptSource<AiSyncAttempt> for LocalOpenAiImageSyncAttemptS
 
 #[async_trait]
 impl LocalExecutionAttemptSource<AiStreamAttempt> for LocalOpenAiImageStreamAttemptSource<'_> {
+    fn routing_execution_policy(&self) -> Option<RoutingExecutionPolicy> {
+        self.input
+            .routing_policy
+            .as_ref()
+            .map(|policy| policy.execution_policy.clone())
+    }
+
     async fn next_execution_attempt(&mut self) -> Result<Option<AiStreamAttempt>, GatewayError> {
         while let Some(attempt) = self.candidates.next_attempt().await? {
             match self.build_stream_attempt(attempt).await? {

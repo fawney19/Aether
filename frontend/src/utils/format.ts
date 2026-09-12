@@ -163,6 +163,10 @@ export function formatDate(dateString: string | undefined | null): string {
   })
 }
 
+export function formatRelativeTime(value: number, unit: Intl.RelativeTimeFormatUnit): string {
+  return new Intl.RelativeTimeFormat(getI18nLocale(), { numeric: 'auto' }).format(value, unit)
+}
+
 // Model price formatting (already in per 1M tokens)
 export function formatModelPrice(price: number | undefined | null): string {
   if (price === undefined || price === null) {

@@ -708,7 +708,7 @@ async function handleSave() {
   try {
     const latestProvider = await getProvider(providerId)
     if (!props.modelValue || props.providerId !== providerId || dialogRevision !== revision) return
-    const latestAdvanced = (latestProvider as Record<string, unknown>).pool_advanced
+    const latestAdvanced = latestProvider.pool_advanced
     const existingPoolAdvanced = mergePoolAdvancedPatch(latestAdvanced, {})
     const latestScoreRules = typeof existingPoolAdvanced.score_rules === 'object'
       && existingPoolAdvanced.score_rules !== null

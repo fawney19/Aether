@@ -212,7 +212,7 @@
                 :class="getPoolKeyRowClass(key.key_id)"
               >
                 <TableCell
-                  class="px-4 py-3"
+                  class="px-4 py-3 align-top"
                 >
                   <div class="flex min-w-0 items-center gap-2">
                     <Checkbox
@@ -324,33 +324,38 @@
                 </TableCell>
                 <TableCell
                   v-if="showAccountQuotaColumn"
-                  class="py-3 align-middle"
+                  class="py-3 align-top"
                 >
                   <PoolKeyQuotaPanel
                     :items="quotaProgressDisplayMap[key.key_id] || []"
                     :account-quota-text="keyUiStateMap[key.key_id]?.accountQuotaText"
                     :fallback-text="keyUiStateMap[key.key_id]?.quotaFallbackText"
                     :text-class="keyUiStateMap[key.key_id]?.quotaTextClass || ''"
+                    :reset-credit-text="getCodexResetCreditCountText(key)"
+                    :reset-credit-items="getCodexResetCreditItemTexts(key)"
+                    :can-consume-reset-credit="canConsumeCodexResetCredit(key)"
+                    :consuming-reset-credit="consumingCodexResetCreditKeyId === key.key_id"
+                    @consume-reset-credit="handleConsumeCodexResetCredit(key)"
                   />
                 </TableCell>
-                <TableCell class="py-3 px-2 align-middle">
+                <TableCell class="py-3 px-2 align-top">
                   <PoolKeyStatsPanel
                     :cycle="isPoolKeyCycleStatsDisplay(key)"
                     :cycle-groups="getPoolKeyCycleStatsGroups(key)"
                     :account-metrics="getPoolKeyAccountStatsMetrics(key)"
                   />
                 </TableCell>
-                <TableCell class="py-3 text-center">
+                <TableCell class="py-3 text-center align-top">
                   <span class="text-[10px] text-muted-foreground whitespace-nowrap">
                     {{ keyUiStateMap[key.key_id]?.importedAtRelative || '-' }}
                   </span>
                 </TableCell>
-                <TableCell class="py-3 text-center">
+                <TableCell class="py-3 text-center align-top">
                   <span class="text-[10px] text-muted-foreground whitespace-nowrap">
                     {{ keyUiStateMap[key.key_id]?.lastUsedRelative || '-' }}
                   </span>
                 </TableCell>
-                <TableCell class="py-3 text-center align-middle">
+                <TableCell class="py-3 text-center align-top">
                   <div class="inline-flex items-center justify-center gap-1">
                     <span class="font-mono text-xs tabular-nums text-foreground/90">
                       {{ formatPoolScore(key.pool_score?.score) }}
@@ -411,7 +416,7 @@
                     </Popover>
                   </div>
                 </TableCell>
-                <TableCell class="py-3 text-center">
+                <TableCell class="py-3 text-center align-top">
                   <Badge
                     :variant="keyUiStateMap[key.key_id]?.schedulingBadgeVariant || 'default'"
                     class="text-[10px]"
@@ -420,7 +425,7 @@
                     {{ keyUiStateMap[key.key_id]?.schedulingBadgeLabel }}
                   </Badge>
                 </TableCell>
-                <TableCell class="py-3 px-2 align-middle">
+                <TableCell class="py-3 px-2 align-top">
                   <div class="flex justify-center gap-0.5">
                     <Button
                       v-if="key.cooldown_reason"
@@ -588,8 +593,8 @@
                   <button
                     v-if="item.key === 'priority'"
                     type="button"
-                    class="inline-flex max-w-full items-center rounded-full border px-2 py-0.5 text-[10px] font-medium leading-4"
-                    :class="`${getMobileTagClass(item)} hover:border-primary/40 hover:text-foreground`"
+                    class="inline-flex max-w-full items-center rounded-full border px-2 py-0.5 text-[10px] font-medium leading-4 hover:border-primary/40 hover:text-foreground"
+                    :class="getMobileTagClass(item)"
                     :title="`${item.label}，点击编辑优先级`"
                     @click="quickEditInternalPriority(key)"
                   >
@@ -709,7 +714,12 @@
                 :account-quota-text="keyUiStateMap[key.key_id]?.accountQuotaText"
                 :fallback-text="keyUiStateMap[key.key_id]?.quotaFallbackText"
                 :text-class="keyUiStateMap[key.key_id]?.quotaTextClass || ''"
+                :reset-credit-text="getCodexResetCreditCountText(key)"
+                :reset-credit-items="getCodexResetCreditItemTexts(key)"
+                :can-consume-reset-credit="canConsumeCodexResetCredit(key)"
+                :consuming-reset-credit="consumingCodexResetCreditKeyId === key.key_id"
                 variant="mobile"
+                @consume-reset-credit="handleConsumeCodexResetCredit(key)"
               />
 
               <div class="flex items-center gap-0.5">
@@ -970,7 +980,7 @@
       v-model="showAccountBatchDialog"
       :provider-id="selectedProviderId"
       :provider-name="selectedProviderData?.name || ''"
-      :provider-type="selectedProviderData?.provider_type || selectedProviderType"
+      :provider-type="selectedProviderData?.provider_type ?? selectedProviderOverview?.provider_type ?? undefined"
       :batch-concurrency="selectedProviderConfig?.batch_concurrency"
       :selected-keys="selectedPoolKeys"
       :select-all-filtered="selectAllFilteredPoolKeys"
@@ -994,7 +1004,7 @@
       v-if="selectedProviderId"
       :open="keyFormDialogOpen"
       :endpoint="null"
-      :provider-type="selectedProviderData?.provider_type || selectedProviderType"
+      :provider-type="selectedProviderData?.provider_type ?? selectedProviderOverview?.provider_type ?? null"
       :editing-key="editingKey"
       :provider-id="selectedProviderId"
       :available-api-formats="selectedProviderData?.api_formats || []"
@@ -1074,6 +1084,7 @@ import {
   deleteEndpointKey,
   updateProviderKey,
   refreshProviderQuota,
+  consumeCodexResetCredit,
   resetProviderKeyCycleStats,
 } from '@/api/endpoints/keys'
 import { refreshProviderOAuth } from '@/api/endpoints/provider_oauth'
@@ -1125,6 +1136,7 @@ import {
 } from '@/features/pool/utils/poolManagementState'
 import type { PoolBatchActionValue } from '@/features/pool/utils/poolBatchActions'
 import {
+  buildAccountTotalStatsDisplay,
   buildPoolStatsDisplay,
   type PoolCodexCycleStatsGroup,
   type PoolStatsDisplay,
@@ -1132,6 +1144,20 @@ import {
 } from '@/features/pool/utils/poolStatsDisplay'
 import { resetCodexCycleUsageWindows } from '@/features/pool/utils/poolCycleStats'
 import { mergePoolKeyQuotaSnapshots } from '@/features/pool/utils/poolQuotaRefresh'
+import { resolveAntigravityQuotaGroupLabel } from '@/features/providers/utils/antigravityQuota'
+import {
+  clearPendingCodexResetCreditIdempotencyKey,
+  clearPendingCodexResetCreditIdempotencyKeyForOutcome,
+  createCodexResetCreditIdempotencyKey,
+  formatCodexResetCreditCount,
+  formatCodexResetCreditExpiresAt,
+  getCodexResetCreditAvailableCount,
+  getCodexResetCreditReservationIdempotencyKey,
+  getVisibleCodexResetCreditItems,
+  mergeCodexQuotaDisplays,
+  readPendingCodexResetCreditIdempotencyKey,
+  rememberPendingCodexResetCreditIdempotencyKey,
+} from '@/features/providers/components/codex-reset-credit-display'
 import { getCodexQuotaWindowPresentation } from '@/utils/codexQuotaWindow'
 import { getOAuthOrgBadge } from '@/utils/oauthIdentity'
 import { formatOAuthPlanType, getOAuthPlanTypeClass } from '@/utils/oauthPlanType'
@@ -1169,7 +1195,7 @@ function prefetchProviderDetailDrawer(): void {
 type PoolKeyScore = NonNullable<PoolKeyDetail['pool_score']>
 
 const { success, error: showError, warning: showWarning } = useToast()
-const { legacyT } = useI18n()
+const { legacyT, t } = useI18n()
 const { confirm } = useConfirm()
 const { copyToClipboard } = useClipboard()
 const { tick: countdownTick, start: startCountdownTimer } = useCountdownTimer()
@@ -1478,7 +1504,7 @@ function appendDemandMetricSample(overview: PoolOverviewItem | null): void {
   const existing = providerDemandMetricSamples.value.filter(
     sample => sample.providerId === overview.provider_id,
   )
-  const lastSample = existing.at(-1)
+  const lastSample = existing[existing.length - 1]
   if (
     lastSample
     && nextSample.sampledAt - lastSample.sampledAt < 1000
@@ -1853,6 +1879,7 @@ const sortOrder = ref<PoolManagementSortOrder>(restoredViewState.sortOrder)
 const hasPoolKeyFilters = computed(() => searchQuery.value.trim().length > 0 || statusFilter.value !== 'all')
 const MANUAL_QUOTA_REFRESH_COOLDOWN_SECONDS = 5 * 60
 const refreshingOAuthKeyId = ref<string | null>(null)
+const consumingCodexResetCreditKeyId = ref<string | null>(null)
 const resettingCycleKeyId = ref<string | null>(null)
 const savingProxyKeyId = ref<string | null>(null)
 const proxyDesktopPopoverOpenKeyId = ref<string | null>(null)
@@ -1978,6 +2005,7 @@ watch(
 interface QuotaProgressItem {
   label: string
   remainingPercent: number
+  numericOnly?: boolean
   sortOrder?: number
   detail?: string
   resetAtSeconds?: number | null
@@ -1993,6 +2021,7 @@ interface QuotaProgressDisplayItem {
   meterText: string
   barClass: string
   meterClass: string
+  numericOnly?: boolean
 }
 
 type PoolKeyUiState = {
@@ -2033,9 +2062,12 @@ const quotaProgressDisplayMap = computed<Record<string, QuotaProgressDisplayItem
       label: getQuotaProgressLabel(item.label),
       remainingPercent: item.remainingPercent,
       resetText: getQuotaProgressResetDisplayText(item),
-      meterText: getQuotaProgressMeterDisplayText(item),
+      meterText: item.numericOnly
+        ? item.detail || formatQuotaValue(item.remainingPercent)
+        : getQuotaProgressMeterDisplayText(item),
       barClass: getQuotaRemainingBarColorByRemaining(item.remainingPercent),
       meterClass: getQuotaRemainingClassByRemaining(item.remainingPercent),
+      numericOnly: item.numericOnly,
     }))
   }
   return map
@@ -2106,7 +2138,7 @@ function getPoolKeyAccountStatsMetrics(key: PoolKeyDetail): PoolStatsMetric[] {
   const display = getPoolKeyStatsDisplay(key)
   return display.kind === 'account_total'
     ? display.metrics
-    : buildPoolStatsDisplay(key, selectedProviderType.value, 'account_total').metrics
+    : buildAccountTotalStatsDisplay(key).metrics
 }
 
 const quotaRefreshSupported = computed(() => {
@@ -2202,6 +2234,115 @@ function applyPoolKeyActiveState(key: PoolKeyDetail, nextStatus: boolean): void 
 
 function applyQuotaRefreshResultToCurrentPage(result: Awaited<ReturnType<typeof refreshProviderQuota>>): void {
   keyPage.value.keys = mergePoolKeyQuotaSnapshots(keyPage.value.keys, result.results)
+}
+
+function getCodexResetCredits(key: PoolKeyDetail) {
+  if (getQuotaSnapshotProviderType(key) !== 'codex') return null
+
+  const snapshot = key.status_snapshot?.quota?.reset_credits
+  const snapshotUpdatedAt = key.status_snapshot?.quota?.updated_at
+  const snapshotDisplay = snapshot
+    ? {
+        ...(typeof snapshotUpdatedAt === 'number' ? { updated_at: snapshotUpdatedAt } : {}),
+        reset_credits: snapshot,
+      }
+    : null
+  return mergeCodexQuotaDisplays(snapshotDisplay, key.upstream_metadata?.codex)?.reset_credits ?? null
+}
+
+function getCodexCredentialGeneration(key: PoolKeyDetail): string | null | undefined {
+  const codex = key.upstream_metadata?.codex
+  return codex && typeof codex === 'object'
+    ? codex.credential_generation?.trim() || null
+    : undefined
+}
+
+function getPendingCodexResetCreditIdempotencyKey(key: PoolKeyDetail): string | null {
+  const codex = key.upstream_metadata?.codex
+  const serverReservation = getCodexResetCreditReservationIdempotencyKey(codex)
+  if (serverReservation) return serverReservation
+  const generation = getCodexCredentialGeneration(key)
+  return generation === undefined
+    ? null
+    : readPendingCodexResetCreditIdempotencyKey(key.key_id, generation)
+}
+
+function getCodexResetCreditCountText(key: PoolKeyDetail): string | null {
+  const count = getCodexResetCreditAvailableCount(getCodexResetCredits(key))
+  return count === null && !getPendingCodexResetCreditIdempotencyKey(key)
+    ? null
+    : formatCodexResetCreditCount(count)
+}
+
+function getCodexResetCreditItemTexts(key: PoolKeyDetail): string[] {
+  return getVisibleCodexResetCreditItems(getCodexResetCredits(key), undefined, 3)
+    .map(item => `${item.displayKey} ${formatCodexResetCreditExpiresAt(item.expiresAt)}`)
+}
+
+function canConsumeCodexResetCredit(key: PoolKeyDetail): boolean {
+  return getQuotaSnapshotProviderType(key) === 'codex'
+    && getCodexCredentialGeneration(key) !== undefined
+    && (getPendingCodexResetCreditIdempotencyKey(key) !== null
+      || (getCodexResetCreditAvailableCount(getCodexResetCredits(key)) ?? 0) > 0)
+    && consumingCodexResetCreditKeyId.value === null
+}
+
+async function handleConsumeCodexResetCredit(key: PoolKeyDetail): Promise<void> {
+  if (!canConsumeCodexResetCredit(key)) return
+  const generation = getCodexCredentialGeneration(key)
+  if (generation === undefined) return
+  const pendingIdempotencyKey = getPendingCodexResetCreditIdempotencyKey(key)
+  const confirmed = await confirm({
+    title: '确认使用 Codex 重置机会',
+    message: pendingIdempotencyKey
+      ? '将继续确认上次尚未完成的 Codex 重置请求。'
+      : '将消耗 1 次 Codex 重置机会，完成后自动刷新账号额度。',
+    confirmText: '确认重置',
+    cancelText: '取消',
+    variant: 'warning',
+  })
+  if (!confirmed) return
+
+  consumingCodexResetCreditKeyId.value = key.key_id
+  try {
+    const idempotencyKey = pendingIdempotencyKey
+      || readPendingCodexResetCreditIdempotencyKey(key.key_id, generation)
+      || createCodexResetCreditIdempotencyKey()
+    rememberPendingCodexResetCreditIdempotencyKey(key.key_id, idempotencyKey, generation)
+    const result = await consumeCodexResetCredit(key.key_id, {
+      idempotency_key: idempotencyKey,
+      expected_credential_generation: generation,
+    })
+    clearPendingCodexResetCreditIdempotencyKeyForOutcome(key.key_id, result.outcome)
+    keyPage.value.keys = mergePoolKeyQuotaSnapshots(keyPage.value.keys, [{
+      key_id: result.key_id,
+      key_name: key.key_name,
+      status: result.refresh_status === 'success' ? 'success' : result.status as 'success',
+      metadata: result.metadata,
+      quota_snapshot: result.quota_snapshot,
+    }])
+    if (result.outcome === 'reset' || result.outcome === 'already_redeemed') {
+      success('Codex 重置机会已使用，账号额度已刷新')
+    } else {
+      showWarning(result.message || '重置请求已处理，请查看最新额度')
+    }
+  } catch (err: unknown) {
+    const responseData = typeof err === 'object' && err !== null && 'response' in err
+      ? (err as { response?: { data?: Record<string, unknown> } }).response?.data
+      : undefined
+    if (responseData?.outcome === 'credential_changed') {
+      clearPendingCodexResetCreditIdempotencyKey(key.key_id)
+    } else if (typeof responseData?.active_idempotency_key === 'string') {
+      rememberPendingCodexResetCreditIdempotencyKey(
+        key.key_id,
+        responseData.active_idempotency_key,
+        generation,
+      )
+    }
+    showError(parseApiError(err, 'Codex 重置机会使用失败'))
+  } finally {
+    consumingCodexResetCreditKeyId.value = null
+  }
 }
 
 function normalizeQuotaUpdatedAt(raw: number | null | undefined): number | null {
@@ -2447,6 +2588,7 @@ function toEndpointApiKey(key: PoolKeyDetail): EndpointAPIKey {
     rate_multipliers: key.rate_multipliers ?? null,
     internal_priority: key.internal_priority ?? 50,
     rpm_limit: key.rpm_limit ?? null,
+    concurrent_limit: key.concurrent_limit ?? null,
     allowed_models: key.allowed_models ?? null,
     capabilities: key.capabilities ?? null,
     cache_ttl_minutes: key.cache_ttl_minutes ?? 5,
@@ -3728,22 +3870,25 @@ function buildQuotaProgressItemsFromSnapshot(key: PoolKeyDetail): QuotaProgressI
   }
 
   if (providerType === 'antigravity') {
-    const windows = getQuotaSnapshotWindowsByScope(quota, 'model')
+    const windows = getQuotaSnapshotWindowsByScope(quota, 'quota_group')
     if (windows.length === 0) return []
-
-    const remainingPercents = windows
-      .map(getQuotaWindowRemainingPercent)
-      .filter((value): value is number => value != null)
-    if (remainingPercents.length === 0) return []
-
-    return [{
-      label: '最低',
-      remainingPercent: Math.min(...remainingPercents),
-      detail: `${windows.length} 模型`,
-      resetAtSeconds: null,
-      resetSeconds: null,
-      updatedAtSeconds: getQuotaSnapshotUpdatedAtSeconds(quota),
-    }]
+    return windows
+      .map((window, index): QuotaProgressItem | null => {
+        const remainingPercent = getQuotaWindowRemainingPercent(window)
+        if (remainingPercent == null) return null
+        const label = resolveAntigravityQuotaGroupLabel(window, t)
+        if (!label) return null
+        return {
+          label,
+          sortOrder: index,
+          remainingPercent,
+          resetAtSeconds: normalizeUnixSeconds(window.reset_at ?? quota.reset_at ?? null),
+          resetSeconds: normalizeRemainingSeconds(window.reset_seconds ?? quota.reset_seconds ?? null),
+          updatedAtSeconds: getQuotaSnapshotUpdatedAtSeconds(quota),
+          allowDynamicReset: true,
+        }
+      })
+      .filter((item): item is QuotaProgressItem => item != null)
   }
 
   if (providerType === 'gemini_cli') {

@@ -1,5 +1,4 @@
 use crate::handlers::admin::request::{AdminAppState, AdminGatewayProviderTransportSnapshot};
-use crate::handlers::admin::shared::decrypt_catalog_secret_with_fallbacks;
 use aether_data_contracts::repository::provider_catalog::{
     StoredProviderCatalogKey, StoredProviderCatalogProvider,
 };
@@ -31,9 +30,13 @@ pub(super) struct RefreshSuccessContext {
 
 pub(super) fn decrypt_auth_config(
     state: &AdminAppState<'_>,
-    encrypted_auth_config: &str,
+    key: &StoredProviderCatalogKey,
 ) -> Option<String> {
-    state.decrypt_catalog_secret_with_fallbacks(encrypted_auth_config)
+    state
+        .app()
+        .decrypt_provider_catalog_key_auth_config(key)
+        .ok()
+        .flatten()
 }
 
 pub(super) fn parse_auth_config_object(plaintext: &str) -> Map<String, Value> {
@@ -45,10 +48,9 @@ pub(super) fn parse_auth_config_object(plaintext: &str) -> Map<String, Value> {
 
 pub(super) fn refreshed_auth_config_object(
     state: &AdminAppState<'_>,
-    encrypted_auth_config: Option<&str>,
+    key: &StoredProviderCatalogKey,
 ) -> Map<String, Value> {
-    encrypted_auth_config
-        .and_then(|ciphertext| decrypt_auth_config(state, ciphertext))
+    decrypt_auth_config(state, key)
         .map(|plaintext| parse_auth_config_object(&plaintext))
         .unwrap_or_default()
 }

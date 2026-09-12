@@ -1,11 +1,29 @@
 use serde_json::{Map, Value};
+use std::fmt;
 
 use super::auth::GeminiCliRequestAuth;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub enum GeminiCliRequestEnvelopeSupport {
     Supported(Value),
     Unsupported(GeminiCliRequestEnvelopeUnsupportedReason),
+}
+
+impl fmt::Debug for GeminiCliRequestEnvelopeSupport {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Supported(body) => formatter
+                .debug_struct("Supported")
+                .field(
+                    "body_bytes",
+                    &serde_json::to_vec(body).ok().map(|bytes| bytes.len()),
+                )
+                .finish(),
+            Self::Unsupported(reason) => {
+                formatter.debug_tuple("Unsupported").field(reason).finish()
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

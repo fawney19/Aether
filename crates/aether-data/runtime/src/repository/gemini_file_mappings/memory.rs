@@ -41,6 +41,40 @@ impl GeminiFileMappingReadRepository for InMemoryGeminiFileMappingRepository {
         Ok(guard.get(file_name).cloned())
     }
 
+    async fn find_active_by_file_name_for_user(
+        &self,
+        file_name: &str,
+        user_id: &str,
+        now_unix_secs: u64,
+    ) -> Result<Option<StoredGeminiFileMapping>, DataLayerError> {
+        let guard = self.by_file.read().expect("gemini mapping repository lock");
+        Ok(guard
+            .get(file_name)
+            .filter(|mapping| {
+                mapping.user_id.as_deref() == Some(user_id)
+                    && mapping.expires_at_unix_secs > now_unix_secs
+            })
+            .cloned())
+    }
+
+    async fn find_active_by_file_name_for_owner(
+        &self,
+        file_name: &str,
+        key_id: &str,
+        user_id: &str,
+        now_unix_secs: u64,
+    ) -> Result<Option<StoredGeminiFileMapping>, DataLayerError> {
+        let guard = self.by_file.read().expect("gemini mapping repository lock");
+        Ok(guard
+            .get(file_name)
+            .filter(|mapping| {
+                mapping.key_id == key_id
+                    && mapping.user_id.as_deref() == Some(user_id)
+                    && mapping.expires_at_unix_secs > now_unix_secs
+            })
+            .cloned())
+    }
+
     async fn list_mappings(
         &self,
         query: &GeminiFileMappingListQuery,
@@ -52,6 +86,12 @@ impl GeminiFileMappingReadRepository for InMemoryGeminiFileMappingRepository {
             .map(|value| value.to_ascii_lowercase());
         let mut items = guard
             .values()
+            .filter(|item| {
+                query
+                    .user_id
+                    .as_deref()
+                    .is_none_or(|user_id| item.user_id.as_deref() == Some(user_id))
+            })
             .filter(|item| query.include_expired || item.expires_at_unix_secs > query.now_unix_secs)
             .filter(|item| {
                 search.as_deref().is_none_or(|needle| {
@@ -146,11 +186,82 @@ impl GeminiFileMappingWriteRepository for InMemoryGeminiFileMappingRepository {
         Ok(mapping)
     }
 
+    async fn upsert_if_owner_matches(
+        &self,
+        record: UpsertGeminiFileMappingRecord,
+    ) -> Result<Option<StoredGeminiFileMapping>, DataLayerError> {
+        record.validate()?;
+        let mut guard = self
+            .by_file
+            .write()
+            .expect("gemini mapping repository lock");
+        let (id, created_at_unix_ms) = match guard.get(&record.file_name) {
+            Some(existing)
+                if existing.key_id == record.key_id && existing.user_id == record.user_id =>
+            {
+                (existing.id.clone(), existing.created_at_unix_ms)
+            }
+            Some(_) => return Ok(None),
+            None => (record.id.clone(), current_unix_secs()),
+        };
+        let mapping = StoredGeminiFileMapping {
+            id,
+            file_name: record.file_name.clone(),
+            key_id: record.key_id.clone(),
+            user_id: record.user_id.clone(),
+            display_name: record.display_name.clone(),
+            mime_type: record.mime_type.clone(),
+            source_hash: record.source_hash.clone(),
+            created_at_unix_ms,
+            expires_at_unix_secs: record.expires_at_unix_secs,
+        };
+        guard.insert(record.file_name, mapping.clone());
+        Ok(Some(mapping))
+    }
+
     async fn delete_by_file_name(&self, file_name: &str) -> Result<bool, DataLayerError> {
         let mut guard = self
             .by_file
             .write()
             .expect("gemini mapping repository lock");
+        Ok(guard.remove(file_name).is_some())
+    }
+
+    async fn delete_by_file_name_for_user(
+        &self,
+        file_name: &str,
+        user_id: &str,
+    ) -> Result<bool, DataLayerError> {
+        let mut guard = self
+            .by_file
+            .write()
+            .expect("gemini mapping repository lock");
+        if guard
+            .get(file_name)
+            .and_then(|item| item.user_id.as_deref())
+            != Some(user_id)
+        {
+            return Ok(false);
+        }
+        Ok(guard.remove(file_name).is_some())
+    }
+
+    async fn delete_by_file_name_for_owner(
+        &self,
+        file_name: &str,
+        key_id: &str,
+        user_id: &str,
+    ) -> Result<bool, DataLayerError> {
+        let mut guard = self
+            .by_file
+            .write()
+            .expect("gemini mapping repository lock");
+        let owner_matches = guard
+            .get(file_name)
+            .is_some_and(|item| item.key_id == key_id && item.user_id.as_deref() == Some(user_id));
+        if !owner_matches {
+            return Ok(false);
+        }
         Ok(guard.remove(file_name).is_some())
     }
 
@@ -225,6 +336,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn owner_scoped_reads_bind_user_provider_key_and_expiry() -> Result<(), DataLayerError> {
+        let repo = InMemoryGeminiFileMappingRepository::default();
+        repo.upsert(sample_record("id-owner", "files/owned"))
+            .await?;
+
+        assert!(repo
+            .find_active_by_file_name_for_user("files/owned", "user-1", 100)
+            .await?
+            .is_some());
+        assert!(repo
+            .find_active_by_file_name_for_user("files/owned", "user-2", 100)
+            .await?
+            .is_none());
+        assert!(repo
+            .find_active_by_file_name_for_owner("files/owned", "key-1", "user-1", 100)
+            .await?
+            .is_some());
+        assert!(repo
+            .find_active_by_file_name_for_owner("files/owned", "key-2", "user-1", 100)
+            .await?
+            .is_none());
+        assert!(repo
+            .find_active_by_file_name_for_user("files/owned", "user-1", 4_102_444_800)
+            .await?
+            .is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn delete_removes_entry() -> Result<(), DataLayerError> {
         let repo = InMemoryGeminiFileMappingRepository::default();
         let record = sample_record("id-2", "files/def");
@@ -248,6 +388,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn owner_checked_upsert_cannot_reassign_existing_mapping() -> Result<(), DataLayerError> {
+        let repo = InMemoryGeminiFileMappingRepository::default();
+        let first = repo.upsert(sample_record("id-1", "files/owned")).await?;
+
+        let mut attacker = sample_record("id-2", "files/owned");
+        attacker.key_id = "key-2".to_string();
+        attacker.user_id = Some("user-2".to_string());
+        assert!(repo.upsert_if_owner_matches(attacker).await?.is_none());
+
+        let unchanged = repo
+            .find_by_file_name("files/owned")
+            .await?
+            .expect("mapping should remain");
+        assert_eq!(unchanged.key_id, "key-1");
+        assert_eq!(unchanged.user_id.as_deref(), Some("user-1"));
+
+        let mut refresh = sample_record("id-3", "files/owned");
+        refresh.display_name = Some("refreshed".to_string());
+        let refreshed = repo
+            .upsert_if_owner_matches(refresh)
+            .await?
+            .expect("same owner should refresh");
+        assert_eq!(refreshed.id, first.id);
+        assert_eq!(refreshed.display_name.as_deref(), Some("refreshed"));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn list_and_summarize_mappings() -> Result<(), DataLayerError> {
         let repo = InMemoryGeminiFileMappingRepository::seed(vec![
             repo_item("id-1", "files/alpha", "image/png", 10, 200),
@@ -257,6 +425,7 @@ mod tests {
 
         let page = repo
             .list_mappings(&GeminiFileMappingListQuery {
+                user_id: None,
                 include_expired: false,
                 search: Some("ga".to_string()),
                 offset: 0,
@@ -276,6 +445,46 @@ mod tests {
         assert_eq!(stats.by_mime_type[0].count, 1);
         assert_eq!(stats.by_mime_type[1].mime_type, "unknown");
         assert_eq!(stats.by_mime_type[1].count, 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn owner_filter_and_delete_do_not_cross_user_boundaries() -> Result<(), DataLayerError> {
+        let mut first = repo_item("id-1", "files/alpha", "image/png", 10, 200);
+        first.user_id = Some("user-1".to_string());
+        let mut second = repo_item("id-2", "files/beta", "image/png", 20, 200);
+        second.user_id = Some("user-2".to_string());
+        let repo = InMemoryGeminiFileMappingRepository::seed([first, second]);
+
+        let page = repo
+            .list_mappings(&GeminiFileMappingListQuery {
+                user_id: Some("user-1".to_string()),
+                include_expired: false,
+                search: None,
+                offset: 0,
+                limit: 10,
+                now_unix_secs: 100,
+            })
+            .await?;
+        assert_eq!(page.total, 1);
+        assert_eq!(page.items[0].file_name, "files/alpha");
+
+        assert!(
+            !repo
+                .delete_by_file_name_for_user("files/alpha", "user-2")
+                .await?
+        );
+        assert!(repo.find_by_file_name("files/alpha").await?.is_some());
+        assert!(
+            !repo
+                .delete_by_file_name_for_owner("files/alpha", "key-2", "user-1")
+                .await?
+        );
+        assert!(repo.find_by_file_name("files/alpha").await?.is_some());
+        assert!(
+            repo.delete_by_file_name_for_user("files/alpha", "user-1")
+                .await?
+        );
         Ok(())
     }
 

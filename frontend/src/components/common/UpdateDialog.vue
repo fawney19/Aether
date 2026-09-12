@@ -195,6 +195,7 @@ import { normalizeReleaseNotesForDisplay } from '@/utils/releaseNotes'
 import { sanitizeMarkdown } from '@/utils/sanitize'
 import { marked } from 'marked'
 import { useI18n } from '@/i18n'
+import { safeExternalHttpsUrl } from '@/utils/navigationSecurity'
 
 const props = defineProps<{
   modelValue: boolean
@@ -323,8 +324,9 @@ function handleLater() {
 }
 
 function handleViewRelease() {
-  if (props.releaseUrl) {
-    window.open(props.releaseUrl, '_blank')
+  const releaseUrl = safeExternalHttpsUrl(props.releaseUrl)
+  if (releaseUrl) {
+    window.open(releaseUrl, '_blank', 'noopener,noreferrer')
   }
   isOpen.value = false
 }

@@ -1494,6 +1494,133 @@ pub(crate) async fn read_recent_codex_catalog_client_version(
     (!normalized.used_fallback()).then_some(normalized.value)
 }
 
+/// Management is not tied to a downstream client's compatibility version. Keep its
+/// directory at least as new as the built-in fingerprint and successful catalogs.
+pub(crate) struct CodexManagementCatalog {
+    pub(crate) client_version: String,
+    pub(crate) models: Option<Vec<Value>>,
+    target: CodexCatalogTarget,
+}
+
+pub(crate) async fn read_codex_management_catalog<R>(
+    runtime: &R,
+    provider_id: &str,
+    key_id: &str,
+) -> Option<CodexManagementCatalog>
+where
+    R: CodexCatalogRuntime + ?Sized,
+{
+    let target = bind_codex_catalog_target(
+        runtime,
+        &CodexCatalogTarget {
+            identity: CodexCatalogIdentity::new(provider_id, key_id),
+            endpoint_ids: Vec::new(),
+            credential_scope: None,
+        },
+    )
+    .await?;
+    let scope = target.credential_scope()?;
+    let state = runtime.codex_catalog_runtime_state();
+    let mut version = Version::parse(crate::ai_serving::CODEX_CLIENT_VERSION).ok()?;
+    if let Some(recent) =
+        read_recent_codex_catalog_client_version(state, provider_id, key_id, scope).await
+    {
+        version = version.max(Version::parse(&recent).ok()?);
+    }
+    // The most recently seen client can be older than an already successful catalog.
+    // Only consider the current credential generation's bounded success index.
+    for member in state
+        .score_range_by_min(&catalog_versions_key(&target.identity), 0.0)
+        .await
+        .unwrap_or_default()
+    {
+        if let Some((stored_scope, stored_version)) = parse_catalog_version_member(&member) {
+            if stored_scope == scope {
+                if let Ok(candidate) = Version::parse(stored_version) {
+                    version = version.max(candidate);
+                }
+            }
+        }
+    }
+    let client_version = version.to_string();
+    let models = if let Some(snapshot) = read_lkg_snapshot(runtime, &target, &client_version).await
+    {
+        let fresh = state
+            .kv_get(&catalog_fresh_key(&target, &client_version))
+            .await
+            .ok()
+            .flatten();
+        (fresh.as_deref() == Some(snapshot.content_sha256.as_str())).then_some(snapshot.models)
+    } else {
+        None
+    };
+    if !codex_catalog_credential_scope_is_current(runtime, &target).await {
+        return None;
+    }
+    Some(CodexManagementCatalog {
+        client_version,
+        models,
+        target,
+    })
+}
+
+/// Publish a successful management fetch into the same versioned directory used by
+/// clients. A credential replacement while the request is in flight must not leak
+/// the previous account's catalog into the new account.
+pub(crate) async fn store_codex_management_catalog<R>(
+    runtime: &R,
+    catalog: &CodexManagementCatalog,
+    transports: &[GatewayProviderTransportSnapshot],
+    models: Vec<Value>,
+    etag: Option<&str>,
+) where
+    R: CodexCatalogRuntime + ?Sized,
+{
+    let target = &catalog.target;
+    if transports.is_empty()
+        || transports.iter().any(|transport| {
+            codex_catalog_credential_scope_from_transport(transport).as_deref()
+                != target.credential_scope()
+        })
+        || !codex_catalog_credential_scope_is_current(runtime, target).await
+    {
+        return;
+    }
+    let Ok(serialized) = validate_catalog_models(&models) else {
+        return;
+    };
+    let now = current_unix_secs();
+    let snapshot = CodexCatalogSnapshot {
+        schema_version: CODEX_CATALOG_SCHEMA_VERSION,
+        provider_id: target.identity.provider_id.clone(),
+        key_id: target.identity.key_id.clone(),
+        credential_scope: target.credential_scope().unwrap_or_default().to_string(),
+        client_version: catalog.client_version.clone(),
+        models,
+        etag: etag.and_then(normalize_etag),
+        fetched_at_unix_secs: now,
+        last_checked_at_unix_secs: now,
+        content_sha256: sha256_hex(&serialized),
+    };
+    persist_catalog_success(
+        runtime,
+        target,
+        &catalog.client_version,
+        &snapshot,
+        Some(200),
+        Duration::ZERO,
+    )
+    .await;
+    if !codex_catalog_credential_scope_is_current(runtime, target).await {
+        discard_catalog_success_after_scope_change(
+            runtime.codex_catalog_runtime_state(),
+            target,
+            &catalog.client_version,
+        )
+        .await;
+    }
+}
+
 async fn retain_catalog_version(
     state: &RuntimeState,
     target: &CodexCatalogTarget,
@@ -2327,6 +2454,101 @@ mod tests {
         assert!(!prerelease.used_fallback());
     }
 
+    #[tokio::test]
+    async fn management_catalog_uses_version_floor_and_newest_success_not_last_client() {
+        let runtime = TestRuntime::new(vec![successful_execution("gpt-new", "etag")]);
+        remember_seen_version(&runtime.state, &target(), "0.144.1").await;
+        let initial = read_codex_management_catalog(&runtime, TEST_PROVIDER_ID, TEST_KEY_ID)
+            .await
+            .expect("management context");
+        assert_eq!(
+            initial.client_version,
+            crate::ai_serving::CODEX_CLIENT_VERSION
+        );
+        assert!(initial.models.is_none());
+
+        seed_catalog(&runtime, &version("0.200.0")).await;
+        remember_seen_version(&runtime.state, &target(), "0.144.1").await;
+        let current = read_codex_management_catalog(&runtime, TEST_PROVIDER_ID, TEST_KEY_ID)
+            .await
+            .expect("management context");
+        assert_eq!(current.client_version, "0.200.0");
+        assert_eq!(current.models.unwrap()[0]["slug"], "gpt-new");
+        assert_eq!(
+            runtime.execution_count(),
+            1,
+            "management read does not fetch upstream"
+        );
+
+        runtime
+            .state
+            .kv_delete(&catalog_fresh_key(&target(), "0.200.0"))
+            .await
+            .unwrap();
+        let stale = read_codex_management_catalog(&runtime, TEST_PROVIDER_ID, TEST_KEY_ID)
+            .await
+            .unwrap();
+        assert_eq!(stale.client_version, "0.200.0");
+        assert!(
+            stale.models.is_none(),
+            "expired LKG must not become a fresh admin cache"
+        );
+
+        runtime.set_credential_generation(TEST_CREDENTIAL_GENERATION_B);
+        let rebound = read_codex_management_catalog(&runtime, TEST_PROVIDER_ID, TEST_KEY_ID)
+            .await
+            .unwrap();
+        assert_eq!(
+            rebound.client_version,
+            crate::ai_serving::CODEX_CLIENT_VERSION
+        );
+        assert!(rebound.models.is_none());
+    }
+
+    #[tokio::test]
+    async fn management_refresh_updates_shared_catalog_but_rejects_replaced_credentials() {
+        let runtime = TestRuntime::new(vec![]);
+        let context = read_codex_management_catalog(&runtime, TEST_PROVIDER_ID, TEST_KEY_ID)
+            .await
+            .unwrap();
+        let transports = vec![sample_codex_transport()];
+        for slug in ["gpt-old", "gpt-6-astra"] {
+            store_codex_management_catalog(
+                &runtime,
+                &context,
+                &transports,
+                vec![codex_model(slug)],
+                Some("etag"),
+            )
+            .await;
+            let shared = read_lkg_snapshot(&runtime, &target(), &context.client_version)
+                .await
+                .unwrap();
+            assert_eq!(shared.models[0]["slug"], slug);
+            let admin = read_codex_management_catalog(&runtime, TEST_PROVIDER_ID, TEST_KEY_ID)
+                .await
+                .unwrap();
+            assert_eq!(admin.models.unwrap()[0]["slug"], slug);
+        }
+        runtime.set_credential_generation(TEST_CREDENTIAL_GENERATION_B);
+        store_codex_management_catalog(
+            &runtime,
+            &context,
+            &transports,
+            vec![codex_model("gpt-leaked")],
+            None,
+        )
+        .await;
+        let rebound = read_codex_management_catalog(&runtime, TEST_PROVIDER_ID, TEST_KEY_ID)
+            .await
+            .unwrap();
+        assert!(rebound.models.is_none());
+        let old = read_raw_snapshot(&runtime, &target(), &context.client_version)
+            .await
+            .unwrap();
+        assert_eq!(old.models[0]["slug"], "gpt-6-astra");
+    }
+
     #[test]
     fn invalid_or_oversized_client_versions_use_bounded_fallback_identity() {
         for raw in [
@@ -2861,7 +3083,7 @@ mod tests {
         .await
         .expect("stale LKG read must not wait for retention lock");
         assert_eq!(stale.snapshot(TEST_PROVIDER_ID, TEST_KEY_ID), Some(&seeded));
-        assert_eq!(stale.stale_targets(), &[target.clone()]);
+        assert_eq!(stale.stale_targets(), std::slice::from_ref(&target));
         assert_eq!(runtime.execution_count(), 1);
 
         assert!(runtime
@@ -2889,7 +3111,7 @@ mod tests {
         let load = load_one(&runtime, &client_version).await;
 
         assert_eq!(load.snapshot(TEST_PROVIDER_ID, TEST_KEY_ID), Some(&seeded));
-        assert_eq!(load.stale_targets(), &[target.clone()]);
+        assert_eq!(load.stale_targets(), std::slice::from_ref(&target));
         assert!(runtime
             .state
             .kv_get(&catalog_lkg_key(&target, client_version.as_str()))
@@ -2920,7 +3142,7 @@ mod tests {
 
         let load = load_one(&runtime, &client_version).await;
         assert_eq!(load.snapshot(TEST_PROVIDER_ID, TEST_KEY_ID), Some(&seeded));
-        assert_eq!(load.stale_targets(), &[target.clone()]);
+        assert_eq!(load.stale_targets(), std::slice::from_ref(&target));
         assert_eq!(runtime.execution_count(), 1);
     }
 

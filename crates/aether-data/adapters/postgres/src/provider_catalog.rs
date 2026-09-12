@@ -10,9 +10,11 @@ use sqlx::{
 
 use aether_data_contracts::repository::provider_catalog::{
     ProviderCatalogKeyAdaptiveStateUpdate, ProviderCatalogKeyAdminCasUpdate,
-    ProviderCatalogKeyHealthStateUpdate, ProviderCatalogKeyListOrder, ProviderCatalogKeyListQuery,
+    ProviderCatalogKeyCredentialsCasUpdate, ProviderCatalogKeyHealthStateUpdate,
+    ProviderCatalogKeyListOrder, ProviderCatalogKeyListQuery,
     ProviderCatalogKeyOAuthCredentialCasDelete, ProviderCatalogKeyOAuthRuntimeStateCasUpdate,
     ProviderCatalogKeyRuntimeMetadataUpdate, ProviderCatalogKeyStatusSnapshotUpdate,
+    ProviderCatalogProviderConfigCasUpdate, ProviderCatalogProxyCasUpdate,
     ProviderCatalogReadRepository, ProviderCatalogUpstreamMetadataNamespaceUpdate,
     ProviderCatalogWriteRepository, StoredProviderCatalogEndpoint, StoredProviderCatalogKey,
     StoredProviderCatalogKeyMaintenanceSummary, StoredProviderCatalogKeyPage,
@@ -273,6 +275,7 @@ SELECT
   is_active,
   api_formats,
   NULL::jsonb AS auth_type_by_format,
+  NULL::jsonb AS allow_auth_channel_mismatch_formats,
   'summary' AS api_key,
   CASE
     WHEN auth_config IS NULL THEN NULL
@@ -398,7 +401,18 @@ WHERE id = $1
   AND ($6::text IS NULL OR auth_config IS NOT DISTINCT FROM $6)
 "#;
 
-const KEY_RUNTIME_METADATA_CAS_SQL: &str = r#"
+const KEY_RUNTIME_METADATA_NAMESPACE_LOCK_SQL: &str = r#"
+SELECT
+  jsonb_typeof(COALESCE(upstream_metadata, '{}'::jsonb)) = 'object'
+    AS metadata_is_object,
+  COALESCE(upstream_metadata, '{}'::jsonb) ? $2 AS namespace_exists,
+  COALESCE(upstream_metadata, '{}'::jsonb) -> $2 AS namespace_value
+FROM provider_api_keys
+WHERE id = $1
+FOR UPDATE
+"#;
+
+const KEY_RUNTIME_METADATA_UPDATE_SQL: &str = r#"
 UPDATE provider_api_keys
 SET
   upstream_metadata = COALESCE(upstream_metadata, '{}'::jsonb)
@@ -410,9 +424,57 @@ SET
   END
 WHERE id = $1
   AND jsonb_typeof(COALESCE(upstream_metadata, '{}'::jsonb)) = 'object'
-  AND (COALESCE(upstream_metadata, '{}'::jsonb) -> $2)
-      IS NOT DISTINCT FROM $6::jsonb
 "#;
+
+fn runtime_metadata_namespace_matches(
+    metadata_is_object: bool,
+    namespace_exists: bool,
+    current: Option<&serde_json::Value>,
+    expected: Option<&serde_json::Value>,
+) -> bool {
+    metadata_is_object
+        && match expected {
+            Some(expected) => namespace_exists && current == Some(expected),
+            None => !namespace_exists,
+        }
+}
+
+async fn lock_runtime_metadata_namespace_matches(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    key_id: &str,
+    namespace: &str,
+    expected: Option<&serde_json::Value>,
+) -> Result<bool, DataLayerError> {
+    let Some(row) = sqlx::query(KEY_RUNTIME_METADATA_NAMESPACE_LOCK_SQL)
+        .bind(key_id)
+        .bind(namespace)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_postgres_err()?
+    else {
+        return Ok(false);
+    };
+    let metadata_is_object = row
+        .try_get::<bool, _>("metadata_is_object")
+        .map_postgres_err()?;
+    let namespace_exists = row
+        .try_get::<bool, _>("namespace_exists")
+        .map_postgres_err()?;
+    let current = row
+        .try_get::<Option<serde_json::Value>, _>("namespace_value")
+        .map_postgres_err()?;
+
+    // PostgreSQL jsonb retains decimal lexemes that serde_json's default
+    // Number representation rounds to f64. Re-read and compare while holding
+    // the row lock instead of binding that rounded value back into a jsonb
+    // equality predicate, which would report a false CAS conflict.
+    Ok(runtime_metadata_namespace_matches(
+        metadata_is_object,
+        namespace_exists,
+        current.as_ref(),
+        expected,
+    ))
+}
 
 fn validate_key_for_update(key: &StoredProviderCatalogKey) -> Result<(), DataLayerError> {
     if key.id.trim().is_empty() {
@@ -907,56 +969,11 @@ impl SqlxProviderCatalogReadRepository {
         .await
     }
 
-    pub async fn update_key_oauth_credentials(
-        &self,
-        key_id: &str,
-        encrypted_api_key: &str,
-        encrypted_auth_config: Option<&str>,
-        expires_at_unix_secs: Option<u64>,
-    ) -> Result<bool, DataLayerError> {
-        if key_id.trim().is_empty() {
-            return Err(DataLayerError::InvalidInput(
-                "provider catalog key_id is empty".to_string(),
-            ));
-        }
-        if encrypted_api_key.trim().is_empty() {
-            return Err(DataLayerError::InvalidInput(
-                "provider catalog oauth api_key is empty".to_string(),
-            ));
-        }
-
-        let rows_affected = sqlx::query(
-            r#"
-UPDATE provider_api_keys
-SET
-  api_key = $2,
-  auth_config = $3,
-  expires_at = CASE
-    WHEN $4::double precision IS NULL THEN NULL
-    ELSE TO_TIMESTAMP($4::double precision)
-  END,
-  updated_at = NOW()
-WHERE id = $1
-"#,
-        )
-        .bind(key_id)
-        .bind(encrypted_api_key)
-        .bind(encrypted_auth_config)
-        .bind(expires_at_unix_secs.map(|value| value as f64))
-        .execute(&self.pool)
-        .await
-        .map_postgres_err()?
-        .rows_affected();
-
-        Ok(rows_affected > 0)
-    }
-
     pub async fn update_key_oauth_runtime_state(
         &self,
         key_id: &str,
         oauth_invalid_at_unix_secs: Option<u64>,
         oauth_invalid_reason: Option<&str>,
-        encrypted_auth_config_update: Option<&str>,
         updated_at_unix_secs: Option<u64>,
     ) -> Result<bool, DataLayerError> {
         if key_id.trim().is_empty() {
@@ -973,10 +990,9 @@ SET
     ELSE TO_TIMESTAMP($2::double precision)
   END,
   oauth_invalid_reason = $3,
-  auth_config = COALESCE($4, auth_config),
   updated_at = CASE
-    WHEN $5::double precision IS NULL THEN NOW()
-    ELSE TO_TIMESTAMP($5::double precision)
+    WHEN $4::double precision IS NULL THEN NOW()
+    ELSE TO_TIMESTAMP($4::double precision)
   END
 WHERE id = $1
 "#,
@@ -984,7 +1000,6 @@ WHERE id = $1
         .bind(key_id)
         .bind(oauth_invalid_at_unix_secs.map(|value| value as f64))
         .bind(oauth_invalid_reason)
-        .bind(encrypted_auth_config_update)
         .bind(updated_at_unix_secs.map(|value| value as f64))
         .execute(&self.pool)
         .await
@@ -1041,6 +1056,20 @@ WHERE id = $1
                     .to_string(),
             ));
         }
+        let mut tx = self.pool.begin().await.map_postgres_err()?;
+        if let Some(expected) = update.expected_upstream_metadata_namespace.as_ref() {
+            let matches = lock_runtime_metadata_namespace_matches(
+                &mut tx,
+                &update.key_id,
+                &expected.namespace,
+                expected.expected_value.as_ref(),
+            )
+            .await?;
+            if !matches {
+                tx.rollback().await.map_postgres_err()?;
+                return Ok(false);
+            }
+        }
         let rows_affected = sqlx::query(
             r#"
 UPDATE provider_api_keys
@@ -1089,14 +1118,6 @@ WHERE id = $1
         AND providers.provider_type = $18
     )
   )
-  AND (
-    $19::boolean IS FALSE
-    OR (
-      jsonb_typeof(COALESCE(upstream_metadata, '{}'::jsonb)) = 'object'
-      AND (COALESCE(upstream_metadata, '{}'::jsonb) -> $20)
-        IS NOT DISTINCT FROM $21::jsonb
-    )
-  )
 "#,
         )
         .bind(&update.key_id)
@@ -1142,24 +1163,16 @@ WHERE id = $1
                 .as_ref()
                 .map(|expected| expected.provider_type.as_str()),
         )
-        .bind(update.expected_upstream_metadata_namespace.is_some())
-        .bind(
-            update
-                .expected_upstream_metadata_namespace
-                .as_ref()
-                .map(|expected| expected.namespace.as_str()),
-        )
-        .bind(
-            update
-                .expected_upstream_metadata_namespace
-                .as_ref()
-                .and_then(|expected| expected.expected_value.as_ref()),
-        )
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_postgres_err()?
         .rows_affected();
-        Ok(rows_affected > 0)
+        if rows_affected == 0 {
+            tx.rollback().await.map_postgres_err()?;
+            return Ok(false);
+        }
+        tx.commit().await.map_postgres_err()?;
+        Ok(true)
     }
 
     pub async fn create_provider(
@@ -1453,6 +1466,60 @@ WHERE id = $1
                     provider.id
                 ))
             })
+    }
+
+    pub async fn compare_and_swap_provider_config(
+        &self,
+        update: &ProviderCatalogProviderConfigCasUpdate,
+    ) -> Result<bool, DataLayerError> {
+        if update.provider_id.trim().is_empty() {
+            return Err(DataLayerError::InvalidInput(
+                "provider catalog provider_id is empty".to_string(),
+            ));
+        }
+        let rows_affected = sqlx::query(
+            r#"
+UPDATE providers
+SET config = $3, updated_at = NOW()
+WHERE id = $1
+  AND config::jsonb IS NOT DISTINCT FROM $2::jsonb
+"#,
+        )
+        .bind(&update.provider_id)
+        .bind(&update.expected_config)
+        .bind(&update.config)
+        .execute(&self.pool)
+        .await
+        .map_postgres_err()?
+        .rows_affected();
+        Ok(rows_affected == 1)
+    }
+
+    pub async fn compare_and_swap_provider_proxy(
+        &self,
+        update: &ProviderCatalogProxyCasUpdate,
+    ) -> Result<bool, DataLayerError> {
+        if update.record_id.trim().is_empty() {
+            return Err(DataLayerError::InvalidInput(
+                "provider catalog provider_id is empty".to_string(),
+            ));
+        }
+        let rows_affected = sqlx::query(
+            r#"
+UPDATE providers
+SET proxy = $3, updated_at = NOW()
+WHERE id = $1
+  AND proxy::jsonb IS NOT DISTINCT FROM $2::jsonb
+"#,
+        )
+        .bind(&update.record_id)
+        .bind(&update.expected_proxy)
+        .bind(&update.proxy)
+        .execute(&self.pool)
+        .await
+        .map_postgres_err()?
+        .rows_affected();
+        Ok(rows_affected == 1)
     }
 
     pub async fn delete_provider(&self, provider_id: &str) -> Result<bool, DataLayerError> {
@@ -2112,6 +2179,33 @@ WHERE id = $1
             })
     }
 
+    pub async fn compare_and_swap_endpoint_proxy(
+        &self,
+        update: &ProviderCatalogProxyCasUpdate,
+    ) -> Result<bool, DataLayerError> {
+        if update.record_id.trim().is_empty() {
+            return Err(DataLayerError::InvalidInput(
+                "provider catalog endpoint_id is empty".to_string(),
+            ));
+        }
+        let rows_affected = sqlx::query(
+            r#"
+UPDATE provider_endpoints
+SET proxy = $3, updated_at = NOW()
+WHERE id = $1
+  AND proxy::jsonb IS NOT DISTINCT FROM $2::jsonb
+"#,
+        )
+        .bind(&update.record_id)
+        .bind(&update.expected_proxy)
+        .bind(&update.proxy)
+        .execute(&self.pool)
+        .await
+        .map_postgres_err()?
+        .rows_affected();
+        Ok(rows_affected == 1)
+    }
+
     pub async fn delete_endpoint(&self, endpoint_id: &str) -> Result<bool, DataLayerError> {
         if endpoint_id.trim().is_empty() {
             return Err(DataLayerError::InvalidInput(
@@ -2162,6 +2256,65 @@ WHERE id = $1
                     key.id
                 ))
             })
+    }
+
+    pub async fn compare_and_swap_key_proxy(
+        &self,
+        update: &ProviderCatalogProxyCasUpdate,
+    ) -> Result<bool, DataLayerError> {
+        if update.record_id.trim().is_empty() {
+            return Err(DataLayerError::InvalidInput(
+                "provider catalog key_id is empty".to_string(),
+            ));
+        }
+        let rows_affected = sqlx::query(
+            r#"
+UPDATE provider_api_keys
+SET proxy = $3, updated_at = NOW()
+WHERE id = $1
+  AND proxy::jsonb IS NOT DISTINCT FROM $2::jsonb
+"#,
+        )
+        .bind(&update.record_id)
+        .bind(&update.expected_proxy)
+        .bind(&update.proxy)
+        .execute(&self.pool)
+        .await
+        .map_postgres_err()?
+        .rows_affected();
+        Ok(rows_affected == 1)
+    }
+
+    pub async fn compare_and_swap_key_credentials(
+        &self,
+        update: &ProviderCatalogKeyCredentialsCasUpdate,
+    ) -> Result<bool, DataLayerError> {
+        if update.key_id.trim().is_empty() || update.expected_provider_id.trim().is_empty() {
+            return Err(DataLayerError::InvalidInput(
+                "provider catalog key credential CAS requires key_id and provider_id".to_string(),
+            ));
+        }
+        let rows_affected = sqlx::query(
+            r#"
+UPDATE provider_api_keys
+SET api_key = $5, encrypted_key = NULL, auth_config = $6
+WHERE id = $1
+  AND provider_id = $2
+  AND COALESCE(api_key, encrypted_key) IS NOT DISTINCT FROM $3
+  AND auth_config IS NOT DISTINCT FROM $4
+"#,
+        )
+        .bind(&update.key_id)
+        .bind(&update.expected_provider_id)
+        .bind(update.expected_encrypted_api_key.as_deref())
+        .bind(update.expected_encrypted_auth_config.as_deref())
+        .bind(update.encrypted_api_key.as_deref())
+        .bind(update.encrypted_auth_config.as_deref())
+        .execute(&self.pool)
+        .await
+        .map_postgres_err()?
+        .rows_affected();
+        Ok(rows_affected == 1)
     }
 
     pub async fn compare_and_update_key_admin_state(
@@ -2702,18 +2855,34 @@ WHERE id = $1
         update: &ProviderCatalogKeyRuntimeMetadataUpdate,
     ) -> Result<bool, DataLayerError> {
         validate_runtime_metadata_update(update)?;
-        let rows_affected = sqlx::query(KEY_RUNTIME_METADATA_CAS_SQL)
+        let mut tx = self.pool.begin().await.map_postgres_err()?;
+        if !lock_runtime_metadata_namespace_matches(
+            &mut tx,
+            &update.key_id,
+            &update.namespace,
+            update.expected_upstream_metadata_value.as_ref(),
+        )
+        .await?
+        {
+            tx.rollback().await.map_postgres_err()?;
+            return Ok(false);
+        }
+        let rows_affected = sqlx::query(KEY_RUNTIME_METADATA_UPDATE_SQL)
             .bind(&update.key_id)
             .bind(&update.namespace)
             .bind(&update.upstream_metadata_value)
             .bind(&update.status_snapshot_patch)
             .bind(update.updated_at_unix_secs.map(|value| value as f64))
-            .bind(update.expected_upstream_metadata_value.as_ref())
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_postgres_err()?
             .rows_affected();
-        Ok(rows_affected > 0)
+        if rows_affected == 0 {
+            tx.rollback().await.map_postgres_err()?;
+            return Ok(false);
+        }
+        tx.commit().await.map_postgres_err()?;
+        Ok(true)
     }
 
     pub async fn update_key_status_snapshot(
@@ -2861,6 +3030,20 @@ impl ProviderCatalogWriteRepository for SqlxProviderCatalogReadRepository {
         Self::update_provider(self, provider).await
     }
 
+    async fn compare_and_swap_provider_config(
+        &self,
+        update: &ProviderCatalogProviderConfigCasUpdate,
+    ) -> Result<bool, DataLayerError> {
+        Self::compare_and_swap_provider_config(self, update).await
+    }
+
+    async fn compare_and_swap_provider_proxy(
+        &self,
+        update: &ProviderCatalogProxyCasUpdate,
+    ) -> Result<bool, DataLayerError> {
+        Self::compare_and_swap_provider_proxy(self, update).await
+    }
+
     async fn delete_provider(&self, provider_id: &str) -> Result<bool, DataLayerError> {
         Self::delete_provider(self, provider_id).await
     }
@@ -2896,6 +3079,13 @@ impl ProviderCatalogWriteRepository for SqlxProviderCatalogReadRepository {
         self.update_endpoint(endpoint).await
     }
 
+    async fn compare_and_swap_endpoint_proxy(
+        &self,
+        update: &ProviderCatalogProxyCasUpdate,
+    ) -> Result<bool, DataLayerError> {
+        Self::compare_and_swap_endpoint_proxy(self, update).await
+    }
+
     async fn delete_endpoint(&self, endpoint_id: &str) -> Result<bool, DataLayerError> {
         Self::delete_endpoint(self, endpoint_id).await
     }
@@ -2912,6 +3102,20 @@ impl ProviderCatalogWriteRepository for SqlxProviderCatalogReadRepository {
         key: &StoredProviderCatalogKey,
     ) -> Result<StoredProviderCatalogKey, DataLayerError> {
         Self::update_key(self, key).await
+    }
+
+    async fn compare_and_swap_key_proxy(
+        &self,
+        update: &ProviderCatalogProxyCasUpdate,
+    ) -> Result<bool, DataLayerError> {
+        Self::compare_and_swap_key_proxy(self, update).await
+    }
+
+    async fn compare_and_swap_key_credentials(
+        &self,
+        update: &ProviderCatalogKeyCredentialsCasUpdate,
+    ) -> Result<bool, DataLayerError> {
+        Self::compare_and_swap_key_credentials(self, update).await
     }
 
     async fn compare_and_update_key_admin_state(
@@ -3008,29 +3212,11 @@ impl ProviderCatalogWriteRepository for SqlxProviderCatalogReadRepository {
         Self::clear_key_oauth_invalid_marker(self, key_id).await
     }
 
-    async fn update_key_oauth_credentials(
-        &self,
-        key_id: &str,
-        encrypted_api_key: &str,
-        encrypted_auth_config: Option<&str>,
-        expires_at_unix_secs: Option<u64>,
-    ) -> Result<bool, DataLayerError> {
-        Self::update_key_oauth_credentials(
-            self,
-            key_id,
-            encrypted_api_key,
-            encrypted_auth_config,
-            expires_at_unix_secs,
-        )
-        .await
-    }
-
     async fn update_key_oauth_runtime_state(
         &self,
         key_id: &str,
         oauth_invalid_at_unix_secs: Option<u64>,
         oauth_invalid_reason: Option<&str>,
-        encrypted_auth_config_update: Option<&str>,
         updated_at_unix_secs: Option<u64>,
     ) -> Result<bool, DataLayerError> {
         Self::update_key_oauth_runtime_state(
@@ -3038,7 +3224,6 @@ impl ProviderCatalogWriteRepository for SqlxProviderCatalogReadRepository {
             key_id,
             oauth_invalid_at_unix_secs,
             oauth_invalid_reason,
-            encrypted_auth_config_update,
             updated_at_unix_secs,
         )
         .await
@@ -3163,6 +3348,16 @@ where
     row.try_get(column).map_postgres_err()
 }
 
+fn optional_u64(value: Option<i64>, field_name: &str) -> Result<Option<u64>, DataLayerError> {
+    value
+        .map(|value| {
+            u64::try_from(value).map_err(|_| {
+                DataLayerError::UnexpectedValue(format!("invalid {field_name}: {value}"))
+            })
+        })
+        .transpose()
+}
+
 fn map_provider_row(row: &PgRow) -> Result<StoredProviderCatalogProvider, DataLayerError> {
     let quota_reset_day = row_get::<Option<i32>>(row, "quota_reset_day")?
         .map(|value| {
@@ -3203,8 +3398,14 @@ fn map_provider_row(row: &PgRow) -> Result<StoredProviderCatalogProvider, DataLa
         row_get(row, "monthly_quota_usd")?,
         row_get(row, "monthly_used_usd")?,
         quota_reset_day,
-        row_get::<Option<i64>>(row, "quota_last_reset_at_unix_secs")?.map(|value| value as u64),
-        row_get::<Option<i64>>(row, "quota_expires_at_unix_secs")?.map(|value| value as u64),
+        optional_u64(
+            row_get(row, "quota_last_reset_at_unix_secs")?,
+            "providers.quota_last_reset_at",
+        )?,
+        optional_u64(
+            row_get(row, "quota_expires_at_unix_secs")?,
+            "providers.quota_expires_at",
+        )?,
     )
     .with_routing_fields(row_get(row, "provider_priority")?)
     .with_transport_fields(
@@ -3321,6 +3522,10 @@ fn map_key_maintenance_summary_row(
 }
 
 fn map_key_row(row: &PgRow) -> Result<StoredProviderCatalogKey, DataLayerError> {
+    let expires_at_unix_secs = optional_u64(
+        row_get(row, "expires_at_unix_secs")?,
+        "provider_api_keys.expires_at",
+    )?;
     let rpm_limit = row_get::<Option<i32>>(row, "rpm_limit")?
         .map(|value| {
             u32::try_from(value).map_err(|_| {
@@ -3471,6 +3676,9 @@ fn map_key_row(row: &PgRow) -> Result<StoredProviderCatalogKey, DataLayerError> 
             })
         })
         .transpose()?;
+    let auth_type_by_format: Option<serde_json::Value> = row_get(row, "auth_type_by_format")?;
+    let allow_auth_channel_mismatch_formats: Option<serde_json::Value> =
+        row_get(row, "allow_auth_channel_mismatch_formats")?;
 
     StoredProviderCatalogKey::new(
         row_get(row, "id")?,
@@ -3487,8 +3695,7 @@ fn map_key_row(row: &PgRow) -> Result<StoredProviderCatalogKey, DataLayerError> 
         row_get(row, "rate_multipliers")?,
         row_get(row, "global_priority_by_format")?,
         row_get(row, "allowed_models")?,
-        row_get::<Option<i64>>(row, "expires_at_unix_secs")?
-            .and_then(|value| u64::try_from(value).ok()),
+        expires_at_unix_secs,
         row_get(row, "proxy")?,
         row_get(row, "fingerprint")?,
     )
@@ -3515,9 +3722,6 @@ fn map_key_row(row: &PgRow) -> Result<StoredProviderCatalogKey, DataLayerError> 
                 row.try_get("circuit_breaker_by_format").ok(),
             );
         key.note = row.try_get("note").ok();
-        key.auth_type_by_format = row.try_get("auth_type_by_format").ok();
-        key.allow_auth_channel_mismatch_formats =
-            row.try_get("allow_auth_channel_mismatch_formats").ok();
         key.internal_priority = row.try_get("internal_priority").unwrap_or(50);
         key.cache_ttl_minutes = row.try_get("cache_ttl_minutes").unwrap_or(5);
         key.max_probe_interval_minutes = row.try_get("max_probe_interval_minutes").unwrap_or(32);
@@ -3540,11 +3744,20 @@ fn map_key_row(row: &PgRow) -> Result<StoredProviderCatalogKey, DataLayerError> 
         key.updated_at_unix_secs = updated_at_unix_secs;
         key
     })
+    .and_then(|key| {
+        key.with_auth_channel_policy_fields(
+            auth_type_by_format,
+            allow_auth_channel_mismatch_formats,
+        )
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::SqlxProviderCatalogReadRepository;
+    use aether_data_contracts::repository::provider_catalog::ProviderCatalogKeyRuntimeMetadataUpdate;
+    use serde_json::json;
+
+    use super::{optional_u64, SqlxProviderCatalogReadRepository};
     use crate::{PostgresPoolConfig, PostgresPoolFactory};
 
     #[tokio::test]
@@ -3564,6 +3777,16 @@ mod tests {
         let pool = factory.connect_lazy().expect("pool should build");
         let repository = SqlxProviderCatalogReadRepository::new(pool);
         let _ = repository.pool();
+    }
+
+    #[test]
+    fn provider_catalog_negative_security_timestamps_fail_closed() {
+        assert!(optional_u64(Some(-1), "provider_api_keys.expires_at").is_err());
+        assert_eq!(
+            optional_u64(None, "provider_api_keys.expires_at")
+                .expect("SQL NULL should remain optional"),
+            None
+        );
     }
 
     #[test]
@@ -3634,7 +3857,7 @@ mod tests {
         );
         assert!(source.contains("QueryBuilder::<Postgres>::new(select_prefix_for_in("));
         assert!(source.contains(".bind(&key.allow_auth_channel_mismatch_formats)"));
-        assert!(source.contains("row.try_get(\"allow_auth_channel_mismatch_formats\").ok()"));
+        assert!(source.contains("row_get(row, \"allow_auth_channel_mismatch_formats\")?"));
     }
 
     #[test]
@@ -3662,13 +3885,141 @@ mod tests {
     }
 
     #[test]
-    fn runtime_metadata_cas_compares_only_the_requested_namespace() {
-        let sql = super::KEY_RUNTIME_METADATA_CAS_SQL.to_ascii_lowercase();
-        assert!(sql.contains("upstream_metadata, '{}'::jsonb) -> $2"));
-        assert!(sql.contains("jsonb_typeof(coalesce(upstream_metadata, '{}'::jsonb)) = 'object'"));
-        assert!(sql.contains("is not distinct from $6::jsonb"));
-        assert!(sql.contains("status_snapshot::jsonb"));
-        assert!(!sql.contains("is_active"));
+    fn runtime_metadata_cas_locks_only_the_requested_namespace() {
+        let lock_sql = super::KEY_RUNTIME_METADATA_NAMESPACE_LOCK_SQL.to_ascii_lowercase();
+        let update_sql = super::KEY_RUNTIME_METADATA_UPDATE_SQL.to_ascii_lowercase();
+
+        assert!(lock_sql.contains("upstream_metadata, '{}'::jsonb) -> $2"));
+        assert!(lock_sql.contains("upstream_metadata, '{}'::jsonb) ? $2"));
+        assert!(lock_sql.contains("for update"));
+        assert!(update_sql
+            .contains("jsonb_typeof(coalesce(upstream_metadata, '{}'::jsonb)) = 'object'"));
+        assert!(update_sql.contains("status_snapshot::jsonb"));
+        assert!(!update_sql.contains("is_active"));
+    }
+
+    #[test]
+    fn runtime_metadata_namespace_cas_distinguishes_missing_from_json_null() {
+        assert!(super::runtime_metadata_namespace_matches(
+            true, false, None, None,
+        ));
+        assert!(!super::runtime_metadata_namespace_matches(
+            true,
+            true,
+            Some(&serde_json::Value::Null),
+            None,
+        ));
+        assert!(super::runtime_metadata_namespace_matches(
+            true,
+            true,
+            Some(&serde_json::Value::Null),
+            Some(&serde_json::Value::Null),
+        ));
+        assert!(!super::runtime_metadata_namespace_matches(
+            false, false, None, None,
+        ));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires AETHER_TEST_DATABASE_URL and PostgreSQL migrations"]
+    async fn live_runtime_metadata_cas_handles_high_precision_jsonb_numbers() {
+        let database_url = std::env::var("AETHER_TEST_DATABASE_URL")
+            .expect("AETHER_TEST_DATABASE_URL must point at the test database");
+        let factory = PostgresPoolFactory::new(PostgresPoolConfig {
+            database_url,
+            min_connections: 1,
+            max_connections: 2,
+            acquire_timeout_ms: 10_000,
+            idle_timeout_ms: 30_000,
+            max_lifetime_ms: 60_000,
+            statement_cache_capacity: 64,
+            require_ssl: false,
+        })
+        .expect("factory should build");
+        let repository = SqlxProviderCatalogReadRepository::new(
+            factory.connect_lazy().expect("lazy pool should build"),
+        );
+        crate::run_migrations(repository.pool())
+            .await
+            .expect("test database migrations should succeed");
+
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        let provider_id = uuid::Uuid::new_v4().to_string();
+        let key_id = uuid::Uuid::new_v4().to_string();
+        let provider_name = format!("provider-metadata-cas-{suffix}");
+        let key_name = format!("key-metadata-cas-{suffix}");
+        sqlx::query(
+            "INSERT INTO providers (id, name, provider_type) VALUES ($1, $2, 'antigravity')",
+        )
+        .bind(&provider_id)
+        .bind(&provider_name)
+        .execute(repository.pool())
+        .await
+        .expect("provider fixture should insert");
+        sqlx::query(
+            r#"
+INSERT INTO provider_api_keys (
+  id, name, provider_id, total_tokens, total_cost_usd, upstream_metadata
+)
+VALUES ($1, $2, $3, 0, 0, $4::jsonb)
+"#,
+        )
+        .bind(&key_id)
+        .bind(&key_name)
+        .bind(&provider_id)
+        .bind(r#"{"antigravity":{"used_percent":0.123456789012345678901234567890}}"#)
+        .execute(repository.pool())
+        .await
+        .expect("provider key fixture should insert");
+
+        let observed = sqlx::query_scalar::<_, serde_json::Value>(
+            "SELECT upstream_metadata -> 'antigravity' FROM provider_api_keys WHERE id = $1",
+        )
+        .bind(&key_id)
+        .fetch_one(repository.pool())
+        .await
+        .expect("metadata namespace should load");
+        assert_ne!(
+            serde_json::to_string(&observed).expect("metadata should serialize"),
+            r#"{"used_percent":0.123456789012345678901234567890}"#,
+            "the fixture must exercise precision loss in serde_json's default number representation",
+        );
+
+        let updated = repository
+            .update_key_runtime_metadata(&ProviderCatalogKeyRuntimeMetadataUpdate {
+                key_id: key_id.clone(),
+                namespace: "antigravity".to_string(),
+                expected_upstream_metadata_value: Some(observed),
+                upstream_metadata_value: json!({"used_percent": 12.5}),
+                status_snapshot_patch: json!({"quota": {"used_percent": 12.5}}),
+                updated_at_unix_secs: Some(1_700_000_000),
+            })
+            .await
+            .expect("runtime metadata CAS should execute");
+        assert!(
+            updated,
+            "matching metadata must not report a false CAS conflict"
+        );
+
+        let stored = sqlx::query_scalar::<_, serde_json::Value>(
+            "SELECT upstream_metadata -> 'antigravity' FROM provider_api_keys WHERE id = $1",
+        )
+        .bind(&key_id)
+        .fetch_one(repository.pool())
+        .await
+        .expect("updated metadata namespace should load");
+        assert_eq!(stored, json!({"used_percent": 12.5}));
+
+        sqlx::query("DELETE FROM provider_api_keys WHERE id = $1")
+            .bind(&key_id)
+            .execute(repository.pool())
+            .await
+            .expect("provider key fixture should delete");
+        sqlx::query("DELETE FROM providers WHERE id = $1")
+            .bind(&provider_id)
+            .execute(repository.pool())
+            .await
+            .expect("provider fixture should delete");
     }
 
     #[test]
@@ -3697,6 +4048,13 @@ mod tests {
         assert!(sql.contains("rpm_limit = $12"));
         assert!(sql.contains("api_key is not distinct from $5"));
         assert!(sql.contains("auth_config is not distinct from $6"));
+    }
+
+    #[test]
+    fn credential_cas_migrates_legacy_encrypted_key_with_null_safe_fence() {
+        let source = include_str!("provider_catalog.rs");
+        assert!(source.contains("SET api_key = $5, encrypted_key = NULL, auth_config = $6"));
+        assert!(source.contains("AND COALESCE(api_key, encrypted_key) IS NOT DISTINCT FROM $3"));
     }
 
     #[test]

@@ -1,6 +1,20 @@
 use serde_json::{json, Map, Number, Value};
 
+use crate::formats::openai::image::{
+    bounded_openai_image_revised_prompt, is_safe_openai_image_base64_payload,
+    normalize_openai_image_output_format, parse_safe_openai_image_data_url,
+    safe_openai_image_mime_type, sanitize_openai_image_source_url,
+};
 use crate::formats::shared::model_directives::extract_gemini_model_from_path;
+
+const MAX_IMAGE_BRIDGE_OUTPUTS: usize = 64;
+// Responses output items are provider-controlled and may contain deeply
+// nested message/content arrays. Keep the projection bounded independently
+// of the image count so a pathological text envelope cannot exhaust stack or
+// heap while an otherwise valid image is being bridged.
+const MAX_IMAGE_BRIDGE_PARTS: usize = 512;
+const MAX_IMAGE_BRIDGE_TEXT_BYTES: usize = 256 * 1024;
+const MAX_IMAGE_BRIDGE_RECURSION_DEPTH: usize = 32;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct OpenAiImageRequestForGemini {
@@ -208,7 +222,7 @@ pub fn build_openai_image_response_from_gemini_response(
                 .get("text")
                 .and_then(Value::as_str)
                 .map(str::trim)
-                .filter(|value| !value.is_empty())
+                .and_then(bounded_openai_image_revised_prompt)
             {
                 revised_prompt = Some(Value::String(text.to_string()));
             }
@@ -220,6 +234,12 @@ pub fn build_openai_image_response_from_gemini_response(
                 "output_format": output_format_from_mime_type(&mime_type),
                 "revised_prompt": revised_prompt.clone().unwrap_or(Value::Null),
             }));
+            if images.len() >= MAX_IMAGE_BRIDGE_OUTPUTS {
+                break;
+            }
+        }
+        if images.len() >= MAX_IMAGE_BRIDGE_OUTPUTS {
+            break;
         }
     }
     if images.is_empty() {
@@ -249,17 +269,64 @@ pub fn build_openai_image_response_from_gemini_response(
     Some(Value::Object(response))
 }
 
+/// Projects a native OpenAI Images response before it is returned to a client.
+///
+/// Native image responses normally do not need a format conversion, but they
+/// still cross the provider trust boundary.  Keep this projection separate
+/// from the raw provider body retained for the conversion/audit report so
+/// untrusted URLs, payloads, and metadata cannot be passed through unchanged.
+pub(crate) fn build_openai_image_response_from_standard_image_response(
+    provider_body_json: &Value,
+    report_context: Option<&Value>,
+) -> Option<Value> {
+    let data = provider_body_json.get("data")?.as_array()?;
+    let images = data
+        .iter()
+        .take(MAX_IMAGE_BRIDGE_OUTPUTS)
+        .filter_map(standard_openai_image_item_to_image_data)
+        .collect::<Vec<_>>();
+    if images.is_empty() {
+        return None;
+    }
+
+    let created = provider_body_json
+        .get("created")
+        .and_then(Value::as_i64)
+        .unwrap_or_default();
+    let mut response = Map::new();
+    response.insert("created".to_string(), Value::Number(Number::from(created)));
+    response.insert("data".to_string(), Value::Array(images));
+    if let Some(model) = provider_body_json
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| report_context.and_then(context_model))
+    {
+        response.insert("model".to_string(), Value::String(model.to_string()));
+    }
+    if let Some(usage) = provider_body_json.get("usage") {
+        response.insert("usage".to_string(), usage.clone());
+    }
+    Some(Value::Object(response))
+}
+
 pub fn build_gemini_image_response_from_openai_image_response(
     provider_body_json: &Value,
     report_context: Option<&Value>,
 ) -> Option<Value> {
     let mut parts = Vec::new();
-    for item in provider_body_json.get("data")?.as_array()? {
+    for item in provider_body_json
+        .get("data")?
+        .as_array()?
+        .iter()
+        .take(MAX_IMAGE_BRIDGE_OUTPUTS)
+    {
         if let Some(prompt) = item
             .get("revised_prompt")
             .and_then(Value::as_str)
             .map(str::trim)
-            .filter(|value| !value.is_empty())
+            .and_then(bounded_openai_image_revised_prompt)
         {
             parts.push(json!({ "text": prompt }));
         }
@@ -311,22 +378,23 @@ pub fn build_gemini_image_response_from_openai_responses_image_response(
 ) -> Option<Value> {
     let output = provider_body_json.get("output").and_then(Value::as_array)?;
     let mut parts = Vec::new();
-    for item in output {
+    let mut budget = GeminiImagePartBudget::default();
+    for item in output.iter().take(MAX_IMAGE_BRIDGE_OUTPUTS) {
         let item_type = item.get("type").and_then(Value::as_str).unwrap_or_default();
         if item_type == "image_generation_call" {
             if let Some(prompt) = item
                 .get("revised_prompt")
                 .and_then(Value::as_str)
                 .map(str::trim)
-                .filter(|value| !value.is_empty())
+                .and_then(bounded_openai_image_revised_prompt)
             {
-                parts.push(json!({ "text": prompt }));
+                budget.push_text(&mut parts, prompt);
             }
             let Some(b64_json) = item
                 .get("result")
                 .and_then(Value::as_str)
                 .map(str::trim)
-                .filter(|value| !value.is_empty())
+                .filter(|value| is_safe_openai_image_base64_payload(value))
             else {
                 continue;
             };
@@ -335,19 +403,22 @@ pub fn build_gemini_image_response_from_openai_responses_image_response(
                 .and_then(Value::as_str)
                 .map(mime_type_from_output_format)
                 .unwrap_or_else(|| "image/png".to_string());
-            parts.push(json!({
-                "inlineData": {
-                    "mimeType": mime_type,
-                    "data": b64_json,
-                }
-            }));
+            budget.push_part(
+                &mut parts,
+                json!({
+                    "inlineData": {
+                        "mimeType": mime_type,
+                        "data": b64_json,
+                    }
+                }),
+            );
             continue;
         }
         if matches!(
             item_type,
             "message" | "output_text" | "text" | "output_image" | "image_url"
         ) {
-            collect_openai_response_output_item_for_gemini(item, &mut parts);
+            collect_openai_response_output_item_for_gemini(item, &mut parts, &mut budget, 0);
         }
     }
     if !parts.iter().any(is_gemini_inline_image_part) {
@@ -389,6 +460,7 @@ pub fn build_openai_image_response_from_response_stream_sync_body(
     let output = provider_body_json.get("output").and_then(Value::as_array)?;
     let images = output
         .iter()
+        .take(MAX_IMAGE_BRIDGE_OUTPUTS)
         .filter_map(openai_response_image_generation_item_to_image_data)
         .collect::<Vec<_>>();
     if images.is_empty() {
@@ -438,28 +510,90 @@ fn openai_response_image_generation_item_to_image_data(item: &Value) -> Option<V
         .filter(|value| !value.is_empty());
     let mut image = Map::new();
     match result {
-        Some(value) if value.starts_with("data:") => {
+        Some(value) if value.trim_start().starts_with("data:") => {
             let (_, b64_json) = parse_data_url(value)?;
             image.insert("b64_json".to_string(), Value::String(b64_json));
         }
-        Some(value) if value.starts_with("http://") || value.starts_with("https://") => {
-            image.insert("url".to_string(), Value::String(value.to_string()));
-        }
         Some(value) => {
-            image.insert("b64_json".to_string(), Value::String(value.to_string()));
+            if let Some(url) = sanitize_openai_image_source_url(value) {
+                if url.starts_with("data:") {
+                    let (_, b64_json) = parse_data_url(&url)?;
+                    image.insert("b64_json".to_string(), Value::String(b64_json));
+                } else {
+                    image.insert("url".to_string(), Value::String(url));
+                }
+            } else if is_safe_openai_image_base64_payload(value) {
+                image.insert("b64_json".to_string(), Value::String(value.to_string()));
+            } else {
+                return None;
+            }
         }
         None => {
             let url = url?;
-            if let Some((_, b64_json)) = parse_data_url(url) {
+            let url = sanitize_openai_image_source_url(url)?;
+            if let Some((_, b64_json)) = parse_data_url(&url) {
                 image.insert("b64_json".to_string(), Value::String(b64_json));
             } else {
-                image.insert("url".to_string(), Value::String(url.to_string()));
+                image.insert("url".to_string(), Value::String(url));
             }
         }
     }
     image.insert(
         "revised_prompt".to_string(),
-        item.get("revised_prompt").cloned().unwrap_or(Value::Null),
+        item.get("revised_prompt")
+            .and_then(Value::as_str)
+            .and_then(bounded_openai_image_revised_prompt)
+            .map(|value| Value::String(value.to_string()))
+            .unwrap_or(Value::Null),
+    );
+    Some(Value::Object(image))
+}
+
+fn standard_openai_image_item_to_image_data(item: &Value) -> Option<Value> {
+    let object = item.as_object()?;
+    let b64_json = object
+        .get("b64_json")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| is_safe_openai_image_base64_payload(value));
+    let url = object
+        .get("url")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .and_then(sanitize_openai_image_source_url);
+
+    let mut image = Map::new();
+    if let Some(b64_json) = b64_json {
+        image.insert("b64_json".to_string(), Value::String(b64_json.to_string()));
+    } else if let Some(url) = url {
+        if let Some((_, b64_json)) = parse_data_url(&url) {
+            image.insert("b64_json".to_string(), Value::String(b64_json));
+        } else {
+            image.insert("url".to_string(), Value::String(url));
+        }
+    } else {
+        return None;
+    }
+
+    if let Some(output_format) = object
+        .get("output_format")
+        .and_then(Value::as_str)
+        .and_then(normalize_openai_image_output_format)
+    {
+        image.insert(
+            "output_format".to_string(),
+            Value::String(output_format.to_string()),
+        );
+    }
+    image.insert(
+        "revised_prompt".to_string(),
+        object
+            .get("revised_prompt")
+            .and_then(Value::as_str)
+            .and_then(bounded_openai_image_revised_prompt)
+            .map(|value| Value::String(value.to_string()))
+            .unwrap_or(Value::Null),
     );
     Some(Value::Object(image))
 }
@@ -474,12 +608,17 @@ pub fn build_openai_image_provider_body_from_response_stream_sync_body(
     }
     let output = data
         .iter()
+        .take(MAX_IMAGE_BRIDGE_OUTPUTS)
         .filter_map(|item| {
             extract_openai_image_response_item(item).map(|(mime_type, _)| {
                 json!({
                     "type": "image_generation_call",
                     "output_format": output_format_from_mime_type(&mime_type),
-                    "revised_prompt": item.get("revised_prompt").cloned().unwrap_or(Value::Null),
+                    "revised_prompt": item.get("revised_prompt")
+                        .and_then(Value::as_str)
+                        .and_then(bounded_openai_image_revised_prompt)
+                        .map(|value| Value::String(value.to_string()))
+                        .unwrap_or(Value::Null),
                 })
             })
         })
@@ -578,7 +717,8 @@ fn openai_input_image_to_gemini_part(image: Value) -> Option<Value> {
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())?;
-    if let Some((mime_type, data)) = parse_data_url(image_url) {
+    let image_url = sanitize_openai_image_source_url(image_url)?;
+    if let Some((mime_type, data)) = parse_data_url(&image_url) {
         return Some(json!({
             "inlineData": {
                 "mimeType": mime_type,
@@ -588,7 +728,7 @@ fn openai_input_image_to_gemini_part(image: Value) -> Option<Value> {
     }
     Some(json!({
         "fileData": {
-            "mimeType": mime_type_from_url(image_url),
+            "mimeType": mime_type_from_url(&image_url),
             "fileUri": image_url,
         }
     }))
@@ -691,13 +831,53 @@ fn collect_gemini_part(part: &Value, text: &mut Vec<String>, content: &mut Vec<V
     }
 }
 
-fn collect_openai_response_output_item_for_gemini(item: &Value, parts: &mut Vec<Value>) {
+#[derive(Default)]
+struct GeminiImagePartBudget {
+    text_bytes: usize,
+}
+
+impl GeminiImagePartBudget {
+    fn push_part(&mut self, parts: &mut Vec<Value>, part: Value) {
+        if parts.len() < MAX_IMAGE_BRIDGE_PARTS {
+            parts.push(part);
+        }
+    }
+
+    fn push_text(&mut self, parts: &mut Vec<Value>, text: &str) {
+        let text_bytes = text.len();
+        let Some(next_text_bytes) = self.text_bytes.checked_add(text_bytes) else {
+            return;
+        };
+        if next_text_bytes > MAX_IMAGE_BRIDGE_TEXT_BYTES || parts.len() >= MAX_IMAGE_BRIDGE_PARTS {
+            return;
+        }
+        parts.push(json!({ "text": text }));
+        self.text_bytes = next_text_bytes;
+    }
+}
+
+fn collect_openai_response_output_item_for_gemini(
+    item: &Value,
+    parts: &mut Vec<Value>,
+    budget: &mut GeminiImagePartBudget,
+    depth: usize,
+) {
+    if depth >= MAX_IMAGE_BRIDGE_RECURSION_DEPTH {
+        return;
+    }
+    if let Value::Array(items) = item {
+        for child in items {
+            collect_openai_response_output_item_for_gemini(child, parts, budget, depth + 1);
+            if parts.len() >= MAX_IMAGE_BRIDGE_PARTS {
+                break;
+            }
+        }
+        return;
+    }
     let item_type = item.get("type").and_then(Value::as_str).unwrap_or_default();
     if item_type == "message" {
-        if let Some(content) = item.get("content").and_then(Value::as_array) {
-            for part in content {
-                collect_openai_response_output_item_for_gemini(part, parts);
-            }
+        if let Some(content) = item.get("content") {
+            collect_openai_response_output_item_for_gemini(content, parts, budget, depth + 1);
         }
         return;
     }
@@ -708,7 +888,7 @@ fn collect_openai_response_output_item_for_gemini(item: &Value, parts: &mut Vec<
             .map(str::trim)
             .filter(|value| !value.is_empty())
         {
-            parts.push(json!({ "text": text }));
+            budget.push_text(parts, text);
         }
         return;
     }
@@ -727,12 +907,15 @@ fn collect_openai_response_output_item_for_gemini(item: &Value, parts: &mut Vec<
             .filter(|value| !value.is_empty());
         if let Some(image_url) = image_url {
             if let Some((mime_type, data)) = parse_data_url(image_url) {
-                parts.push(json!({
-                    "inlineData": {
-                        "mimeType": mime_type,
-                        "data": data,
-                    }
-                }));
+                budget.push_part(
+                    parts,
+                    json!({
+                        "inlineData": {
+                            "mimeType": mime_type,
+                            "data": data,
+                        }
+                    }),
+                );
             }
         }
     }
@@ -745,15 +928,14 @@ fn extract_gemini_inline_image(part: &Value) -> Option<(String, String)> {
         .get("mimeType")
         .or_else(|| object.get("mime_type"))
         .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| value.starts_with("image/"))
+        .and_then(safe_openai_image_mime_type)
         .unwrap_or("image/png")
         .to_string();
     let data = object
         .get("data")
         .and_then(Value::as_str)
         .map(str::trim)
-        .filter(|value| !value.is_empty())?
+        .filter(|value| is_safe_openai_image_base64_payload(value))?
         .to_string();
     Some((mime_type, data))
 }
@@ -764,13 +946,12 @@ fn extract_openai_image_response_item(item: &Value) -> Option<(String, String)> 
         .get("b64_json")
         .and_then(Value::as_str)
         .map(str::trim)
-        .filter(|value| !value.is_empty())
+        .filter(|value| is_safe_openai_image_base64_payload(value))
     {
         let output_format = object
             .get("output_format")
             .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
+            .and_then(normalize_openai_image_output_format)
             .unwrap_or("png");
         return Some((
             mime_type_from_output_format(output_format),
@@ -786,13 +967,7 @@ fn extract_openai_image_response_item(item: &Value) -> Option<(String, String)> 
 }
 
 fn parse_data_url(value: &str) -> Option<(String, String)> {
-    let (metadata, payload) = value.trim().split_once(',')?;
-    let metadata = metadata.strip_prefix("data:")?;
-    let mime_type = metadata.strip_suffix(";base64")?;
-    let payload = payload.trim();
-    if payload.is_empty() {
-        return None;
-    }
+    let (mime_type, payload) = parse_safe_openai_image_data_url(value)?;
     Some((mime_type.to_string(), payload.to_string()))
 }
 
@@ -822,12 +997,11 @@ fn output_format_from_mime_type(mime_type: &str) -> &'static str {
 }
 
 fn mime_type_from_output_format(output_format: &str) -> String {
-    match output_format.trim().to_ascii_lowercase().as_str() {
-        "jpeg" | "jpg" => "image/jpeg".to_string(),
-        "webp" => "image/webp".to_string(),
-        "png" => "image/png".to_string(),
-        other if other.starts_with("image/") => other.to_string(),
-        _ => "image/png".to_string(),
+    match normalize_openai_image_output_format(output_format) {
+        Some("jpeg") => "image/jpeg".to_string(),
+        Some("webp") => "image/webp".to_string(),
+        Some("png") | None => "image/png".to_string(),
+        Some(_) => "image/png".to_string(),
     }
 }
 
@@ -901,7 +1075,7 @@ fn context_model(context: &Value) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use http::{Method, Request};
-    use serde_json::json;
+    use serde_json::{json, Value};
 
     use super::{
         build_gemini_image_request_body_from_openai_image_request,
@@ -909,6 +1083,7 @@ mod tests {
         build_openai_image_request_body_from_gemini_image_request,
         build_openai_image_response_from_gemini_response,
         build_openai_image_response_from_response_stream_sync_body,
+        build_openai_image_response_from_standard_image_response,
         gemini_request_is_image_generation,
     };
     use crate::formats::openai::image::request::normalize_openai_image_request;
@@ -1128,5 +1303,89 @@ mod tests {
             "aGVsbG8="
         );
         assert_eq!(converted["usageMetadata"]["totalTokenCount"], 3);
+    }
+
+    #[test]
+    fn standard_openai_image_bridge_filters_fields_and_bounds_outputs() {
+        let provider_body = json!({
+            "created": 1779273523,
+            "model": "gpt-image-2",
+            "data": [
+                {"url": "javascript:alert(1)"},
+                {"url": "data:text/html;base64,PGh0bWw+"},
+                {
+                    "b64_json": "aGVsbG8=",
+                    "output_format": "text/html",
+                    "revised_prompt": "p".repeat(256 * 1024 + 1)
+                }
+            ]
+        });
+        let converted =
+            build_openai_image_response_from_standard_image_response(&provider_body, None)
+                .expect("valid standard image should remain");
+        assert_eq!(converted["data"].as_array().map(Vec::len), Some(1));
+        assert_eq!(converted["data"][0]["b64_json"], "aGVsbG8=");
+        assert_eq!(converted["data"][0]["revised_prompt"], Value::Null);
+        assert!(converted["data"][0].get("output_format").is_none());
+        let serialized = serde_json::to_string(&converted).expect("json");
+        assert!(!serialized.contains("javascript:"));
+        assert!(!serialized.contains("text/html"));
+
+        let outputs = (0..80)
+            .map(|index| json!({"b64_json": format!("image{index:02}=")}))
+            .collect::<Vec<_>>();
+        let bounded = build_openai_image_response_from_standard_image_response(
+            &json!({"data": outputs}),
+            None,
+        )
+        .expect("bounded standard image response should convert");
+        assert_eq!(bounded["data"].as_array().map(Vec::len), Some(64));
+    }
+
+    #[test]
+    fn responses_image_bridge_bounds_nested_text_without_losing_image() {
+        let mut nested = json!({"type": "output_text", "text": "nested"});
+        for _ in 0..128 {
+            nested = json!({"type": "message", "content": [nested]});
+        }
+        let converted = super::build_gemini_image_response_from_openai_responses_image_response(
+            &json!({
+                "output": [
+                    nested,
+                    {"type": "image_generation_call", "result": "aGVsbG8="}
+                ]
+            }),
+            None,
+        )
+        .expect("nested response should still retain the image");
+        let parts = converted["candidates"][0]["content"]["parts"]
+            .as_array()
+            .expect("gemini parts");
+        assert!(parts.iter().any(super::is_gemini_inline_image_part));
+        assert!(parts.len() <= super::MAX_IMAGE_BRIDGE_PARTS);
+
+        let large_text = "t".repeat(super::MAX_IMAGE_BRIDGE_TEXT_BYTES / 2);
+        let output = (0..4)
+            .map(|_| json!({"type": "output_text", "text": large_text.clone()}))
+            .chain(std::iter::once(json!({
+                "type": "image_generation_call",
+                "result": "aGVsbG8="
+            })))
+            .collect::<Vec<_>>();
+        let bounded = super::build_gemini_image_response_from_openai_responses_image_response(
+            &json!({"output": output}),
+            None,
+        )
+        .expect("text budget should not suppress a valid image");
+        let parts = bounded["candidates"][0]["content"]["parts"]
+            .as_array()
+            .expect("bounded parts");
+        assert!(parts.iter().any(super::is_gemini_inline_image_part));
+        let text_bytes = parts
+            .iter()
+            .filter_map(|part| part.get("text").and_then(Value::as_str))
+            .map(str::len)
+            .sum::<usize>();
+        assert!(text_bytes <= super::MAX_IMAGE_BRIDGE_TEXT_BYTES);
     }
 }

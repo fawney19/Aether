@@ -1538,6 +1538,68 @@ fn hotspot_modules_do_not_log_sensitive_payload_like_fields() {
 }
 
 #[test]
+fn identity_oauth_does_not_persist_raw_userinfo_claims() {
+    let source = read_workspace_file("apps/aether-gateway/src/oauth/identity_repo.rs");
+    assert!(
+        !source.contains("claims.raw"),
+        "identity OAuth must persist only dedicated claim fields, never raw userinfo JSON"
+    );
+}
+
+#[test]
+fn gateway_does_not_log_raw_request_queries_or_credential_bearing_urls() {
+    let patterns = [
+        "request_query_string = %",
+        "request_query_string = ?",
+        "request_path_and_query = %request_context.request_path_and_query()",
+        "request_path_and_query = ?request_context.request_path_and_query()",
+        "upstream_url = %",
+        "upstream_url = ?",
+        "plan_url = %",
+        "plan_url = ?",
+        "token_url = %",
+        "token_url = ?",
+        "endpoint_base_url = %",
+        "endpoint_base_url = ?",
+        "url = %plan.url",
+        "url = ?plan.url",
+    ];
+
+    for root in [
+        "src/ai_serving",
+        "src/execution_runtime",
+        "src/handlers",
+        "src/maintenance",
+        "src/oauth",
+        "src/state",
+    ] {
+        assert_no_sensitive_log_patterns(root, &patterns);
+    }
+
+    let provider_transport_root =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/aether-provider/transport/src");
+    let mut provider_transport_files = Vec::new();
+    collect_rust_files(&provider_transport_root, &mut provider_transport_files);
+    let violations = provider_transport_files
+        .into_iter()
+        .filter_map(|path| {
+            let source = std::fs::read_to_string(&path).expect("source file should be readable");
+            let hits = patterns
+                .iter()
+                .filter(|pattern| source.contains(**pattern))
+                .copied()
+                .collect::<Vec<_>>();
+            (!hits.is_empty()).then(|| format!("{} -> {}", path.display(), hits.join(", ")))
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        violations.is_empty(),
+        "provider transport must log URL origins/hosts instead of raw URLs or queries:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
 fn execution_runtime_video_finalize_paths_depend_on_shared_video_task_core() {
     let response =
         read_workspace_file("apps/aether-gateway/src/execution_runtime/sync/execution/response.rs");

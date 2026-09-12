@@ -30,8 +30,12 @@ function isLocale(value: string | null | undefined): value is Locale {
 function readInitialLocale(): Locale {
   if (typeof window === 'undefined') return defaultLocale
 
-  const stored = localStorage.getItem(STORAGE_KEY)
-  if (isLocale(stored)) return stored
+  try {
+    const stored = normalizeLocale(localStorage.getItem(STORAGE_KEY))
+    if (stored) return stored
+  } catch {
+    // Browser storage may be unavailable; the in-memory preference still works.
+  }
 
   const preferred = navigator.languages?.find(language => {
     const normalized = normalizeLocale(language)
@@ -41,21 +45,26 @@ function readInitialLocale(): Locale {
   return isLocale(normalizedPreferred) ? normalizedPreferred : defaultLocale
 }
 
-function normalizeLocale(value: string | undefined): string | undefined {
+export function normalizeLocale(value: string | null | undefined): Locale | undefined {
   if (!value) return undefined
-  const lower = value.toLowerCase()
-  if (lower.startsWith('zh')) return 'zh-CN'
-  if (lower.startsWith('en')) return 'en-US'
-  return value
+  const language = value.trim().toLowerCase().split(/[-_]/)[0]
+  if (language === 'zh') return 'zh-CN'
+  if (language === 'en') return 'en-US'
+  return undefined
 }
 
 function setLocale(nextLocale: Locale): void {
+  if (!isLocale(nextLocale)) return
   locale.value = nextLocale
   if (typeof document !== 'undefined') {
     document.documentElement.lang = nextLocale
   }
   if (typeof window !== 'undefined') {
-    localStorage.setItem(STORAGE_KEY, nextLocale)
+    try {
+      localStorage.setItem(STORAGE_KEY, nextLocale)
+    } catch {
+      // Persistence is optional; do not interrupt language switching.
+    }
   }
 }
 
@@ -88,7 +97,8 @@ export function createI18n() {
       app.config.globalProperties.$t = t
       app.config.globalProperties.$legacyT = legacyT
       setLocale(locale.value)
-      installLegacyDomTranslator(locale)
+      const stopTranslating = installLegacyDomTranslator(locale)
+      app.onUnmount(stopTranslating)
     }
   }
 }

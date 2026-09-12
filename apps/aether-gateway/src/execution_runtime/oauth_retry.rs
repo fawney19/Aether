@@ -164,7 +164,7 @@ pub(crate) async fn refresh_oauth_plan_auth_for_retry(
                     key_id = %plan.key_id,
                     status_code,
                     refresh_status_code,
-                    error = ?err,
+                    error = %crate::error::redact_error_debug(&err),
                     "gateway failed to persist oauth retry refresh failure"
                 );
             }
@@ -190,7 +190,12 @@ pub(crate) async fn refresh_oauth_plan_auth_for_retry(
                 endpoint_id = %plan.endpoint_id,
                 key_id = %plan.key_id,
                 status_code,
-                error = %err,
+                // `LocalOAuthRefreshError` carries provider-generated details
+                // in a few variants. Its `Debug` implementation deliberately
+                // redacts those details; using `%` here would invoke
+                // `Display` and could expose a raw transport URL/query or an
+                // upstream error body in the ops log.
+                error = ?err,
                 "gateway oauth retry refresh failed"
             );
             false
@@ -334,6 +339,23 @@ mod tests {
             Some("authorization denied")
         ));
         assert!(!status_may_be_oauth_invalid(429, Some("token bucket")));
+    }
+
+    #[test]
+    fn oauth_retry_failure_log_uses_redacted_error_debug() {
+        let error = crate::provider_transport::LocalOAuthRefreshError::TransportMessage {
+            provider_type: "kiro",
+            message: "request failed for https://user:password@example.test/token?refresh_token=oauth-retry-canary"
+                .to_string(),
+        };
+
+        // The retry path logs this error with `?error` (Debug), whose contract
+        // is to omit dynamic transport details. Keep the assertion here so a
+        // future change back to `%error` cannot silently reintroduce leakage.
+        let debug = format!("{error:?}");
+        assert!(!debug.contains("oauth-retry-canary"));
+        assert!(!debug.contains("password"));
+        assert!(debug.contains("TransportMessage"));
     }
 
     #[test]

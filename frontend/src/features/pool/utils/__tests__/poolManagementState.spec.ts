@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 
 import {
+  POOL_MANAGEMENT_VIEW_STORAGE_KEY,
   buildPoolManagementQueryPatch,
   readPoolManagementViewState,
   resolvePoolManagementPageAfterLoad,
@@ -71,8 +72,9 @@ describe('poolManagementState', () => {
   })
 
   it('falls back to storage when query is missing', () => {
-    writePoolManagementViewState(
-      {
+    storage.setItem(
+      POOL_MANAGEMENT_VIEW_STORAGE_KEY,
+      JSON.stringify({
         providerId: 'provider-c',
         search: 'stored only',
         status: 'active',
@@ -81,8 +83,7 @@ describe('poolManagementState', () => {
         sortBy: 'last_used_at',
         sortOrder: 'asc',
         statsMode: 'account_total',
-      },
-      storage,
+      }),
     )
 
     const state = readPoolManagementViewState({}, storage)

@@ -34,5 +34,6 @@ pub use queue::{
 pub use redaction::{summarize_text_payload, TextPayloadSummary};
 pub use shutdown::wait_for_shutdown_signal;
 pub use tracing::{
-    init_reloadable_service_tracing, init_reloadable_tracing, LogFormat, LogReloader,
+    init_reloadable_service_tracing, init_reloadable_tracing, logging_metric_samples,
+    shutdown_logging, LogFormat, LogReloader, LogShutdownGuard,
 };

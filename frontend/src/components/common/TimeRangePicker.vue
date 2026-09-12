@@ -1,10 +1,10 @@
 <template>
-  <div class="flex flex-wrap items-center gap-2">
+  <div class="flex max-w-full flex-wrap items-center gap-2">
     <Select
       v-model="selectedPreset"
     >
       <SelectTrigger
-        class="h-8 w-32 text-xs border-border/60"
+        class="h-8 w-40 text-xs border-border/60"
         :class="[presetTriggerClass]"
       >
         <SelectValue :placeholder="legacyT('选择时间段')" />
@@ -22,7 +22,7 @@
 
     <div
       v-if="selectedPreset === 'custom'"
-      class="flex items-center gap-2"
+      class="flex max-w-full flex-wrap items-center gap-2"
     >
       <Input
         v-model="startDate"

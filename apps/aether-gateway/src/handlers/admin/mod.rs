@@ -41,6 +41,7 @@ pub(crate) use self::provider::oauth::runtime::{
     refresh_provider_oauth_account_state_after_update,
 };
 pub(crate) use self::provider::ops::providers::actions::admin_provider_ops_local_action_response;
+pub(crate) use self::provider::ops::providers::admin_provider_ops_credential_snapshot;
 pub(crate) use self::provider::ops::providers::store_admin_provider_ops_balance_cache;
 pub(crate) use self::provider::pool::config::admin_provider_pool_config;
 pub(crate) use self::provider::pool_admin::maybe_build_local_admin_pool_response;
@@ -53,11 +54,15 @@ pub(crate) use self::provider::{
 };
 pub(crate) use self::request::{
     AdminAppState, AdminGatewayProviderTransportSnapshot, AdminLocalOAuthRefreshError,
-    AdminRequestContext, AdminRouteRequest, AdminRouteResponse, AdminRouteResult,
+    AdminRequestContext, AdminRouteRequest, AdminRouteResponse, AdminRouteResult, SystemExportMode,
 };
 pub(crate) use self::routes::maybe_build_local_admin_response;
 #[cfg(test)]
 pub(crate) use self::system::{
     clear_proxy_node_references_with_cache_failure_for_tests,
     override_proxy_connectivity_probe_url_for_tests,
+};
+pub(crate) use self::system::{
+    execute_admin_system_import_exclusively, release_admin_system_import_lease,
+    try_acquire_admin_system_import_lease, AdminSystemImportLockError,
 };

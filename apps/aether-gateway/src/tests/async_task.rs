@@ -5,13 +5,14 @@ use aether_data_contracts::repository::provider_catalog::{
     StoredProviderCatalogEndpoint, StoredProviderCatalogKey, StoredProviderCatalogProvider,
 };
 use aether_data_contracts::repository::video_tasks::{
-    UpsertVideoTask, VideoTaskStatus, VideoTaskWriteRepository,
+    UpsertVideoTask, VideoTaskLookupKey, VideoTaskReadRepository, VideoTaskStatus,
+    VideoTaskWriteRepository,
 };
 
 use super::{
-    any, build_router_with_state, build_state_with_execution_runtime_override, json, start_server,
-    to_bytes, AppState, Arc, Body, Bytes, HeaderValue, Json, Mutex, Request, Response, Router,
-    StatusCode,
+    any, authenticated_operational_client, build_state_with_execution_runtime_override, json,
+    start_authenticated_operational_server, start_server, to_bytes, AppState, Arc, Body, Bytes,
+    HeaderValue, Json, Mutex, Request, Response, Router, StatusCode,
 };
 
 fn sample_video_task(
@@ -75,6 +76,93 @@ fn sample_video_task(
     }
 }
 
+fn bound_provider_api_key(provider_id: &str, key_id: &str, plaintext: &str) -> String {
+    let purpose = format!(
+        "provider-catalog-credential-bound-v2\0provider-id-bytes={}\0{provider_id}\0key-id-bytes={}\0{key_id}\0field=api-key",
+        provider_id.len(),
+        key_id.len(),
+    );
+    let protected = format!("{purpose}\0{plaintext}");
+    let ciphertext = encrypt_python_fernet_plaintext(DEVELOPMENT_ENCRYPTION_KEY, &protected)
+        .expect("bound provider api key should encrypt");
+    format!("aether-provider-catalog-credential-v2:aether-runtime-secret-v1:{ciphertext}")
+}
+
+fn video_provider_catalog_repository(
+    provider_id: &str,
+    provider_type: &str,
+    endpoint_id: &str,
+    api_format: &str,
+    endpoint_base_url: &str,
+    key_id: &str,
+    upstream_api_key: &str,
+) -> Arc<InMemoryProviderCatalogReadRepository> {
+    let provider = StoredProviderCatalogProvider::new(
+        provider_id.to_string(),
+        format!("video-{provider_type}"),
+        Some("https://example.com".to_string()),
+        provider_type.to_string(),
+    )
+    .expect("provider should build")
+    .with_transport_fields(
+        true,
+        false,
+        false,
+        None,
+        Some(2),
+        None,
+        Some(20.0),
+        None,
+        None,
+    );
+    let endpoint = StoredProviderCatalogEndpoint::new(
+        endpoint_id.to_string(),
+        provider_id.to_string(),
+        api_format.to_string(),
+        Some(provider_type.to_string()),
+        Some("video".to_string()),
+        true,
+    )
+    .expect("endpoint should build")
+    .with_transport_fields(
+        endpoint_base_url.to_string(),
+        None,
+        None,
+        Some(2),
+        None,
+        None,
+        None,
+        None,
+    )
+    .expect("endpoint transport should build");
+    let key = StoredProviderCatalogKey::new(
+        key_id.to_string(),
+        provider_id.to_string(),
+        "primary".to_string(),
+        "api_key".to_string(),
+        None,
+        true,
+    )
+    .expect("key should build")
+    .with_transport_fields(
+        Some(json!([api_format])),
+        bound_provider_api_key(provider_id, key_id, upstream_api_key),
+        None,
+        None,
+        Some(json!({api_format: 1})),
+        None,
+        None,
+        None,
+        None,
+    )
+    .expect("key transport should build");
+    Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        vec![endpoint],
+        vec![key],
+    ))
+}
+
 #[tokio::test]
 async fn gateway_lists_video_tasks_via_internal_async_task_endpoint() {
     let repository = Arc::new(InMemoryVideoTaskRepository::default());
@@ -112,14 +200,14 @@ async fn gateway_lists_video_tasks_via_internal_async_task_endpoint() {
         .await
         .expect("upsert should succeed");
 
-    let gateway = build_router_with_state(
-        AppState::new()
-            .expect("gateway state should build")
-            .with_video_task_data_repository_for_tests(repository),
-    );
-    let (gateway_url, gateway_handle) = start_server(gateway).await;
+    let state = AppState::new()
+        .expect("gateway state should build")
+        .with_video_task_data_repository_for_tests(repository);
+    let (gateway_url, gateway_handle, access_token) =
+        start_authenticated_operational_server(state).await;
+    let client = authenticated_operational_client(&access_token);
 
-    let response = reqwest::Client::new()
+    let response = client
         .get(format!(
             "{gateway_url}/_gateway/async-tasks/video-tasks?status=completed&page=1&page_size=1"
         ))
@@ -169,14 +257,14 @@ async fn gateway_exposes_video_task_stats_via_internal_async_task_endpoint() {
         .await
         .expect("upsert should succeed");
 
-    let gateway = build_router_with_state(
-        AppState::new()
-            .expect("gateway state should build")
-            .with_video_task_data_repository_for_tests(repository),
-    );
-    let (gateway_url, gateway_handle) = start_server(gateway).await;
+    let state = AppState::new()
+        .expect("gateway state should build")
+        .with_video_task_data_repository_for_tests(repository);
+    let (gateway_url, gateway_handle, access_token) =
+        start_authenticated_operational_server(state).await;
+    let client = authenticated_operational_client(&access_token);
 
-    let response = reqwest::Client::new()
+    let response = client
         .get(format!(
             "{gateway_url}/_gateway/async-tasks/video-tasks/stats"
         ))
@@ -212,14 +300,14 @@ async fn gateway_reads_video_task_detail_via_internal_async_task_endpoint() {
         .await
         .expect("upsert should succeed");
 
-    let gateway = build_router_with_state(
-        AppState::new()
-            .expect("gateway state should build")
-            .with_video_task_data_repository_for_tests(repository),
-    );
-    let (gateway_url, gateway_handle) = start_server(gateway).await;
+    let state = AppState::new()
+        .expect("gateway state should build")
+        .with_video_task_data_repository_for_tests(repository);
+    let (gateway_url, gateway_handle, access_token) =
+        start_authenticated_operational_server(state).await;
+    let client = authenticated_operational_client(&access_token);
 
-    let response = reqwest::Client::new()
+    let response = client
         .get(format!(
             "{gateway_url}/_gateway/async-tasks/video-tasks/task-1"
         ))
@@ -238,7 +326,7 @@ async fn gateway_reads_video_task_detail_via_internal_async_task_endpoint() {
 }
 
 #[tokio::test]
-async fn gateway_redirects_direct_video_task_video_from_internal_async_task_endpoint() {
+async fn gateway_redirects_persisted_openai_video_url_from_authenticated_internal_endpoint() {
     let repository = Arc::new(InMemoryVideoTaskRepository::default());
     let mut task = sample_video_task(
         "task-redirect",
@@ -248,23 +336,26 @@ async fn gateway_redirects_direct_video_task_video_from_internal_async_task_endp
         "user-1",
         "openai:video",
     );
-    task.video_url = Some("https://cdn.example.com/video-task-redirect.mp4".to_string());
-    repository
+    task.video_url = Some("https://8.8.8.8/video-task-redirect.mp4".to_string());
+    let stored = repository
         .upsert(task)
         .await
         .expect("upsert should succeed");
-
-    let gateway = build_router_with_state(
-        AppState::new()
-            .expect("gateway state should build")
-            .with_video_task_data_repository_for_tests(repository),
+    assert_eq!(
+        stored.video_url.as_deref(),
+        Some("https://8.8.8.8/video-task-redirect.mp4")
     );
-    let (gateway_url, gateway_handle) = start_server(gateway).await;
 
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .expect("client should build");
+    let state = AppState::new()
+        .expect("gateway state should build")
+        .with_video_task_data_repository_for_tests(repository);
+    let (gateway_url, gateway_handle, access_token) =
+        start_authenticated_operational_server(state).await;
+
+    let client = super::authenticated_operational_client_with_builder(
+        reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()),
+        &access_token,
+    );
     let response = client
         .get(format!(
             "{gateway_url}/_gateway/async-tasks/video-tasks/task-redirect/video"
@@ -277,16 +368,16 @@ async fn gateway_redirects_direct_video_task_video_from_internal_async_task_endp
     assert_eq!(
         response
             .headers()
-            .get(http::header::LOCATION)
+            .get("location")
             .and_then(|value| value.to_str().ok()),
-        Some("https://cdn.example.com/video-task-redirect.mp4")
+        stored.video_url.as_deref()
     );
 
     gateway_handle.abort();
 }
 
 #[tokio::test]
-async fn gateway_proxies_gemini_video_task_video_from_internal_async_task_endpoint() {
+async fn gateway_rejects_private_gemini_video_target_without_sending_provider_key() {
     let seen_api_key = Arc::new(Mutex::new(None::<String>));
     let seen_api_key_clone = Arc::clone(&seen_api_key);
 
@@ -384,8 +475,11 @@ async fn gateway_proxies_gemini_video_task_video_from_internal_async_task_endpoi
         .expect("key should build")
         .with_transport_fields(
             Some(json!(["gemini:video"])),
-            encrypt_python_fernet_plaintext(DEVELOPMENT_ENCRYPTION_KEY, "gemini-upstream-secret")
-                .expect("api key should encrypt"),
+            bound_provider_api_key(
+                "provider-gemini-video-1",
+                "key-gemini-video-1",
+                "gemini-upstream-secret",
+            ),
             None,
             None,
             Some(json!({"gemini:video": 1})),
@@ -397,20 +491,20 @@ async fn gateway_proxies_gemini_video_task_video_from_internal_async_task_endpoi
         .expect("key transport should build")],
     ));
 
-    let gateway = build_router_with_state(
-        AppState::new()
+    let state = AppState::new()
         .expect("gateway state should build")
         .with_data_state_for_tests(
-            crate::data::GatewayDataState::with_video_task_repository_and_provider_transport_for_tests(
-                repository,
-                provider_catalog_repository,
-                DEVELOPMENT_ENCRYPTION_KEY,
-            ),
+        crate::data::GatewayDataState::with_video_task_repository_and_provider_transport_for_tests(
+            repository,
+            provider_catalog_repository,
+            DEVELOPMENT_ENCRYPTION_KEY,
         ),
     );
-    let (gateway_url, gateway_handle) = start_server(gateway).await;
+    let (gateway_url, gateway_handle, access_token) =
+        start_authenticated_operational_server(state).await;
+    let client = authenticated_operational_client(&access_token);
 
-    let response = reqwest::Client::new()
+    let response = client
         .get(format!(
             "{gateway_url}/_gateway/async-tasks/video-tasks/task-proxy/video"
         ))
@@ -418,28 +512,10 @@ async fn gateway_proxies_gemini_video_task_video_from_internal_async_task_endpoi
         .await
         .expect("request should succeed");
 
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(
-        response
-            .headers()
-            .get(http::header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok()),
-        Some("video/mp4")
-    );
-    assert_eq!(
-        response
-            .headers()
-            .get(http::header::CONTENT_DISPOSITION)
-            .and_then(|value| value.to_str().ok()),
-        Some("inline; filename=\"video_task-proxy.mp4\"")
-    );
-    assert_eq!(
-        response.bytes().await.expect("body should read"),
-        Bytes::from_static(b"proxied-video-bytes")
-    );
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
     assert_eq!(
         seen_api_key.lock().expect("mutex should lock").as_deref(),
-        Some("gemini-upstream-secret")
+        None
     );
 
     gateway_handle.abort();
@@ -563,14 +639,29 @@ async fn gateway_cancels_openai_video_task_via_internal_async_task_endpoint() {
         .await
         .expect("upsert should succeed");
 
-    let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
-    let gateway = build_router_with_state(
-        build_state_with_execution_runtime_override(execution_runtime_url)
-            .with_video_task_data_repository_for_tests(Arc::clone(&repository)),
+    let provider_catalog_repository = video_provider_catalog_repository(
+        "provider-1",
+        "openai",
+        "endpoint-1",
+        "openai:video",
+        "https://api.openai.example/v1",
+        "provider-key-1",
+        "sk-upstream-openai-video",
     );
-    let (gateway_url, gateway_handle) = start_server(gateway).await;
+    let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
+    let state = build_state_with_execution_runtime_override(execution_runtime_url)
+        .with_data_state_for_tests(
+        crate::data::GatewayDataState::with_video_task_repository_and_provider_transport_for_tests(
+            Arc::clone(&repository),
+            provider_catalog_repository,
+            DEVELOPMENT_ENCRYPTION_KEY,
+        ),
+    );
+    let (gateway_url, gateway_handle, access_token) =
+        start_authenticated_operational_server(state).await;
+    let client = authenticated_operational_client(&access_token);
 
-    let response = reqwest::Client::new()
+    let response = client
         .post(format!(
             "{gateway_url}/_gateway/async-tasks/video-tasks/task-openai-cancel/cancel"
         ))
@@ -606,7 +697,7 @@ async fn gateway_cancels_openai_video_task_via_internal_async_task_endpoint() {
         "Bearer sk-upstream-openai-video"
     );
 
-    let detail = reqwest::Client::new()
+    let detail = client
         .get(format!(
             "{gateway_url}/_gateway/async-tasks/video-tasks/task-openai-cancel"
         ))
@@ -617,10 +708,10 @@ async fn gateway_cancels_openai_video_task_via_internal_async_task_endpoint() {
     let detail_json: serde_json::Value = detail.json().await.expect("detail should parse");
     assert_eq!(detail_json["status"], "Cancelled");
     assert!(detail_json["next_poll_at_unix_secs"].is_null());
-    assert_eq!(
-        detail_json["request_metadata"]["rust_local_snapshot"]["OpenAi"]["status"],
-        "Cancelled"
-    );
+    assert!(detail_json["original_request_body"].is_null());
+    assert!(detail_json["progress_message"].is_null());
+    assert!(detail_json["error_message"].is_null());
+    assert!(detail_json["request_metadata"].is_null());
 
     gateway_handle.abort();
     execution_runtime_handle.abort();
@@ -726,14 +817,29 @@ async fn gateway_cancels_openai_video_task_via_internal_async_task_endpoint_with
         .await
         .expect("upsert should succeed");
 
-    let gateway = build_router_with_state(
-        AppState::new()
-            .expect("gateway state should build")
-            .with_video_task_data_repository_for_tests(Arc::clone(&repository)),
+    let provider_catalog_repository = video_provider_catalog_repository(
+        "provider-1",
+        "openai",
+        "endpoint-1",
+        "openai:video",
+        &upstream_api_root,
+        "provider-key-1",
+        "sk-upstream-openai-video",
     );
-    let (gateway_url, gateway_handle) = start_server(gateway).await;
+    let state = AppState::new()
+        .expect("gateway state should build")
+        .with_data_state_for_tests(
+        crate::data::GatewayDataState::with_video_task_repository_and_provider_transport_for_tests(
+            Arc::clone(&repository),
+            provider_catalog_repository,
+            DEVELOPMENT_ENCRYPTION_KEY,
+        ),
+    );
+    let (gateway_url, gateway_handle, access_token) =
+        start_authenticated_operational_server(state).await;
+    let client = authenticated_operational_client(&access_token);
 
-    let response = reqwest::Client::new()
+    let response = client
         .post(format!(
             "{gateway_url}/_gateway/async-tasks/video-tasks/task-openai-cancel-direct/cancel"
         ))
@@ -763,7 +869,7 @@ async fn gateway_cancels_openai_video_task_via_internal_async_task_endpoint_with
         })
     );
 
-    let detail = reqwest::Client::new()
+    let detail = client
         .get(format!(
             "{gateway_url}/_gateway/async-tasks/video-tasks/task-openai-cancel-direct"
         ))
@@ -774,10 +880,10 @@ async fn gateway_cancels_openai_video_task_via_internal_async_task_endpoint_with
     let detail_json: serde_json::Value = detail.json().await.expect("detail should parse");
     assert_eq!(detail_json["status"], "Cancelled");
     assert!(detail_json["next_poll_at_unix_secs"].is_null());
-    assert_eq!(
-        detail_json["request_metadata"]["rust_local_snapshot"]["OpenAi"]["status"],
-        "Cancelled"
-    );
+    assert!(detail_json["original_request_body"].is_null());
+    assert!(detail_json["progress_message"].is_null());
+    assert!(detail_json["error_message"].is_null());
+    assert!(detail_json["request_metadata"].is_null());
 
     gateway_handle.abort();
     upstream_handle.abort();
@@ -798,14 +904,14 @@ async fn gateway_rejects_terminal_video_task_cancel_via_internal_async_task_endp
         .await
         .expect("upsert should succeed");
 
-    let gateway = build_router_with_state(
-        AppState::new()
-            .expect("gateway state should build")
-            .with_video_task_data_repository_for_tests(repository),
-    );
-    let (gateway_url, gateway_handle) = start_server(gateway).await;
+    let state = AppState::new()
+        .expect("gateway state should build")
+        .with_video_task_data_repository_for_tests(repository);
+    let (gateway_url, gateway_handle, access_token) =
+        start_authenticated_operational_server(state).await;
+    let client = authenticated_operational_client(&access_token);
 
-    let response = reqwest::Client::new()
+    let response = client
         .post(format!(
             "{gateway_url}/_gateway/async-tasks/video-tasks/task-cancelled-already/cancel"
         ))
@@ -827,4 +933,42 @@ async fn gateway_rejects_terminal_video_task_cancel_via_internal_async_task_endp
     );
 
     gateway_handle.abort();
+}
+
+#[tokio::test]
+async fn user_scoped_video_task_cancel_rechecks_owner_before_side_effects() {
+    let repository = Arc::new(InMemoryVideoTaskRepository::default());
+    repository
+        .upsert(sample_video_task(
+            "task-owner-bound-cancel",
+            VideoTaskStatus::Processing,
+            100,
+            "sora-2",
+            "user-owner",
+            "openai:video",
+        ))
+        .await
+        .expect("upsert should succeed");
+    let state = AppState::new()
+        .expect("gateway state should build")
+        .with_video_task_data_repository_for_tests(Arc::clone(&repository));
+
+    let error = crate::async_task::cancel_video_task_record_for_user(
+        &state,
+        "task-owner-bound-cancel",
+        "user-foreign",
+    )
+    .await
+    .expect_err("a non-owner cancellation must be hidden as not found");
+
+    assert!(matches!(
+        error,
+        crate::async_task::CancelVideoTaskError::NotFound
+    ));
+    let stored = repository
+        .find(VideoTaskLookupKey::Id("task-owner-bound-cancel"))
+        .await
+        .expect("task lookup should succeed")
+        .expect("task should remain present");
+    assert_eq!(stored.status, VideoTaskStatus::Processing);
 }

@@ -68,18 +68,44 @@ pub(crate) fn generate_gateway_api_key_plaintext() -> String {
     generate_gateway_api_key_plaintext_with_prefix(&configured_api_key_prefix())
 }
 
+pub(crate) fn masked_secret_display(
+    value: &str,
+    preferred_prefix_chars: usize,
+    preferred_suffix_chars: usize,
+    separator: &str,
+) -> String {
+    let char_count = value.chars().count();
+    if char_count <= 4 {
+        return "***".to_string();
+    }
+
+    // Never reveal more than half of a short secret. For normal generated keys,
+    // the preferred prefix/suffix remains stable while a meaningful middle
+    // section is always hidden.
+    let visible_budget =
+        (char_count / 2).min(preferred_prefix_chars.saturating_add(preferred_suffix_chars));
+    if visible_budget == 0 {
+        return "***".to_string();
+    }
+    let suffix_chars = preferred_suffix_chars.min(visible_budget / 2);
+    let prefix_chars = preferred_prefix_chars.min(visible_budget.saturating_sub(suffix_chars));
+    if prefix_chars == 0 && suffix_chars == 0 {
+        return "***".to_string();
+    }
+
+    let prefix = value.chars().take(prefix_chars).collect::<String>();
+    let suffix = value
+        .chars()
+        .skip(char_count.saturating_sub(suffix_chars))
+        .collect::<String>();
+    format!("{prefix}{separator}{suffix}")
+}
+
 pub(crate) fn masked_gateway_api_key_display(full_key: Option<&str>) -> String {
     let Some(full_key) = full_key.map(str::trim).filter(|value| !value.is_empty()) else {
         return api_key_placeholder_display();
     };
-    let prefix_len = full_key.len().min(10);
-    let prefix = &full_key[..prefix_len];
-    let suffix = if full_key.len() >= 4 {
-        &full_key[full_key.len().saturating_sub(4)..]
-    } else {
-        ""
-    };
-    format!("{prefix}...{suffix}")
+    masked_secret_display(full_key, 10, 4, "...")
 }
 
 pub(crate) fn normalize_optional_api_key_concurrent_limit(
@@ -96,7 +122,7 @@ mod tests {
     use super::{
         api_key_placeholder_display_with_prefix, configured_api_key_prefix_from_lookup,
         generate_gateway_api_key_plaintext_with_prefix, generate_gateway_secret_plaintext,
-        masked_gateway_api_key_display,
+        masked_gateway_api_key_display, masked_secret_display,
     };
 
     #[test]
@@ -149,7 +175,17 @@ mod tests {
     fn masks_plaintext_api_key_without_changing_prefix() {
         assert_eq!(
             masked_gateway_api_key_display(Some("ak-1234567890abcdef")),
-            "ak-1234567...cdef".to_string()
+            "ak-12...cdef".to_string()
         );
+    }
+
+    #[test]
+    fn masking_never_discloses_an_entire_short_or_unicode_secret() {
+        for secret in ["abc", "sk-short", "测试密钥一二三"] {
+            let masked = masked_secret_display(secret, 10, 4, "...");
+            assert_ne!(masked, secret);
+            assert!(!masked.contains(secret));
+            assert!(masked.contains('*') || masked.contains("..."));
+        }
     }
 }

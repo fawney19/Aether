@@ -103,6 +103,22 @@ fn classifies_admin_user_billing_routes_as_admin_proxy_route() {
         Some("admin:users")
     );
 
+    let revoke_uri: Uri = "/api/admin/users/user-1/billing/entitlements/entitlement-1"
+        .parse()
+        .expect("uri should parse");
+    let revoke = classify_control_route(&http::Method::DELETE, &revoke_uri, &headers)
+        .expect("route should classify");
+    assert_eq!(revoke.route_class.as_deref(), Some("admin_proxy"));
+    assert_eq!(revoke.route_family.as_deref(), Some("users_manage"));
+    assert_eq!(
+        revoke.route_kind.as_deref(),
+        Some("revoke_user_billing_entitlement")
+    );
+    assert_eq!(
+        revoke.auth_endpoint_signature.as_deref(),
+        Some("admin:users")
+    );
+
     let context = GatewayPublicRequestContext::from_request_parts(
         "trace-user-billing-grant",
         &http::Method::POST,

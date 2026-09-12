@@ -14,6 +14,7 @@ use crate::DataLayerError;
 struct MemoryVideoTaskIndex {
     by_id: BTreeMap<String, StoredVideoTask>,
     short_to_id: BTreeMap<String, String>,
+    request_to_id: BTreeMap<String, String>,
     user_external_to_id: BTreeMap<(String, String), String>,
 }
 
@@ -28,6 +29,7 @@ impl InMemoryVideoTaskRepository {
             if let Some(short_id) = previous.short_id {
                 index.short_to_id.remove(&short_id);
             }
+            index.request_to_id.remove(&previous.request_id);
             if let (Some(user_id), Some(external_task_id)) =
                 (previous.user_id, previous.external_task_id)
             {
@@ -40,6 +42,9 @@ impl InMemoryVideoTaskRepository {
         if let Some(short_id) = &task.short_id {
             index.short_to_id.insert(short_id.clone(), task.id.clone());
         }
+        index
+            .request_to_id
+            .insert(task.request_id.clone(), task.id.clone());
         if let (Some(user_id), Some(external_task_id)) = (&task.user_id, &task.external_task_id) {
             index
                 .user_external_to_id
@@ -47,6 +52,35 @@ impl InMemoryVideoTaskRepository {
         }
 
         task
+    }
+
+    fn ensure_unique_keys_available(
+        index: &MemoryVideoTaskIndex,
+        task: &UpsertVideoTask,
+    ) -> Result<(), DataLayerError> {
+        if let Some(short_id) = task.short_id.as_deref() {
+            if index
+                .short_to_id
+                .get(short_id)
+                .is_some_and(|existing_id| existing_id != &task.id)
+            {
+                return Err(DataLayerError::InvalidInput(format!(
+                    "video task {} conflicts with existing short_id {short_id}",
+                    task.id
+                )));
+            }
+        }
+        if index
+            .request_to_id
+            .get(&task.request_id)
+            .is_some_and(|existing_id| existing_id != &task.id)
+        {
+            return Err(DataLayerError::InvalidInput(format!(
+                "video task {} conflicts with existing request_id {}",
+                task.id, task.request_id
+            )));
+        }
+        Ok(())
     }
 
     fn matches_filter(task: &StoredVideoTask, filter: &VideoTaskQueryFilter) -> bool {
@@ -101,6 +135,36 @@ impl VideoTaskReadRepository for InMemoryVideoTaskRepository {
                 .and_then(|id| index.by_id.get(id))
                 .cloned(),
         })
+    }
+
+    async fn find_for_user(
+        &self,
+        key: VideoTaskLookupKey<'_>,
+        user_id: &str,
+    ) -> Result<Option<StoredVideoTask>, DataLayerError> {
+        let index = self.index.read().expect("video task repository lock");
+        let task = match key {
+            VideoTaskLookupKey::Id(id) => index.by_id.get(id),
+            VideoTaskLookupKey::ShortId(short_id) => index
+                .short_to_id
+                .get(short_id)
+                .and_then(|id| index.by_id.get(id)),
+            VideoTaskLookupKey::UserExternal {
+                user_id: lookup_user_id,
+                external_task_id,
+            } => {
+                if lookup_user_id != user_id {
+                    return Ok(None);
+                }
+                index
+                    .user_external_to_id
+                    .get(&(lookup_user_id.to_string(), external_task_id.to_string()))
+                    .and_then(|id| index.by_id.get(id))
+            }
+        };
+        Ok(task
+            .filter(|task| task.user_id.as_deref() == Some(user_id))
+            .cloned())
     }
 
     async fn list_active(&self, limit: usize) -> Result<Vec<StoredVideoTask>, DataLayerError> {
@@ -306,22 +370,34 @@ impl VideoTaskReadRepository for InMemoryVideoTaskRepository {
 
 #[async_trait]
 impl VideoTaskWriteRepository for InMemoryVideoTaskRepository {
-    async fn upsert(&self, task: UpsertVideoTask) -> Result<StoredVideoTask, DataLayerError> {
+    async fn upsert(&self, mut task: UpsertVideoTask) -> Result<StoredVideoTask, DataLayerError> {
         let mut index = self.index.write().expect("video task repository lock");
+        Self::ensure_unique_keys_available(&index, &task)?;
+        if let Some(existing) = index.by_id.get(&task.id) {
+            existing.ensure_immutable_identity_matches(&task)?;
+            task.created_at_unix_ms = existing.created_at_unix_ms;
+        }
         Ok(Self::store_locked(&mut index, task.into_stored()))
     }
 
     async fn update_if_active(
         &self,
-        task: UpsertVideoTask,
+        mut task: UpsertVideoTask,
     ) -> Result<Option<StoredVideoTask>, DataLayerError> {
         let mut index = self.index.write().expect("video task repository lock");
+        if Self::ensure_unique_keys_available(&index, &task).is_err() {
+            return Ok(None);
+        }
         let Some(existing) = index.by_id.get(&task.id) else {
             return Ok(None);
         };
         if !existing.status.is_active() {
             return Ok(None);
         }
+        if existing.ensure_immutable_identity_matches(&task).is_err() {
+            return Ok(None);
+        }
+        task.created_at_unix_ms = existing.created_at_unix_ms;
         Ok(Some(Self::store_locked(&mut index, task.into_stored())))
     }
 
@@ -456,6 +532,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn owner_scoped_lookup_rejects_foreign_user_for_every_identifier() {
+        let repo = InMemoryVideoTaskRepository::default();
+        repo.upsert(sample_task("task-1", VideoTaskStatus::Submitted, 100))
+            .await
+            .expect("upsert should succeed");
+
+        for key in [
+            VideoTaskLookupKey::Id("task-1"),
+            VideoTaskLookupKey::ShortId("short-task-1"),
+            VideoTaskLookupKey::UserExternal {
+                user_id: "user-1",
+                external_task_id: "ext-task-1",
+            },
+        ] {
+            assert!(repo
+                .find_for_user(key, "user-1")
+                .await
+                .expect("owner lookup should succeed")
+                .is_some());
+            assert!(repo
+                .find_for_user(key, "user-2")
+                .await
+                .expect("foreign lookup should succeed")
+                .is_none());
+        }
+    }
+
+    #[tokio::test]
     async fn list_active_only_returns_active_tasks_in_descending_update_order() {
         let repo = InMemoryVideoTaskRepository::default();
         repo.upsert(sample_task("task-1", VideoTaskStatus::Completed, 100))
@@ -478,59 +582,69 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn upsert_replaces_secondary_indexes() {
+    async fn upsert_rejects_immutable_identity_replacement() {
         let repo = InMemoryVideoTaskRepository::default();
         repo.upsert(sample_task("task-1", VideoTaskStatus::Submitted, 100))
             .await
             .expect("upsert should succeed");
 
-        repo.upsert(UpsertVideoTask {
-            id: "task-1".to_string(),
-            short_id: Some("short-task-1b".to_string()),
-            request_id: "request-task-1b".to_string(),
-            user_id: Some("user-2".to_string()),
-            api_key_id: Some("api-key-2".to_string()),
-            username: Some("user-2".to_string()),
-            api_key_name: Some("secondary".to_string()),
-            external_task_id: Some("ext-task-1b".to_string()),
-            provider_id: Some("provider-2".to_string()),
-            endpoint_id: Some("endpoint-2".to_string()),
-            key_id: Some("provider-key-2".to_string()),
-            client_api_format: Some("gemini:video".to_string()),
-            provider_api_format: Some("gemini:video".to_string()),
-            format_converted: false,
-            model: Some("veo-3".to_string()),
-            prompt: Some("remix".to_string()),
-            original_request_body: Some(serde_json::json!({"prompt": "remix"})),
-            duration_seconds: Some(8),
-            resolution: Some("1080p".to_string()),
-            aspect_ratio: Some("16:9".to_string()),
-            size: Some("720p".to_string()),
-            status: VideoTaskStatus::Processing,
-            progress_percent: 50,
-            progress_message: Some("processing".to_string()),
-            retry_count: 1,
-            poll_interval_seconds: 10,
-            next_poll_at_unix_secs: Some(200),
-            poll_count: 2,
-            max_poll_count: 360,
-            created_at_unix_ms: 150,
-            submitted_at_unix_secs: Some(150),
-            completed_at_unix_secs: None,
-            updated_at_unix_secs: 200,
-            error_code: None,
-            error_message: None,
-            video_url: None,
-            request_metadata: None,
-        })
-        .await
-        .expect("upsert should succeed");
+        let conflict = repo
+            .upsert(UpsertVideoTask {
+                id: "task-1".to_string(),
+                short_id: Some("short-task-1b".to_string()),
+                request_id: "request-task-1b".to_string(),
+                user_id: Some("user-2".to_string()),
+                api_key_id: Some("api-key-2".to_string()),
+                username: Some("user-2".to_string()),
+                api_key_name: Some("secondary".to_string()),
+                external_task_id: Some("ext-task-1b".to_string()),
+                provider_id: Some("provider-2".to_string()),
+                endpoint_id: Some("endpoint-2".to_string()),
+                key_id: Some("provider-key-2".to_string()),
+                client_api_format: Some("gemini:video".to_string()),
+                provider_api_format: Some("gemini:video".to_string()),
+                format_converted: false,
+                model: Some("veo-3".to_string()),
+                prompt: Some("remix".to_string()),
+                original_request_body: Some(serde_json::json!({"prompt": "remix"})),
+                duration_seconds: Some(8),
+                resolution: Some("1080p".to_string()),
+                aspect_ratio: Some("16:9".to_string()),
+                size: Some("720p".to_string()),
+                status: VideoTaskStatus::Processing,
+                progress_percent: 50,
+                progress_message: Some("processing".to_string()),
+                retry_count: 1,
+                poll_interval_seconds: 10,
+                next_poll_at_unix_secs: Some(200),
+                poll_count: 2,
+                max_poll_count: 360,
+                created_at_unix_ms: 150,
+                submitted_at_unix_secs: Some(150),
+                completed_at_unix_secs: None,
+                updated_at_unix_secs: 200,
+                error_code: None,
+                error_message: None,
+                video_url: None,
+                request_metadata: None,
+            })
+            .await
+            .expect_err("identity replacement should be rejected");
+        assert!(conflict.to_string().contains("immutable field short_id"));
 
+        let stored = repo
+            .find(VideoTaskLookupKey::Id("task-1"))
+            .await
+            .expect("find should succeed")
+            .expect("original task should remain");
+        assert_eq!(stored.request_id, "request-task-1");
+        assert_eq!(stored.user_id.as_deref(), Some("user-1"));
+        assert_eq!(stored.status, VideoTaskStatus::Submitted);
         assert!(repo
             .find(VideoTaskLookupKey::ShortId("short-task-1"))
             .await
             .expect("find should succeed")
-            .is_none());
+            .is_some());
         assert!(repo
             .find(VideoTaskLookupKey::UserExternal {
                 user_id: "user-1",
@@ -538,12 +652,117 @@ mod tests {
             })
             .await
             .expect("find should succeed")
-            .is_none());
+            .is_some());
         assert!(repo
             .find(VideoTaskLookupKey::ShortId("short-task-1b"))
             .await
             .expect("find should succeed")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn upsert_allows_same_identity_status_update() {
+        let repo = InMemoryVideoTaskRepository::default();
+        let task = sample_task("task-1", VideoTaskStatus::Submitted, 100);
+        repo.upsert(task.clone())
+            .await
+            .expect("initial upsert should succeed");
+
+        let updated = repo
+            .upsert(UpsertVideoTask {
+                status: VideoTaskStatus::Processing,
+                progress_percent: 50,
+                poll_count: 2,
+                created_at_unix_ms: 999,
+                updated_at_unix_secs: 200,
+                ..task
+            })
+            .await
+            .expect("same identity update should succeed");
+
+        assert_eq!(updated.status, VideoTaskStatus::Processing);
+        assert_eq!(updated.progress_percent, 50);
+        assert_eq!(updated.poll_count, 2);
+        assert_eq!(updated.created_at_unix_ms, 90);
+        assert_eq!(updated.updated_at_unix_secs, 200);
+    }
+
+    #[tokio::test]
+    async fn update_if_active_rejects_identity_conflict_without_modification() {
+        let repo = InMemoryVideoTaskRepository::default();
+        let task = sample_task("task-1", VideoTaskStatus::Submitted, 100);
+        repo.upsert(task.clone())
+            .await
+            .expect("initial upsert should succeed");
+
+        let result = repo
+            .update_if_active(UpsertVideoTask {
+                user_id: Some("attacker".to_string()),
+                status: VideoTaskStatus::Completed,
+                progress_percent: 100,
+                updated_at_unix_secs: 200,
+                ..task
+            })
+            .await
+            .expect("guarded update should execute");
+        assert!(result.is_none());
+
+        let stored = repo
+            .find(VideoTaskLookupKey::Id("task-1"))
+            .await
+            .expect("find should succeed")
+            .expect("original task should remain");
+        assert_eq!(stored.user_id.as_deref(), Some("user-1"));
+        assert_eq!(stored.status, VideoTaskStatus::Submitted);
+        assert_eq!(stored.progress_percent, 0);
+        assert_eq!(stored.updated_at_unix_secs, 100);
+    }
+
+    #[tokio::test]
+    async fn upsert_rejects_secondary_unique_key_takeover() {
+        let repo = InMemoryVideoTaskRepository::default();
+        let original = sample_task("task-1", VideoTaskStatus::Submitted, 100);
+        repo.upsert(original.clone())
+            .await
+            .expect("initial upsert should succeed");
+
+        let short_id_conflict = repo
+            .upsert(UpsertVideoTask {
+                id: "task-2".to_string(),
+                request_id: "request-task-2".to_string(),
+                ..original.clone()
+            })
+            .await
+            .expect_err("a short id must not be reassigned to another task");
+        assert!(short_id_conflict.to_string().contains("existing short_id"));
+
+        let request_id_conflict = repo
+            .upsert(UpsertVideoTask {
+                id: "task-3".to_string(),
+                short_id: Some("short-task-3".to_string()),
+                ..original
+            })
+            .await
+            .expect_err("a request id must not be reassigned to another task");
+        assert!(request_id_conflict
+            .to_string()
+            .contains("existing request_id"));
+
+        assert!(repo
+            .find(VideoTaskLookupKey::ShortId("short-task-1"))
+            .await
+            .expect("find should succeed")
             .is_some());
+        assert!(repo
+            .find(VideoTaskLookupKey::Id("task-2"))
+            .await
+            .expect("find should succeed")
+            .is_none());
+        assert!(repo
+            .find(VideoTaskLookupKey::Id("task-3"))
+            .await
+            .expect("find should succeed")
+            .is_none());
     }
 
     #[tokio::test]

@@ -415,7 +415,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted } from 'vue'
 import { useToast } from '@/composables/useToast'
-import { useI18n } from '@/i18n'
+import { getI18nLocale, useI18n } from '@/i18n'
 import Card from '@/components/ui/card.vue'
 import Badge from '@/components/ui/badge.vue'
 import Button from '@/components/ui/button.vue'
@@ -658,7 +658,7 @@ function handleFileSelect(e: Event) {
 function formatDate(dateStr: string) {
   if (!dateStr) return '-'
   const date = new Date(dateStr)
-  return date.toLocaleString('zh-CN', {
+  return date.toLocaleString(getI18nLocale(), {
     month: '2-digit',
     day: '2-digit',
     hour: '2-digit',

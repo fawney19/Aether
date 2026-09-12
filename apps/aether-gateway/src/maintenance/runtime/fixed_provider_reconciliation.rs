@@ -289,7 +289,7 @@ mod tests {
         assert_eq!(responses.max_retries, Some(9));
         assert_eq!(
             responses.proxy,
-            Some(json!({"url": "http://proxy.internal:8080"}))
+            Some(json!({"url": "http://proxy.internal:8080/"}))
         );
         assert_eq!(
             responses
@@ -312,7 +312,7 @@ mod tests {
         assert_eq!(live.max_retries, Some(6));
         assert_eq!(
             live.proxy,
-            Some(json!({"url": "http://voice-proxy.internal:8080"}))
+            Some(json!({"url": "http://voice-proxy.internal:8080/"}))
         );
         assert_eq!(
             live.config

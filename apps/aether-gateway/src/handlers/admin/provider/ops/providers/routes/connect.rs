@@ -1,6 +1,6 @@
 use super::super::config::{
-    admin_provider_ops_config_object, admin_provider_ops_connector_object,
-    admin_provider_ops_decrypted_credentials, resolve_admin_provider_ops_base_url,
+    admin_provider_ops_config_object, admin_provider_ops_credential_snapshot,
+    resolve_admin_provider_ops_base_url,
 };
 use super::super::support::{
     AdminProviderOpsConnectRequest, ADMIN_PROVIDER_OPS_CONNECT_RUST_ONLY_MESSAGE,
@@ -33,6 +33,9 @@ pub(super) async fn handle_admin_provider_ops_connect(
     else {
         return Ok(bad_request_detail_response("Provider 不存在"));
     };
+    let credential_snapshot =
+        admin_provider_ops_credential_snapshot(state, &existing_provider).await?;
+    let existing_provider = credential_snapshot.provider;
     let Some(provider_ops_config) = admin_provider_ops_config_object(&existing_provider) else {
         return Ok(bad_request_detail_response("未配置操作设置"));
     };
@@ -52,14 +55,7 @@ pub(super) async fn handle_admin_provider_ops_connect(
     let actual_credentials = payload
         .credentials
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| {
-            admin_provider_ops_decrypted_credentials(
-                state,
-                admin_provider_ops_config_object(&existing_provider)
-                    .and_then(admin_provider_ops_connector_object)
-                    .and_then(|connector| connector.get("credentials")),
-            )
-        });
+        .unwrap_or(credential_snapshot.credentials);
     if actual_credentials.is_empty() {
         return Ok(bad_request_detail_response("未提供凭据"));
     }

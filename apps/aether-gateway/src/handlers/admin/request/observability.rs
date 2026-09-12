@@ -234,6 +234,20 @@ impl<'a> AdminAppState<'a> {
             .map_err(|err| GatewayError::Internal(err.to_string()))
     }
 
+    pub(crate) async fn read_request_usage_body_payload(
+        &self,
+        body_ref: &str,
+    ) -> Result<
+        Option<aether_data_contracts::repository::usage::StoredUsageBodyPayload>,
+        GatewayError,
+    > {
+        self.app
+            .data
+            .read_request_usage_body_payload(body_ref)
+            .await
+            .map_err(|error| GatewayError::Internal(error.to_string()))
+    }
+
     pub(crate) async fn build_api_format_health_monitor_payload(
         &self,
         lookback_hours: u64,

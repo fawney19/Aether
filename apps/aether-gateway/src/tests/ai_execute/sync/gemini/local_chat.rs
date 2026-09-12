@@ -399,6 +399,11 @@ async fn gateway_executes_gemini_chat_sync_via_local_decision_gate_with_local_sy
             provider_catalog_repository,
             Arc::clone(&request_candidate_repository),
             DEVELOPMENT_ENCRYPTION_KEY,
+        )
+        .attach_proxy_node_repository_for_tests(
+            crate::tests::ai_execute::ai_execute_proxy_node_repository([
+                "proxy-node-gemini-chat-local",
+            ]),
         ),
     );
     let gateway = build_router_with_state(gateway_state);
@@ -695,7 +700,7 @@ async fn gateway_returns_gemini_chat_error_for_local_sync_failure_impl() {
         any(move |_request: Request| async move {
             Json(json!({
                 "request_id": "trace-gemini-chat-local-error-123",
-                "status_code": 200,
+                "status_code": 429,
                 "headers": {
                     "content-type": "application/json"
                 },
@@ -724,7 +729,12 @@ async fn gateway_returns_gemini_chat_error_for_local_sync_failure_impl() {
         ]));
     let request_candidate_repository = Arc::new(InMemoryRequestCandidateRepository::default());
     let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
-        vec![sample_provider_catalog_provider()],
+        vec![
+            crate::tests::ai_execute::ai_execute_provider_stop_on_status_code(
+                sample_provider_catalog_provider(),
+                429,
+            ),
+        ],
         vec![sample_provider_catalog_endpoint()],
         vec![sample_provider_catalog_key()],
     ));
@@ -740,6 +750,11 @@ async fn gateway_returns_gemini_chat_error_for_local_sync_failure_impl() {
             provider_catalog_repository,
             Arc::clone(&request_candidate_repository),
             DEVELOPMENT_ENCRYPTION_KEY,
+        )
+        .attach_proxy_node_repository_for_tests(
+            crate::tests::ai_execute::ai_execute_proxy_node_repository([
+                "proxy-node-gemini-chat-local",
+            ]),
         ),
     );
     let gateway = build_router_with_state(gateway_state);

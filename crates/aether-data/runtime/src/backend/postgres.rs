@@ -275,6 +275,40 @@ mod tests {
     use crate::driver::postgres::{PostgresLeaseRunnerConfig, PostgresPoolConfig};
 
     #[tokio::test]
+    async fn maintenance_and_aggregation_futures_are_send() {
+        fn assert_send(_: impl Send) {}
+
+        let backend = PostgresBackend::from_config(PostgresPoolConfig {
+            database_url: "postgres://localhost/aether".to_string(),
+            min_connections: 0,
+            ..PostgresPoolConfig::default()
+        })
+        .unwrap();
+        let now = chrono::Utc::now();
+        let daily = crate::StatsDailyAggregationInput {
+            target_day_utc: now,
+            aggregated_at: now,
+        };
+        let hourly = crate::StatsHourlyAggregationInput {
+            target_hour_utc: now,
+            aggregated_at: now,
+        };
+        let wallet = crate::WalletDailyUsageAggregationInput {
+            billing_date: "2026-09-09".to_string(),
+            billing_timezone: "UTC".to_string(),
+            window_start_unix_secs: 0,
+            window_end_unix_secs: 86_400,
+            aggregated_at_unix_secs: 86_400,
+        };
+
+        // Drop without polling: these are compile-time checks for spawned workers.
+        assert_send(backend.run_table_maintenance(&["usage"]));
+        assert_send(backend.aggregate_stats_daily(&daily));
+        assert_send(backend.aggregate_stats_hourly(&hourly));
+        assert_send(backend.aggregate_wallet_daily_usage(&wallet));
+    }
+
+    #[tokio::test]
     async fn backend_retains_config_and_pool() {
         let config = PostgresPoolConfig {
             database_url: "postgres://localhost/aether".to_string(),

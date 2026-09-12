@@ -1,10 +1,9 @@
 use aether_contracts::{StreamFrame, StreamFramePayload, StreamFrameType};
-use aether_crypto::{encrypt_python_fernet_plaintext, DEVELOPMENT_ENCRYPTION_KEY};
-use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
-use aether_data::repository::video_tasks::InMemoryVideoTaskRepository;
-use aether_data_contracts::repository::provider_catalog::{
-    StoredProviderCatalogEndpoint, StoredProviderCatalogKey, StoredProviderCatalogProvider,
+use aether_crypto::DEVELOPMENT_ENCRYPTION_KEY;
+use aether_data::repository::auth::{
+    InMemoryAuthApiKeySnapshotRepository, StoredAuthApiKeySnapshot,
 };
+use aether_data::repository::video_tasks::InMemoryVideoTaskRepository;
 use aether_data_contracts::repository::video_tasks::{
     UpsertVideoTask, VideoTaskStatus, VideoTaskWriteRepository,
 };
@@ -16,13 +15,14 @@ use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use http::header::{HeaderName, HeaderValue};
 use http::StatusCode;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use std::sync::{Arc, Mutex};
 
 use crate::constants::{CONTROL_EXECUTED_HEADER, CONTROL_EXECUTE_FALLBACK_HEADER, TRACE_ID_HEADER};
 
 use super::{
     build_router_with_state, build_state_with_execution_runtime_override, start_server,
-    VideoTaskTruthSourceMode,
+    video_provider_catalog_repository, VideoTaskTruthSourceMode,
 };
 
 #[tokio::test]
@@ -32,75 +32,40 @@ async fn gateway_executes_openai_video_content_from_reconstructed_data_task_with
     struct SeenExecutionRuntimeStreamRequest {
         method: String,
         url: String,
+        headers: serde_json::Value,
     }
 
-    fn sample_provider() -> StoredProviderCatalogProvider {
-        StoredProviderCatalogProvider::new(
-            "provider-openai-video-content-followup-1".to_string(),
-            "openai".to_string(),
-            Some("https://example.com".to_string()),
-            "custom".to_string(),
-        )
-        .expect("provider should build")
-        .with_transport_fields(
+    fn hash_api_key(value: &str) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(value.as_bytes());
+        format!("{:x}", hasher.finalize())
+    }
+
+    fn sample_auth_snapshot(api_key_id: &str, user_id: &str) -> StoredAuthApiKeySnapshot {
+        StoredAuthApiKeySnapshot::new(
+            user_id.to_string(),
+            "video-user".to_string(),
+            Some("video@example.com".to_string()),
+            "user".to_string(),
+            "local".to_string(),
             true,
             false,
-            false,
-            None,
-            Some(2),
-            None,
-            Some(20.0),
-            None,
-            None,
-        )
-    }
-
-    fn sample_endpoint() -> StoredProviderCatalogEndpoint {
-        StoredProviderCatalogEndpoint::new(
-            "endpoint-openai-video-content-followup-1".to_string(),
-            "provider-openai-video-content-followup-1".to_string(),
-            "openai:video".to_string(),
-            Some("openai".to_string()),
-            Some("video".to_string()),
-            true,
-        )
-        .expect("endpoint should build")
-        .with_transport_fields(
-            "https://api.openai.example/v1".to_string(),
-            None,
-            None,
-            Some(2),
-            None,
-            None,
-            None,
-            None,
-        )
-        .expect("endpoint transport should build")
-    }
-
-    fn sample_key() -> StoredProviderCatalogKey {
-        StoredProviderCatalogKey::new(
-            "key-openai-video-content-followup-1".to_string(),
-            "provider-openai-video-content-followup-1".to_string(),
-            "prod".to_string(),
-            "api_key".to_string(),
-            None,
-            true,
-        )
-        .expect("key should build")
-        .with_transport_fields(
+            Some(json!(["openai"])),
             Some(json!(["openai:video"])),
-            encrypt_python_fernet_plaintext(DEVELOPMENT_ENCRYPTION_KEY, "sk-upstream-openai-video")
-                .expect("api key should encrypt"),
-            None,
-            None,
-            Some(json!({"openai:video": 1})),
-            None,
-            None,
-            None,
-            None,
+            Some(json!(["sora-2"])),
+            api_key_id.to_string(),
+            Some("default".to_string()),
+            true,
+            false,
+            false,
+            Some(60),
+            Some(5),
+            Some(4_102_444_800),
+            Some(json!(["openai"])),
+            Some(json!(["openai:video"])),
+            Some(json!(["sora-2"])),
         )
-        .expect("key transport should build")
+        .expect("auth snapshot should build")
     }
 
     let decision_stream_hits = Arc::new(Mutex::new(0usize));
@@ -112,7 +77,6 @@ async fn gateway_executes_openai_video_content_from_reconstructed_data_task_with
     let seen_execution_runtime_stream =
         Arc::new(Mutex::new(None::<SeenExecutionRuntimeStreamRequest>));
     let seen_execution_runtime_stream_clone = Arc::clone(&seen_execution_runtime_stream);
-
     let upstream = Router::new()
         .route(
             "/api/internal/gateway/resolve",
@@ -124,11 +88,6 @@ async fn gateway_executes_openai_video_content_from_reconstructed_data_task_with
                     "route_kind": "video",
                     "auth_endpoint_signature": "openai:video",
                     "execution_runtime_candidate": true,
-                    "auth_context": {
-                        "user_id": "user-video-content-local-123",
-                        "api_key_id": "key-video-content-local-123",
-                        "access_allowed": true
-                    },
                     "public_path": request.uri().path()
                 }))
             }),
@@ -201,6 +160,7 @@ async fn gateway_executes_openai_video_content_from_reconstructed_data_task_with
                         .and_then(|value| value.as_str())
                         .unwrap_or_default()
                         .to_string(),
+                    headers: payload.get("headers").cloned().unwrap_or_else(|| json!({})),
                 });
 
                 let frames = [
@@ -294,33 +254,89 @@ async fn gateway_executes_openai_video_content_from_reconstructed_data_task_with
             updated_at_unix_secs: 456,
             error_code: None,
             error_message: None,
-            video_url: Some("https://cdn.example.com/video-content.mp4".to_string()),
+            video_url: Some(
+                "https://cdn.example.com/video-content.mp4?signature=a%2Fb%2Bc%3D&part=2&part=1"
+                    .to_string(),
+            ),
             request_metadata: None,
         })
         .await
         .expect("upsert should succeed");
-    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
-        vec![sample_provider()],
-        vec![sample_endpoint()],
-        vec![sample_key()],
-    ));
+    let provider_catalog_repository = video_provider_catalog_repository(
+        "provider-openai-video-content-followup-1",
+        "openai",
+        "endpoint-openai-video-content-followup-1",
+        "openai:video",
+        "https://api.openai.example/v1",
+        "key-openai-video-content-followup-1",
+        "sk-upstream-openai-video",
+    );
+    let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![
+        (
+            Some(hash_api_key("client-video-content-foreign-key")),
+            sample_auth_snapshot(
+                "key-video-content-foreign-123",
+                "user-video-content-foreign-123",
+            ),
+        ),
+        (
+            Some(hash_api_key("client-video-content-owner-key")),
+            sample_auth_snapshot(
+                "key-video-content-local-rotated-123",
+                "user-video-content-local-123",
+            ),
+        ),
+    ]));
 
     let gateway = build_router_with_state(
         build_state_with_execution_runtime_override(execution_runtime_url)
             .with_video_task_truth_source_mode(VideoTaskTruthSourceMode::RustAuthoritative)
-            .with_video_task_repository_and_provider_transport_for_tests(
-                repository,
-                provider_catalog_repository,
-                DEVELOPMENT_ENCRYPTION_KEY,
-            ),
+            .with_data_state_for_tests(
+                crate::data::GatewayDataState::with_video_task_repository_and_provider_transport_for_tests(
+                    repository,
+                    provider_catalog_repository,
+                    DEVELOPMENT_ENCRYPTION_KEY,
+                )
+                .with_auth_api_key_reader(auth_repository),
+            )
     );
     let (gateway_url, gateway_handle) = start_server(gateway).await;
 
-    let response = reqwest::Client::new()
+    let client = reqwest::Client::new();
+    let foreign_response = client
         .get(format!(
             "{gateway_url}/v1/videos/task-content-local-123/content?variant=video"
         ))
         .header(CONTROL_EXECUTE_FALLBACK_HEADER, "true")
+        .bearer_auth("client-video-content-foreign-key")
+        .header(
+            TRACE_ID_HEADER,
+            "trace-openai-video-content-foreign-local-123",
+        )
+        .send()
+        .await
+        .expect("foreign content request should complete");
+    let foreign_status = foreign_response.status();
+    let foreign_body = foreign_response.text().await.expect("body should read");
+    assert_eq!(
+        foreign_status,
+        StatusCode::NOT_FOUND,
+        "unexpected foreign response body: {foreign_body}"
+    );
+    assert!(seen_execution_runtime_stream
+        .lock()
+        .expect("mutex should lock")
+        .is_none());
+    assert_eq!(*decision_stream_hits.lock().expect("mutex should lock"), 0);
+    assert_eq!(*execute_stream_hits.lock().expect("mutex should lock"), 0);
+    assert_eq!(*public_hits.lock().expect("mutex should lock"), 0);
+
+    let response = client
+        .get(format!(
+            "{gateway_url}/v1/videos/task-content-local-123/content?variant=video"
+        ))
+        .header(CONTROL_EXECUTE_FALLBACK_HEADER, "true")
+        .bearer_auth("client-video-content-owner-key")
         .header(TRACE_ID_HEADER, "trace-openai-video-content-local-123")
         .send()
         .await
@@ -347,8 +363,9 @@ async fn gateway_executes_openai_video_content_from_reconstructed_data_task_with
     assert_eq!(seen_stream_request.method, "GET");
     assert_eq!(
         seen_stream_request.url,
-        "https://cdn.example.com/video-content.mp4"
+        "https://cdn.example.com/video-content.mp4?signature=a%2Fb%2Bc%3D&part=2&part=1"
     );
+    assert!(seen_stream_request.headers.get("authorization").is_none());
     assert_eq!(*decision_stream_hits.lock().expect("mutex should lock"), 0);
     assert_eq!(*execute_stream_hits.lock().expect("mutex should lock"), 0);
     assert_eq!(*public_hits.lock().expect("mutex should lock"), 0);

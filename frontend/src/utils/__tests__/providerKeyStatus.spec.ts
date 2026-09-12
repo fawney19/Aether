@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import type { ProviderKeyStatusCarrier } from '@/utils/providerKeyStatus'
 
 import {
   getAccountStatusDisplay,
@@ -207,7 +208,7 @@ describe('providerKeyStatus', () => {
   })
 
   it('shows missing refresh token state for access-token-only oauth credentials', () => {
-    const input = {
+    const input: ProviderKeyStatusCarrier = {
       auth_type: 'oauth',
       oauth_managed: true,
       oauth_temporary: true,
@@ -225,7 +226,7 @@ describe('providerKeyStatus', () => {
   })
 
   it('does not show invalid oauth state when refresh token is missing', () => {
-    const input = {
+    const input: ProviderKeyStatusCarrier = {
       auth_type: 'oauth',
       oauth_managed: true,
       oauth_temporary: true,
@@ -253,7 +254,7 @@ describe('providerKeyStatus', () => {
   })
 
   it('does not treat non-refreshable provider sessions as missing refresh token', () => {
-    const input = {
+    const input: ProviderKeyStatusCarrier = {
       auth_type: 'oauth',
       oauth_managed: true,
       can_refresh_oauth: false,

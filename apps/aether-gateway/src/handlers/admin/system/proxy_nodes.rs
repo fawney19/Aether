@@ -19,11 +19,9 @@ use aether_admin::system::{
     build_admin_proxy_node_payload, build_admin_proxy_nodes_data_unavailable_response,
     build_admin_proxy_nodes_not_found_response,
 };
-use aether_contracts::tunnel::{
-    TUNNEL_RELAY_FORWARDED_BY_HEADER, TUNNEL_RELAY_OWNER_INSTANCE_HEADER,
-};
+use aether_contracts::tunnel::TUNNEL_RELAY_FORWARDED_BY_HEADER;
 use aether_data::repository::management_tokens::{
-    CreateManagementTokenRecord, StoredManagementTokenUserSummary,
+    CreateManagementTokenRecord, StoredManagementToken, StoredManagementTokenUserSummary,
 };
 use aether_data::repository::proxy_nodes::{ProxyNodeEventQuery, ProxyNodeMetricsStep};
 use axum::{
@@ -103,7 +101,7 @@ struct ProxyNodeUnregisterRequest {
     node_id: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct ManualProxyNodeCreateRequest {
     name: String,
     proxy_url: String,
@@ -115,7 +113,7 @@ struct ManualProxyNodeCreateRequest {
     region: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct ManualProxyNodeUpdateRequest {
     #[serde(default)]
     name: Option<String>,
@@ -129,7 +127,7 @@ struct ManualProxyNodeUpdateRequest {
     region: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct ProxyNodeTestUrlRequest {
     proxy_url: String,
     #[serde(default)]
@@ -177,6 +175,7 @@ const MAX_PROXY_CONNECTIVITY_RESPONSE_BYTES: usize = 64 * 1024;
 const PROXY_NODE_METRICS_MAX_POINTS: usize = 50_000;
 const PROXY_NODE_METRICS_1M_MAX_WINDOW_SECS: u64 = 30 * 24 * 60 * 60;
 const PROXY_NODE_METRICS_1H_MAX_WINDOW_SECS: u64 = 365 * 24 * 60 * 60;
+const PROXY_INSTALL_INTERNAL_ERROR_DETAIL: &str = "Service temporarily unavailable";
 
 #[cfg(test)]
 fn manual_proxy_connectivity_probe_url_override() -> &'static std::sync::RwLock<Option<String>> {
@@ -233,6 +232,7 @@ pub(crate) async fn maybe_build_local_admin_proxy_nodes_response(
     state: &AdminAppState<'_>,
     request_context: &AdminRequestContext<'_>,
     headers: &http::HeaderMap,
+    remote_addr: &std::net::SocketAddr,
     request_body: Option<&Bytes>,
 ) -> Result<Option<Response<Body>>, GatewayError> {
     let Some(decision) = request_context.decision() else {
@@ -374,9 +374,11 @@ pub(crate) async fn maybe_build_local_admin_proxy_nodes_response(
                 .tunnel
                 .register_secure_tunnel_key(node.id.clone(), key);
         }
+        state.app().tunnel.request_close_proxies_for_node(&node.id);
         return Ok(Some(
             Json(json!({
                 "node_id": node.id,
+                "tunnel_generation": node.tunnel_generation,
                 "node": build_admin_proxy_node_payload(&node),
             }))
             .into_response(),
@@ -434,6 +436,7 @@ pub(crate) async fn maybe_build_local_admin_proxy_nodes_response(
         let Some(node) = state.unregister_proxy_node(&node_id).await? else {
             return Ok(Some(build_admin_proxy_nodes_not_found_response()));
         };
+        state.app().tunnel.request_close_proxies_for_node(&node.id);
         return Ok(Some(
             Json(json!({
                 "message": "unregistered",
@@ -483,7 +486,7 @@ pub(crate) async fn maybe_build_local_admin_proxy_nodes_response(
             Ok(node_name) => node_name,
             Err(response) => return Ok(Some(response)),
         };
-        let raw_token =
+        let (token_record, raw_token) =
             match create_proxy_install_management_token(state, request_context, &node_name).await {
                 Ok(token) => token,
                 Err(response) => return Ok(Some(response)),
@@ -493,7 +496,9 @@ pub(crate) async fn maybe_build_local_admin_proxy_nodes_response(
                 state.app(),
                 request_context.public(),
                 headers,
+                remote_addr,
                 node_name,
+                &token_record,
                 raw_token,
             )
             .await,
@@ -555,6 +560,7 @@ pub(crate) async fn maybe_build_local_admin_proxy_nodes_response(
             let Some(_deleted_node) = state.delete_proxy_node(&node_id).await? else {
                 return Ok(build_admin_proxy_nodes_not_found_response());
             };
+            state.app().tunnel.request_close_proxies_for_node(&node_id);
             Ok(Json(json!({
                 "message": build_delete_proxy_node_message(&cleanup),
                 "node_id": node_id,
@@ -901,13 +907,7 @@ struct DeletedProxyNodeCleanup {
 fn build_admin_proxy_node_detail_payload(
     node: &aether_data::repository::proxy_nodes::StoredProxyNode,
 ) -> Value {
-    let mut payload = build_admin_proxy_node_payload(node);
-    if node.is_manual {
-        if let Value::Object(object) = &mut payload {
-            object.insert("proxy_password".to_string(), json!(node.proxy_password));
-        }
-    }
-    payload
+    build_admin_proxy_node_payload(node)
 }
 
 #[derive(Debug, Clone)]
@@ -1147,12 +1147,33 @@ async fn test_proxy_node_connectivity(
                 );
             }
         };
-        let proxy_url = proxy_url_with_auth(
+        let proxy_password = match state.app().decrypt_proxy_node_password(&node.id).await {
+            Ok(password) => password,
+            Err(_) => {
+                return build_proxy_connectivity_result(
+                    &probe_url,
+                    PROXY_CONNECTIVITY_TIMEOUT_SECS,
+                    false,
+                    None,
+                    None,
+                    Some("手动节点密码不可用".to_string()),
+                );
+            }
+        };
+        let Some(proxy_url) = proxy_url_with_auth(
             &endpoint.proxy_url,
             node.proxy_username.as_deref(),
-            node.proxy_password.as_deref(),
-        )
-        .unwrap_or(endpoint.proxy_url);
+            proxy_password.as_deref(),
+        ) else {
+            return build_proxy_connectivity_result(
+                &probe_url,
+                PROXY_CONNECTIVITY_TIMEOUT_SECS,
+                false,
+                None,
+                None,
+                Some("手动节点认证配置不可用".to_string()),
+            );
+        };
         return test_manual_proxy_connectivity(&proxy_url).await;
     }
 
@@ -1251,7 +1272,25 @@ async fn test_manual_proxy_connectivity_with_probe_url(
     timeout_secs: u64,
 ) -> Value {
     let started_at = Instant::now();
-    let proxy = match reqwest::Proxy::all(proxy_url) {
+    // reqwest resolves the destination locally for `socks5://`, which would
+    // bypass the gateway's private-address/DNS-rebinding guard.  Normalize
+    // legacy SOCKS URLs to the remote-DNS form before probing; HTTP/HTTPS and
+    // already-normalized `socks5h://` URLs are unchanged.
+    let proxy_url =
+        match crate::execution_runtime::transport::normalize_execution_proxy_url(proxy_url) {
+            Ok(proxy_url) => proxy_url,
+            Err(_) => {
+                return build_proxy_connectivity_result(
+                    probe_url,
+                    timeout_secs,
+                    false,
+                    None,
+                    None,
+                    Some("代理 URL 无效".to_string()),
+                );
+            }
+        };
+    let proxy = match reqwest::Proxy::all(&proxy_url) {
         Ok(proxy) => proxy,
         Err(error) => {
             return build_proxy_connectivity_result(
@@ -1260,24 +1299,17 @@ async fn test_manual_proxy_connectivity_with_probe_url(
                 false,
                 None,
                 None,
-                Some(sanitize_proxy_error(&format_upstream_request_error(&error))),
+                Some(sanitize_proxy_error(&error.to_string())),
             );
         }
     };
-    let mut builder = reqwest::Client::builder()
+    let builder = reqwest::Client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(5))
         .timeout(Duration::from_secs(timeout_secs))
         .proxy(proxy)
         .user_agent("aether-gateway/proxy-connectivity");
-    if proxy_url
-        .trim()
-        .to_ascii_lowercase()
-        .starts_with("https://")
-    {
-        builder = builder.danger_accept_invalid_certs(true);
-    }
     let client = match builder.build() {
         Ok(client) => client,
         Err(error) => {
@@ -1306,8 +1338,13 @@ async fn test_manual_proxy_connectivity_with_probe_url(
         }
     };
     let status = response.status();
-    let body = match response.text().await {
-        Ok(body) => body,
+    let body = match aether_http::read_response_bytes_with_limit(
+        response,
+        MAX_PROXY_CONNECTIVITY_RESPONSE_BYTES,
+    )
+    .await
+    {
+        Ok(body) => String::from_utf8_lossy(&body).into_owned(),
         Err(error) => {
             return build_proxy_connectivity_result(
                 probe_url,
@@ -1315,7 +1352,7 @@ async fn test_manual_proxy_connectivity_with_probe_url(
                 false,
                 None,
                 None,
-                Some(sanitize_proxy_error(&format_upstream_request_error(&error))),
+                Some(sanitize_proxy_error(&error.to_string())),
             );
         }
     };
@@ -1424,10 +1461,21 @@ async fn probe_tunnel_proxy_connectivity_via_owner(
     relay_base_url: &str,
     owner_instance_id: &str,
 ) -> Result<TunnelConnectivityProbeResult, String> {
-    let owner_url = build_tunnel_owner_relay_url(relay_base_url, node_id)?;
+    let owner_url = crate::tunnel::build_tunnel_owner_relay_url(relay_base_url, node_id)?;
+    let payload = build_tunnel_probe_relay_envelope(probe_url, timeout_secs)?;
+    let relay_auth = state.tunnel.build_relay_auth_headers(
+        owner_instance_id,
+        node_id,
+        true,
+        false,
+        &payload,
+        &[],
+    )?;
     let started_at = Instant::now();
-    let response = state
-        .client
+    let owner_client =
+        crate::tunnel::owner_forward_client_for_url(&state.owner_forward_client, &owner_url)
+            .await?;
+    let request = owner_client
         .post(owner_url)
         .header(
             http::header::CONTENT_TYPE,
@@ -1437,23 +1485,20 @@ async fn probe_tunnel_proxy_connectivity_via_owner(
             TUNNEL_RELAY_FORWARDED_BY_HEADER,
             state.tunnel.local_instance_id(),
         )
-        .header(TUNNEL_RELAY_OWNER_INSTANCE_HEADER, owner_instance_id)
         .timeout(Duration::from_secs(timeout_secs))
-        .body(build_tunnel_probe_relay_envelope(probe_url, timeout_secs)?)
+        .body(payload);
+    let response = relay_auth
+        .apply(request)
         .send()
         .await
-        .map_err(|error| format!("owner tunnel relay probe failed: {error}"))?;
+        .map_err(|error| crate::tunnel::owner_forward_request_error(&error))?;
     let status = response.status();
-    let body = response
-        .bytes()
-        .await
-        .map_err(|error| format!("failed to read owner tunnel relay probe body: {error}"))?;
-    if body.len() > MAX_PROXY_CONNECTIVITY_RESPONSE_BYTES {
-        return Err(format!(
-            "owner tunnel relay probe body exceeds {} bytes",
-            MAX_PROXY_CONNECTIVITY_RESPONSE_BYTES
-        ));
-    }
+    let body = aether_http::read_response_bytes_with_limit(
+        response,
+        MAX_PROXY_CONNECTIVITY_RESPONSE_BYTES,
+    )
+    .await
+    .map_err(|_| "failed to read owner tunnel relay probe body".to_string())?;
 
     Ok(TunnelConnectivityProbeResult {
         status: status.as_u16(),
@@ -1487,23 +1532,6 @@ fn build_tunnel_probe_relay_envelope(
     envelope.extend_from_slice(&(meta_bytes.len() as u32).to_be_bytes());
     envelope.extend_from_slice(&meta_bytes);
     Ok(envelope)
-}
-
-fn build_tunnel_owner_relay_url(relay_base_url: &str, node_id: &str) -> Result<String, String> {
-    let mut url = url::Url::parse(relay_base_url)
-        .map_err(|error| format!("invalid owner relay base url: {error}"))?;
-    {
-        let mut segments = url
-            .path_segments_mut()
-            .map_err(|_| "owner relay base url cannot be a base-less URL".to_string())?;
-        segments.pop_if_empty();
-        segments.push("api");
-        segments.push("internal");
-        segments.push("tunnel");
-        segments.push("relay");
-        segments.push(node_id.trim());
-    }
-    Ok(url.to_string())
 }
 
 fn validate_register_request(
@@ -1577,6 +1605,7 @@ fn validate_register_request(
 
     Ok(
         aether_data::repository::proxy_nodes::ProxyNodeRegistrationMutation {
+            node_id: None,
             name,
             ip,
             port: i32::from(input.port.unwrap_or_default()),
@@ -1611,6 +1640,7 @@ fn validate_manual_create_request(
 
     Ok(
         aether_data::repository::proxy_nodes::ProxyNodeManualCreateMutation {
+            node_id: None,
             name: normalize_required_string(&input.name, "name", 100)?,
             ip: endpoint.node_ip,
             port: endpoint.node_port,
@@ -1665,12 +1695,12 @@ fn validate_proxy_test_url_request(
     let username = normalize_optional_string(input.username.as_deref(), "username", 255)?;
     let password = normalize_optional_string(input.password.as_deref(), "password", 500)?;
     let endpoint = normalize_manual_proxy_endpoint(&input.proxy_url)?;
-    Ok(proxy_url_with_auth(
+    proxy_url_with_auth(
         &endpoint.proxy_url,
         username.as_deref(),
         password.as_deref(),
     )
-    .unwrap_or(endpoint.proxy_url))
+    .ok_or_else(|| bad_request_response("password 需要非空 username，且代理 URL 必须支持认证"))
 }
 
 fn admin_proxy_node_upgrade_action_node_id_from_path(path: &str, suffix: &str) -> Option<String> {
@@ -1760,6 +1790,7 @@ async fn dispatch_proxy_node_upgrade_targets(
             .update_proxy_node_remote_config(
                 &aether_data::repository::proxy_nodes::ProxyNodeRemoteConfigMutation {
                     node_id: node.id.clone(),
+                    expected_tunnel_generation: None,
                     node_name: None,
                     allowed_ports: None,
                     log_level: None,
@@ -1851,6 +1882,7 @@ fn validate_heartbeat_request(
     Ok(
         aether_data::repository::proxy_nodes::ProxyNodeHeartbeatMutation {
             node_id,
+            expected_tunnel_generation: None,
             heartbeat_interval: input.heartbeat_interval,
             active_connections: input.active_connections,
             total_requests_delta: input.total_requests,
@@ -1964,6 +1996,7 @@ fn validate_remote_config_request(
     Ok(
         aether_data::repository::proxy_nodes::ProxyNodeRemoteConfigMutation {
             node_id,
+            expected_tunnel_generation: None,
             node_name,
             allowed_ports,
             log_level,
@@ -2035,6 +2068,12 @@ fn parse_manual_proxy_endpoint(
     }
     if !parsed.username().is_empty() || parsed.password().is_some() {
         return Err(format!("{field} 不应包含用户名或密码，请使用独立字段"));
+    }
+    if !matches!(parsed.path(), "" | "/") || parsed.query().is_some() || parsed.fragment().is_some()
+    {
+        return Err(format!(
+            "{field} 必须是代理 origin，不能包含 path、query 或 fragment"
+        ));
     }
     let host = parsed
         .host_str()
@@ -2119,13 +2158,74 @@ fn normalize_ip_address(value: &str) -> Result<String, Response<Body>> {
 }
 
 fn sanitize_proxy_error(detail: &str) -> String {
-    match detail.split_once("://") {
-        Some((scheme, rest)) => match rest.split_once('@') {
-            Some((_, tail)) => format!("{scheme}://***@{tail}"),
-            None => detail.to_string(),
-        },
-        None => detail.to_string(),
+    const HTTP_STATUS_PREFIX: &str = "代理探测返回 HTTP ";
+    const CLASSIFICATION_PREFIX_BYTES: usize = 4 * 1024;
+
+    if let Some(status) = detail
+        .strip_prefix(HTTP_STATUS_PREFIX)
+        .and_then(|rest| {
+            rest.split(|character: char| !character.is_ascii_digit())
+                .next()
+        })
+        .and_then(|status| status.parse::<u16>().ok())
+        .filter(|status| (100..=599).contains(status))
+    {
+        return format!("{HTTP_STATUS_PREFIX}{status}");
     }
+
+    let detail = if detail.len() <= CLASSIFICATION_PREFIX_BYTES {
+        detail
+    } else {
+        let mut end = CLASSIFICATION_PREFIX_BYTES;
+        while !detail.is_char_boundary(end) {
+            end = end.saturating_sub(1);
+        }
+        &detail[..end]
+    };
+    let normalized = detail.to_ascii_lowercase();
+    if normalized.contains("timed out") || normalized.contains("timeout") {
+        return "代理探测超时".to_string();
+    }
+    if normalized.contains("overloaded")
+        || normalized.contains("backpressure")
+        || normalized.contains("congested")
+        || normalized.contains("busy")
+    {
+        return "代理探测服务繁忙".to_string();
+    }
+    if normalized.contains("unauthorized")
+        || normalized.contains("forbidden")
+        || normalized.contains("authentication")
+        || normalized.contains("credential")
+    {
+        return "代理认证失败".to_string();
+    }
+    if normalized.contains("too large")
+        || normalized.contains("body exceeds")
+        || normalized.contains("response exceeds")
+    {
+        return "代理探测响应过大".to_string();
+    }
+    if normalized.contains("response body")
+        || normalized.contains("body read")
+        || normalized.contains("decode")
+    {
+        return "代理探测响应读取失败".to_string();
+    }
+    if normalized.contains("connect")
+        || normalized.contains("dns")
+        || normalized.contains("socket")
+        || normalized.contains("not connected")
+        || normalized.contains("unavailable")
+        || normalized.contains("offline")
+    {
+        return "代理连接失败".to_string();
+    }
+
+    // Error strings can originate in reqwest, a remote gateway, or a tunnel
+    // peer. Keep arbitrary URLs, credentials, paths, and control characters
+    // out of the admin response by projecting unknown details to one category.
+    "代理探测失败".to_string()
 }
 
 fn proxy_url_with_auth(
@@ -2133,13 +2233,22 @@ fn proxy_url_with_auth(
     username: Option<&str>,
     password: Option<&str>,
 ) -> Option<String> {
-    let username = username.map(str::trim).filter(|value| !value.is_empty())?;
+    let username = username.filter(|value| !value.is_empty());
+    let password = password.filter(|value| !value.is_empty());
     let mut parsed = url::Url::parse(proxy_url).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https" | "socks5" | "socks5h")
+        || parsed.host_str().is_none()
+    {
+        return None;
+    }
+    if username.is_none() && password.is_none() {
+        return Some(parsed.to_string());
+    }
+    let username = username.unwrap_or("");
     if parsed.set_username(username).is_err() {
         return None;
     }
 
-    let password = password.map(str::trim).filter(|value| !value.is_empty());
     if parsed.set_password(password).is_err() {
         return None;
     }
@@ -2152,27 +2261,18 @@ fn parse_proxy_probe_exit_ip(body: &str) -> Option<String> {
         if key.trim() != "ip" {
             return None;
         }
-        let value = value.trim();
-        if value.is_empty() {
-            return None;
-        }
-        Some(value.to_string())
+        value
+            .trim()
+            .parse::<std::net::IpAddr>()
+            .ok()
+            .map(|ip| ip.to_string())
     })
 }
 
-fn format_proxy_probe_status_error(status: reqwest::StatusCode, body: &str) -> String {
-    let body = body.trim();
-    if body.is_empty() {
-        return format!("代理探测返回 HTTP {}", status.as_u16());
-    }
-
-    let truncated = if body.chars().count() > 200 {
-        let shortened: String = body.chars().take(200).collect();
-        format!("{shortened}...")
-    } else {
-        body.to_string()
-    };
-    format!("代理探测返回 HTTP {}: {truncated}", status.as_u16())
+fn format_proxy_probe_status_error(status: reqwest::StatusCode, _body: &str) -> String {
+    // The body is controlled by the probe target and may echo proxy
+    // credentials or contain private upstream diagnostics.
+    format!("代理探测返回 HTTP {}", status.as_u16())
 }
 
 fn validate_optional_counter(value: Option<i64>, field: &str) -> Result<(), Response<Body>> {
@@ -2238,14 +2338,14 @@ fn hash_proxy_install_management_token(value: &str) -> String {
 }
 
 fn proxy_install_management_token_prefix(value: &str) -> Option<String> {
-    (!value.is_empty()).then(|| value[..value.len().min(12)].to_string())
+    (!value.is_empty()).then(|| value.chars().take(12).collect())
 }
 
 async fn create_proxy_install_management_token(
     state: &AdminAppState<'_>,
     request_context: &AdminRequestContext<'_>,
     node_name: &str,
-) -> Result<String, Response<Body>> {
+) -> Result<(StoredManagementToken, String), Response<Body>> {
     let Some(principal) = request_context
         .decision()
         .and_then(|decision| decision.admin_principal.as_ref())
@@ -2257,39 +2357,70 @@ async fn create_proxy_install_management_token(
             .into_response());
     };
 
+    let (allowed_ips, expires_at_unix_secs) =
+        if let Some(parent_token_id) = principal.management_token_id.as_deref() {
+            let parent = match state.get_management_token_with_user(parent_token_id).await {
+                Ok(Some(parent)) => parent,
+                Ok(None) => return Err(proxy_install_parent_token_denied_response()),
+                Err(_) => {
+                    return Err(proxy_install_internal_error_response(
+                        "proxy_install_parent_management_token_lookup",
+                        "repository_lookup_failed",
+                    ))
+                }
+            };
+            let now = chrono::Utc::now().timestamp().max(0) as u64;
+            if parent.token.user_id != principal.user_id
+                || !parent.token.is_active
+                || parent
+                    .token
+                    .expires_at_unix_secs
+                    .is_some_and(|expires_at| expires_at <= now)
+            {
+                return Err(proxy_install_parent_token_denied_response());
+            }
+            let permissions = crate::control::management_token_permission_keys_from_value(
+                parent.token.permissions.as_ref(),
+            )
+            .map_err(|_| proxy_install_parent_token_denied_response())?;
+            let Some(decision) = request_context.decision() else {
+                return Err(proxy_install_parent_token_denied_response());
+            };
+            crate::control::validate_management_token_admin_route_permission(
+                request_context.method(),
+                decision,
+                permissions.as_deref(),
+            )
+            .map_err(|_| proxy_install_parent_token_denied_response())?;
+            (
+                parent.token.allowed_ips.clone(),
+                parent.token.expires_at_unix_secs,
+            )
+        } else {
+            (None, None)
+        };
+
     let user = match state.app().find_user_auth_by_id(&principal.user_id).await {
         Ok(value) => value,
-        Err(err) => {
-            return Err((
-                http::StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "detail": format!("admin user lookup failed: {err:?}") })),
-            )
-                .into_response())
+        Err(_) => {
+            return Err(proxy_install_internal_error_response(
+                "proxy_install_admin_user_lookup",
+                "repository_lookup_failed",
+            ))
         }
     };
-    let user = user
-        .map(|user| {
-            StoredManagementTokenUserSummary::new(
-                user.id,
-                user.email,
-                user.username,
-                user.role,
+    let Some(user) = user else {
+        return Err(proxy_install_parent_token_denied_response());
+    };
+    if !user.is_active || user.is_deleted || !user.role.eq_ignore_ascii_case("admin") {
+        return Err(proxy_install_parent_token_denied_response());
+    }
+    let user = StoredManagementTokenUserSummary::new(user.id, user.email, user.username, user.role)
+        .map_err(|_| {
+            proxy_install_internal_error_response(
+                "proxy_install_management_token_user_summary_build",
+                "invalid_user_summary",
             )
-        })
-        .unwrap_or_else(|| {
-            StoredManagementTokenUserSummary::new(
-                principal.user_id.clone(),
-                None,
-                principal.user_id.clone(),
-                principal.user_role.clone(),
-            )
-        })
-        .map_err(|err| {
-            (
-                http::StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "detail": format!("management token user summary build failed: {err:?}") })),
-            )
-                .into_response()
         })?;
 
     let raw_token = generate_proxy_install_management_token_plaintext();
@@ -2307,14 +2438,15 @@ async fn create_proxy_install_management_token(
         token_prefix: proxy_install_management_token_prefix(&raw_token),
         name: format!("aether-tunnel {node_name} {short_id}"),
         description: Some("Created by proxy node one-click installer".to_string()),
-        allowed_ips: None,
+        allowed_ips,
         permissions: Some(json!(["admin:proxy_nodes:write"])),
-        expires_at_unix_secs: None,
-        is_active: true,
+        expires_at_unix_secs,
+        // The bearer secret is not usable until its one-time install session is consumed.
+        is_active: false,
     };
 
     match state.app().create_management_token(&record).await {
-        Ok(LocalMutationOutcome::Applied(_)) => Ok(raw_token),
+        Ok(LocalMutationOutcome::Applied(stored)) => Ok((stored, raw_token)),
         Ok(LocalMutationOutcome::Invalid(detail)) => Err(bad_request_response(detail)),
         Ok(LocalMutationOutcome::Unavailable) => {
             Err(build_admin_proxy_nodes_data_unavailable_response())
@@ -2324,12 +2456,36 @@ async fn create_proxy_install_management_token(
             Json(json!({ "detail": "管理员不存在" })),
         )
             .into_response()),
-        Err(err) => Err((
-            http::StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "detail": format!("management token create failed: {err:?}") })),
-        )
-            .into_response()),
+        Err(_) => Err(proxy_install_internal_error_response(
+            "proxy_install_management_token_create",
+            "repository_write_failed",
+        )),
     }
+}
+
+fn proxy_install_internal_error_response(
+    operation: &'static str,
+    error_category: &'static str,
+) -> Response<Body> {
+    warn!(
+        event_name = "proxy_install_internal_error",
+        operation, error_category, "proxy install operation failed"
+    );
+    (
+        http::StatusCode::INTERNAL_SERVER_ERROR,
+        Json(json!({ "detail": PROXY_INSTALL_INTERNAL_ERROR_DETAIL })),
+    )
+        .into_response()
+}
+
+fn proxy_install_parent_token_denied_response() -> Response<Body> {
+    (
+        http::StatusCode::FORBIDDEN,
+        Json(json!({
+            "detail": "parent management token is no longer authorized to create install sessions"
+        })),
+    )
+        .into_response()
 }
 
 fn parse_proxy_node_event_query(
@@ -2418,4 +2574,133 @@ fn bad_request_response(detail: impl Into<String>) -> Response<Body> {
         Json(json!({ "detail": detail.into() })),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn proxy_auth_url_construction_never_falls_back_to_unauthenticated() {
+        assert_eq!(
+            proxy_url_with_auth("http://proxy.example:8080", None, None).as_deref(),
+            Some("http://proxy.example:8080/")
+        );
+        assert_eq!(
+            proxy_url_with_auth("http://proxy.example:8080", None, Some("secret")).as_deref(),
+            Some("http://:secret@proxy.example:8080/")
+        );
+        assert!(proxy_url_with_auth("not a proxy url", Some("alice"), Some("secret")).is_none());
+        assert!(proxy_url_with_auth("mailto:proxy@example.com", Some("alice"), None).is_none());
+    }
+
+    #[test]
+    fn manual_proxy_endpoint_accepts_only_an_origin_without_ambiguous_components() {
+        for value in [
+            "http://proxy.example:8080/path",
+            "http://proxy.example:8080?token=secret",
+            "http://proxy.example:8080#fragment",
+            "http://alice:password@proxy.example:8080",
+            "file:///tmp/proxy",
+        ] {
+            assert!(
+                parse_manual_proxy_endpoint(value, "proxy_url").is_err(),
+                "proxy URL should be rejected: {value}"
+            );
+        }
+
+        for value in [
+            "http://proxy.example:8080",
+            "https://proxy.example:8443/",
+            "socks5://proxy.example:1080",
+            "socks5h://proxy.example:1080",
+        ] {
+            assert!(
+                parse_manual_proxy_endpoint(value, "proxy_url").is_ok(),
+                "proxy origin should be accepted: {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn proxy_connectivity_errors_are_projected_without_sensitive_details() {
+        let details = [
+            "request failed for https://alice:proxy-secret@10.0.0.8/probe?access_token=query-secret",
+            "Bearer bearer-secret\r\nx-injected: true",
+            "failed to open /private/var/proxy-secret.pem",
+        ];
+
+        for detail in details {
+            let projected = sanitize_proxy_error(detail);
+            for secret in [
+                "alice",
+                "proxy-secret",
+                "10.0.0.8",
+                "query-secret",
+                "bearer-secret",
+                "x-injected",
+                "/private/var",
+            ] {
+                assert!(!projected.contains(secret), "leaked {secret}: {projected}");
+            }
+            assert!(!projected.contains(['\r', '\n']));
+        }
+
+        assert_eq!(
+            sanitize_proxy_error("connection timed out for https://secret.internal"),
+            "代理探测超时"
+        );
+        assert_eq!(
+            sanitize_proxy_error("DNS connect error for http://10.0.0.2"),
+            "代理连接失败"
+        );
+    }
+
+    #[test]
+    fn proxy_probe_status_error_does_not_echo_untrusted_body() {
+        let detail = format_proxy_probe_status_error(
+            reqwest::StatusCode::BAD_GATEWAY,
+            "Bearer upstream-secret at http://10.0.0.9/private?token=query-secret",
+        );
+
+        assert_eq!(detail, "代理探测返回 HTTP 502");
+        assert_eq!(sanitize_proxy_error(&detail), detail);
+        assert!(!detail.contains("upstream-secret"));
+        assert!(!detail.contains("10.0.0.9"));
+    }
+
+    #[test]
+    fn proxy_probe_exit_ip_only_accepts_ip_addresses() {
+        assert_eq!(
+            parse_proxy_probe_exit_ip("fl=1\nip=2001:db8::1\nts=2"),
+            Some("2001:db8::1".to_string())
+        );
+        assert_eq!(
+            parse_proxy_probe_exit_ip("ip=Bearer upstream-secret\nx=1"),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn proxy_install_internal_error_response_hides_internal_details() {
+        let response = proxy_install_internal_error_response(
+            "secret-bearing operation https://internal.example/token",
+            "Bearer super-secret",
+        );
+
+        assert_eq!(response.status(), http::StatusCode::INTERNAL_SERVER_ERROR);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("internal error response body should be readable");
+        let payload: Value =
+            serde_json::from_slice(&body).expect("internal error response should be JSON");
+
+        assert_eq!(
+            payload,
+            json!({ "detail": PROXY_INSTALL_INTERNAL_ERROR_DETAIL })
+        );
+        let body = String::from_utf8_lossy(&body);
+        assert!(!body.contains("internal.example"));
+        assert!(!body.contains("super-secret"));
+    }
 }

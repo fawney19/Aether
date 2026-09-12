@@ -3,12 +3,16 @@ use super::{
 };
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::handlers::shared::{
+    normalize_payment_callback_base_url, normalize_payment_currency, normalize_payment_https_url,
     payment_gateway_allow_user_refund, payment_gateway_channels_config_json,
     payment_gateway_channels_json, payment_gateway_config_json, payment_gateway_refund_enabled,
-    payment_gateway_secret_keys_json,
+    payment_gateway_secret_is_legacy_unbound, payment_gateway_secret_keys_json,
+    PaymentGatewaySecretBinding,
 };
 use crate::{GatewayError, LocalMutationOutcome};
-use aether_data_contracts::repository::billing::PaymentGatewayConfigWriteInput;
+use aether_data_contracts::repository::billing::{
+    PaymentGatewayConfigCasWriteInput, PaymentGatewayConfigWriteInput,
+};
 use axum::{
     body::Body,
     http,
@@ -18,7 +22,9 @@ use axum::{
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-#[derive(Debug, Deserialize)]
+const PAYMENT_GATEWAY_CONFIG_CAS_MAX_ATTEMPTS: usize = 8;
+
+#[derive(Deserialize)]
 struct PaymentGatewayConfigRequest {
     #[serde(default)]
     enabled: bool,
@@ -58,6 +64,14 @@ fn default_usd_exchange_rate() -> f64 {
 
 fn default_min_recharge_usd() -> f64 {
     1.0
+}
+
+fn build_payment_gateway_conflict_response(detail: impl Into<String>) -> Response<Body> {
+    (
+        http::StatusCode::CONFLICT,
+        Json(json!({ "detail": detail.into() })),
+    )
+        .into_response()
 }
 
 fn default_channels() -> Value {
@@ -119,6 +133,18 @@ fn admin_payment_gateway_provider_from_path(path: &str) -> Option<String> {
         return None;
     }
     Some(provider)
+}
+
+fn resolve_admin_payment_gateway_provider(path: &str, route_kind: &str) -> Option<String> {
+    match route_kind {
+        "get_epay_gateway" | "update_epay_gateway" | "test_epay_gateway" => {
+            Some("epay".to_string())
+        }
+        "get_payment_gateway" | "update_payment_gateway" | "test_payment_gateway" => {
+            admin_payment_gateway_provider_from_path(path)
+        }
+        _ => None,
+    }
 }
 
 fn default_provider_channels(provider: &str) -> Value {
@@ -263,29 +289,97 @@ fn normalize_config_object(config: Value) -> Result<Value, String> {
     Err("config must be an object".to_string())
 }
 
+fn merge_gateway_secret_maps(
+    existing_plaintext: Option<&str>,
+    updates: serde_json::Map<String, Value>,
+) -> Result<serde_json::Map<String, Value>, &'static str> {
+    let mut merged = match existing_plaintext {
+        Some(plaintext) => serde_json::from_str::<Value>(plaintext)
+            .ok()
+            .and_then(|value| value.as_object().cloned())
+            .ok_or("existing gateway secrets have invalid format")?,
+        None => serde_json::Map::new(),
+    };
+    merged.extend(updates);
+    Ok(merged)
+}
+
+/// A legacy gateway ciphertext has no authenticated destination (or only the
+/// provider in v2).  Reusing it while changing endpoint/merchant would carry
+/// an unknown credential into a different payment account.  Require the
+/// administrator to provide a replacement secret in that case.
+fn legacy_secret_reuse_requires_reentry(
+    existing: Option<&aether_data_contracts::repository::billing::PaymentGatewayConfigRecord>,
+    requested_binding: &PaymentGatewaySecretBinding,
+) -> bool {
+    let Some(record) = existing else {
+        return false;
+    };
+    let Some(ciphertext) = record.merchant_key_encrypted.as_deref() else {
+        return false;
+    };
+    if !payment_gateway_secret_is_legacy_unbound(ciphertext) {
+        return false;
+    }
+
+    // An invalid historical binding cannot establish that the legacy value
+    // belongs to the requested destination, so fail closed as well.
+    PaymentGatewaySecretBinding::from_record(record)
+        .map(|stored_binding| stored_binding != requested_binding.clone())
+        .unwrap_or(true)
+}
+
 fn encrypted_gateway_secret(
     state: &AdminAppState<'_>,
-    provider: &str,
+    binding: &PaymentGatewaySecretBinding,
     payload: &PaymentGatewayConfigRequest,
-) -> Result<Option<String>, Response<Body>> {
+    existing: Option<&aether_data_contracts::repository::billing::PaymentGatewayConfigRecord>,
+) -> Result<(Option<String>, Vec<Value>), Response<Body>> {
+    let provider = binding.provider.as_str();
+    let decrypt_existing = || {
+        if legacy_secret_reuse_requires_reentry(existing, binding) {
+            return Err(build_admin_payments_bad_request_response(
+                "endpoint_url or merchant_id changed; re-enter the gateway secret",
+            ));
+        }
+        existing
+            .and_then(|record| record.merchant_key_encrypted.as_deref())
+            .map(|ciphertext| {
+                crate::handlers::shared::open_payment_gateway_secret(
+                    state.app(), binding, ciphertext,
+                )
+                .map(|projection| projection.plaintext)
+                .map_err(|_| {
+                    build_admin_payments_backend_unavailable_response(
+                        "existing gateway secrets are not valid for the requested destination; re-enter the secret",
+                    )
+                })
+            })
+            .transpose()
+    };
     let secret_plaintext = if provider == "epay" {
-        payload
+        let supplied = payload
             .merchant_key
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .map(ToOwned::to_owned)
+            .map(ToOwned::to_owned);
+        if supplied.is_none() {
+            decrypt_existing()?;
+        }
+        supplied
     } else {
         let Some(secrets) = payload.secrets.as_object() else {
             return if payload.secrets.is_null() {
-                Ok(None)
+                decrypt_existing()?;
+                Ok((None, existing_gateway_secret_keys(existing)))
             } else {
                 Err(build_admin_payments_bad_request_response(
                     "secrets must be an object",
                 ))
             };
         };
-        let filtered = secrets
+        let updates = secrets
             .iter()
             .filter_map(|(key, value)| {
                 let value = value.as_str()?.trim();
@@ -293,39 +387,60 @@ fn encrypted_gateway_secret(
                     .then(|| (key.trim().to_string(), Value::String(value.to_string())))
             })
             .collect::<serde_json::Map<_, _>>();
-        if filtered.is_empty() {
-            None
-        } else {
-            Some(Value::Object(filtered).to_string())
+        if updates.is_empty() {
+            decrypt_existing()?;
+            return Ok((None, existing_gateway_secret_keys(existing)));
         }
+
+        let existing_plaintext = decrypt_existing()?;
+        let merged = match merge_gateway_secret_maps(existing_plaintext.as_deref(), updates) {
+            Ok(value) => value,
+            Err(detail) => {
+                return Err(build_admin_payments_backend_unavailable_response(detail));
+            }
+        };
+        Some(Value::Object(merged).to_string())
     };
 
     let Some(secret_plaintext) = secret_plaintext else {
-        return Ok(None);
+        return Ok((None, existing_gateway_secret_keys(existing)));
     };
-    state
-        .encrypt_catalog_secret_with_fallbacks(&secret_plaintext)
-        .ok_or_else(|| {
-            build_admin_payments_backend_unavailable_response("encryption key is not configured")
-        })
-        .map(Some)
+    let encrypted = crate::handlers::shared::seal_payment_gateway_secret(
+        state.app(),
+        binding,
+        &secret_plaintext,
+    )
+    .map_err(build_admin_payments_backend_unavailable_response)?;
+    let secret_keys = if provider == "epay" {
+        Vec::new()
+    } else {
+        let mut keys = serde_json::from_str::<Value>(&secret_plaintext)
+            .ok()
+            .and_then(|value| value.as_object().cloned())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(key, _)| Value::String(key))
+            .collect::<Vec<_>>();
+        keys.sort_by(|left, right| left.as_str().cmp(&right.as_str()));
+        keys
+    };
+    Ok((Some(encrypted), secret_keys))
 }
 
-async fn existing_gateway_secret_keys(
-    state: &AdminAppState<'_>,
-    provider: &str,
-) -> Result<Vec<Value>, GatewayError> {
-    let Some(record) = state.app().find_payment_gateway_config(provider).await? else {
-        return Ok(Vec::new());
+fn existing_gateway_secret_keys(
+    record: Option<&aether_data_contracts::repository::billing::PaymentGatewayConfigRecord>,
+) -> Vec<Value> {
+    let Some(record) = record else {
+        return Vec::new();
     };
-    let (_, _, secret_keys, _, _) = split_gateway_channels_config(&record);
-    Ok(secret_keys
+    let (_, _, secret_keys, _, _) = split_gateway_channels_config(record);
+    secret_keys
         .as_array()
         .cloned()
         .unwrap_or_default()
         .into_iter()
         .filter(|value| value.as_str().is_some_and(|item| !item.trim().is_empty()))
-        .collect())
+        .collect()
 }
 
 pub(super) async fn maybe_build_local_admin_payment_gateways_response(
@@ -336,8 +451,14 @@ pub(super) async fn maybe_build_local_admin_payment_gateways_response(
 ) -> Result<Option<Response<Body>>, GatewayError> {
     match route_kind {
         Some("get_epay_gateway") | Some("get_payment_gateway") => {
-            let provider = admin_payment_gateway_provider_from_path(request_context.path())
-                .unwrap_or_else(|| "epay".to_string());
+            let Some(provider) = resolve_admin_payment_gateway_provider(
+                request_context.path(),
+                route_kind.expect("matched payment gateway route kind"),
+            ) else {
+                return Ok(Some(build_admin_payments_bad_request_response(
+                    "unsupported payment gateway provider",
+                )));
+            };
             let record = state.app().find_payment_gateway_config(&provider).await?;
             let payload = record
                 .map(gateway_config_payload)
@@ -345,8 +466,14 @@ pub(super) async fn maybe_build_local_admin_payment_gateways_response(
             Ok(Some(Json(payload).into_response()))
         }
         Some("update_epay_gateway") | Some("update_payment_gateway") => {
-            let provider = admin_payment_gateway_provider_from_path(request_context.path())
-                .unwrap_or_else(|| "epay".to_string());
+            let Some(provider) = resolve_admin_payment_gateway_provider(
+                request_context.path(),
+                route_kind.expect("matched payment gateway route kind"),
+            ) else {
+                return Ok(Some(build_admin_payments_bad_request_response(
+                    "unsupported payment gateway provider",
+                )));
+            };
             let Some(body) = request_body else {
                 return Ok(Some(build_admin_payments_bad_request_response(
                     "缺少请求体",
@@ -371,109 +498,167 @@ pub(super) async fn maybe_build_local_admin_payment_gateways_response(
                 )));
             }
 
-            let merchant_key_encrypted = match encrypted_gateway_secret(state, &provider, &payload)
-            {
-                Ok(value) => value,
-                Err(response) => return Ok(Some(response)),
-            };
             let endpoint_url = if provider == "epay" {
-                match normalize_text(payload.endpoint_url, "endpoint_url", 512) {
-                    Ok(value) => value,
+                match normalize_text(payload.endpoint_url.clone(), "endpoint_url", 512) {
+                    Ok(value) => match normalize_payment_https_url(&value, "endpoint_url") {
+                        Ok(value) => value,
+                        Err(detail) => {
+                            return Ok(Some(build_admin_payments_bad_request_response(detail)))
+                        }
+                    },
                     Err(detail) => {
                         return Ok(Some(build_admin_payments_bad_request_response(detail)))
                     }
                 }
             } else {
-                match normalize_optional_text(Some(payload.endpoint_url), 512) {
-                    Ok(value) => value.unwrap_or_default(),
+                match normalize_optional_text(Some(payload.endpoint_url.clone()), 512) {
+                    Ok(Some(value)) => match normalize_payment_https_url(&value, "endpoint_url") {
+                        Ok(value) => value,
+                        Err(detail) => {
+                            return Ok(Some(build_admin_payments_bad_request_response(detail)))
+                        }
+                    },
+                    Ok(None) => String::new(),
                     Err(detail) => {
                         return Ok(Some(build_admin_payments_bad_request_response(detail)))
                     }
                 }
             };
-            let callback_base_url = match normalize_optional_text(payload.callback_base_url, 512) {
-                Ok(value) => value,
-                Err(detail) => return Ok(Some(build_admin_payments_bad_request_response(detail))),
-            };
+            let callback_base_url =
+                match normalize_optional_text(payload.callback_base_url.clone(), 512) {
+                    Ok(Some(value)) => match normalize_payment_callback_base_url(&value) {
+                        Ok(value) => Some(value),
+                        Err(detail) => {
+                            return Ok(Some(build_admin_payments_bad_request_response(detail)))
+                        }
+                    },
+                    Ok(None) => None,
+                    Err(detail) => {
+                        return Ok(Some(build_admin_payments_bad_request_response(detail)))
+                    }
+                };
             let merchant_id = if provider == "epay" {
-                match normalize_text(payload.merchant_id, "merchant_id", 128) {
+                match normalize_text(payload.merchant_id.clone(), "merchant_id", 128) {
                     Ok(value) => value,
                     Err(detail) => {
                         return Ok(Some(build_admin_payments_bad_request_response(detail)))
                     }
                 }
             } else {
-                match normalize_optional_text(Some(payload.merchant_id), 128) {
+                match normalize_optional_text(Some(payload.merchant_id.clone()), 128) {
                     Ok(value) => value.unwrap_or_default(),
                     Err(detail) => {
                         return Ok(Some(build_admin_payments_bad_request_response(detail)))
                     }
                 }
             };
-            let pay_currency = match normalize_text(payload.pay_currency, "pay_currency", 16) {
+            let pay_currency =
+                match normalize_payment_currency(&payload.pay_currency, "pay_currency") {
+                    Ok(value) => value,
+                    Err(detail) => {
+                        return Ok(Some(build_admin_payments_bad_request_response(detail)))
+                    }
+                };
+            let config = match normalize_config_object(payload.config.clone()) {
                 Ok(value) => value,
                 Err(detail) => return Ok(Some(build_admin_payments_bad_request_response(detail))),
             };
-            let config = match normalize_config_object(payload.config) {
-                Ok(value) => value,
-                Err(detail) => return Ok(Some(build_admin_payments_bad_request_response(detail))),
-            };
-            let submitted_secret_keys = payload
-                .secrets
-                .as_object()
-                .map(|secrets| {
-                    secrets
-                        .iter()
-                        .filter(|(_, value)| {
-                            value.as_str().is_some_and(|value| !value.trim().is_empty())
-                        })
-                        .map(|(key, _)| Value::String(key.clone()))
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-            let secret_keys = if provider == "epay" || !submitted_secret_keys.is_empty() {
-                submitted_secret_keys
-            } else {
-                existing_gateway_secret_keys(state, &provider).await?
-            };
-            let channels = match normalize_gateway_channels(&provider, payload.channels) {
+            let channels = match normalize_gateway_channels(&provider, payload.channels.clone()) {
                 Ok(value) => value,
                 Err(detail) => return Ok(Some(build_admin_payments_bad_request_response(detail))),
             };
             let refund_enabled = payload.refund_enabled;
             let allow_user_refund = refund_enabled && payload.allow_user_refund;
-            let channels_json = payment_gateway_channels_config_json(
-                channels,
-                config,
-                Value::Array(secret_keys),
-                refund_enabled,
-                allow_user_refund,
-            );
-            let input = PaymentGatewayConfigWriteInput {
-                provider: provider.clone(),
-                enabled: payload.enabled,
-                endpoint_url,
-                callback_base_url,
-                merchant_id,
-                preserve_existing_secret: merchant_key_encrypted.is_none(),
-                merchant_key_encrypted,
-                pay_currency,
-                usd_exchange_rate: payload.usd_exchange_rate,
-                min_recharge_usd: payload.min_recharge_usd,
-                channels_json,
-            };
-            match state.app().upsert_payment_gateway_config(&input).await? {
-                LocalMutationOutcome::Applied(record) => {
-                    Ok(Some(Json(gateway_config_payload(record)).into_response()))
+            let binding =
+                match PaymentGatewaySecretBinding::new(&provider, &endpoint_url, &merchant_id) {
+                    Ok(value) => value,
+                    Err(detail) => {
+                        return Ok(Some(build_admin_payments_bad_request_response(detail)))
+                    }
+                };
+            let mut existing_record = state.app().find_payment_gateway_config(&provider).await?;
+            let expected_existing = existing_record.is_some();
+            for _ in 0..PAYMENT_GATEWAY_CONFIG_CAS_MAX_ATTEMPTS {
+                if expected_existing && existing_record.is_none() {
+                    return Ok(Some(build_payment_gateway_conflict_response(
+                        "payment gateway config was removed concurrently",
+                    )));
                 }
-                _ => Ok(Some(build_admin_payments_backend_unavailable_response(
-                    "payment gateway config backend unavailable",
-                ))),
+                let (merchant_key_encrypted, secret_keys) = match encrypted_gateway_secret(
+                    state,
+                    &binding,
+                    &payload,
+                    existing_record.as_ref(),
+                ) {
+                    Ok(value) => value,
+                    Err(response) => return Ok(Some(response)),
+                };
+                let channels_json = payment_gateway_channels_config_json(
+                    channels.clone(),
+                    config.clone(),
+                    Value::Array(secret_keys),
+                    refund_enabled,
+                    allow_user_refund,
+                );
+                let mutation = PaymentGatewayConfigCasWriteInput {
+                    input: PaymentGatewayConfigWriteInput {
+                        provider: provider.clone(),
+                        enabled: payload.enabled,
+                        endpoint_url: endpoint_url.clone(),
+                        callback_base_url: callback_base_url.clone(),
+                        merchant_id: merchant_id.clone(),
+                        preserve_existing_secret: merchant_key_encrypted.is_none(),
+                        merchant_key_encrypted,
+                        pay_currency: pay_currency.clone(),
+                        usd_exchange_rate: payload.usd_exchange_rate,
+                        min_recharge_usd: payload.min_recharge_usd,
+                        channels_json,
+                    },
+                    expected_existing,
+                    expected_merchant_key_encrypted: existing_record
+                        .as_ref()
+                        .and_then(|record| record.merchant_key_encrypted.clone()),
+                };
+                match state
+                    .app()
+                    .compare_and_swap_payment_gateway_config(&mutation)
+                    .await?
+                {
+                    LocalMutationOutcome::Applied(record) => {
+                        return Ok(Some(Json(gateway_config_payload(record)).into_response()));
+                    }
+                    LocalMutationOutcome::NotFound if !expected_existing => {
+                        return Ok(Some(build_payment_gateway_conflict_response(
+                            "payment gateway config was created concurrently",
+                        )));
+                    }
+                    LocalMutationOutcome::NotFound => {
+                        existing_record =
+                            state.app().find_payment_gateway_config(&provider).await?;
+                    }
+                    LocalMutationOutcome::Invalid(detail) => {
+                        return Ok(Some(build_admin_payments_bad_request_response(detail)));
+                    }
+                    LocalMutationOutcome::Unavailable => {
+                        return Ok(Some(build_admin_payments_backend_unavailable_response(
+                            "payment gateway config backend unavailable",
+                        )));
+                    }
+                }
             }
+            Ok(Some(build_payment_gateway_conflict_response(
+                "payment gateway config changed too frequently; retry the request",
+            )))
         }
         Some("test_epay_gateway") | Some("test_payment_gateway") => {
-            let provider = admin_payment_gateway_provider_from_path(request_context.path())
-                .unwrap_or_else(|| "epay".to_string());
+            let Some(provider) = resolve_admin_payment_gateway_provider(
+                request_context.path(),
+                route_kind.expect("matched payment gateway route kind"),
+            ) else {
+                return Ok(Some(build_admin_payments_bad_request_response(
+                    "unsupported payment gateway provider",
+                )));
+            };
             let status = state.app().find_payment_gateway_config(&provider).await?;
             let ok = status
                 .as_ref()
@@ -491,5 +676,166 @@ pub(super) async fn maybe_build_local_admin_payment_gateways_response(
             ))
         }
         _ => Ok(None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use aether_crypto::{encrypt_python_fernet_plaintext, DEVELOPMENT_ENCRYPTION_KEY};
+    use aether_data_contracts::repository::billing::PaymentGatewayConfigRecord;
+    use serde_json::{json, Value};
+
+    use super::{
+        legacy_secret_reuse_requires_reentry, merge_gateway_secret_maps,
+        resolve_admin_payment_gateway_provider,
+    };
+    use crate::handlers::shared::PaymentGatewaySecretBinding;
+
+    fn gateway_record(
+        endpoint_url: &str,
+        merchant_id: &str,
+        merchant_key_encrypted: Option<String>,
+    ) -> PaymentGatewayConfigRecord {
+        PaymentGatewayConfigRecord {
+            provider: "stripe".to_string(),
+            enabled: true,
+            endpoint_url: endpoint_url.to_string(),
+            callback_base_url: None,
+            merchant_id: merchant_id.to_string(),
+            merchant_key_encrypted,
+            pay_currency: "USD".to_string(),
+            usd_exchange_rate: 1.0,
+            min_recharge_usd: 1.0,
+            channels_json: json!({}),
+            created_at_unix_secs: 1,
+            updated_at_unix_secs: 1,
+        }
+    }
+
+    #[test]
+    fn legacy_secret_reuse_requires_reentry_after_binding_change() {
+        let legacy = encrypt_python_fernet_plaintext(DEVELOPMENT_ENCRYPTION_KEY, "legacy-secret")
+            .expect("legacy secret should encrypt");
+        let old_record = gateway_record("https://api.stripe.com", "merchant-old", Some(legacy));
+        let changed_binding =
+            PaymentGatewaySecretBinding::new("stripe", "https://api.stripe.com", "merchant-new")
+                .expect("changed binding should be valid");
+        assert!(legacy_secret_reuse_requires_reentry(
+            Some(&old_record),
+            &changed_binding,
+        ));
+
+        let v2_record = gateway_record(
+            "https://api.stripe.com",
+            "merchant-old",
+            Some("aether-payment-gateway-secret-v2:legacy".to_string()),
+        );
+        assert!(legacy_secret_reuse_requires_reentry(
+            Some(&v2_record),
+            &changed_binding,
+        ));
+    }
+
+    #[test]
+    fn legacy_secret_reuse_is_allowed_only_for_same_binding_or_bound_v3() {
+        let legacy = encrypt_python_fernet_plaintext(DEVELOPMENT_ENCRYPTION_KEY, "legacy-secret")
+            .expect("legacy secret should encrypt");
+        let old_record =
+            gateway_record("https://API.STRIPE.COM:443/", "merchant-old", Some(legacy));
+        let same_binding = PaymentGatewaySecretBinding::new(
+            "stripe",
+            "https://api.stripe.com:443/",
+            " merchant-old ",
+        )
+        .expect("same binding should be valid");
+        assert!(!legacy_secret_reuse_requires_reentry(
+            Some(&old_record),
+            &same_binding,
+        ));
+
+        let v3_record = gateway_record(
+            "https://api.stripe.com",
+            "merchant-old",
+            Some("aether-payment-gateway-secret-v3:bound".to_string()),
+        );
+        let changed_binding =
+            PaymentGatewaySecretBinding::new("stripe", "https://api.stripe.com", "merchant-new")
+                .expect("changed binding should be valid");
+        assert!(!legacy_secret_reuse_requires_reentry(
+            Some(&v3_record),
+            &changed_binding,
+        ));
+    }
+
+    #[test]
+    fn stripe_secret_rotation_preserves_omitted_secret_fields() {
+        let existing = json!({
+            "secret_key": "old-secret-key",
+            "webhook_secret": "old-webhook"
+        })
+        .to_string();
+        let updates = json!({"webhook_secret": "new-webhook"})
+            .as_object()
+            .cloned()
+            .expect("updates should be an object");
+
+        let merged = Value::Object(
+            merge_gateway_secret_maps(Some(&existing), updates)
+                .expect("valid secret maps should merge"),
+        );
+        assert_eq!(merged["secret_key"], "old-secret-key");
+        assert_eq!(merged["webhook_secret"], "new-webhook");
+    }
+
+    #[test]
+    fn wxpay_secret_rotation_preserves_omitted_secret_fields() {
+        let existing = json!({
+            "private_key": "old-private",
+            "api_v3_key": "old-api-v3-key",
+            "public_key": "old-public"
+        })
+        .to_string();
+        let updates = json!({"api_v3_key": "new-api-v3-key"})
+            .as_object()
+            .cloned()
+            .expect("updates should be an object");
+
+        let merged = Value::Object(
+            merge_gateway_secret_maps(Some(&existing), updates)
+                .expect("valid secret maps should merge"),
+        );
+        assert_eq!(merged["private_key"], "old-private");
+        assert_eq!(merged["api_v3_key"], "new-api-v3-key");
+        assert_eq!(merged["public_key"], "old-public");
+    }
+
+    #[test]
+    fn generic_gateway_routes_never_fall_back_to_epay() {
+        assert_eq!(
+            resolve_admin_payment_gateway_provider(
+                "/api/admin/payments/gateways/stripe",
+                "update_payment_gateway",
+            )
+            .as_deref(),
+            Some("stripe")
+        );
+        assert!(resolve_admin_payment_gateway_provider(
+            "/api/admin/payments/gateways/unsupported",
+            "update_payment_gateway",
+        )
+        .is_none());
+        assert!(resolve_admin_payment_gateway_provider(
+            "/api/admin/payments/gateways/stripe/extra",
+            "get_payment_gateway",
+        )
+        .is_none());
+        assert_eq!(
+            resolve_admin_payment_gateway_provider(
+                "/api/admin/payments/epay",
+                "update_epay_gateway",
+            )
+            .as_deref(),
+            Some("epay")
+        );
     }
 }

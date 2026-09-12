@@ -32,7 +32,12 @@ pub(in super::super) async fn admin_provider_ops_run_checkin_action(
         );
     }
 
-    let url = admin_provider_ops_request_url(base_url, action_config, "/api/user/checkin");
+    let url = match admin_provider_ops_request_url(base_url, action_config, "/api/user/checkin") {
+        Ok(url) => url,
+        Err(message) => {
+            return admin_provider_ops_action_error("not_configured", "checkin", message, None)
+        }
+    };
     let method = admin_provider_ops_request_method(action_config, "POST");
     let (status, response_json) = match admin_provider_ops_execute_json_request(
         state,
@@ -129,7 +134,7 @@ pub(in super::super) async fn admin_provider_ops_run_checkin_action(
         );
     }
 
-    let message = response_json
+    let upstream_message = response_json
         .get("message")
         .and_then(serde_json::Value::as_str)
         .unwrap_or_default()
@@ -143,23 +148,23 @@ pub(in super::super) async fn admin_provider_ops_run_checkin_action(
         return admin_provider_ops_action_response(
             "success",
             "checkin",
-            admin_provider_ops_checkin_payload(&response_json, Some(message)),
+            admin_provider_ops_checkin_payload(&response_json, Some("签到成功".to_string())),
             None,
             response_time_ms,
             3600,
         );
     }
-    if admin_provider_ops_checkin_already_done(&message) {
+    if admin_provider_ops_checkin_already_done(&upstream_message) {
         return admin_provider_ops_action_response(
             "already_done",
             "checkin",
-            admin_provider_ops_checkin_payload(&response_json, Some(message)),
+            admin_provider_ops_checkin_payload(&response_json, Some("今日已签到".to_string())),
             None,
             response_time_ms,
             3600,
         );
     }
-    if admin_provider_ops_checkin_auth_failure(&message) {
+    if admin_provider_ops_checkin_auth_failure(&upstream_message) {
         return admin_provider_ops_action_error(
             if has_cookie {
                 "auth_expired"
@@ -167,28 +172,15 @@ pub(in super::super) async fn admin_provider_ops_run_checkin_action(
                 "auth_failed"
             },
             "checkin",
-            if message.is_empty() {
-                if has_cookie {
-                    "Cookie 已失效"
-                } else {
-                    "认证失败"
-                }
+            if has_cookie {
+                "Cookie 已失效"
             } else {
-                message.as_str()
+                "认证失败"
             },
             response_time_ms,
         );
     }
-    admin_provider_ops_action_error(
-        "unknown_error",
-        "checkin",
-        if message.is_empty() {
-            "签到失败"
-        } else {
-            message.as_str()
-        },
-        response_time_ms,
-    )
+    admin_provider_ops_action_error("unknown_error", "checkin", "签到失败", response_time_ms)
 }
 
 fn admin_provider_ops_network_error_message(error: &str) -> String {
@@ -197,5 +189,5 @@ fn admin_provider_ops_network_error_message(error: &str) -> String {
     if lower.contains("timeout") || normalized.contains("超时") {
         return "请求超时".to_string();
     }
-    format!("网络错误: {normalized}")
+    "网络错误".to_string()
 }

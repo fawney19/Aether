@@ -57,12 +57,12 @@
                     />
                   </div>
                   <div class="flex-1 min-w-0">
-                    <h3 class="text-balance text-base font-semibold leading-tight text-foreground sm:text-lg">
+                    <h3 class="break-words text-balance text-base font-semibold leading-tight text-foreground sm:text-lg">
                       {{ title }}
                     </h3>
                     <p
                       v-if="description"
-                      class="mt-0.5 text-pretty text-xs leading-4 text-muted-foreground"
+                      class="mt-0.5 break-words text-pretty text-xs leading-4 text-muted-foreground"
                     >
                       {{ description }}
                     </p>
@@ -80,7 +80,7 @@
             <!-- Footer 区域：如果有 footer 插槽，自动添加样式 -->
             <div
               v-if="slots.footer"
-              class="flex shrink-0 flex-col-reverse items-stretch gap-2 border-t border-border bg-background/95 px-4 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-3 backdrop-blur-sm [&>button]:w-full sm:flex-row-reverse sm:items-center sm:gap-3 sm:bg-muted/10 sm:px-6 sm:py-4 sm:[&>button]:w-auto"
+              class="flex shrink-0 flex-col-reverse items-stretch gap-2 border-t border-border bg-background/95 px-4 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-3 backdrop-blur-sm [&>button]:min-h-min [&>button]:w-full [&>button]:whitespace-normal [&>button]:py-2 sm:flex-row-reverse sm:flex-wrap sm:items-center sm:gap-3 sm:bg-muted/10 sm:px-6 sm:py-4 sm:[&>button]:w-auto"
             >
               <slot name="footer" />
             </div>
@@ -169,7 +169,7 @@ const maxWidthClass = computed(() => {
 })
 
 const contentBodyClass = computed(() => [
-  'min-h-0 overflow-y-auto overscroll-contain',
+  'min-h-0 min-w-0 overflow-y-auto overscroll-contain',
   props.noPadding ? '' : 'px-4 py-3 sm:px-6',
 ].filter(Boolean).join(' '))
 

@@ -1,8 +1,13 @@
 // Gateway-backed benchmark scenarios live outside the reusable testkit.
 use std::env;
+#[cfg(unix)]
 use std::fs;
-use std::path::PathBuf;
+use std::io;
+#[cfg(unix)]
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
+use aether_crypto::PythonFernetCompat;
 use aether_data::repository::auth::CreateStandaloneApiKeyRecord;
 use aether_data::repository::wallet::WalletLookupKey;
 use aether_data::{
@@ -12,6 +17,7 @@ use aether_data_contracts::repository::global_models::{
     CreateAdminGlobalModelRecord, UpdateAdminGlobalModelRecord, UpsertAdminProviderModelRecord,
 };
 use aether_data_contracts::repository::provider_catalog::{
+    ProviderCatalogKeyAdminCasUpdate, ProviderCatalogKeyOAuthCredentialFence,
     StoredProviderCatalogEndpoint, StoredProviderCatalogKey, StoredProviderCatalogProvider,
 };
 use serde_json::json;
@@ -196,6 +202,12 @@ impl Config {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::from_env_and_args().map_err(|err| format!("invalid config: {err}"))?;
+    let encryption_key = env_value("AETHER_GATEWAY_DATA_ENCRYPTION_KEY")
+        .or_else(|| env_value("ENCRYPTION_KEY"))
+        .ok_or(
+            "set AETHER_GATEWAY_DATA_ENCRYPTION_KEY or ENCRYPTION_KEY to the gateway's encryption key before seeding",
+        )?;
+    let secret_cipher = PythonFernetCompat::from_secret(&encryption_key);
 
     let backends = DataBackends::from_config(DataLayerConfig::from_database(SqlDatabaseConfig {
         driver: DatabaseDriver::Postgres,
@@ -211,10 +223,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     }))?;
 
-    seed_provider_catalog(&backends, &config).await?;
+    seed_provider_catalog(&backends, &config, &secret_cipher).await?;
     seed_models(&backends, &config).await?;
     let operator_user_id = seed_operator_user(&backends, &config).await?;
-    seed_api_keys(&backends, &config, &operator_user_id).await?;
+    seed_api_keys(&backends, &config, &operator_user_id, &secret_cipher).await?;
     verify_candidate_selection(&backends, &config).await?;
     write_outputs(&config)?;
 
@@ -239,6 +251,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 async fn seed_provider_catalog(
     backends: &DataBackends,
     config: &Config,
+    secret_cipher: &PythonFernetCompat,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let reader = backends
         .read()
@@ -322,7 +335,7 @@ async fn seed_provider_catalog(
     )?
     .with_transport_fields(
         Some(json!(["openai:chat"])),
-        Some(config.provider_api_key.clone()),
+        Some(secret_cipher.encrypt_plaintext(&config.provider_api_key)?),
         None,
         None,
         None,
@@ -337,17 +350,40 @@ async fn seed_provider_catalog(
         Some(json!({"openai:chat": {"state": "closed"}})),
     );
 
-    if reader
-        .list_keys_by_ids(std::slice::from_ref(&config.provider_key_id))
-        .await?
-        .is_empty()
-    {
-        writer.create_key(&provider_key).await?;
-    } else {
-        writer.update_key(&provider_key).await?;
+    for _ in 0..8 {
+        let existing = reader
+            .list_keys_by_ids(std::slice::from_ref(&config.provider_key_id))
+            .await?
+            .into_iter()
+            .next();
+        let Some(existing) = existing else {
+            writer.create_key(&provider_key).await?;
+            return Ok(());
+        };
+        if existing.provider_id != config.provider_id {
+            return Err("existing pressure provider key belongs to a different provider".into());
+        }
+
+        // Randomized ciphertext changes on every seed. Fence against the observed
+        // credential and preserve runtime fields when rotating the configured key.
+        let update = ProviderCatalogKeyAdminCasUpdate {
+            expected_encrypted_auth_config: existing.encrypted_auth_config.clone(),
+            expected_credential: ProviderCatalogKeyOAuthCredentialFence {
+                encrypted_api_key: existing.encrypted_api_key,
+                auth_type: existing.auth_type,
+                provider_id: existing.provider_id,
+                provider_type: provider.provider_type.clone(),
+            },
+            key: provider_key.clone(),
+            codex_rotation: None,
+            reset_oauth_runtime: true,
+        };
+        if writer.compare_and_update_key_admin_state(&update).await? {
+            return Ok(());
+        }
     }
 
-    Ok(())
+    Err("pressure provider key changed repeatedly during seed; retry initialization".into())
 }
 
 fn pressure_provider_transport_config(mock_upstream_h2c: bool) -> Option<serde_json::Value> {
@@ -462,9 +498,10 @@ async fn seed_api_keys(
     backends: &DataBackends,
     config: &Config,
     operator_user_id: &str,
+    secret_cipher: &PythonFernetCompat,
 ) -> Result<(), Box<dyn std::error::Error>> {
     for index in 0..config.api_key_count {
-        seed_api_key(backends, config, operator_user_id, index).await?;
+        seed_api_key(backends, config, operator_user_id, index, secret_cipher).await?;
     }
     Ok(())
 }
@@ -474,6 +511,7 @@ async fn seed_api_key(
     config: &Config,
     operator_user_id: &str,
     key_index: usize,
+    secret_cipher: &PythonFernetCompat,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let auth_reader = backends
         .read()
@@ -490,17 +528,28 @@ async fn seed_api_key(
 
     let api_key_id = pressure_api_key_id(config, key_index);
     let api_key_value = pressure_api_key_value(config, key_index);
+    let key_hash = sha256_hex(&api_key_value);
+    let key_encrypted = secret_cipher.encrypt_plaintext(&api_key_value)?;
 
     let existing = auth_reader
         .find_export_standalone_api_key_by_id(&api_key_id)
         .await?;
+    if existing
+        .as_ref()
+        .is_some_and(|record| record.key_hash != key_hash)
+    {
+        return Err(format!(
+            "existing pressure API key {api_key_id} has a different hash; use its original value or a new --api-key-id"
+        )
+        .into());
+    }
     if existing.is_none() {
         auth_writer
             .create_standalone_api_key(CreateStandaloneApiKeyRecord {
                 user_id: operator_user_id.to_string(),
                 api_key_id: api_key_id.clone(),
-                key_hash: sha256_hex(&api_key_value),
-                key_encrypted: Some(api_key_value),
+                key_hash,
+                key_encrypted: Some(key_encrypted),
                 name: Some(format!("Local pressure API key {}", key_index + 1)),
                 allowed_providers: Some(vec![config.provider_id.clone()]),
                 allowed_api_formats: Some(vec!["openai:chat".to_string()]),
@@ -522,7 +571,11 @@ async fn seed_api_key(
             .update_standalone_api_key_basic(
                 aether_data::repository::auth::UpdateStandaloneApiKeyBasicRecord {
                     api_key_id: api_key_id.clone(),
+                    key_encrypted: Some(key_encrypted),
+                    key_encrypted_present: true,
                     name: Some(format!("Local pressure API key {}", key_index + 1)),
+                    name_present: true,
+                    force_capabilities: None,
                     rate_limit_present: true,
                     rate_limit: Some(0),
                     concurrent_limit_present: true,
@@ -655,22 +708,18 @@ async fn verify_candidate_selection(
 }
 
 fn write_outputs(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
-    if let Some(parent) = config.output_env_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    if let Some(parent) = config.output_key_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    if let Some(parent) = config.output_key_list_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
-    fs::write(&config.output_key_path, format!("{}\n", config.api_key))?;
+    write_private_output(
+        &config.output_key_path,
+        format!("{}\n", config.api_key).as_bytes(),
+    )?;
     let key_list = (0..config.api_key_count)
         .map(|index| pressure_api_key_value(config, index))
         .collect::<Vec<_>>()
         .join("\n");
-    fs::write(&config.output_key_list_path, format!("{key_list}\n"))?;
+    write_private_output(
+        &config.output_key_list_path,
+        format!("{key_list}\n").as_bytes(),
+    )?;
     let env_content = format!(
         concat!(
             "export AETHER_API_KEY_FILE={key_path}\n",
@@ -689,8 +738,107 @@ fn write_outputs(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
         model = shell_escape(&config.model),
         mock_upstream_base_url = shell_escape(&config.mock_upstream_base_url),
     );
-    fs::write(&config.output_env_path, env_content)?;
+    write_private_output(&config.output_env_path, env_content.as_bytes())?;
 
+    Ok(())
+}
+
+fn write_private_output(path: &Path, contents: &[u8]) -> io::Result<()> {
+    #[cfg(not(unix))]
+    {
+        let _ = (path, contents);
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "private benchmark credential outputs currently require Unix filesystem checks",
+        ));
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+
+        let file_name = path.file_name().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "private output path must name a file",
+            )
+        })?;
+        let input_parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let parent = fs::canonicalize(input_parent)?;
+        let parent_metadata = fs::symlink_metadata(&parent)?;
+        if !parent_metadata.is_dir() || parent_metadata.file_type().is_symlink() {
+            return Err(io::Error::other(
+                "private output parent must be a real directory",
+            ));
+        }
+
+        let target = parent.join(file_name);
+        let temporary = parent.join(format!(
+            ".aether-pressure-output-{}.tmp",
+            uuid::Uuid::new_v4()
+        ));
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temporary)?;
+
+        let result = (|| -> io::Result<()> {
+            let owner_uid = file.metadata()?.uid();
+            validate_private_output_directory(&parent, owner_uid)?;
+            match fs::symlink_metadata(&target) {
+                Ok(metadata)
+                    if metadata.is_file()
+                        && !metadata.file_type().is_symlink()
+                        && metadata.uid() == owner_uid
+                        && metadata.nlink() == 1 => {}
+                Ok(_) => {
+                    return Err(io::Error::other(
+                        "refusing to replace a symlink, special file, hard link, or foreign-owned private output",
+                    ));
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+
+            file.set_permissions(fs::Permissions::from_mode(0o600))?;
+            file.write_all(contents)?;
+            file.sync_all()?;
+            drop(file);
+            fs::rename(&temporary, &target)?;
+            fs::File::open(&parent)?.sync_all()
+        })();
+
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary);
+        }
+        result
+    }
+}
+
+#[cfg(unix)]
+fn validate_private_output_directory(directory: &Path, owner_uid: u32) -> io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    let mut ancestor = Some(directory);
+    while let Some(path) = ancestor {
+        let metadata = fs::symlink_metadata(path)?;
+        let mode = metadata.mode();
+        if !metadata.is_dir()
+            || metadata.file_type().is_symlink()
+            || (metadata.uid() != owner_uid && metadata.uid() != 0)
+            || (mode & 0o022 != 0 && mode & 0o1000 == 0)
+        {
+            return Err(io::Error::other(format!(
+                "private output directory '{}' has unsafe ownership or permissions",
+                path.display()
+            )));
+        }
+        ancestor = path.parent();
+    }
     Ok(())
 }
 
@@ -764,6 +912,8 @@ fn print_help() {
     println!(
         "Usage: cargo run -p aether-integration-tests --bin gateway_pressure_seed -- [options]\n\
 \n\
+The seed and gateway must share AETHER_GATEWAY_DATA_ENCRYPTION_KEY (or ENCRYPTION_KEY).\n\
+\n\
 Options:\n\
   --database-url URL\n\
   --output-env PATH\n\
@@ -789,7 +939,7 @@ Options:\n\
 mod tests {
     use serde_json::json;
 
-    use super::pressure_provider_transport_config;
+    use super::{pressure_provider_transport_config, write_private_output};
 
     #[test]
     fn pressure_provider_transport_config_enables_h2c_prior_knowledge() {
@@ -810,5 +960,39 @@ mod tests {
     #[test]
     fn pressure_provider_transport_config_is_absent_by_default() {
         assert_eq!(pressure_provider_transport_config(false), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_outputs_are_atomic_private_and_refuse_link_targets() {
+        use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
+
+        let root = std::env::temp_dir().join(format!(
+            "aether-pressure-private-output-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let output = root.join("api-key");
+        write_private_output(&output, b"secret\n").unwrap();
+        let metadata = std::fs::symlink_metadata(&output).unwrap();
+        assert_eq!(std::fs::read(&output).unwrap(), b"secret\n");
+        assert_eq!(metadata.mode() & 0o777, 0o600);
+        assert_eq!(metadata.nlink(), 1);
+
+        let victim = root.join("victim");
+        std::fs::write(&victim, b"known-good").unwrap();
+        std::fs::remove_file(&output).unwrap();
+        symlink(&victim, &output).unwrap();
+        assert!(write_private_output(&output, b"replacement\n").is_err());
+        assert_eq!(std::fs::read(&victim).unwrap(), b"known-good");
+
+        std::fs::remove_file(&output).unwrap();
+        std::fs::hard_link(&victim, &output).unwrap();
+        assert!(write_private_output(&output, b"replacement\n").is_err());
+        assert_eq!(std::fs::read(&victim).unwrap(), b"known-good");
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

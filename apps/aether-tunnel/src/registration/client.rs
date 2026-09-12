@@ -1,12 +1,20 @@
-use aether_http::{build_http_client, jittered_delay_for_retry, HttpClientConfig, HttpRetryConfig};
+use aether_http::{
+    apply_http_client_config, jittered_delay_for_retry, read_response_bytes_with_limit,
+    HttpClientConfig, HttpRetryConfig, ResponseBodyReadError,
+};
 use aether_runtime::summarize_text_payload;
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use tokio::time::sleep;
 use tracing::{debug, error, info};
 
-use crate::config::{effective_tunnel_security, Config, ServerEntry, TunnelSecurity};
+use crate::config::{
+    aether_url_for_log, effective_tunnel_security, validate_aether_url, Config, ServerEntry,
+    TunnelSecurity,
+};
 use crate::hardware::HardwareInfo;
+
+const MAX_AETHER_CONTROL_RESPONSE_BYTES: usize = 256 * 1024;
 
 #[derive(Debug, Serialize)]
 struct RegisterRequest {
@@ -32,6 +40,7 @@ struct RegisterRequest {
 #[derive(Debug, Deserialize)]
 pub struct RegisterResponse {
     pub node_id: String,
+    pub tunnel_generation: String,
 }
 
 /// Remote configuration pushed by the Aether management backend.
@@ -58,7 +67,7 @@ pub struct AetherClient {
 
 impl AetherClient {
     pub fn new(config: &Config, aether_url: &str, management_token: &str) -> Self {
-        let http = build_http_client(&HttpClientConfig {
+        let client_config = HttpClientConfig {
             connect_timeout_ms: Some(config.aether_connect_timeout_secs.saturating_mul(1_000)),
             request_timeout_ms: Some(config.aether_request_timeout_secs.saturating_mul(1_000)),
             pool_idle_timeout_ms: Some(config.aether_pool_idle_timeout_secs.saturating_mul(1_000)),
@@ -75,8 +84,18 @@ impl AetherClient {
                 .effective_aether_outbound_proxy_url()
                 .map(str::to_string),
             ..HttpClientConfig::default()
-        })
-        .expect("failed to create HTTP client");
+        };
+        let mut builder = apply_http_client_config(
+            reqwest::Client::builder()
+                .no_proxy()
+                .redirect(reqwest::redirect::Policy::none()),
+            &client_config,
+        );
+        if let Some(proxy_url) = client_config.proxy_url.as_deref() {
+            builder = builder
+                .proxy(reqwest::Proxy::all(proxy_url).expect("invalid Aether outbound proxy URL"));
+        }
+        let http = builder.build().expect("failed to create HTTP client");
 
         let retry = HttpRetryConfig {
             max_attempts: config.aether_retry_max_attempts,
@@ -87,7 +106,7 @@ impl AetherClient {
 
         Self {
             http,
-            base_url: aether_url.trim_end_matches('/').to_string(),
+            base_url: aether_url.trim().trim_end_matches('/').to_string(),
             token: management_token.to_string(),
             retry,
         }
@@ -95,7 +114,7 @@ impl AetherClient {
 
     /// Register this node with Aether (idempotent upsert by ip:port).
     ///
-    /// Returns the stable node_id assigned by Aether.
+    /// Returns the stable node identity and the current server-issued tunnel generation.
     pub async fn register(
         &self,
         config: &Config,
@@ -103,7 +122,8 @@ impl AetherClient {
         node_name: &str,
         public_ip: &str,
         hw: Option<&HardwareInfo>,
-    ) -> anyhow::Result<String> {
+    ) -> anyhow::Result<RegisterResponse> {
+        validate_aether_url(&self.base_url)?;
         let url = format!("{}/api/admin/proxy-nodes/register", self.base_url);
         let effective_security = effective_tunnel_security(
             &server.aether_url,
@@ -130,7 +150,7 @@ impl AetherClient {
         };
 
         info!(
-            url = %url,
+            url = %aether_url_for_log(&url),
             name = %body.name,
             ip = %body.ip,
             "registering with Aether"
@@ -146,11 +166,22 @@ impl AetherClient {
                 },
                 "register",
             )
-            .await?;
+            .await
+            .map_err(|error| {
+                anyhow::anyhow!("register request failed ({})", reqwest_error_kind(&error))
+            })?;
 
         let status = resp.status();
         if !status.is_success() {
-            let text = resp.text().await.unwrap_or_default();
+            let body = read_response_bytes_with_limit(resp, MAX_AETHER_CONTROL_RESPONSE_BYTES)
+                .await
+                .map_err(|error| {
+                    anyhow::anyhow!(
+                        "register failed (HTTP {status}): {}",
+                        response_body_error_kind(&error)
+                    )
+                })?;
+            let text = String::from_utf8_lossy(&body);
             let summary = summarize_text_payload(&text);
             anyhow::bail!(
                 "register failed (HTTP {}): response body redacted (bytes={}, sha256={})",
@@ -160,13 +191,23 @@ impl AetherClient {
             );
         }
 
-        let data: RegisterResponse = resp.json().await?;
-        info!(node_id = %data.node_id, "registered successfully");
-        Ok(data.node_id)
+        let body = read_response_bytes_with_limit(resp, MAX_AETHER_CONTROL_RESPONSE_BYTES)
+            .await
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "failed to read Aether registration response ({})",
+                    response_body_error_kind(&error)
+                )
+            })?;
+        let data: RegisterResponse = serde_json::from_slice(&body)?;
+        validate_registration_binding(&data)?;
+        info!(node_id = %data.node_id, tunnel_generation = %data.tunnel_generation, "registered successfully");
+        Ok(data)
     }
 
     /// Unregister this node from Aether (graceful shutdown).
     pub async fn unregister(&self, node_id: &str) -> anyhow::Result<()> {
+        validate_aether_url(&self.base_url)?;
         let url = format!("{}/api/admin/proxy-nodes/unregister", self.base_url);
         let body = UnregisterRequest {
             node_id: node_id.to_string(),
@@ -193,7 +234,15 @@ impl AetherClient {
             }
             Ok(r) => {
                 let status = r.status();
-                let text = r.text().await.unwrap_or_default();
+                let body = read_response_bytes_with_limit(r, MAX_AETHER_CONTROL_RESPONSE_BYTES)
+                    .await
+                    .map_err(|error| {
+                        anyhow::anyhow!(
+                            "unregister failed (HTTP {status}): {}",
+                            response_body_error_kind(&error)
+                        )
+                    })?;
+                let text = String::from_utf8_lossy(&body);
                 let summary = summarize_text_payload(&text);
                 error!(
                     status = %status,
@@ -210,8 +259,9 @@ impl AetherClient {
             }
             Err(e) => {
                 // Best-effort during shutdown
-                error!(error = %e, "unregister request failed");
-                anyhow::bail!("unregister request failed: {}", e);
+                let kind = reqwest_error_kind(&e);
+                error!(error_kind = kind, "unregister request failed");
+                anyhow::bail!("unregister request failed ({kind})");
             }
         }
     }
@@ -250,7 +300,7 @@ impl AetherClient {
                         let sleep_for = jittered_delay_for_retry(self.retry, attempt - 1);
                         debug!(
                             attempt,
-                            error = %e,
+                            error_kind = reqwest_error_kind(&e),
                             sleep_ms = sleep_for.as_millis(),
                             label,
                             "Aether request retrying"
@@ -261,6 +311,55 @@ impl AetherClient {
                     return Err(e);
                 }
             }
+        }
+    }
+}
+
+fn validate_registration_binding(response: &RegisterResponse) -> anyhow::Result<()> {
+    for (field, value) in [
+        ("node_id", response.node_id.as_str()),
+        ("tunnel_generation", response.tunnel_generation.as_str()),
+    ] {
+        if value.is_empty()
+            || value.len() > 128
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        {
+            anyhow::bail!("registration response contains an invalid {field}");
+        }
+    }
+    Ok(())
+}
+
+/// Reqwest error messages can include the complete request URL.  Registration
+/// URLs are derived from configuration, whose path may contain an operator
+/// secret, so expose only a stable transport category at this boundary.
+fn reqwest_error_kind(error: &reqwest::Error) -> &'static str {
+    if error.is_timeout() {
+        "timeout"
+    } else if error.is_connect() {
+        "connect"
+    } else if error.is_request() {
+        "request"
+    } else if error.is_redirect() {
+        "redirect"
+    } else if error.is_body() {
+        "body"
+    } else if error.is_decode() {
+        "decode"
+    } else {
+        "transport"
+    }
+}
+
+fn response_body_error_kind(error: &ResponseBodyReadError) -> String {
+    match error {
+        ResponseBodyReadError::TooLarge { max_bytes } => {
+            format!("response too large (max {max_bytes} bytes)")
+        }
+        ResponseBodyReadError::Read(error) => {
+            format!("response read failed ({})", reqwest_error_kind(error))
         }
     }
 }

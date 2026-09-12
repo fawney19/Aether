@@ -10,13 +10,18 @@ description = "HTTP frontdoor middleware and request lifecycle primitives for Ae
 aether-ai-formats.workspace = true
 axum.workspace = true
 bytes.workspace = true
+futures-util.workspace = true
 http.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["io-util"] }
+tokio-util = { workspace = true, features = ["rt"] }
 tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-futures-util.workspace = true
+http-body-util = "0.1"
+hyper = { version = "1", features = ["client", "server", "http1", "http2"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
 serde_json.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
 tower = { version = "0.5", features = ["util"] }
 tracing-subscriber.workspace = true

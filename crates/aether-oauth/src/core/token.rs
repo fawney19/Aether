@@ -1,7 +1,7 @@
 use serde_json::Value;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct OAuthTokenSet {
     pub access_token: String,
     pub refresh_token: Option<String>,
@@ -9,6 +9,26 @@ pub struct OAuthTokenSet {
     pub scope: Option<String>,
     pub expires_at_unix_secs: Option<u64>,
     pub raw_payload: Option<Value>,
+}
+
+impl std::fmt::Debug for OAuthTokenSet {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("OAuthTokenSet")
+            .field("access_token", &"<redacted>")
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_ref().map(|_| "<redacted>"),
+            )
+            .field("token_type", &self.token_type)
+            .field("scope", &self.scope)
+            .field("expires_at_unix_secs", &self.expires_at_unix_secs)
+            .field(
+                "raw_payload",
+                &self.raw_payload.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
 }
 
 impl OAuthTokenSet {
@@ -108,5 +128,21 @@ mod tests {
         assert_eq!(token.refresh_token.as_deref(), Some("refresh"));
         assert!(token.expires_at_unix_secs.is_some());
         assert_eq!(token.bearer_header_value(), "Bearer access");
+    }
+
+    #[test]
+    fn debug_output_redacts_tokens_and_raw_payload() {
+        let token = OAuthTokenSet::from_token_payload(json!({
+            "access_token": "access-secret-sentinel",
+            "refresh_token": "refresh-secret-sentinel",
+            "provider_secret": "raw-secret-sentinel"
+        }))
+        .expect("token should parse");
+
+        let debug = format!("{token:?}");
+        assert!(!debug.contains("access-secret-sentinel"));
+        assert!(!debug.contains("refresh-secret-sentinel"));
+        assert!(!debug.contains("raw-secret-sentinel"));
+        assert!(debug.contains("<redacted>"));
     }
 }

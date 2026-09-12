@@ -173,6 +173,15 @@ impl SystemConfigCache {
         self.detach_all_loads();
     }
 
+    pub(crate) fn invalidate(&self, key: &str) {
+        let Ok(_mutation) = self.mutation.lock() else {
+            return;
+        };
+        self.generation.fetch_add(1, Ordering::AcqRel);
+        self.entries.remove(&key.to_string());
+        self.detach_all_loads();
+    }
+
     pub(crate) fn insert_if_generation(
         &self,
         key: String,

@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::convert::Infallible;
 use std::fmt;
+use std::io::Write;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
@@ -26,6 +27,10 @@ const MAX_SENTINEL_NAMESPACE_LEN: usize = 32;
 const DIRECT_RESTORE_SENTINEL_LIMIT: usize = 32;
 const MAX_CACHE_SENTINEL_BYTES: usize = 128;
 const MAX_CACHE_RECORD_BYTES: usize = 512;
+// A configured response buffer may be explicitly disabled, so restoration
+// needs an independent ceiling for bytes introduced by sentinel replacement.
+// This is not a response-body limit: an ordinary large response remains valid.
+pub(crate) const MAX_SYNC_RESTORE_EXPANSION_BYTES: usize = 64 * 1024 * 1024;
 const CHAT_PII_REDACTION_RUNTIME_CONFIG_CACHE_TTL: Duration = Duration::from_secs(5);
 
 static EMAIL_REGEX: LazyLock<Regex> = LazyLock::new(|| {
@@ -495,11 +500,16 @@ impl RedactionSession {
         self.mappings.values()
     }
 
-    fn restore_text(&self, input: &str) -> RestoredText {
-        if self.mapping_count() <= DIRECT_RESTORE_SENTINEL_LIMIT {
-            return restore_text_direct_longest_first(input, self);
-        }
-        restore_text_with_matcher(input, &SentinelMatcher::new(self))
+    fn restore_text(&self, input: &str) -> Result<RestoredText, GatewayError> {
+        let matcher = SentinelMatcher::new(self);
+        let mut budget = RestoreExpansionBudget::new(MAX_SYNC_RESTORE_EXPANSION_BYTES);
+        let (bytes, restored) = restore_bytes_with_budget(input.as_bytes(), &matcher, &mut budget)?;
+        let text = String::from_utf8(bytes).map_err(|_| {
+            GatewayError::Internal(
+                "redaction response restoration produced invalid UTF-8".to_string(),
+            )
+        })?;
+        Ok(RestoredText { text, restored })
     }
 
     fn sentinel_for_candidate(&mut self, source_text: &str, candidate: &Candidate) -> String {
@@ -2589,10 +2599,358 @@ struct RestoredText {
     restored: bool,
 }
 
+pub(crate) struct RestoreExpansionBudget {
+    limit: usize,
+    used: usize,
+}
+
+impl RestoreExpansionBudget {
+    /// The caller creates a fresh budget for one sync response, stream
+    /// `push_chunk`/`finish`, SSE event, or WebSocket frame.  It intentionally
+    /// never accumulates across a long-lived stream.
+    pub(crate) fn new(limit: usize) -> Self {
+        Self { limit, used: 0 }
+    }
+
+    fn charge(&mut self, expansion: usize) -> Result<(), GatewayError> {
+        let next = self.used.checked_add(expansion).ok_or_else(|| {
+            GatewayError::Internal("redaction response restoration expansion overflow".to_string())
+        })?;
+        if next > self.limit {
+            return Err(GatewayError::Internal(format!(
+                "redaction response restoration expansion exceeds {}/{} bytes",
+                next, self.limit
+            )));
+        }
+        self.used = next;
+        Ok(())
+    }
+
+    fn checkpoint(&self) -> usize {
+        self.used
+    }
+
+    fn available_from(&self, checkpoint: usize) -> usize {
+        self.limit.saturating_sub(checkpoint)
+    }
+
+    fn replace_charge(&mut self, checkpoint: usize, expansion: usize) -> Result<(), GatewayError> {
+        self.used = checkpoint.min(self.used);
+        self.charge(expansion)
+    }
+}
+
+struct RestoreScan {
+    consumed: usize,
+    output_len: usize,
+    expansion: usize,
+    restored: bool,
+}
+
+fn scan_restore_bytes(
+    input: &[u8],
+    matcher: &SentinelMatcher<'_>,
+) -> Result<RestoreScan, GatewayError> {
+    scan_restore_prefix(input, input.len(), matcher)
+}
+
+fn scan_restore_prefix(
+    input: &[u8],
+    scan_limit: usize,
+    matcher: &SentinelMatcher<'_>,
+) -> Result<RestoreScan, GatewayError> {
+    let scan_limit = scan_limit.min(input.len());
+    let mut output_len = 0usize;
+    let mut index = 0usize;
+    let mut restored = false;
+    while index < scan_limit {
+        if let Some(mapping) = matcher.matching_mapping_at(input, index) {
+            let next_index = index
+                .checked_add(mapping.sentinel.len())
+                .filter(|next| *next > index && *next <= input.len())
+                .ok_or_else(|| {
+                    GatewayError::Internal(
+                        "redaction response restoration sentinel length overflow".to_string(),
+                    )
+                })?;
+            output_len = output_len
+                .checked_add(mapping.original.len())
+                .ok_or_else(|| {
+                    GatewayError::Internal(
+                        "redaction response restoration output length overflow".to_string(),
+                    )
+                })?;
+            index = next_index;
+            restored = true;
+        } else {
+            output_len = output_len.checked_add(1).ok_or_else(|| {
+                GatewayError::Internal(
+                    "redaction response restoration output length overflow".to_string(),
+                )
+            })?;
+            index += 1;
+        }
+    }
+    Ok(RestoreScan {
+        consumed: index,
+        output_len,
+        expansion: output_len.saturating_sub(index),
+        restored,
+    })
+}
+
+fn build_restored_bytes(
+    input: &[u8],
+    matcher: &SentinelMatcher<'_>,
+    scan: &RestoreScan,
+) -> Vec<u8> {
+    let mut output = Vec::with_capacity(scan.output_len);
+    let mut index = 0usize;
+    while index < scan.consumed {
+        if let Some(mapping) = matcher.matching_mapping_at(input, index) {
+            output.extend_from_slice(mapping.original.as_bytes());
+            index += mapping.sentinel.len();
+        } else {
+            output.push(input[index]);
+            index += 1;
+        }
+    }
+    output
+}
+
+fn restore_bytes_with_budget(
+    input: &[u8],
+    matcher: &SentinelMatcher<'_>,
+    budget: &mut RestoreExpansionBudget,
+) -> Result<(Vec<u8>, bool), GatewayError> {
+    let scan = scan_restore_bytes(input, matcher)?;
+    if !scan.restored {
+        return Ok((input.to_vec(), false));
+    }
+    // Charge before allocating the replacement buffer.  A provider can repeat
+    // a short sentinel many times, so checking after `Vec` construction is too
+    // late to protect the process from an amplification attack.
+    budget.charge(scan.expansion)?;
+    Ok((build_restored_bytes(input, matcher, &scan), true))
+}
+
+fn measure_json_restore(
+    value: &Value,
+    matcher: &SentinelMatcher<'_>,
+) -> Result<(usize, bool), GatewayError> {
+    match value {
+        Value::String(text) => {
+            let scan = scan_restore_bytes(text.as_bytes(), matcher)?;
+            Ok((scan.expansion, scan.restored))
+        }
+        Value::Array(values) => {
+            let mut expansion = 0usize;
+            let mut restored = false;
+            for value in values {
+                let (value_expansion, value_restored) = measure_json_restore(value, matcher)?;
+                expansion = expansion.checked_add(value_expansion).ok_or_else(|| {
+                    GatewayError::Internal(
+                        "redaction response restoration expansion overflow".to_string(),
+                    )
+                })?;
+                restored |= value_restored;
+            }
+            Ok((expansion, restored))
+        }
+        Value::Object(values) => {
+            let mut expansion = 0usize;
+            let mut restored = false;
+            for value in values.values() {
+                let (value_expansion, value_restored) = measure_json_restore(value, matcher)?;
+                expansion = expansion.checked_add(value_expansion).ok_or_else(|| {
+                    GatewayError::Internal(
+                        "redaction response restoration expansion overflow".to_string(),
+                    )
+                })?;
+                restored |= value_restored;
+            }
+            Ok((expansion, restored))
+        }
+        _ => Ok((0, false)),
+    }
+}
+
+fn restore_json_strings_inner(
+    value: &mut Value,
+    matcher: &SentinelMatcher<'_>,
+    preserve_opaque_reasoning_state: bool,
+) -> Result<bool, GatewayError> {
+    match value {
+        Value::String(text) => {
+            let scan = scan_restore_bytes(text.as_bytes(), matcher)?;
+            if !scan.restored {
+                return Ok(false);
+            }
+            let bytes = build_restored_bytes(text.as_bytes(), matcher, &scan);
+            *text = String::from_utf8(bytes).map_err(|_| {
+                GatewayError::Internal(
+                    "redaction response restoration produced invalid UTF-8".to_string(),
+                )
+            })?;
+            Ok(true)
+        }
+        Value::Array(values) => {
+            let mut restored = false;
+            for value in values {
+                restored |=
+                    restore_json_strings_inner(value, matcher, preserve_opaque_reasoning_state)?;
+            }
+            Ok(restored)
+        }
+        Value::Object(values) => {
+            if preserve_opaque_reasoning_state
+                && openai_responses_object_is_opaque_reasoning_state(values)
+            {
+                return Ok(false);
+            }
+            let mut restored = false;
+            for value in values.values_mut() {
+                restored |=
+                    restore_json_strings_inner(value, matcher, preserve_opaque_reasoning_state)?;
+            }
+            Ok(restored)
+        }
+        _ => Ok(false),
+    }
+}
+
+pub(crate) fn restore_json_strings_with_budget(
+    value: &mut Value,
+    session: &RedactionSession,
+    budget: &mut RestoreExpansionBudget,
+) -> Result<bool, GatewayError> {
+    let matcher = SentinelMatcher::new(session);
+    let (expansion, restored) = measure_json_restore(value, &matcher)?;
+    if !restored {
+        return Ok(false);
+    }
+    budget.charge(expansion)?;
+    restore_json_strings_inner(
+        value,
+        &matcher,
+        session.preserves_deepseek_opaque_reasoning_state(),
+    )
+}
+
+/// Compatibility wrapper for crate-local callers that only need the historical
+/// boolean result.  The bounded implementation remains the source of truth;
+/// failures are treated as "not restored" so callers cannot accidentally emit
+/// a partially restored value.
+pub(crate) fn restore_json_strings(value: &mut Value, session: &RedactionSession) -> bool {
+    let mut budget = RestoreExpansionBudget::new(MAX_SYNC_RESTORE_EXPANSION_BYTES);
+    restore_json_strings_with_budget(value, session, &mut budget).unwrap_or(false)
+}
+
+fn openai_responses_object_is_opaque_reasoning_state(
+    object: &serde_json::Map<String, Value>,
+) -> bool {
+    let Some(item_type) = object.get("type").and_then(Value::as_str) else {
+        return false;
+    };
+    // A provider-owned reasoning item is replayed byte-for-byte.  The
+    // encrypted continuation token is only considered opaque when it is
+    // paired with the reasoning text item shape; ordinary reasoning text must
+    // still participate in PII masking/restoration.
+    let id_is_absent_or_empty = object
+        .get("id")
+        .is_none_or(|id| id.is_null() || id.as_str().is_some_and(|value| value.trim().is_empty()));
+    item_type == "reasoning"
+        && id_is_absent_or_empty
+        && object
+            .get("encrypted_content")
+            .and_then(Value::as_str)
+            .is_some_and(|state| !state.trim().is_empty())
+        && object
+            .get("content")
+            .and_then(Value::as_array)
+            .is_some_and(|content| {
+                content.iter().any(|part| {
+                    part.get("type").and_then(Value::as_str) == Some("reasoning_text")
+                        && part.get("text").is_some_and(Value::is_string)
+                })
+            })
+}
+
+fn effective_sync_restore_expansion_limit(configured_limit: u64) -> usize {
+    usize::try_from(configured_limit)
+        .unwrap_or(usize::MAX)
+        .min(MAX_SYNC_RESTORE_EXPANSION_BYTES)
+}
+
+fn sync_restore_expansion_limit() -> usize {
+    effective_sync_restore_expansion_limit(crate::headers::max_redacted_sync_response_body_bytes())
+}
+
+struct LimitedJsonWriter {
+    bytes: Vec<u8>,
+    limit: usize,
+    exceeded: bool,
+}
+
+impl LimitedJsonWriter {
+    fn new(limit: usize) -> Self {
+        Self {
+            bytes: Vec::with_capacity(limit.min(16 * 1024)),
+            limit,
+            exceeded: false,
+        }
+    }
+}
+
+impl Write for LimitedJsonWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if bytes.len() > self.limit.saturating_sub(self.bytes.len()) {
+            self.exceeded = true;
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                "redaction response exceeds output limit",
+            ));
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+pub(crate) fn serialize_json_value_with_limit(
+    value: &Value,
+    limit: usize,
+) -> Result<String, GatewayError> {
+    let mut writer = LimitedJsonWriter::new(limit);
+    match serde_json::to_writer(&mut writer, value) {
+        Ok(()) => String::from_utf8(writer.bytes).map_err(|_| {
+            GatewayError::Internal(
+                "redaction response serialization produced invalid UTF-8".to_string(),
+            )
+        }),
+        Err(_) if writer.exceeded => Err(GatewayError::Internal(format!(
+            "redaction response serialized body exceeds {limit} bytes"
+        ))),
+        Err(error) => Err(GatewayError::Internal(error.to_string())),
+    }
+}
+
 pub(crate) fn restore_sync_response_body(
     headers: &mut BTreeMap<String, String>,
     body: &[u8],
     session: &RedactionSession,
+) -> Result<RestoredSyncResponseBody, GatewayError> {
+    restore_sync_response_body_with_limit(headers, body, session, sync_restore_expansion_limit())
+}
+
+fn restore_sync_response_body_with_limit(
+    headers: &mut BTreeMap<String, String>,
+    body: &[u8],
+    session: &RedactionSession,
+    expansion_limit: usize,
 ) -> Result<RestoredSyncResponseBody, GatewayError> {
     if session.mapping_count() == 0 {
         return Ok(RestoredSyncResponseBody {
@@ -2604,9 +2962,9 @@ pub(crate) fn restore_sync_response_body(
     ensure_identity_response_encoding(headers)?;
 
     let restored = if response_body_is_json(headers, body) {
-        restore_json_response_body(body, session)?
+        restore_json_response_body(body, session, expansion_limit)?
     } else {
-        restore_text_response_body(body, session)
+        restore_text_response_body(body, session, expansion_limit)?
     };
     if restored.restored {
         set_content_length(headers, restored.body.len());
@@ -2654,17 +3012,22 @@ fn content_type_is_json(content_type: &str) -> bool {
 fn restore_json_response_body(
     body: &[u8],
     session: &RedactionSession,
+    expansion_limit: usize,
 ) -> Result<RestoredSyncResponseBody, GatewayError> {
     let Ok(mut value) = serde_json::from_slice::<Value>(body) else {
-        return Ok(restore_text_response_body(body, session));
+        return restore_text_response_body(body, session, expansion_limit);
     };
-    if !restore_json_strings(&mut value, session) {
+    let mut budget = RestoreExpansionBudget::new(expansion_limit);
+    if !restore_json_strings_with_budget(&mut value, session, &mut budget)? {
         return Ok(RestoredSyncResponseBody {
             body: body.to_vec(),
             restored: false,
         });
     }
-    let body = serde_json::to_vec(&value).map_err(|err| GatewayError::Internal(err.to_string()))?;
+    let output_limit = body.len().checked_add(expansion_limit).ok_or_else(|| {
+        GatewayError::Internal("redaction response output length overflow".to_string())
+    })?;
+    let body = serialize_json_value_with_limit(&value, output_limit)?.into_bytes();
     Ok(RestoredSyncResponseBody {
         body,
         restored: true,
@@ -2678,89 +3041,21 @@ fn restore_json_response_body(
 /// 两边因此保持同一套还原语义：未映射的占位符原样保留，`type` / `model` / `id`
 /// 这类协议字段虽然也被遍历，但它们不可能包含本 session 派生出的 sentinel，
 /// 所以不会被改写。
-///
-/// Provider-owned Responses reasoning state is the exception. DeepSeek-style
-/// items bind `reasoning_text` to `encrypted_content` and require both to be
-/// replayed unchanged. Restoring a sentinel in only the text half would make
-/// the client return a different continuation item, so those objects/events
-/// stay opaque even when another response field is restored.
-pub(crate) fn restore_json_strings(value: &mut Value, session: &RedactionSession) -> bool {
-    match value {
-        Value::String(text) => {
-            let restored = session.restore_text(text);
-            if !restored.restored {
-                return false;
-            }
-            *text = restored.text;
-            true
-        }
-        Value::Array(values) => {
-            let mut restored = false;
-            for value in values {
-                restored = restore_json_strings(value, session) || restored;
-            }
-            restored
-        }
-        Value::Object(values) => {
-            if session.preserves_deepseek_opaque_reasoning_state()
-                && openai_responses_object_is_opaque_reasoning_state(values)
-            {
-                return false;
-            }
-            let mut restored = false;
-            for value in values.values_mut() {
-                restored = restore_json_strings(value, session) || restored;
-            }
-            restored
-        }
-        _ => false,
-    }
-}
-
-fn openai_responses_object_is_opaque_reasoning_state(
-    object: &serde_json::Map<String, Value>,
-) -> bool {
-    let Some(item_type) = object.get("type").and_then(Value::as_str) else {
-        return false;
-    };
-    // Never treat a `reasoning_text` content part or delta/done event name by
-    // itself as proof of opaque state: ordinary OpenAI reasoning text may
-    // contain mask placeholders that still need client-side restoration. The
-    // binding evidence is the parent reasoning item carrying provider-owned
-    // encrypted continuation state. Returning here keeps that whole object,
-    // including its nested reasoning_text parts, value-for-value unchanged.
-    let id_is_absent_or_empty = object
-        .get("id")
-        .is_none_or(|id| id.is_null() || id.as_str().is_some_and(|value| value.trim().is_empty()));
-    item_type == "reasoning"
-        && id_is_absent_or_empty
-        && object
-            .get("encrypted_content")
-            .and_then(Value::as_str)
-            .is_some_and(|state| !state.trim().is_empty())
-        && object
-            .get("content")
-            .and_then(Value::as_array)
-            .is_some_and(|content| {
-                content.iter().any(|part| {
-                    part.get("type").and_then(Value::as_str) == Some("reasoning_text")
-                        && part.get("text").is_some_and(Value::is_string)
-                })
-            })
-}
-
-fn restore_text_response_body(body: &[u8], session: &RedactionSession) -> RestoredSyncResponseBody {
+fn restore_text_response_body(
+    body: &[u8],
+    session: &RedactionSession,
+    expansion_limit: usize,
+) -> Result<RestoredSyncResponseBody, GatewayError> {
     let Ok(text) = std::str::from_utf8(body) else {
-        return RestoredSyncResponseBody {
+        return Ok(RestoredSyncResponseBody {
             body: body.to_vec(),
             restored: false,
-        };
+        });
     };
-    let restored = session.restore_text(text);
-    RestoredSyncResponseBody {
-        body: restored.text.into_bytes(),
-        restored: restored.restored,
-    }
+    let matcher = SentinelMatcher::new(session);
+    let mut budget = RestoreExpansionBudget::new(expansion_limit);
+    let (body, restored) = restore_bytes_with_budget(text.as_bytes(), &matcher, &mut budget)?;
+    Ok(RestoredSyncResponseBody { body, restored })
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -2777,7 +3072,21 @@ pub(crate) struct StreamingResponseRestorer<'a> {
     text_carry: Vec<u8>,
     sse_line_buffer: Vec<u8>,
     sse_json_event_lines: Vec<Vec<u8>>,
+    sse_json_event_bytes: usize,
+    max_expansion_bytes: usize,
 }
+
+// A provider-controlled SSE line/event must not be allowed to grow forever
+// while the stream restorer waits for a newline or blank-record separator.
+// This bounds parser carry state only; complete response bodies and ordinary
+// streaming chunks are still passed through without a body/concurrency cap.
+const MAX_STREAM_RESTORE_BUFFER_BYTES: usize = 16 * 1024 * 1024;
+// This is an expansion budget, not a body or duration limit.  A normal
+// pass-through chunk can be any size; only bytes introduced by replacing a
+// sentinel with its original value consume this budget.
+pub(crate) const MAX_STREAM_RESTORE_EXPANSION_BYTES: usize = 16 * 1024 * 1024;
+pub(crate) const MAX_STREAM_RESTORE_OUTPUT_BYTES: usize =
+    (16usize * 1024 * 1024).saturating_add(MAX_STREAM_RESTORE_EXPANSION_BYTES);
 
 impl<'a> StreamingResponseRestorer<'a> {
     pub(crate) fn new(
@@ -2805,6 +3114,26 @@ impl<'a> StreamingResponseRestorer<'a> {
         Self::with_mode(session, StreamRestoreMode::Text)
     }
 
+    #[cfg(test)]
+    fn for_text_with_expansion_limit(
+        session: &'a RedactionSession,
+        max_expansion_bytes: usize,
+    ) -> Self {
+        let mut restorer = Self::with_mode(session, StreamRestoreMode::Text);
+        restorer.max_expansion_bytes = max_expansion_bytes;
+        restorer
+    }
+
+    #[cfg(test)]
+    fn for_sse_with_expansion_limit(
+        session: &'a RedactionSession,
+        max_expansion_bytes: usize,
+    ) -> Self {
+        let mut restorer = Self::with_mode(session, StreamRestoreMode::Sse);
+        restorer.max_expansion_bytes = max_expansion_bytes;
+        restorer
+    }
+
     fn with_mode(session: &'a RedactionSession, mode: StreamRestoreMode) -> Self {
         let max_sentinel_len = session
             .mappings()
@@ -2819,6 +3148,8 @@ impl<'a> StreamingResponseRestorer<'a> {
             text_carry: Vec::new(),
             sse_line_buffer: Vec::new(),
             sse_json_event_lines: Vec::new(),
+            sse_json_event_bytes: 0,
+            max_expansion_bytes: MAX_STREAM_RESTORE_EXPANSION_BYTES,
         }
     }
 
@@ -2826,9 +3157,12 @@ impl<'a> StreamingResponseRestorer<'a> {
         if self.max_sentinel_len == 0 {
             return Ok(chunk.to_vec());
         }
+        // Per-call expansion protection only: do not turn this into a total
+        // stream byte or duration limit.
+        let mut budget = RestoreExpansionBudget::new(self.max_expansion_bytes);
         match self.mode {
-            StreamRestoreMode::Sse => self.push_sse_chunk(chunk),
-            StreamRestoreMode::Text => Ok(self.push_text_chunk(chunk)),
+            StreamRestoreMode::Sse => self.push_sse_chunk(chunk, &mut budget),
+            StreamRestoreMode::Text => self.push_text_chunk(chunk, &mut budget),
         }
     }
 
@@ -2836,9 +3170,11 @@ impl<'a> StreamingResponseRestorer<'a> {
         if self.max_sentinel_len == 0 {
             return Ok(Vec::new());
         }
+        // `finish` is a separate bounded flush, not a cumulative stream cap.
+        let mut budget = RestoreExpansionBudget::new(self.max_expansion_bytes);
         match self.mode {
-            StreamRestoreMode::Sse => self.finish_sse(),
-            StreamRestoreMode::Text => Ok(self.flush_text_carry()),
+            StreamRestoreMode::Sse => self.finish_sse(&mut budget),
+            StreamRestoreMode::Text => self.flush_text_carry(&mut budget),
         }
     }
 
@@ -2852,16 +3188,27 @@ impl<'a> StreamingResponseRestorer<'a> {
         self.text_carry.len()
     }
 
-    fn push_text_chunk(&mut self, chunk: &[u8]) -> Vec<u8> {
+    fn push_text_chunk(
+        &mut self,
+        chunk: &[u8],
+        budget: &mut RestoreExpansionBudget,
+    ) -> Result<Vec<u8>, GatewayError> {
         self.text_carry.extend_from_slice(chunk);
-        self.restore_available_text(false)
+        self.restore_available_text(false, budget)
     }
 
-    fn flush_text_carry(&mut self) -> Vec<u8> {
-        self.restore_available_text(true)
+    fn flush_text_carry(
+        &mut self,
+        budget: &mut RestoreExpansionBudget,
+    ) -> Result<Vec<u8>, GatewayError> {
+        self.restore_available_text(true, budget)
     }
 
-    fn restore_available_text(&mut self, flush: bool) -> Vec<u8> {
+    fn restore_available_text(
+        &mut self,
+        flush: bool,
+        budget: &mut RestoreExpansionBudget,
+    ) -> Result<Vec<u8>, GatewayError> {
         let scan_limit = if flush {
             self.text_carry.len()
         } else {
@@ -2869,48 +3216,56 @@ impl<'a> StreamingResponseRestorer<'a> {
                 .len()
                 .saturating_sub(self.max_sentinel_len.saturating_sub(1))
         };
-        let mut output = Vec::with_capacity(scan_limit);
-        let mut index = 0;
-        while index < scan_limit {
-            if let Some(mapping) = self.matcher.matching_mapping_at(&self.text_carry, index) {
-                output.extend_from_slice(mapping.original.as_bytes());
-                index += mapping.sentinel.len();
-            } else {
-                output.push(self.text_carry[index]);
-                index += 1;
-            }
-        }
-        self.text_carry.drain(..index);
-        output
+        let scan = scan_restore_prefix(&self.text_carry, scan_limit, &self.matcher)?;
+        budget.charge(scan.expansion)?;
+        let output = build_restored_bytes(&self.text_carry, &self.matcher, &scan);
+        self.text_carry.drain(..scan.consumed);
+        Ok(output)
     }
 
-    fn push_sse_chunk(&mut self, chunk: &[u8]) -> Result<Vec<u8>, GatewayError> {
-        self.sse_line_buffer.extend_from_slice(chunk);
+    fn push_sse_chunk(
+        &mut self,
+        chunk: &[u8],
+        budget: &mut RestoreExpansionBudget,
+    ) -> Result<Vec<u8>, GatewayError> {
         let mut output = Vec::new();
-        while let Some(line_end) = self.sse_line_buffer.iter().position(|byte| *byte == b'\n') {
-            let line = self.sse_line_buffer.drain(..=line_end).collect::<Vec<_>>();
-            self.push_sse_line(line, &mut output)?;
+        let mut remaining = chunk;
+        while !remaining.is_empty() {
+            let Some(line_end) = remaining.iter().position(|byte| *byte == b'\n') else {
+                append_bounded_stream_restore_bytes(&mut self.sse_line_buffer, remaining)?;
+                break;
+            };
+            let line_len = line_end + 1;
+            append_bounded_stream_restore_bytes(&mut self.sse_line_buffer, &remaining[..line_len])?;
+            remaining = &remaining[line_len..];
+            let line = std::mem::take(&mut self.sse_line_buffer);
+            self.push_sse_line(line, &mut output, budget)?;
         }
         Ok(output)
     }
 
-    fn finish_sse(&mut self) -> Result<Vec<u8>, GatewayError> {
+    fn finish_sse(&mut self, budget: &mut RestoreExpansionBudget) -> Result<Vec<u8>, GatewayError> {
         let mut output = Vec::new();
         if !self.sse_line_buffer.is_empty() {
             let line = std::mem::take(&mut self.sse_line_buffer);
-            self.push_sse_line(line, &mut output)?;
+            self.push_sse_line(line, &mut output, budget)?;
         }
-        self.flush_sse_json_event(&mut output)?;
+        self.flush_sse_json_event(&mut output, budget)?;
         Ok(output)
     }
 
-    fn push_sse_line(&mut self, line: Vec<u8>, output: &mut Vec<u8>) -> Result<(), GatewayError> {
+    fn push_sse_line(
+        &mut self,
+        line: Vec<u8>,
+        output: &mut Vec<u8>,
+        budget: &mut RestoreExpansionBudget,
+    ) -> Result<(), GatewayError> {
         if !self.sse_json_event_lines.is_empty() {
             if sse_line_is_blank(&line) {
-                self.flush_sse_json_event(output)?;
+                self.flush_sse_json_event(output, budget)?;
                 output.extend_from_slice(&line);
             } else {
-                self.sse_json_event_lines.push(line);
+                self.push_sse_json_event_line(line)?;
             }
             return Ok(());
         }
@@ -2929,19 +3284,25 @@ impl<'a> StreamingResponseRestorer<'a> {
             return Ok(());
         }
         if sse_data_value_may_be_json(value) {
-            self.sse_json_event_lines.push(line);
+            self.push_sse_json_event_line(line)?;
             return Ok(());
         }
-        output.extend(self.restore_sse_text_data_line(&line));
+        output.extend(self.restore_sse_text_data_line(&line, budget)?);
         Ok(())
     }
 
-    fn flush_sse_json_event(&mut self, output: &mut Vec<u8>) -> Result<(), GatewayError> {
+    fn flush_sse_json_event(
+        &mut self,
+        output: &mut Vec<u8>,
+        budget: &mut RestoreExpansionBudget,
+    ) -> Result<(), GatewayError> {
         if self.sse_json_event_lines.is_empty() {
             return Ok(());
         }
 
         let event_lines = std::mem::take(&mut self.sse_json_event_lines);
+        self.sse_json_event_bytes = 0;
+        let event_budget_checkpoint = budget.checkpoint();
         let Some(payload) = sse_event_data_payload(&event_lines) else {
             output.extend(event_lines.into_iter().flatten());
             return Ok(());
@@ -2954,7 +3315,7 @@ impl<'a> StreamingResponseRestorer<'a> {
         let Ok(mut value) = serde_json::from_str::<Value>(&payload) else {
             for line in event_lines {
                 if sse_data_line_value(&line).is_some() {
-                    output.extend(self.restore_sse_text_data_line(&line));
+                    output.extend(self.restore_sse_text_data_line(&line, budget)?);
                 } else {
                     output.extend_from_slice(&line);
                 }
@@ -2962,42 +3323,125 @@ impl<'a> StreamingResponseRestorer<'a> {
             return Ok(());
         };
 
-        if !restore_json_strings(&mut value, self.session) {
+        if !restore_json_strings_with_budget(&mut value, self.session, budget)? {
             output.extend(event_lines.into_iter().flatten());
             return Ok(());
         }
 
+        let event_input_bytes = event_lines
+            .iter()
+            .map(Vec::len)
+            .try_fold(0usize, |sum, len| {
+                sum.checked_add(len).ok_or_else(|| {
+                    GatewayError::Internal("stream redaction SSE event length overflow".to_string())
+                })
+            })?;
+        let event_output_limit = event_input_bytes
+            .checked_add(budget.available_from(event_budget_checkpoint))
+            .ok_or_else(|| {
+                GatewayError::Internal(
+                    "stream redaction SSE restored output length overflow".to_string(),
+                )
+            })?;
         let restored_payload =
-            serde_json::to_string(&value).map_err(|err| GatewayError::Internal(err.to_string()))?;
+            serialize_json_value_with_limit(&value, event_output_limit)?.into_bytes();
         let mut wrote_data_line = false;
+        let mut output_len = 0usize;
         for line in event_lines {
             if sse_data_line_value(&line).is_some() {
                 if !wrote_data_line {
-                    output.extend(replace_sse_data_line_value(
-                        &line,
-                        restored_payload.as_bytes(),
-                    ));
+                    let replaced = replace_sse_data_line_value(&line, &restored_payload);
+                    output_len = output_len.checked_add(replaced.len()).ok_or_else(|| {
+                        GatewayError::Internal(
+                            "stream redaction SSE restored output length overflow".to_string(),
+                        )
+                    })?;
+                    if output_len > event_output_limit {
+                        return Err(GatewayError::Internal(format!(
+                            "stream redaction SSE restored event exceeds {event_output_limit} bytes"
+                        )));
+                    }
+                    output.extend(replaced);
                     wrote_data_line = true;
                 }
             } else {
+                output_len = output_len.checked_add(line.len()).ok_or_else(|| {
+                    GatewayError::Internal(
+                        "stream redaction SSE restored output length overflow".to_string(),
+                    )
+                })?;
+                if output_len > event_output_limit {
+                    return Err(GatewayError::Internal(format!(
+                        "stream redaction SSE restored event exceeds {event_output_limit} bytes"
+                    )));
+                }
                 output.extend_from_slice(&line);
             }
         }
+        let actual_expansion = output_len.saturating_sub(event_input_bytes);
+        budget.replace_charge(event_budget_checkpoint, actual_expansion)?;
         Ok(())
     }
 
-    fn restore_sse_text_data_line(&self, line: &[u8]) -> Vec<u8> {
+    fn push_sse_json_event_line(&mut self, line: Vec<u8>) -> Result<(), GatewayError> {
+        let next_len = self
+            .sse_json_event_bytes
+            .checked_add(line.len())
+            .ok_or_else(|| {
+                GatewayError::Internal("stream redaction SSE event length overflow".to_string())
+            })?;
+        if next_len > MAX_STREAM_RESTORE_BUFFER_BYTES {
+            return Err(GatewayError::Internal(format!(
+                "stream redaction SSE event exceeds {MAX_STREAM_RESTORE_BUFFER_BYTES} bytes"
+            )));
+        }
+        self.sse_json_event_lines.push(line);
+        self.sse_json_event_bytes = next_len;
+        Ok(())
+    }
+
+    fn restore_sse_text_data_line(
+        &self,
+        line: &[u8],
+        budget: &mut RestoreExpansionBudget,
+    ) -> Result<Vec<u8>, GatewayError> {
         let Some(range) = sse_data_line_value_range(line) else {
-            return line.to_vec();
+            return Ok(line.to_vec());
         };
         let (body, ending) = split_sse_line_ending(line);
-        let restored = restore_known_sentinels_in_bytes(&body[range.clone()], self.session);
-        let mut output = Vec::with_capacity(line.len());
+        let (restored, _) = restore_bytes_with_budget(&body[range.clone()], &self.matcher, budget)?;
+        let output_len = body
+            .len()
+            .saturating_sub(range.len())
+            .checked_add(restored.len())
+            .and_then(|len| len.checked_add(ending.len()))
+            .ok_or_else(|| {
+                GatewayError::Internal(
+                    "stream redaction SSE restored output length overflow".to_string(),
+                )
+            })?;
+        let mut output = Vec::with_capacity(output_len);
         output.extend_from_slice(&body[..range.start]);
         output.extend(restored);
         output.extend_from_slice(ending);
-        output
+        Ok(output)
     }
+}
+
+fn append_bounded_stream_restore_bytes(
+    buffered: &mut Vec<u8>,
+    chunk: &[u8],
+) -> Result<(), GatewayError> {
+    let next_len = buffered.len().checked_add(chunk.len()).ok_or_else(|| {
+        GatewayError::Internal("stream redaction buffer length overflow".to_string())
+    })?;
+    if next_len > MAX_STREAM_RESTORE_BUFFER_BYTES {
+        return Err(GatewayError::Internal(format!(
+            "stream redaction buffer exceeds {MAX_STREAM_RESTORE_BUFFER_BYTES} bytes"
+        )));
+    }
+    buffered.extend_from_slice(chunk);
+    Ok(())
 }
 
 enum SentinelMatcher<'a> {
@@ -3084,55 +3528,6 @@ impl<'a> SentinelTrie<'a> {
         }
         best
     }
-}
-
-fn restore_text_direct_longest_first(input: &str, session: &RedactionSession) -> RestoredText {
-    let mut mappings = session.mappings().collect::<Vec<_>>();
-    mappings.sort_by_key(|mapping| std::cmp::Reverse(mapping.sentinel.len()));
-    let mut text = input.to_string();
-    let mut restored = false;
-    for mapping in mappings {
-        if text.contains(&mapping.sentinel) {
-            text = text.replace(&mapping.sentinel, &mapping.original);
-            restored = true;
-        }
-    }
-    RestoredText { text, restored }
-}
-
-fn restore_text_with_matcher(input: &str, matcher: &SentinelMatcher<'_>) -> RestoredText {
-    let input_bytes = input.as_bytes();
-    let mut output = Vec::with_capacity(input_bytes.len());
-    let mut restored = false;
-    let mut index = 0;
-    while index < input_bytes.len() {
-        if let Some(mapping) = matcher.matching_mapping_at(input_bytes, index) {
-            output.extend_from_slice(mapping.original.as_bytes());
-            index += mapping.sentinel.len();
-            restored = true;
-        } else {
-            output.push(input_bytes[index]);
-            index += 1;
-        }
-    }
-    let text = String::from_utf8(output).unwrap_or_else(|_| input.to_string());
-    RestoredText { text, restored }
-}
-
-fn restore_known_sentinels_in_bytes(input: &[u8], session: &RedactionSession) -> Vec<u8> {
-    let matcher = SentinelMatcher::new(session);
-    let mut output = Vec::with_capacity(input.len());
-    let mut index = 0;
-    while index < input.len() {
-        if let Some(mapping) = matcher.matching_mapping_at(input, index) {
-            output.extend_from_slice(mapping.original.as_bytes());
-            index += mapping.sentinel.len();
-        } else {
-            output.push(input[index]);
-            index += 1;
-        }
-    }
-    output
 }
 
 fn content_type_is_sse(content_type: &str) -> bool {
@@ -4572,7 +4967,10 @@ mod tests {
         assert!(redacted.text.contains(sentinel));
         assert!(!redacted.text.contains("<AETHER:"));
         assert_eq!(
-            session.restore_text(&redacted.text).text,
+            session
+                .restore_text(&redacted.text)
+                .expect("restoration must succeed")
+                .text,
             "contact alice@example.com"
         );
     }
@@ -5647,6 +6045,51 @@ mod tests {
     }
 
     #[test]
+    fn pii_redaction_sync_restore_rejects_expansion_before_allocating_output() {
+        let sentinel = "<AETHER:EMAIL:ABCDEFGHIJKLMNOPQRST>";
+        let original = "x".repeat(256);
+        let session = session_with_response_mapping(&original, sentinel);
+        let body = sentinel.repeat(2).into_bytes();
+        let mut headers = BTreeMap::from([
+            ("content-type".to_string(), "text/plain".to_string()),
+            ("content-length".to_string(), body.len().to_string()),
+        ]);
+
+        let error = super::restore_sync_response_body_with_limit(&mut headers, &body, &session, 64)
+            .expect_err("sentinel amplification above the expansion budget must fail");
+
+        assert!(format!("{error:?}").contains("restoration expansion exceeds"));
+        let original_len = body.len().to_string();
+        assert_eq!(
+            headers.get("content-length").map(String::as_str),
+            Some(original_len.as_str())
+        );
+    }
+
+    #[test]
+    fn pii_redaction_sync_restore_expansion_limit_is_independent_of_body_size() {
+        let sentinel = "<AETHER:EMAIL:ABCDEFGHIJKLMNOPQRST>";
+        let original = "alice@example.com";
+        let session = session_with_response_mapping(original, sentinel);
+        let prefix = "p".repeat(256);
+        let body = format!("{prefix}{sentinel}").into_bytes();
+        let mut headers = BTreeMap::from([("content-type".to_string(), "text/plain".to_string())]);
+
+        let restored = super::restore_sync_response_body_with_limit(
+            &mut headers,
+            &body,
+            &session,
+            original.len(),
+        )
+        .expect("a body larger than the expansion budget must still restore");
+
+        assert_eq!(
+            std::str::from_utf8(&restored.body).expect("restored body should be UTF-8"),
+            format!("{prefix}{original}")
+        );
+    }
+
+    #[test]
     fn pii_redaction_compressed_response_safe_error() {
         let sentinel = "<AETHER:EMAIL:ABCDEFGHIJKLMNOPQRST>";
         let session = session_with_response_mapping("alice@example.com", sentinel);
@@ -5729,6 +6172,92 @@ mod tests {
         let flushed = restorer.finish().expect("finish should succeed");
         assert_eq!(first.len() + flushed.len(), chunk.len());
         assert_eq!(restorer.pending_text_carry_len(), 0);
+    }
+
+    #[test]
+    fn pii_redaction_stream_restore_rejects_only_expansion_not_passthrough_chunk_size() {
+        let sentinel = "<AETHER:EMAIL:ABCDEFGHIJKLMNOPQRST>";
+        let original = "x".repeat(256);
+        let session = session_with_response_mapping(&original, sentinel);
+        let mut restorer = StreamingResponseRestorer::for_text_with_expansion_limit(&session, 32);
+
+        let passthrough = vec![b'p'; 4 * 1024];
+        let output = restorer
+            .push_chunk(&passthrough)
+            .expect("an unmatched chunk is not subject to the expansion budget");
+        assert_eq!(
+            output.len() + restorer.pending_text_carry_len(),
+            passthrough.len()
+        );
+
+        let error = restorer
+            .push_chunk(sentinel.as_bytes())
+            .expect_err("a matching sentinel above the per-push expansion budget must fail");
+        assert!(format!("{error:?}").contains("restoration expansion exceeds"));
+    }
+
+    #[test]
+    fn pii_redaction_stream_restore_expansion_budget_resets_for_each_push() {
+        let sentinel = "<AETHER:EMAIL:ABCDEFGHIJKLMNOPQRST>";
+        let original = "x".repeat(sentinel.len() + 8);
+        let session = session_with_response_mapping(&original, sentinel);
+        let mut restorer = StreamingResponseRestorer::for_text_with_expansion_limit(&session, 8);
+
+        let first = restorer
+            .push_chunk(sentinel.as_bytes())
+            .expect("first chunk should fit its expansion budget");
+        let second = restorer
+            .push_chunk(sentinel.as_bytes())
+            .expect("second chunk should receive a fresh expansion budget");
+        let tail = restorer.finish().expect("carry should flush");
+
+        assert_eq!(first.len() + second.len() + tail.len(), original.len() * 2);
+    }
+
+    #[test]
+    fn pii_redaction_stream_restore_sse_rejects_event_expansion_before_serializing() {
+        let sentinel = "<AETHER:EMAIL:ABCDEFGHIJKLMNOPQRST>";
+        let original = "x".repeat(256);
+        let session = session_with_response_mapping(&original, sentinel);
+        let mut restorer = StreamingResponseRestorer::for_sse_with_expansion_limit(&session, 32);
+        let event = format!("data: {{\"value\":\"{sentinel}\"}}\n\n");
+
+        let error = restorer
+            .push_chunk(event.as_bytes())
+            .expect_err("an SSE event above the per-push expansion budget must fail");
+
+        assert!(format!("{error:?}").contains("restoration expansion exceeds"));
+    }
+
+    #[test]
+    fn pii_redaction_stream_restore_rejects_unbounded_sse_line() {
+        let sentinel = "<AETHER:EMAIL:ABCDEFGHIJKLMNOPQRST>";
+        let session = session_with_response_mapping("alice@example.com", sentinel);
+        let mut restorer = StreamingResponseRestorer::for_sse(&session);
+        let oversized = vec![b'x'; super::MAX_STREAM_RESTORE_BUFFER_BYTES + 1];
+
+        let error = restorer
+            .push_chunk(&oversized)
+            .expect_err("an incomplete SSE line must be bounded");
+        assert!(format!("{error:?}").contains("stream redaction buffer exceeds"));
+    }
+
+    #[test]
+    fn pii_redaction_stream_restore_rejects_unbounded_sse_json_event() {
+        let sentinel = "<AETHER:EMAIL:ABCDEFGHIJKLMNOPQRST>";
+        let session = session_with_response_mapping("alice@example.com", sentinel);
+        let mut restorer = StreamingResponseRestorer::for_sse(&session);
+        let payload_len = super::MAX_STREAM_RESTORE_BUFFER_BYTES / 2;
+        let first = format!("data: {{\"value\":\"{}\n", "x".repeat(payload_len));
+        let second = format!("data: {}\n", "x".repeat(payload_len));
+
+        restorer
+            .push_chunk(first.as_bytes())
+            .expect("first JSON line should fit");
+        let error = restorer
+            .push_chunk(second.as_bytes())
+            .expect_err("an incomplete SSE JSON event must be bounded");
+        assert!(format!("{error:?}").contains("stream redaction SSE event exceeds"));
     }
 
     #[test]
@@ -6484,7 +7013,9 @@ mod tests {
         ));
 
         let text = "before <AETHER:EMAIL:00000000000000000039> middle <AETHER:EMAIL:00000000000000000001> after";
-        let restored = session.restore_text(text);
+        let restored = session
+            .restore_text(text)
+            .expect("restoration must succeed");
         assert!(restored.restored);
         assert_eq!(
             restored.text,

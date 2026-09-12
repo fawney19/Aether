@@ -71,6 +71,37 @@ describe('providerKeyQuota', () => {
     }, 'codex')).toBe('月剩余 86.0%')
   })
 
+  it('keeps account and model Codex weekly quotas distinct in display text', () => {
+    expect(getQuotaDisplayText({
+      status_snapshot: {
+        oauth: { code: 'valid' },
+        account: { code: 'ok', blocked: false },
+        quota: {
+          provider_type: 'codex',
+          code: 'ok',
+          exhausted: false,
+          windows: [
+            {
+              code: 'weekly',
+              label: '周',
+              scope: 'account',
+              window_minutes: 10_080,
+              remaining_ratio: 0.9,
+            },
+            {
+              code: 'additional_0_primary',
+              label: 'gpt-reserve',
+              scope: 'model',
+              model: 'gpt-reserve',
+              window_minutes: 10_080,
+              remaining_ratio: 0.4,
+            },
+          ],
+        },
+      },
+    }, 'codex')).toBe('周剩余 90.0% | gpt-reserve 周剩余 40.0%')
+  })
+
   it('formats Grok account quota from structured quota windows', () => {
     expect(getQuotaDisplayText({
       status_snapshot: {
@@ -87,6 +118,7 @@ describe('providerKeyQuota', () => {
           exhausted: false,
           windows: [
             {
+              code: 'account',
               scope: 'account',
               used_value: 2,
               limit_value: 10,
@@ -139,6 +171,8 @@ describe('providerKeyQuota', () => {
   it('formats Gemini CLI AI credits from status snapshot and upstream metadata', () => {
     expect(getQuotaDisplayText({
       status_snapshot: {
+        oauth: { code: 'none' },
+        account: { code: 'ok', blocked: false },
         quota: {
           provider_type: 'gemini_cli',
           code: 'ok',
@@ -153,6 +187,8 @@ describe('providerKeyQuota', () => {
 
     expect(getGeminiCliAccountCreditsText({
       status_snapshot: {
+        oauth: { code: 'none' },
+        account: { code: 'ok', blocked: false },
         quota: {
           provider_type: 'gemini_cli',
           code: 'ok',
@@ -173,6 +209,8 @@ describe('providerKeyQuota', () => {
   it('formats ChatGPT Web image quota as remaining count', () => {
     expect(getQuotaDisplayText({
       status_snapshot: {
+        oauth: { code: 'none' },
+        account: { code: 'ok', blocked: false },
         quota: {
           provider_type: 'chatgpt_web',
           code: 'ok',
@@ -195,6 +233,8 @@ describe('providerKeyQuota', () => {
   it('surfaces Windsurf hard account states', () => {
     expect(getQuotaDisplayText({
       status_snapshot: {
+        oauth: { code: 'none' },
+        account: { code: 'ok', blocked: false },
         quota: {
           provider_type: 'windsurf',
           code: 'quarantined',
@@ -206,6 +246,8 @@ describe('providerKeyQuota', () => {
 
     expect(getQuotaDisplayText({
       status_snapshot: {
+        oauth: { code: 'none' },
+        account: { code: 'ok', blocked: false },
         quota: {
           provider_type: 'windsurf',
           code: 'cooldown',
@@ -217,6 +259,8 @@ describe('providerKeyQuota', () => {
 
     expect(getQuotaDisplayText({
       status_snapshot: {
+        oauth: { code: 'none' },
+        account: { code: 'ok', blocked: false },
         quota: {
           provider_type: 'windsurf',
           code: 'cooldown',
@@ -229,6 +273,8 @@ describe('providerKeyQuota', () => {
   it('includes Windsurf quota windows and model availability in display text', () => {
     expect(getQuotaDisplayText({
       status_snapshot: {
+        oauth: { code: 'none' },
+        account: { code: 'ok', blocked: false },
         quota: {
           provider_type: 'windsurf',
           code: 'ok',
@@ -260,6 +306,8 @@ describe('providerKeyQuota', () => {
 
     expect(getQuotaDisplayText({
       status_snapshot: {
+        oauth: { code: 'none' },
+        account: { code: 'ok', blocked: false },
         quota: {
           provider_type: 'windsurf',
           code: 'cooldown',
@@ -300,6 +348,8 @@ describe('providerKeyQuota', () => {
   it('uses Windsurf model availability when no quota window is present', () => {
     expect(getQuotaDisplayText({
       status_snapshot: {
+        oauth: { code: 'none' },
+        account: { code: 'ok', blocked: false },
         quota: {
           provider_type: 'windsurf',
           code: 'ok',

@@ -8,6 +8,11 @@ use super::{
     GatewayProviderTransportEndpoint, GatewayProviderTransportKey, GatewayProviderTransportProvider,
 };
 
+const PROVIDER_CATALOG_CREDENTIAL_ENVELOPE_FAMILY: &str = "aether-provider-catalog-credential-";
+const PROVIDER_CATALOG_CREDENTIAL_ENVELOPE_V2: &str = "aether-provider-catalog-credential-v2:";
+const PROVIDER_CATALOG_CREDENTIAL_PURPOSE_V2: &str = "provider-catalog-credential-bound-v2";
+const RUNTIME_SECRET_ENVELOPE_PREFIX: &str = "aether-runtime-secret-v1:";
+
 pub(super) fn map_provider(
     provider: StoredProviderCatalogProvider,
 ) -> GatewayProviderTransportProvider {
@@ -64,6 +69,9 @@ pub(super) fn map_key(
                 encryption_key,
                 fallback_encryption_keys,
                 ciphertext,
+                &key.provider_id,
+                &key.id,
+                "api-key",
                 "provider_api_keys.api_key",
             )
         })
@@ -79,6 +87,9 @@ pub(super) fn map_key(
                 encryption_key,
                 fallback_encryption_keys,
                 ciphertext,
+                &key.provider_id,
+                &key.id,
+                "auth-config",
                 "provider_api_keys.auth_config",
             )
         })
@@ -125,12 +136,78 @@ fn decrypt_secret(
     encryption_key: &str,
     fallback_encryption_keys: &[String],
     ciphertext: &str,
+    provider_id: &str,
+    key_id: &str,
+    field: &str,
     field_name: &str,
 ) -> Result<String, DataLayerError> {
-    if should_use_plaintext_secret(ciphertext, field_name) {
-        return Ok(ciphertext.trim().to_string());
+    if let Some(runtime_envelope) = ciphertext.strip_prefix(PROVIDER_CATALOG_CREDENTIAL_ENVELOPE_V2)
+    {
+        let inner_ciphertext = runtime_envelope
+            .strip_prefix(RUNTIME_SECRET_ENVELOPE_PREFIX)
+            .ok_or_else(|| {
+                DataLayerError::UnexpectedValue(format!(
+                    "{field_name} has an invalid provider catalog credential envelope"
+                ))
+            })?;
+        let protected = decrypt_fernet_with_fallbacks(
+            encryption_key,
+            fallback_encryption_keys,
+            inner_ciphertext,
+            field_name,
+        )?;
+        let purpose = provider_catalog_credential_purpose(provider_id, key_id, field);
+        return protected
+            .strip_prefix(&purpose)
+            .and_then(|value| value.strip_prefix('\0'))
+            .map(ToOwned::to_owned)
+            .ok_or_else(|| {
+                DataLayerError::UnexpectedValue(format!(
+                    "{field_name} provider catalog credential authentication failed"
+                ))
+            });
+    }
+    if ciphertext.starts_with(PROVIDER_CATALOG_CREDENTIAL_ENVELOPE_FAMILY)
+        || ciphertext.starts_with("aether-")
+    {
+        return Err(DataLayerError::UnexpectedValue(format!(
+            "{field_name} has an unsupported or incorrectly bound Aether secret envelope"
+        )));
+    }
+    if !looks_like_python_fernet_ciphertext(ciphertext) {
+        return Err(DataLayerError::UnexpectedValue(format!(
+            "{field_name} is not an authenticated ciphertext"
+        )));
     }
 
+    let plaintext = decrypt_fernet_with_fallbacks(
+        encryption_key,
+        fallback_encryption_keys,
+        ciphertext,
+        field_name,
+    )?;
+    if plaintext.contains('\0') {
+        return Err(DataLayerError::UnexpectedValue(format!(
+            "{field_name} legacy ciphertext contains reserved framing"
+        )));
+    }
+    Ok(plaintext)
+}
+
+fn provider_catalog_credential_purpose(provider_id: &str, key_id: &str, field: &str) -> String {
+    format!(
+        "{PROVIDER_CATALOG_CREDENTIAL_PURPOSE_V2}\0provider-id-bytes={}\0{provider_id}\0key-id-bytes={}\0{key_id}\0field={field}",
+        provider_id.len(),
+        key_id.len(),
+    )
+}
+
+fn decrypt_fernet_with_fallbacks(
+    encryption_key: &str,
+    fallback_encryption_keys: &[String],
+    ciphertext: &str,
+    field_name: &str,
+) -> Result<String, DataLayerError> {
     match decrypt_python_fernet_ciphertext(encryption_key, ciphertext) {
         Ok(value) => Ok(value),
         Err(error) => {
@@ -164,29 +241,6 @@ pub(super) fn fallback_encryption_keys(primary_encryption_key: &str) -> Vec<Stri
         keys.push(value.to_string());
     }
     keys
-}
-
-fn should_use_plaintext_secret(ciphertext: &str, field_name: &str) -> bool {
-    let ciphertext = ciphertext.trim();
-    if ciphertext.is_empty() {
-        return false;
-    }
-
-    match field_name {
-        "provider_api_keys.api_key" => {
-            if ciphertext.starts_with('{') || ciphertext.starts_with('[') {
-                return false;
-            }
-            !looks_like_python_fernet_ciphertext(ciphertext)
-        }
-        "provider_api_keys.auth_config" => {
-            if ciphertext.starts_with('{') || ciphertext.starts_with('[') {
-                return true;
-            }
-            false
-        }
-        _ => false,
-    }
 }
 
 fn normalize_string_list(

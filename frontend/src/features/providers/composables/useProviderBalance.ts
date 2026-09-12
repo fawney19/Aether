@@ -48,7 +48,7 @@ export function useProviderBalance() {
       const schemas: Record<string, CredentialsSchema> = {}
       for (const arch of archs) {
         if (arch.credentials_schema) {
-          schemas[arch.architecture_id] = arch.credentials_schema as CredentialsSchema
+          schemas[arch.architecture_id] = arch.credentials_schema
         }
       }
       architectureSchemas.value = schemas
@@ -59,7 +59,7 @@ export function useProviderBalance() {
   }
 
   // 异步加载余额数据（使用批量接口）
-  async function loadBalances(providers: ProviderWithEndpointsSummary[], fullReload = true) {
+  async function loadBalances(providers: Pick<ProviderWithEndpointsSummary, 'id' | 'ops_configured'>[], fullReload = true) {
     if (fullReload) {
       balanceCache.value = {}
     }
@@ -108,6 +108,7 @@ export function useProviderBalance() {
   async function retryPendingBalances(providerIds: string[], loadVersion: number, retryCount: number) {
     try {
       const results = await batchQueryBalance(providerIds)
+      if (loadVersion !== balanceLoadVersion) return
       const stillPending: string[] = []
 
       for (const [providerId, result] of Object.entries(results)) {
@@ -173,14 +174,16 @@ export function useProviderBalance() {
       return null
     }
     const data = result.data as Record<string, unknown>
-    const extra = data.extra
-    if (!extra || extra.balance === undefined || extra.points === undefined) {
+    const extra = typeof data.extra === 'object' && data.extra !== null
+      ? data.extra as Record<string, unknown>
+      : null
+    if (!extra || typeof extra.balance !== 'number' || typeof extra.points !== 'number') {
       return null
     }
     return {
       balance: extra.balance,
       points: extra.points,
-      currency: data.currency || 'USD',
+      currency: typeof data.currency === 'string' && data.currency ? data.currency : 'USD',
     }
   }
 
@@ -224,13 +227,15 @@ export function useProviderBalance() {
       return null
     }
     const data = result.data as Record<string, unknown>
-    const extra = data.extra
-    if (!extra || extra.checkin_success === undefined) {
+    const extra = typeof data.extra === 'object' && data.extra !== null
+      ? data.extra as Record<string, unknown>
+      : null
+    if (!extra || (extra.checkin_success !== null && typeof extra.checkin_success !== 'boolean')) {
       return null
     }
     return {
       success: extra.checkin_success,
-      message: extra.checkin_message || '',
+      message: typeof extra.checkin_message === 'string' ? extra.checkin_message : '',
     }
   }
 
@@ -244,13 +249,15 @@ export function useProviderBalance() {
       return null
     }
     const data = result.data as Record<string, unknown>
-    const extra = data.extra
+    const extra = typeof data.extra === 'object' && data.extra !== null
+      ? data.extra as Record<string, unknown>
+      : null
     if (!extra || !extra.cookie_expired) {
       return null
     }
     return {
       expired: true,
-      message: extra.cookie_expired_message || 'Cookie 已失效',
+      message: typeof extra.cookie_expired_message === 'string' ? extra.cookie_expired_message : 'Cookie 已失效',
     }
   }
 
@@ -296,7 +303,9 @@ export function useProviderBalance() {
     }
 
     const data = result.data as Record<string, unknown>
-    const extra = data.extra
+    const extra = typeof data.extra === 'object' && data.extra !== null
+      ? data.extra as Record<string, unknown>
+      : null
     if (!extra) return []
 
     // 从 schema 缓存中获取格式化配置
@@ -319,6 +328,7 @@ export function useProviderBalance() {
 
   // 组件卸载时清理
   function cleanup() {
+    balanceLoadVersion++
     stopTick()
     pendingTimers.forEach(clearTimeout)
     pendingTimers.clear()

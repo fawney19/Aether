@@ -73,6 +73,8 @@ pub enum RoutingAction {
         priority_mode: Option<RoutingSetPriorityMode>,
         scheduling_mode: Option<RoutingSchedulingMode>,
         keep_priority_on_conversion: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sticky_key_attempts: Option<u32>,
     },
     SetProviderPriority {
         provider_id: String,
@@ -81,6 +83,10 @@ pub enum RoutingAction {
     SetKeyPriority {
         key_id: String,
         priority: i32,
+        /// When set, the override only applies to candidates served through
+        /// this API format; otherwise it applies to the key on every format.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        api_format: Option<String>,
     },
     JsonPatchBody {
         patch: Vec<RoutingJsonPatchOperation>,

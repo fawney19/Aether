@@ -31,6 +31,38 @@ use super::{
 };
 
 const USERS_ME_USAGE_DATA_UNAVAILABLE_DETAIL: &str = "用户用量数据暂不可用";
+// The active-usage endpoint accepts an explicit list of request IDs.  Keep
+// this list bounded before it reaches the repository layer: the database
+// expand every value into a bind parameter, while PostgreSQL still has to
+// materialize the complete array.  Request IDs are normally UUIDs, but a
+// generous per-item bound preserves compatibility with provider-generated
+// identifiers without allowing query amplification.
+const MAX_USERS_ME_USAGE_IDS: usize = 256;
+const MAX_USERS_ME_USAGE_ID_BYTES: usize = 256;
+const MAX_USERS_ME_USAGE_IDS_QUERY_BYTES: usize = 64 * 1024;
+
+fn users_me_usage_public_error_message(item: &StoredRequestUsageAudit) -> Option<String> {
+    if item
+        .error_message
+        .as_deref()
+        .is_none_or(|value| value.trim().is_empty())
+        && item.status_code.is_none_or(|status| status < 400)
+    {
+        return None;
+    }
+
+    item.error_category
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            item.status_code
+                .filter(|status| *status >= 400)
+                .map(|status| format!("http_{status}"))
+        })
+        .or_else(|| Some("request_failed".to_string()))
+}
 
 fn build_users_me_usage_reader_unavailable_response() -> Response<Body> {
     build_auth_error_response(
@@ -133,15 +165,37 @@ fn parse_users_me_usage_timeline_limit(query: Option<&str>) -> Result<usize, Str
     }
 }
 
-fn parse_users_me_usage_ids(query: Option<&str>) -> Option<BTreeSet<String>> {
-    let ids = query_param_value(query, "ids")?;
-    let values = ids
+fn parse_users_me_usage_ids(query: Option<&str>) -> Result<Option<BTreeSet<String>>, String> {
+    let Some(ids) = query_param_value(query, "ids") else {
+        return Ok(None);
+    };
+    if ids.len() > MAX_USERS_ME_USAGE_IDS_QUERY_BYTES {
+        return Err(format!(
+            "ids query value must not exceed {MAX_USERS_ME_USAGE_IDS_QUERY_BYTES} bytes"
+        ));
+    }
+
+    let mut values = BTreeSet::new();
+    let mut item_count = 0usize;
+    for value in ids
         .split(',')
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
-        .collect::<BTreeSet<_>>();
-    (!values.is_empty()).then_some(values)
+    {
+        item_count = item_count.saturating_add(1);
+        if item_count > MAX_USERS_ME_USAGE_IDS {
+            return Err(format!(
+                "ids must contain at most {MAX_USERS_ME_USAGE_IDS} identifiers"
+            ));
+        }
+        if value.len() > MAX_USERS_ME_USAGE_ID_BYTES {
+            return Err(format!(
+                "each id must not exceed {MAX_USERS_ME_USAGE_ID_BYTES} bytes"
+            ));
+        }
+        values.insert(value.to_owned());
+    }
+    Ok((!values.is_empty()).then_some(values))
 }
 
 fn users_me_usage_cache_creation_tokens(item: &StoredRequestUsageAudit) -> u64 {
@@ -546,7 +600,7 @@ fn build_users_me_usage_record_payload(
         "cache_creation_ephemeral_1h_input_tokens": item.cache_creation_ephemeral_1h_input_tokens,
         "cache_read_input_tokens": item.cache_read_input_tokens,
         "status_code": item.status_code,
-        "error_message": item.error_message,
+        "error_message": users_me_usage_public_error_message(item),
         "request_type": item.request_type,
         "input_price_per_1m": input_price_per_1m,
         "output_price_per_1m": output_price_per_1m,
@@ -609,7 +663,7 @@ fn build_users_me_usage_active_payload(item: &StoredRequestUsageAudit) -> serde_
         "updated_at": unix_secs_to_rfc3339(item.updated_at_unix_secs),
         "response_time_updated_at": users_me_usage_response_time_updated_at(item),
         "status_code": item.status_code,
-        "error_message": item.error_message,
+        "error_message": users_me_usage_public_error_message(item),
         "api_format": item.api_format,
         "endpoint_api_format": item.endpoint_api_format,
         "is_stream": item.is_stream,
@@ -745,9 +799,6 @@ fn users_me_usage_terminal_candidate_state_override(
     }
     if let Some(status_code) = candidate.status_code {
         payload["status_code"] = json!(status_code);
-    }
-    if let Some(error_message) = candidate.error_message.as_ref() {
-        payload["error_message"] = json!(error_message);
     }
     Some(payload)
 }
@@ -1338,7 +1389,12 @@ pub(super) async fn handle_users_me_usage_active_get(
         Ok(value) => value,
         Err(response) => return response,
     };
-    let ids = parse_users_me_usage_ids(request_context.request_query_string.as_deref());
+    let ids = match parse_users_me_usage_ids(request_context.request_query_string.as_deref()) {
+        Ok(value) => value,
+        Err(message) => {
+            return build_auth_error_response(http::StatusCode::BAD_REQUEST, message, false);
+        }
+    };
     // When polling for active (pending/streaming) requests without specific ids,
     // limit to the last 1 hour to avoid scanning all historical records.
     let items = match ids.as_ref() {
@@ -1628,10 +1684,36 @@ mod tests {
 
     use super::{
         build_users_me_usage_active_payload, build_users_me_usage_record_payload,
-        parse_users_me_usage_record_filter, users_me_usage_client_is_stream,
-        users_me_usage_is_failed, users_me_usage_terminal_candidate_state_override,
-        users_me_usage_upstream_is_stream,
+        parse_users_me_usage_ids, parse_users_me_usage_record_filter,
+        users_me_usage_client_is_stream, users_me_usage_is_failed,
+        users_me_usage_terminal_candidate_state_override, users_me_usage_upstream_is_stream,
+        MAX_USERS_ME_USAGE_IDS, MAX_USERS_ME_USAGE_ID_BYTES,
     };
+
+    #[test]
+    fn user_active_usage_ids_are_trimmed_and_deduplicated() {
+        let ids = parse_users_me_usage_ids(Some("ids=req-2,%20req-1,req-2"))
+            .expect("bounded ids should parse")
+            .expect("non-empty ids should be present");
+
+        assert_eq!(ids.into_iter().collect::<Vec<_>>(), vec!["req-1", "req-2"]);
+        assert_eq!(
+            parse_users_me_usage_ids(Some("other=value")).expect("missing ids should parse"),
+            None
+        );
+    }
+
+    #[test]
+    fn user_active_usage_ids_reject_query_amplification() {
+        let too_many = (0..=MAX_USERS_ME_USAGE_IDS)
+            .map(|index| format!("req-{index}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        assert!(parse_users_me_usage_ids(Some(&format!("ids={too_many}"))).is_err());
+
+        let oversized = "x".repeat(MAX_USERS_ME_USAGE_ID_BYTES + 1);
+        assert!(parse_users_me_usage_ids(Some(&format!("ids={oversized}"))).is_err());
+    }
 
     #[test]
     fn users_me_usage_transport_statuses_are_disjoint_server_side_filters() {
@@ -1858,12 +1940,16 @@ mod tests {
 
     #[test]
     fn user_usage_active_override_uses_terminal_candidate_latency() {
-        let candidate = sample_candidate(
+        let mut candidate = sample_candidate(
             RequestCandidateStatus::Success,
             Some(200),
             Some(9_210),
             None,
         );
+        candidate.error_message = Some("private upstream diagnostic".to_string());
+        candidate.extra_data = Some(json!({
+            "upstream_response": {"body": {"error": {"message": "private upstream diagnostic"}}}
+        }));
 
         let payload =
             users_me_usage_terminal_candidate_state_override(&[candidate]).expect("override");
@@ -1871,6 +1957,7 @@ mod tests {
         assert_eq!(payload["status"], "completed");
         assert_eq!(payload["response_time_ms"], 9_210);
         assert_eq!(payload["status_code"], 200);
+        assert!(!payload.to_string().contains("private upstream diagnostic"));
         assert_eq!(
             payload["response_time_updated_at"],
             "1970-01-01T00:00:10.210+00:00"
@@ -1929,6 +2016,26 @@ mod tests {
         };
 
         assert!(users_me_usage_is_failed(&item));
+    }
+
+    #[test]
+    fn user_usage_payload_does_not_return_historical_raw_error_text() {
+        let item = StoredRequestUsageAudit {
+            status_code: Some(401),
+            error_message: Some(
+                "upstream said Authorization: Bearer live-secret at https://api.example?key=secret"
+                    .to_string(),
+            ),
+            error_category: Some("authentication_error".to_string()),
+            ..sample_usage("failed")
+        };
+
+        let record = build_users_me_usage_record_payload(&item, false, &BTreeMap::new(), false);
+        let active = build_users_me_usage_active_payload(&item);
+        assert_eq!(record["error_message"], "authentication_error");
+        assert_eq!(active["error_message"], "authentication_error");
+        assert!(!record.to_string().contains("live-secret"));
+        assert!(!active.to_string().contains("live-secret"));
     }
 
     #[test]

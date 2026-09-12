@@ -1,12 +1,11 @@
-use aether_crypto::{encrypt_python_fernet_plaintext, DEVELOPMENT_ENCRYPTION_KEY};
+use aether_crypto::DEVELOPMENT_ENCRYPTION_KEY;
+use aether_data::repository::auth::{
+    InMemoryAuthApiKeySnapshotRepository, StoredAuthApiKeySnapshot,
+};
 use aether_data::repository::candidates::InMemoryRequestCandidateRepository;
-use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
 use aether_data::repository::video_tasks::InMemoryVideoTaskRepository;
 use aether_data_contracts::repository::candidates::{
     RequestCandidateReadRepository, RequestCandidateStatus,
-};
-use aether_data_contracts::repository::provider_catalog::{
-    StoredProviderCatalogEndpoint, StoredProviderCatalogKey, StoredProviderCatalogProvider,
 };
 use aether_data_contracts::repository::video_tasks::{
     UpsertVideoTask, VideoTaskStatus, VideoTaskWriteRepository,
@@ -18,14 +17,48 @@ use axum::{extract::Request, Json, Router};
 use http::header::{HeaderName, HeaderValue};
 use http::StatusCode;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use std::sync::{Arc, Mutex};
 
 use crate::constants::{CONTROL_EXECUTED_HEADER, CONTROL_EXECUTE_FALLBACK_HEADER, TRACE_ID_HEADER};
 
 use super::{
     build_router_with_state, build_state_with_execution_runtime_override, start_server,
-    VideoTaskTruthSourceMode,
+    video_provider_catalog_repository, VideoTaskTruthSourceMode,
 };
+
+fn hash_api_key(value: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(value.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+fn sample_auth_snapshot(api_key_id: &str, user_id: &str) -> StoredAuthApiKeySnapshot {
+    StoredAuthApiKeySnapshot::new(
+        user_id.to_string(),
+        "video-user".to_string(),
+        Some("video@example.com".to_string()),
+        "user".to_string(),
+        "local".to_string(),
+        true,
+        false,
+        Some(json!(["gemini"])),
+        Some(json!(["gemini:video"])),
+        Some(json!(["veo-3"])),
+        api_key_id.to_string(),
+        Some("default".to_string()),
+        true,
+        false,
+        false,
+        Some(60),
+        Some(5),
+        Some(4_102_444_800),
+        Some(json!(["gemini"])),
+        Some(json!(["gemini:video"])),
+        Some(json!(["veo-3"])),
+    )
+    .expect("auth snapshot should build")
+}
 
 #[tokio::test]
 async fn gateway_executes_gemini_video_cancel_via_data_backed_local_follow_up_with_local_planning_only(
@@ -241,16 +274,35 @@ async fn gateway_executes_gemini_video_cancel_via_data_backed_local_follow_up_wi
         })
         .await
         .expect("upsert should succeed");
+    let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+        Some(hash_api_key("client-gemini-video-cancel-local-key")),
+        sample_auth_snapshot(
+            "key-gemini-video-cancel-rotated-local-123",
+            "user-gemini-video-cancel-local-123",
+        ),
+    )]));
+    let provider_catalog_repository = video_provider_catalog_repository(
+        "provider-gemini-video-local-1",
+        "gemini",
+        "endpoint-gemini-video-local-1",
+        "gemini:video",
+        "https://generativelanguage.googleapis.com",
+        "key-gemini-video-local-1",
+        "sk-upstream-gemini-video",
+    );
 
     let (upstream_url, upstream_handle) = start_server(upstream).await;
     let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
     let gateway_state = build_state_with_execution_runtime_override(execution_runtime_url)
         .with_data_state_for_tests(
-        crate::data::GatewayDataState::with_video_task_and_request_candidate_repository_for_tests(
-            repository,
-            Arc::clone(&request_candidate_repository),
-        ),
-    );
+            crate::data::GatewayDataState::with_video_task_provider_transport_and_request_candidate_repository_for_tests(
+                repository,
+                provider_catalog_repository,
+                Arc::clone(&request_candidate_repository),
+                DEVELOPMENT_ENCRYPTION_KEY,
+            )
+            .with_auth_api_key_reader(auth_repository),
+        );
     let gateway = build_router_with_state(gateway_state);
     let (gateway_url, gateway_handle) = start_server(gateway).await;
 
@@ -258,7 +310,7 @@ async fn gateway_executes_gemini_video_cancel_via_data_backed_local_follow_up_wi
         .post(format!(
             "{gateway_url}/v1beta/models/veo-3/operations/localshort123:cancel"
         ))
-        .header("x-goog-api-key", "client-key")
+        .header("x-goog-api-key", "client-gemini-video-cancel-local-key")
         .header(http::header::CONTENT_TYPE, "application/json")
         .header(TRACE_ID_HEADER, "trace-gemini-video-cancel-local-123")
         .body("{}")
@@ -267,13 +319,8 @@ async fn gateway_executes_gemini_video_cancel_via_data_backed_local_follow_up_wi
         .expect("request should succeed");
 
     assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(
-        response
-            .json::<serde_json::Value>()
-            .await
-            .expect("body should parse"),
-        json!({})
-    );
+    let response: serde_json::Value = response.json().await.expect("body should parse");
+    assert_eq!(response, json!({}));
 
     let seen_execution_runtime_request = seen_execution_runtime
         .lock()
@@ -316,75 +363,6 @@ async fn gateway_executes_gemini_video_cancel_via_reconstructed_data_backed_loca
         method: String,
         url: String,
         api_key: String,
-    }
-
-    fn sample_provider() -> StoredProviderCatalogProvider {
-        StoredProviderCatalogProvider::new(
-            "provider-gemini-video-followup-1".to_string(),
-            "gemini".to_string(),
-            Some("https://example.com".to_string()),
-            "custom".to_string(),
-        )
-        .expect("provider should build")
-        .with_transport_fields(
-            true,
-            false,
-            false,
-            None,
-            Some(2),
-            None,
-            Some(20.0),
-            None,
-            None,
-        )
-    }
-
-    fn sample_endpoint() -> StoredProviderCatalogEndpoint {
-        StoredProviderCatalogEndpoint::new(
-            "endpoint-gemini-video-followup-1".to_string(),
-            "provider-gemini-video-followup-1".to_string(),
-            "gemini:video".to_string(),
-            Some("gemini".to_string()),
-            Some("video".to_string()),
-            true,
-        )
-        .expect("endpoint should build")
-        .with_transport_fields(
-            "https://generativelanguage.googleapis.com".to_string(),
-            None,
-            None,
-            Some(2),
-            None,
-            None,
-            None,
-            None,
-        )
-        .expect("endpoint transport should build")
-    }
-
-    fn sample_key() -> StoredProviderCatalogKey {
-        StoredProviderCatalogKey::new(
-            "key-gemini-video-followup-1".to_string(),
-            "provider-gemini-video-followup-1".to_string(),
-            "prod".to_string(),
-            "api_key".to_string(),
-            None,
-            true,
-        )
-        .expect("key should build")
-        .with_transport_fields(
-            Some(json!(["gemini:video"])),
-            encrypt_python_fernet_plaintext(DEVELOPMENT_ENCRYPTION_KEY, "sk-upstream-gemini-video")
-                .expect("api key should encrypt"),
-            None,
-            None,
-            Some(json!({"gemini:video": 1})),
-            None,
-            None,
-            None,
-            None,
-        )
-        .expect("key transport should build")
     }
 
     let decision_hits = Arc::new(Mutex::new(0usize));
@@ -562,31 +540,43 @@ async fn gateway_executes_gemini_video_cancel_via_reconstructed_data_backed_loca
         })
         .await
         .expect("upsert should succeed");
-    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
-        vec![sample_provider()],
-        vec![sample_endpoint()],
-        vec![sample_key()],
-    ));
+    let provider_catalog_repository = video_provider_catalog_repository(
+        "provider-gemini-video-followup-1",
+        "gemini",
+        "endpoint-gemini-video-followup-1",
+        "gemini:video",
+        "https://generativelanguage.googleapis.com",
+        "key-gemini-video-followup-1",
+        "sk-upstream-gemini-video",
+    );
     let request_candidate_repository = Arc::new(InMemoryRequestCandidateRepository::default());
+    let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+        Some(hash_api_key("client-gemini-video-cancel-op-key")),
+        sample_auth_snapshot(
+            "key-gemini-video-cancel-rotated-op-123",
+            "user-gemini-video-cancel-op-123",
+        ),
+    )]));
 
-    let gateway = build_router_with_state(
-        build_state_with_execution_runtime_override(execution_runtime_url)
+    let gateway_state = build_state_with_execution_runtime_override(execution_runtime_url)
         .with_video_task_truth_source_mode(VideoTaskTruthSourceMode::RustAuthoritative)
         .with_data_state_for_tests(
             crate::data::GatewayDataState::with_video_task_provider_transport_and_request_candidate_repository_for_tests(
-                repository,
+                repository.clone(),
                 provider_catalog_repository,
                 Arc::clone(&request_candidate_repository),
                 DEVELOPMENT_ENCRYPTION_KEY,
-            ),
-        ),
-    );
+            )
+            .with_auth_api_key_reader(auth_repository),
+        );
+    let gateway = build_router_with_state(gateway_state);
     let (gateway_url, gateway_handle) = start_server(gateway).await;
 
     let response = reqwest::Client::new()
         .post(format!(
             "{gateway_url}/v1beta/models/veo-3/operations/opshort123:cancel"
         ))
+        .header("x-goog-api-key", "client-gemini-video-cancel-op-key")
         .header(CONTROL_EXECUTE_FALLBACK_HEADER, "true")
         .header(TRACE_ID_HEADER, "trace-gemini-video-cancel-op-123")
         .send()
@@ -594,13 +584,8 @@ async fn gateway_executes_gemini_video_cancel_via_reconstructed_data_backed_loca
         .expect("request should succeed");
 
     assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(
-        response
-            .json::<serde_json::Value>()
-            .await
-            .expect("body should parse"),
-        json!({})
-    );
+    let response: serde_json::Value = response.json().await.expect("body should parse");
+    assert_eq!(response, json!({}));
 
     let seen_execution_runtime_request = seen_execution_runtime
         .lock()

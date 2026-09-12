@@ -131,7 +131,10 @@
               <TableCell class="py-4">
                 <div class="flex-1 min-w-0">
                   <div class="flex items-center gap-2 mb-1">
-                    <span class="text-sm font-medium text-foreground">{{ announcement.title }}</span>
+                    <span
+                      translate="no"
+                      class="text-sm font-medium text-foreground"
+                    >{{ announcement.title }}</span>
                     <Badge
                       v-if="announcement.requires_ack"
                       variant="outline"
@@ -144,7 +147,10 @@
                       class="w-3.5 h-3.5 text-muted-foreground flex-shrink-0"
                     />
                   </div>
-                  <p class="text-xs text-muted-foreground line-clamp-1">
+                  <p
+                    translate="no"
+                    class="text-xs text-muted-foreground line-clamp-1"
+                  >
                     {{ getPlainText(announcement.content) }}
                   </p>
                 </div>
@@ -246,7 +252,10 @@
                   class="w-4 h-4 shrink-0"
                   :class="getIconColor(announcement.type)"
                 />
-                <span class="font-medium text-sm">{{ announcement.title }}</span>
+                <span
+                  translate="no"
+                  class="font-medium text-sm"
+                >{{ announcement.title }}</span>
                 <Badge
                   v-if="announcement.requires_ack"
                   variant="outline"
@@ -266,7 +275,10 @@
                 {{ announcement.is_read ? '已读' : '未读' }}
               </Badge>
             </div>
-            <p class="text-xs text-muted-foreground line-clamp-2">
+            <p
+              translate="no"
+              class="text-xs text-muted-foreground line-clamp-2"
+            >
               {{ getPlainText(announcement.content) }}
             </p>
             <div class="flex items-center gap-2 text-xs text-muted-foreground">
@@ -555,6 +567,7 @@
 
         <!-- eslint-disable vue/no-v-html -->
         <div
+          translate="no"
           class="prose prose-sm dark:prose-invert max-w-none"
           v-html="renderMarkdown(viewingAnnouncement.content)"
         />
@@ -576,6 +589,8 @@
 </template>
 
 <script setup lang="ts">
+import { getI18nLocale } from '@/i18n'
+import { formatRelativeTime } from '@/utils/format'
 import { ref, onMounted, computed } from 'vue'
 import { announcementApi, type Announcement } from '@/api/announcements'
 import { useAuthStore } from '@/stores/auth'
@@ -852,7 +867,7 @@ function getDialogIconClass(type?: string) {
 
 function formatFullDate(dateString: string): string {
   const date = new Date(dateString)
-  return date.toLocaleDateString('zh-CN', {
+  return date.toLocaleDateString(getI18nLocale(), {
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
@@ -884,13 +899,13 @@ function formatDate(dateString: string): string {
   const minutes = Math.floor(diff / (1000 * 60))
 
   if (minutes < 60) {
-    return `${minutes} 分钟前`
+    return minutes < 1 ? formatRelativeTime(0, 'second') : formatRelativeTime(-minutes, 'minute')
   } else if (hours < 24) {
-    return `${hours} 小时前`
+    return formatRelativeTime(-hours, 'hour')
   } else if (days < 7) {
-    return `${days} 天前`
+    return formatRelativeTime(-days, 'day')
   } else {
-    return date.toLocaleDateString('zh-CN', {
+    return date.toLocaleDateString(getI18nLocale(), {
       year: 'numeric',
       month: '2-digit',
       day: '2-digit'

@@ -11,6 +11,7 @@ use crate::constants::*;
 use crate::control::GatewayControlDecision;
 use crate::control::GatewayLocalAuthRejection;
 use crate::headers::should_skip_response_header;
+use crate::plan_usage_policy::PlanUsagePolicyRejection;
 use crate::rate_limit::FrontdoorUserRpmRejection;
 use crate::{insert_header_if_missing, GatewayError};
 
@@ -52,22 +53,34 @@ pub(crate) fn apply_streaming_response_headers(headers: &mut http::HeaderMap) {
     );
 }
 
+fn apply_gateway_browser_security_headers(headers: &mut http::HeaderMap) {
+    // Provider responses are API data, even when an untrusted provider labels
+    // them as HTML or SVG.  Keep a direct navigation to a gateway API route
+    // from becoming same-origin active content, and prevent referrer leakage
+    // if a user follows a link rendered from such a response.
+    headers.insert(
+        http::header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        HeaderName::from_static("content-security-policy"),
+        HeaderValue::from_static(
+            "default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; sandbox",
+        ),
+    );
+    headers.insert(
+        HeaderName::from_static("referrer-policy"),
+        HeaderValue::from_static("no-referrer"),
+    );
+}
+
 pub(crate) fn build_client_response(
     upstream_response: reqwest::Response,
     trace_id: &str,
     control_decision: Option<&GatewayControlDecision>,
 ) -> Result<Response<Body>, GatewayError> {
     let status = upstream_response.status();
-    let upstream_headers = upstream_response
-        .headers()
-        .iter()
-        .map(|(name, value)| {
-            (
-                name.as_str().to_string(),
-                value.to_str().unwrap_or_default().to_string(),
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
+    let upstream_headers = collect_safe_response_headers(upstream_response.headers());
     let upstream_stream = upstream_response.bytes_stream();
     build_client_response_from_parts(
         status.as_u16(),
@@ -76,6 +89,40 @@ pub(crate) fn build_client_response(
         trace_id,
         control_decision,
     )
+}
+
+fn collect_safe_response_headers(headers: &http::HeaderMap) -> BTreeMap<String, String> {
+    let connection_declared = aether_http::connection_declared_header_names(
+        headers
+            .get_all(http::header::CONNECTION)
+            .iter()
+            .filter_map(|value| value.to_str().ok()),
+    );
+    headers
+        .iter()
+        .filter_map(|(name, value)| {
+            let normalized = name.as_str().to_ascii_lowercase();
+            if should_skip_client_response_header(&normalized)
+                || connection_declared.contains(&normalized)
+            {
+                return None;
+            }
+            value
+                .to_str()
+                .ok()
+                .map(|value| (normalized, value.to_string()))
+        })
+        .collect()
+}
+
+fn should_skip_client_response_header(name: &str) -> bool {
+    should_skip_response_header(name)
+        // A provider Location is relative to the provider, not to the gateway.
+        // Forwarding it lets redirect-following clients bypass the gateway and
+        // can disclose their gateway Authorization header to another origin.
+        // Keep Location available inside execution reports, but never expose
+        // it on the client-facing response boundary.
+        || name.eq_ignore_ascii_case(http::header::LOCATION.as_str())
 }
 
 pub(crate) fn build_client_response_from_parts(
@@ -111,8 +158,17 @@ where
         .body(body)
         .map_err(|err| GatewayError::Internal(err.to_string()))?;
 
+    let connection_declared = aether_http::connection_declared_header_names(
+        upstream_headers
+            .iter()
+            .filter(|(name, _)| name.eq_ignore_ascii_case(http::header::CONNECTION.as_str()))
+            .map(|(_, value)| value.as_str()),
+    );
+
     for (name, value) in upstream_headers {
-        if should_skip_response_header(name.as_str()) {
+        if should_skip_client_response_header(name.as_str())
+            || connection_declared.contains(&name.to_ascii_lowercase())
+        {
             continue;
         }
         let header_name = HeaderName::from_bytes(name.as_bytes())
@@ -123,6 +179,7 @@ where
     }
     mutate_headers(response.headers_mut())?;
     apply_streaming_response_headers(response.headers_mut());
+    apply_gateway_browser_security_headers(response.headers_mut());
     insert_header_if_missing(response.headers_mut(), TRACE_ID_HEADER, trace_id)?;
     insert_header_if_missing(response.headers_mut(), GATEWAY_HEADER, "rust-phase3b")?;
     if let Some(decision) = control_decision {
@@ -248,6 +305,57 @@ pub(crate) fn build_local_user_rpm_limited_response(
         ("X-RateLimit-Limit".to_string(), rejection.limit.to_string()),
         ("X-RateLimit-Remaining".to_string(), "0".to_string()),
         ("X-RateLimit-Scope".to_string(), rejection.scope.to_string()),
+    ]);
+    build_client_response_from_parts(
+        StatusCode::TOO_MANY_REQUESTS.as_u16(),
+        &headers,
+        Body::from(body),
+        trace_id,
+        control_decision,
+    )
+}
+
+pub(crate) fn build_local_plan_usage_limited_response(
+    trace_id: &str,
+    control_decision: Option<&GatewayControlDecision>,
+    rejection: &PlanUsagePolicyRejection,
+) -> Result<Response<Body>, GatewayError> {
+    let message = "套餐使用限制已达到上限，请稍后重试";
+    let fallback_payload = json!({
+        "error": {
+            "type": "plan_usage_limit_exceeded",
+            "message": message,
+            "details": {
+                "metric": rejection.metric,
+                "window": rejection.window,
+                "limit": rejection.limit,
+                "retry_after": rejection.retry_after,
+            }
+        }
+    });
+    let payload = build_local_error_payload(
+        control_decision,
+        None,
+        message,
+        LocalCoreSyncErrorKind::RateLimit,
+        fallback_payload,
+    );
+    let body =
+        serde_json::to_vec(&payload).map_err(|err| GatewayError::Internal(err.to_string()))?;
+    let headers = BTreeMap::from([
+        ("content-type".to_string(), "application/json".to_string()),
+        ("Retry-After".to_string(), rejection.retry_after.to_string()),
+        ("X-RateLimit-Limit".to_string(), rejection.limit.to_string()),
+        ("X-RateLimit-Remaining".to_string(), "0".to_string()),
+        ("X-RateLimit-Scope".to_string(), "plan".to_string()),
+        (
+            "X-RateLimit-Metric".to_string(),
+            rejection.metric.to_string(),
+        ),
+        (
+            "X-RateLimit-Window".to_string(),
+            rejection.window.to_string(),
+        ),
     ]);
     build_client_response_from_parts(
         StatusCode::TOO_MANY_REQUESTS.as_u16(),
@@ -454,11 +562,13 @@ fn local_error_kind_for_status(status: StatusCode) -> LocalCoreSyncErrorKind {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_client_response_from_parts, build_local_auth_rejection_response,
+        build_client_response, build_client_response_from_parts,
+        build_client_response_from_parts_with_mutator, build_local_auth_rejection_response,
         build_local_http_error_response_with_request_path, build_local_overloaded_response,
-        build_local_user_rpm_limited_response,
+        build_local_plan_usage_limited_response, build_local_user_rpm_limited_response,
     };
     use crate::control::{GatewayControlDecision, GatewayLocalAuthRejection};
+    use crate::plan_usage_policy::PlanUsagePolicyRejection;
     use crate::rate_limit::FrontdoorUserRpmRejection;
     use axum::body::{to_bytes, Body};
     use std::collections::BTreeMap;
@@ -488,6 +598,163 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some("no")
         );
+    }
+
+    #[test]
+    fn upstream_security_headers_are_stripped_before_gateway_headers_are_added() {
+        let response = build_client_response_from_parts_with_mutator(
+            200,
+            &BTreeMap::from([
+                ("set-cookie".to_string(), "session=attacker".to_string()),
+                (
+                    "x-aether-gateway".to_string(),
+                    "attacker-gateway".to_string(),
+                ),
+                (
+                    "x-aether-control-action".to_string(),
+                    "attacker-action".to_string(),
+                ),
+                (
+                    "x-aether-future-control".to_string(),
+                    "attacker-future".to_string(),
+                ),
+                (
+                    "x-accel-redirect".to_string(),
+                    "/internal/private-file".to_string(),
+                ),
+                ("x-sendfile".to_string(), "/etc/passwd".to_string()),
+                (
+                    "x-reproxy-url".to_string(),
+                    "http://127.0.0.1:9000/private".to_string(),
+                ),
+                (
+                    "access-control-allow-origin".to_string(),
+                    "https://attacker.example".to_string(),
+                ),
+                (
+                    "access-control-allow-credentials".to_string(),
+                    "true".to_string(),
+                ),
+                ("content-length".to_string(), "999999".to_string()),
+                (
+                    "content-security-policy".to_string(),
+                    "default-src * 'unsafe-inline' 'unsafe-eval'".to_string(),
+                ),
+                (
+                    "content-security-policy-report-only".to_string(),
+                    "default-src 'none'; report-uri https://attacker.example/csp".to_string(),
+                ),
+                (
+                    "reporting-endpoints".to_string(),
+                    "attacker=\"https://attacker.example/reports\"".to_string(),
+                ),
+                ("report-to".to_string(), "attacker".to_string()),
+                (
+                    "nel".to_string(),
+                    "{\"report_to\":\"attacker\"}".to_string(),
+                ),
+                (
+                    "refresh".to_string(),
+                    "0; url=https://attacker.example".to_string(),
+                ),
+                ("referrer-policy".to_string(), "unsafe-url".to_string()),
+                ("x-content-type-options".to_string(), "invalid".to_string()),
+                (
+                    "location".to_string(),
+                    "https://provider.example/direct".to_string(),
+                ),
+                ("x-upstream-visible".to_string(), "ok".to_string()),
+            ]),
+            Body::empty(),
+            "trace-upstream-header-filter",
+            None,
+            |headers| {
+                headers.insert(
+                    http::HeaderName::from_static("x-aether-control-action"),
+                    http::HeaderValue::from_static("gateway-action"),
+                );
+                Ok(())
+            },
+        )
+        .expect("response should build");
+
+        assert!(response.headers().get(http::header::SET_COOKIE).is_none());
+        assert!(response.headers().get("x-aether-future-control").is_none());
+        assert!(response.headers().get("x-accel-redirect").is_none());
+        assert!(response.headers().get("x-sendfile").is_none());
+        assert!(response.headers().get("x-reproxy-url").is_none());
+        assert!(response
+            .headers()
+            .get("access-control-allow-origin")
+            .is_none());
+        assert!(response
+            .headers()
+            .get("access-control-allow-credentials")
+            .is_none());
+        assert!(response
+            .headers()
+            .get(http::header::CONTENT_LENGTH)
+            .is_none());
+        assert!(response
+            .headers()
+            .get("content-security-policy-report-only")
+            .is_none());
+        assert!(response.headers().get("reporting-endpoints").is_none());
+        assert!(response.headers().get("report-to").is_none());
+        assert!(response.headers().get("nel").is_none());
+        assert!(response.headers().get("refresh").is_none());
+        assert!(response.headers().get(http::header::LOCATION).is_none());
+        assert_eq!(
+            response.headers()["content-security-policy"],
+            "default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; sandbox"
+        );
+        assert_eq!(response.headers()["referrer-policy"], "no-referrer");
+        assert_eq!(
+            response.headers()[http::header::X_CONTENT_TYPE_OPTIONS],
+            "nosniff"
+        );
+        assert_eq!(response.headers()["x-aether-gateway"], "rust-phase3b");
+        assert_eq!(
+            response.headers()["x-aether-control-action"],
+            "gateway-action"
+        );
+        assert_eq!(response.headers()["x-upstream-visible"], "ok");
+    }
+
+    #[tokio::test]
+    async fn raw_response_collector_honors_all_connection_header_lines() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let addr = listener.local_addr().expect("address");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("connection");
+            use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request).await.expect("request read");
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nConnection: x-first-hop\r\nConnection: x-second-hop\r\nX-First-Hop: first-secret\r\nX-Second-Hop: second-secret\r\nContent-Length: 2\r\n\r\nok",
+                )
+                .await
+                .expect("response write");
+        });
+        let upstream = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("client")
+            .get(format!("http://{addr}/"))
+            .send()
+            .await
+            .expect("upstream response");
+
+        let response = build_client_response(upstream, "trace-connection-lines", None)
+            .expect("client response");
+        server.await.expect("server");
+
+        assert!(response.headers().get("connection").is_none());
+        assert!(response.headers().get("x-first-hop").is_none());
+        assert!(response.headers().get("x-second-hop").is_none());
     }
 
     fn claude_decision() -> GatewayControlDecision {
@@ -580,5 +847,26 @@ mod tests {
                 "path: {path}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn plan_usage_rejection_exposes_machine_readable_limit_headers() {
+        let response = build_local_plan_usage_limited_response(
+            "trace-plan-limit",
+            None,
+            &PlanUsagePolicyRejection {
+                metric: "request_count",
+                limit: 100.0,
+                retry_after: 42,
+                window: "calendar_week",
+            },
+        )
+        .expect("response");
+        assert_eq!(response.status(), http::StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.headers()["retry-after"], "42");
+        assert_eq!(response.headers()["x-ratelimit-scope"], "plan");
+        assert_eq!(response.headers()["x-ratelimit-window"], "calendar_week");
+        let payload = response_json(response).await;
+        assert_eq!(payload["error"]["type"], "plan_usage_limit_exceeded");
     }
 }

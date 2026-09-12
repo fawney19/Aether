@@ -468,7 +468,8 @@ async function testMapping(group: AliasGroup, mapping: ProviderModelAlias) {
       apiFormat = group.apiFormats[0]
     } else if (group.apiFormats.length === 0) {
       // 如果没有指定格式，但分组显示为"全部"，则使用模型的默认格式
-      apiFormat = group.model.effective_api_format || group.model.api_format
+      const formats = group.model.effective_config?.api_formats ?? group.model.config?.api_formats ?? []
+      if (formats.length === 1) apiFormat = formats[0]
     }
 
     const result = await testModel(

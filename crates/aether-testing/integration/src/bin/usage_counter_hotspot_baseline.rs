@@ -116,8 +116,13 @@ struct LockSample {
     oldest_lock_wait_ms: i64,
 }
 
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let _log_shutdown = aether_runtime::LogShutdownGuard::new();
+    run()
+}
+
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn run() -> Result<(), Box<dyn std::error::Error>> {
     init_test_runtime_for("usage-counter-hotspot-baseline");
     let config = parse_args(std::env::args().skip(1).collect())?;
 
@@ -453,6 +458,7 @@ fn usage_record(index: usize) -> UpsertUsageRecord {
     let now_ms = now_unix_ms().saturating_add(index as u64);
     let now_secs = now_ms / 1_000;
     UpsertUsageRecord {
+        capture_retention: Default::default(),
         request_id: format!("usage-hotspot-{index:08}"),
         user_id: Some("user-hotspot".to_string()),
         api_key_id: Some("api-key-hotspot".to_string()),

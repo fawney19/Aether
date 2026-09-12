@@ -81,12 +81,12 @@ fn select_video_task_full_columns() -> String {
 
 fn select_video_task_claim_columns() -> String {
     select_video_task_columns(
-        "NULL::TEXT",
+        "prompt",
         "NULL::jsonb",
-        "NULL::INTEGER",
-        "NULL::TEXT",
-        "NULL::TEXT",
-        "NULL::TEXT",
+        "duration_seconds",
+        "resolution",
+        "aspect_ratio",
+        "size",
     )
 }
 
@@ -101,8 +101,16 @@ fn find_by_id_sql() -> String {
     select_video_task_sql("WHERE id = $1\nLIMIT 1")
 }
 
+fn find_by_id_for_user_sql() -> String {
+    select_video_task_sql("WHERE id = $1 AND user_id = $2\nLIMIT 1")
+}
+
 fn find_by_short_id_sql() -> String {
     select_video_task_sql("WHERE short_id = $1\nLIMIT 1")
+}
+
+fn find_by_short_id_for_user_sql() -> String {
+    select_video_task_sql("WHERE short_id = $1 AND user_id = $2\nLIMIT 1")
 }
 
 fn find_by_user_external_sql() -> String {
@@ -302,10 +310,26 @@ ON CONFLICT (id) DO UPDATE SET
   error_code = EXCLUDED.error_code,
   error_message = EXCLUDED.error_message,
   request_metadata = EXCLUDED.request_metadata,
-  created_at = EXCLUDED.created_at,
+  created_at = COALESCE(video_tasks.created_at, EXCLUDED.created_at),
   submitted_at = EXCLUDED.submitted_at,
   completed_at = EXCLUDED.completed_at,
   updated_at = EXCLUDED.updated_at
+WHERE video_tasks.short_id IS NOT DISTINCT FROM EXCLUDED.short_id
+  AND video_tasks.request_id IS NOT DISTINCT FROM EXCLUDED.request_id
+  AND video_tasks.user_id IS NOT DISTINCT FROM EXCLUDED.user_id
+  AND video_tasks.api_key_id IS NOT DISTINCT FROM EXCLUDED.api_key_id
+  AND video_tasks.external_task_id IS NOT DISTINCT FROM EXCLUDED.external_task_id
+  AND video_tasks.provider_id IS NOT DISTINCT FROM EXCLUDED.provider_id
+  AND video_tasks.endpoint_id IS NOT DISTINCT FROM EXCLUDED.endpoint_id
+  AND video_tasks.key_id IS NOT DISTINCT FROM EXCLUDED.key_id
+  AND video_tasks.client_api_format IS NOT DISTINCT FROM EXCLUDED.client_api_format
+  AND video_tasks.provider_api_format IS NOT DISTINCT FROM EXCLUDED.provider_api_format
+  AND video_tasks.format_converted IS NOT DISTINCT FROM EXCLUDED.format_converted
+  AND video_tasks.model IS NOT DISTINCT FROM EXCLUDED.model
+  AND video_tasks.duration_seconds IS NOT DISTINCT FROM EXCLUDED.duration_seconds
+  AND video_tasks.resolution IS NOT DISTINCT FROM EXCLUDED.resolution
+  AND video_tasks.aspect_ratio IS NOT DISTINCT FROM EXCLUDED.aspect_ratio
+  AND video_tasks.size IS NOT DISTINCT FROM EXCLUDED.size
 RETURNING
 {columns}
 "
@@ -348,12 +372,28 @@ fn update_if_active_sql() -> String {
   error_code = $31,
   error_message = $32,
   request_metadata = $33,
-  created_at = TO_TIMESTAMP($34),
+  created_at = COALESCE(created_at, TO_TIMESTAMP($34)),
   submitted_at = TO_TIMESTAMP($35),
   completed_at = TO_TIMESTAMP($36),
   updated_at = TO_TIMESTAMP($37)
 WHERE id = $1
   AND status = ANY($38)
+  AND short_id IS NOT DISTINCT FROM $2
+  AND request_id IS NOT DISTINCT FROM $3
+  AND user_id IS NOT DISTINCT FROM $4
+  AND api_key_id IS NOT DISTINCT FROM $5
+  AND external_task_id IS NOT DISTINCT FROM $8
+  AND provider_id IS NOT DISTINCT FROM $9
+  AND endpoint_id IS NOT DISTINCT FROM $10
+  AND key_id IS NOT DISTINCT FROM $11
+  AND client_api_format IS NOT DISTINCT FROM $12
+  AND provider_api_format IS NOT DISTINCT FROM $13
+  AND format_converted IS NOT DISTINCT FROM $14
+  AND model IS NOT DISTINCT FROM $15
+  AND duration_seconds IS NOT DISTINCT FROM $18
+  AND resolution IS NOT DISTINCT FROM $19
+  AND aspect_ratio IS NOT DISTINCT FROM $20
+  AND size IS NOT DISTINCT FROM $21
 RETURNING
 {columns}
 "
@@ -390,10 +430,45 @@ impl SqlxVideoTaskRepository {
         }
     }
 
+    pub async fn find_for_user(
+        &self,
+        key: VideoTaskLookupKey<'_>,
+        user_id: &str,
+    ) -> Result<Option<StoredVideoTask>, DataLayerError> {
+        match key {
+            VideoTaskLookupKey::Id(id) => self.find_by_id_for_user(id, user_id).await,
+            VideoTaskLookupKey::ShortId(short_id) => {
+                self.find_by_short_id_for_user(short_id, user_id).await
+            }
+            VideoTaskLookupKey::UserExternal {
+                user_id: lookup_user_id,
+                external_task_id,
+            } if lookup_user_id == user_id => {
+                self.find_by_user_external(user_id, external_task_id).await
+            }
+            VideoTaskLookupKey::UserExternal { .. } => Ok(None),
+        }
+    }
+
     pub async fn find_by_id(&self, id: &str) -> Result<Option<StoredVideoTask>, DataLayerError> {
         let sql = find_by_id_sql();
         let row = sqlx::query(&sql)
             .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_postgres_err()?;
+        row.as_ref().map(map_video_task_row).transpose()
+    }
+
+    pub async fn find_by_id_for_user(
+        &self,
+        id: &str,
+        user_id: &str,
+    ) -> Result<Option<StoredVideoTask>, DataLayerError> {
+        let sql = find_by_id_for_user_sql();
+        let row = sqlx::query(&sql)
+            .bind(id)
+            .bind(user_id)
             .fetch_optional(&self.pool)
             .await
             .map_postgres_err()?;
@@ -407,6 +482,21 @@ impl SqlxVideoTaskRepository {
         let sql = find_by_short_id_sql();
         let row = sqlx::query(&sql)
             .bind(short_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_postgres_err()?;
+        row.as_ref().map(map_video_task_row).transpose()
+    }
+
+    pub async fn find_by_short_id_for_user(
+        &self,
+        short_id: &str,
+        user_id: &str,
+    ) -> Result<Option<StoredVideoTask>, DataLayerError> {
+        let sql = find_by_short_id_for_user_sql();
+        let row = sqlx::query(&sql)
+            .bind(short_id)
+            .bind(user_id)
             .fetch_optional(&self.pool)
             .await
             .map_postgres_err()?;
@@ -661,7 +751,12 @@ impl SqlxVideoTaskRepository {
             .map_err(|_| DataLayerError::UnexpectedValue(format!("invalid count result: {total}")))
     }
 
-    pub async fn upsert(&self, task: UpsertVideoTask) -> Result<StoredVideoTask, DataLayerError> {
+    pub async fn upsert(
+        &self,
+        mut task: UpsertVideoTask,
+    ) -> Result<StoredVideoTask, DataLayerError> {
+        task.sanitize_for_persistence();
+        let task_id = task.id.clone();
         let sql = upsert_sql();
         let row = sqlx::query(&sql)
             .bind(task.id)
@@ -720,17 +815,23 @@ impl SqlxVideoTaskRepository {
             .bind(task.submitted_at_unix_secs.map(|value| value as f64))
             .bind(task.completed_at_unix_secs.map(|value| value as f64))
             .bind(task.updated_at_unix_secs as f64)
-            .fetch_one(&self.pool)
+            .fetch_optional(&self.pool)
             .await
-            .map_postgres_err()?;
+            .map_postgres_err()?
+            .ok_or_else(|| {
+                DataLayerError::InvalidInput(format!(
+                    "video task {task_id} conflicts with persisted immutable identity"
+                ))
+            })?;
 
         map_video_task_row(&row)
     }
 
     pub async fn update_if_active(
         &self,
-        task: UpsertVideoTask,
+        mut task: UpsertVideoTask,
     ) -> Result<Option<StoredVideoTask>, DataLayerError> {
+        task.sanitize_for_persistence();
         let sql = update_if_active_sql();
         let row = sqlx::query(&sql)
             .bind(task.id)
@@ -837,6 +938,14 @@ impl VideoTaskReadRepository for SqlxVideoTaskRepository {
         key: VideoTaskLookupKey<'_>,
     ) -> Result<Option<StoredVideoTask>, DataLayerError> {
         Self::find(self, key).await
+    }
+
+    async fn find_for_user(
+        &self,
+        key: VideoTaskLookupKey<'_>,
+        user_id: &str,
+    ) -> Result<Option<StoredVideoTask>, DataLayerError> {
+        Self::find_for_user(self, key, user_id).await
     }
 
     async fn list_active(&self, limit: usize) -> Result<Vec<StoredVideoTask>, DataLayerError> {
@@ -1067,7 +1176,7 @@ fn map_video_task_row(row: &PgRow) -> Result<StoredVideoTask, DataLayerError> {
 
 #[cfg(test)]
 mod tests {
-    use super::SqlxVideoTaskRepository;
+    use super::{claim_due_sql, update_if_active_sql, upsert_sql, SqlxVideoTaskRepository};
     use crate::{PostgresPoolConfig, PostgresPoolFactory};
     use aether_data_contracts::repository::video_tasks::{
         UpsertVideoTask, VideoTaskLookupKey, VideoTaskQueryFilter, VideoTaskReadRepository,
@@ -1088,6 +1197,183 @@ mod tests {
         .expect("factory should build");
 
         factory.connect_lazy().expect("pool should build")
+    }
+
+    #[test]
+    fn write_sql_guards_every_immutable_identity_field() {
+        let upsert = upsert_sql();
+        let update = update_if_active_sql();
+        let immutable_columns = [
+            ("short_id", "$2"),
+            ("request_id", "$3"),
+            ("user_id", "$4"),
+            ("api_key_id", "$5"),
+            ("external_task_id", "$8"),
+            ("provider_id", "$9"),
+            ("endpoint_id", "$10"),
+            ("key_id", "$11"),
+            ("client_api_format", "$12"),
+            ("provider_api_format", "$13"),
+            ("format_converted", "$14"),
+            ("model", "$15"),
+            ("duration_seconds", "$18"),
+            ("resolution", "$19"),
+            ("aspect_ratio", "$20"),
+            ("size", "$21"),
+        ];
+
+        for (column, parameter) in immutable_columns {
+            assert!(
+                upsert.contains(&format!(
+                    "video_tasks.{column} IS NOT DISTINCT FROM EXCLUDED.{column}"
+                )),
+                "upsert should guard {column}"
+            );
+            assert!(
+                update.contains(&format!("{column} IS NOT DISTINCT FROM {parameter}")),
+                "active update should guard {column}"
+            );
+        }
+        assert!(
+            upsert.contains("created_at = COALESCE(video_tasks.created_at, EXCLUDED.created_at)")
+        );
+        assert!(update.contains("created_at = COALESCE(created_at, TO_TIMESTAMP($34))"));
+    }
+
+    #[test]
+    fn poll_claim_returns_business_fields_required_by_identity_guards() {
+        let sql = claim_due_sql();
+        for field in [
+            "prompt",
+            "duration_seconds",
+            "resolution",
+            "aspect_ratio",
+            "size",
+        ] {
+            assert!(
+                sql.contains(&format!("{field} AS {field}")),
+                "claim must retain {field}"
+            );
+        }
+        assert!(sql.contains("NULL::jsonb AS original_request_body"));
+        assert!(sql.contains("FOR UPDATE SKIP LOCKED"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires AETHER_TEST_DATABASE_URL and PostgreSQL migrations"]
+    async fn live_video_task_capture_claim_and_completion_preserve_business_fields() {
+        let database_url = std::env::var("AETHER_TEST_DATABASE_URL")
+            .expect("AETHER_TEST_DATABASE_URL must point at the test database");
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&database_url)
+            .await
+            .expect("test database should connect");
+        crate::run_migrations(&pool)
+            .await
+            .expect("test database should migrate");
+        sqlx::query("CREATE TEMP TABLE video_tasks (LIKE public.video_tasks INCLUDING ALL)")
+            .execute(&pool)
+            .await
+            .expect("isolated task table should be created");
+        let repository = SqlxVideoTaskRepository::new(pool);
+        for api_format in ["openai:video", "gemini:video"] {
+            let task_id = uuid::Uuid::new_v4().to_string();
+            let original = UpsertVideoTask {
+                id: task_id.clone(),
+                short_id: Some(uuid::Uuid::new_v4().simple().to_string()[..16].to_string()),
+                request_id: format!("request-{task_id}"),
+                user_id: None,
+                api_key_id: None,
+                username: Some("alice".to_string()),
+                api_key_name: Some("video-client".to_string()),
+                external_task_id: Some("upstream-task-1".to_string()),
+                provider_id: None,
+                endpoint_id: None,
+                key_id: None,
+                client_api_format: Some(api_format.to_string()),
+                provider_api_format: Some(api_format.to_string()),
+                format_converted: false,
+                model: Some("video-model".to_string()),
+                prompt: Some("business prompt".to_string()),
+                original_request_body: Some(serde_json::json!({"token": "private"})),
+                duration_seconds: Some(8),
+                resolution: Some("1080p".to_string()),
+                aspect_ratio: Some("16:9".to_string()),
+                size: Some("1920x1080".to_string()),
+                status: VideoTaskStatus::Submitted,
+                progress_percent: 0,
+                progress_message: None,
+                retry_count: 0,
+                poll_interval_seconds: 10,
+                next_poll_at_unix_secs: Some(10),
+                poll_count: 0,
+                max_poll_count: 360,
+                created_at_unix_ms: 1,
+                submitted_at_unix_secs: Some(1),
+                completed_at_unix_secs: None,
+                updated_at_unix_secs: 1,
+                error_code: None,
+                error_message: None,
+                video_url: None,
+                request_metadata: Some(serde_json::json!({"authorization": "private"})),
+            };
+            let stored = repository
+                .upsert(original.clone())
+                .await
+                .expect("task should persist");
+            assert_eq!(stored.prompt, original.prompt);
+            assert_eq!(stored.username, original.username);
+            assert_eq!(stored.api_key_name, original.api_key_name);
+            assert!(stored.original_request_body.is_none());
+            assert!(stored.request_metadata.is_none());
+
+            let mut claimed = repository
+                .claim_due(20, 50, 10)
+                .await
+                .expect("task should be claimed");
+            assert_eq!(claimed.len(), 1);
+            let mut completion: UpsertVideoTask = claimed.pop().expect("claimed task").into();
+            stored
+                .ensure_immutable_identity_matches(&completion)
+                .expect("claim must preserve task identity");
+            assert_eq!(completion.prompt, original.prompt);
+            let mut mismatched = completion.clone();
+            mismatched.duration_seconds = Some(99);
+            assert!(repository
+                .update_if_active(mismatched)
+                .await
+                .expect("guarded update should execute")
+                .is_none());
+            completion.status = VideoTaskStatus::Completed;
+            completion.progress_percent = 100;
+            completion.next_poll_at_unix_secs = None;
+            completion.completed_at_unix_secs = Some(21);
+            completion.updated_at_unix_secs = 21;
+            completion.video_url = Some(
+                "https://cdn.example.test/video.mp4?alt=media&signature=a%2Fb%2Bc%3D&part=2&part=1"
+                    .to_string(),
+            );
+            let completed = repository
+                .update_if_active(completion.clone())
+                .await
+                .expect("completion should execute")
+                .expect("matching active task should complete");
+            assert_eq!(completed.video_url, completion.video_url);
+            let reloaded = repository
+                .find(VideoTaskLookupKey::Id(&task_id))
+                .await
+                .expect("task should reload")
+                .expect("task should exist");
+            assert_eq!(reloaded.status, VideoTaskStatus::Completed);
+            assert_eq!(reloaded.prompt, original.prompt);
+            assert_eq!(reloaded.video_url, completion.video_url);
+            assert_eq!(reloaded.duration_seconds, original.duration_seconds);
+            assert_eq!(reloaded.size, original.size);
+            assert_eq!(reloaded.username, original.username);
+            assert!(reloaded.request_metadata.is_none());
+        }
+        repository.pool().close().await;
     }
 
     #[tokio::test]

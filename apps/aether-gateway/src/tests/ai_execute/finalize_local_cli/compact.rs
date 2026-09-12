@@ -6,6 +6,7 @@ use super::{
     EXECUTION_PATH_HEADER, TRACE_ID_HEADER,
 };
 use crate::data::GatewayDataState;
+use aether_ai_formats::openai_responses_message_item_id;
 use aether_crypto::{encrypt_python_fernet_plaintext, DEVELOPMENT_ENCRYPTION_KEY};
 use aether_data::repository::auth::{
     InMemoryAuthApiKeySnapshotRepository, StoredAuthApiKeySnapshot,
@@ -414,7 +415,7 @@ async fn gateway_executes_openai_responses_compact_openai_family_upstream_stream
             "output_text": "Hello Compact",
             "output": [{
                 "type": "message",
-                "id": "resp_compact_openai_family_123_msg",
+                "id": openai_responses_message_item_id("resp_compact_openai_family_123", 0),
                 "role": "assistant",
                 "status": "completed",
                 "content": [{

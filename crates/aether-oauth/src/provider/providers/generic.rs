@@ -1,4 +1,7 @@
-use crate::core::{current_unix_secs, OAuthAuthorizeResponse, OAuthError, OAuthTokenSet};
+use crate::core::{
+    current_unix_secs, redacted_oauth_error_body_excerpt, OAuthAuthorizeResponse, OAuthError,
+    OAuthTokenSet,
+};
 use crate::network::{OAuthHttpExecutor, OAuthHttpRequest};
 use crate::provider::ProviderOAuthAdapter;
 use crate::provider::{
@@ -17,6 +20,39 @@ use super::claude_code::{
     CLAUDE_CODE_PROVIDER_TYPE, CLAUDE_CODE_REDIRECT_URI, CLAUDE_CODE_TOKEN_URL,
 };
 
+pub const GEMINI_CLI_OAUTH_CLIENT_ID_ENV: &str = "AETHER_GEMINI_CLI_OAUTH_CLIENT_ID";
+pub const GEMINI_CLI_OAUTH_CLIENT_SECRET_ENV: &str = "AETHER_GEMINI_CLI_OAUTH_CLIENT_SECRET";
+pub const ANTIGRAVITY_OAUTH_CLIENT_ID_ENV: &str = "AETHER_ANTIGRAVITY_OAUTH_CLIENT_ID";
+pub const ANTIGRAVITY_OAUTH_CLIENT_SECRET_ENV: &str = "AETHER_ANTIGRAVITY_OAUTH_CLIENT_SECRET";
+const CODEX_IDENTITY_FINGERPRINT_FIELD: &str = "codex_identity_fingerprint";
+const CODEX_IDENTITY_FINGERPRINT_VERSION: &str = "codex-persisted-fingerprint:v1";
+
+pub fn derive_codex_identity_fingerprint(
+    account_id: Option<&str>,
+    account_user_id: Option<&str>,
+    user_id: Option<&str>,
+    email: Option<&str>,
+) -> Option<String> {
+    let account = normalized_codex_identity_value(account_id);
+    let member = normalized_codex_identity_value(account_user_id)
+        .or_else(|| normalized_codex_identity_value(user_id))
+        .or_else(|| normalized_codex_identity_value(email))?;
+
+    let mut digest = Sha256::new();
+    digest.update(CODEX_IDENTITY_FINGERPRINT_VERSION.as_bytes());
+    digest.update([0]);
+    digest.update(account.as_deref().unwrap_or("").as_bytes());
+    digest.update([0]);
+    digest.update(member.as_bytes());
+    let digest = digest.finalize();
+    let mut encoded = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(&mut encoded, "{byte:02x}");
+    }
+    Some(format!("{CODEX_IDENTITY_FINGERPRINT_VERSION}:{encoded}"))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GenericProviderOAuthTemplate {
     pub provider_type: &'static str,
@@ -24,7 +60,8 @@ pub struct GenericProviderOAuthTemplate {
     pub authorize_url: &'static str,
     pub token_url: &'static str,
     pub client_id: &'static str,
-    pub client_secret: &'static str,
+    pub client_id_env: Option<&'static str>,
+    pub client_secret_env: Option<&'static str>,
     pub scopes: &'static [&'static str],
     pub redirect_uri: &'static str,
     pub use_pkce: bool,
@@ -39,7 +76,8 @@ pub const GENERIC_PROVIDER_OAUTH_TEMPLATES: &[GenericProviderOAuthTemplate] = &[
         authorize_url: CLAUDE_CODE_AUTHORIZE_URL,
         token_url: CLAUDE_CODE_TOKEN_URL,
         client_id: CLAUDE_CODE_CLIENT_ID,
-        client_secret: "",
+        client_id_env: None,
+        client_secret_env: None,
         scopes: CLAUDE_CODE_OAUTH_SCOPES,
         redirect_uri: CLAUDE_CODE_REDIRECT_URI,
         use_pkce: true,
@@ -52,7 +90,8 @@ pub const GENERIC_PROVIDER_OAUTH_TEMPLATES: &[GenericProviderOAuthTemplate] = &[
         authorize_url: "https://auth.openai.com/oauth/authorize",
         token_url: "https://auth.openai.com/oauth/token",
         client_id: "app_EMoamEEZ73f0CkXaXp7hrann",
-        client_secret: "",
+        client_id_env: None,
+        client_secret_env: None,
         scopes: &["openid", "email", "profile", "offline_access"],
         redirect_uri: "http://localhost:1455/auth/callback",
         use_pkce: true,
@@ -65,7 +104,8 @@ pub const GENERIC_PROVIDER_OAUTH_TEMPLATES: &[GenericProviderOAuthTemplate] = &[
         authorize_url: "https://auth.openai.com/oauth/authorize",
         token_url: "https://auth.openai.com/oauth/token",
         client_id: "app_EMoamEEZ73f0CkXaXp7hrann",
-        client_secret: "",
+        client_id_env: None,
+        client_secret_env: None,
         scopes: &["openid", "email", "profile", "offline_access"],
         redirect_uri: "http://localhost:1455/auth/callback",
         use_pkce: true,
@@ -78,7 +118,8 @@ pub const GENERIC_PROVIDER_OAUTH_TEMPLATES: &[GenericProviderOAuthTemplate] = &[
         authorize_url: "https://accounts.google.com/o/oauth2/v2/auth",
         token_url: "https://oauth2.googleapis.com/token",
         client_id: "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com",
-        client_secret: "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",
+        client_id_env: Some(GEMINI_CLI_OAUTH_CLIENT_ID_ENV),
+        client_secret_env: Some(GEMINI_CLI_OAUTH_CLIENT_SECRET_ENV),
         scopes: &[
             "https://www.googleapis.com/auth/cloud-platform",
             "https://www.googleapis.com/auth/userinfo.email",
@@ -95,7 +136,8 @@ pub const GENERIC_PROVIDER_OAUTH_TEMPLATES: &[GenericProviderOAuthTemplate] = &[
         authorize_url: "https://accounts.google.com/o/oauth2/v2/auth",
         token_url: "https://oauth2.googleapis.com/token",
         client_id: "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com",
-        client_secret: "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",
+        client_id_env: Some(ANTIGRAVITY_OAUTH_CLIENT_ID_ENV),
+        client_secret_env: Some(ANTIGRAVITY_OAUTH_CLIENT_SECRET_ENV),
         scopes: &[
             "https://www.googleapis.com/auth/cloud-platform",
             "https://www.googleapis.com/auth/userinfo.email",
@@ -110,10 +152,24 @@ pub const GENERIC_PROVIDER_OAUTH_TEMPLATES: &[GenericProviderOAuthTemplate] = &[
     },
 ];
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct GenericProviderOAuthAdapter {
     template: GenericProviderOAuthTemplate,
     token_url_override: Option<String>,
+    client_id_override: Option<String>,
+    client_secret_override: Option<String>,
+}
+
+impl std::fmt::Debug for GenericProviderOAuthAdapter {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("GenericProviderOAuthAdapter")
+            .field("provider_type", &self.template.provider_type)
+            .field("has_token_url_override", &self.token_url_override.is_some())
+            .field("client_id_env", &self.template.client_id_env)
+            .field("client_secret_env", &self.template.client_secret_env)
+            .finish_non_exhaustive()
+    }
 }
 
 impl GenericProviderOAuthAdapter {
@@ -121,6 +177,8 @@ impl GenericProviderOAuthAdapter {
         Self {
             template,
             token_url_override: None,
+            client_id_override: None,
+            client_secret_override: None,
         }
     }
 
@@ -137,10 +195,71 @@ impl GenericProviderOAuthAdapter {
         self.with_token_url_override(token_url)
     }
 
+    #[doc(hidden)]
+    pub fn with_oauth_credentials_for_tests(
+        mut self,
+        client_id: impl Into<String>,
+        client_secret: impl Into<String>,
+    ) -> Self {
+        self.client_id_override = Some(client_id.into());
+        self.client_secret_override = Some(client_secret.into());
+        self
+    }
+
+    #[cfg(test)]
+    fn without_oauth_client_secret_for_tests(mut self) -> Self {
+        self.client_secret_override = Some(String::new());
+        self
+    }
+
     fn token_url(&self) -> String {
         self.token_url_override
             .clone()
             .unwrap_or_else(|| self.template.token_url.to_string())
+    }
+
+    fn client_id(&self) -> String {
+        if let Some(value) = self.client_id_override.clone().and_then(non_empty_owned) {
+            return value;
+        }
+
+        self.template
+            .client_id_env
+            .and_then(non_empty_environment_value)
+            .unwrap_or_else(|| self.template.client_id.to_string())
+    }
+
+    fn client_secret(&self) -> Result<Option<String>, OAuthError> {
+        let Some(env_name) = self.template.client_secret_env else {
+            return Ok(None);
+        };
+
+        if let Some(value) = self.client_secret_override.clone() {
+            return required_client_secret(env_name, non_empty_owned(value)).map(Some);
+        }
+
+        let configured = non_empty_environment_value(env_name);
+        self.resolve_client_secret(configured).map(Some)
+    }
+
+    fn resolve_client_secret(&self, configured: Option<String>) -> Result<String, OAuthError> {
+        let configured = configured.or_else(|| {
+            let default_template = template_for_provider_type(self.template.provider_type)?;
+            if self.client_id() != default_template.client_id {
+                return None;
+            }
+            match self.template.provider_type {
+                "gemini_cli" => Some("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".to_string()),
+                "antigravity" => Some("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".to_string()),
+                _ => None,
+            }
+        });
+        required_client_secret(
+            self.template
+                .client_secret_env
+                .unwrap_or(ANTIGRAVITY_OAUTH_CLIENT_SECRET_ENV),
+            configured,
+        )
     }
 
     async fn exchange_grant(
@@ -152,6 +271,8 @@ impl GenericProviderOAuthAdapter {
         state: Option<&str>,
         pkce_verifier: Option<&str>,
     ) -> Result<ProviderOAuthTokenSet, OAuthError> {
+        let client_id = self.client_id();
+        let client_secret = self.client_secret()?;
         let scope = (!self.template.scopes.is_empty()).then(|| self.template.scopes.join(" "));
         let request_id = match grant_type {
             "authorization_code" => "provider-oauth:exchange-code".to_string(),
@@ -167,11 +288,14 @@ impl GenericProviderOAuthAdapter {
                     "grant_type".to_string(),
                     Value::String(grant_type.to_string()),
                 ),
-                (
-                    "client_id".to_string(),
-                    Value::String(self.template.client_id.to_string()),
-                ),
+                ("client_id".to_string(), Value::String(client_id.clone())),
             ]);
+            if let Some(client_secret) = client_secret.as_ref() {
+                body.insert(
+                    "client_secret".to_string(),
+                    Value::String(client_secret.clone()),
+                );
+            }
             if grant_type == "authorization_code" {
                 body.insert(
                     "code".to_string(),
@@ -218,7 +342,7 @@ impl GenericProviderOAuthAdapter {
             let form_body = {
                 let mut form = form_urlencoded::Serializer::new(String::new());
                 form.append_pair("grant_type", grant_type);
-                form.append_pair("client_id", self.template.client_id);
+                form.append_pair("client_id", &client_id);
                 if grant_type == "authorization_code" {
                     form.append_pair("redirect_uri", self.template.redirect_uri);
                     form.append_pair("code", code_or_refresh_token);
@@ -233,8 +357,8 @@ impl GenericProviderOAuthAdapter {
                         form.append_pair("scope", scope);
                     }
                 }
-                if !self.template.client_secret.trim().is_empty() {
-                    form.append_pair("client_secret", self.template.client_secret);
+                if let Some(client_secret) = client_secret.as_deref() {
+                    form.append_pair("client_secret", client_secret);
                 }
                 form.finish().into_bytes()
             };
@@ -287,6 +411,7 @@ impl GenericProviderOAuthAdapter {
             auth_config.insert("scope".to_string(), json!(scope));
         }
         enrich_generic_identity(self.template.provider_type, &mut auth_config, &payload);
+        ensure_codex_identity_fingerprint(self.template.provider_type, &mut auth_config);
         Ok(ProviderOAuthTokenSet {
             token_set,
             auth_config: Value::Object(auth_config),
@@ -310,12 +435,14 @@ impl ProviderOAuthAdapter for GenericProviderOAuthAdapter {
         state: &str,
         code_challenge: Option<&str>,
     ) -> Result<OAuthAuthorizeResponse, OAuthError> {
+        self.client_secret()?;
+        let client_id = self.client_id();
         let mut url = url::Url::parse(self.template.authorize_url)
             .map_err(|_| OAuthError::invalid_request("authorize_url must be absolute"))?;
         {
             let mut query = url.query_pairs_mut();
             query.append_pair("response_type", "code");
-            query.append_pair("client_id", self.template.client_id);
+            query.append_pair("client_id", &client_id);
             query.append_pair("redirect_uri", self.template.redirect_uri);
             query.append_pair("state", state);
             if !self.template.scopes.is_empty() {
@@ -374,16 +501,25 @@ impl ProviderOAuthAdapter for GenericProviderOAuthAdapter {
         ctx: &ProviderOAuthTransportContext,
         account: &ProviderOAuthAccount,
     ) -> Result<ProviderOAuthTokenSet, OAuthError> {
-        let refresh_token = account
-            .auth_config
-            .get("refresh_token")
-            .and_then(Value::as_str)
+        let refresh_token = ["refresh_token", "refreshToken"]
+            .iter()
+            .find_map(|field| account.auth_config.get(*field).and_then(Value::as_str))
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .ok_or_else(|| OAuthError::invalid_request("auth_config missing refresh_token"))?;
         let mut refreshed = self
             .exchange_grant(executor, ctx, "refresh_token", refresh_token, None, None)
             .await?;
+        let existing_codex_identity_fingerprint = self
+            .template
+            .provider_type
+            .eq_ignore_ascii_case("codex")
+            .then(|| {
+                codex_identity_fingerprint_value(&account.auth_config).or_else(|| {
+                    derive_codex_identity_fingerprint_from_auth_config(&account.auth_config)
+                })
+            })
+            .flatten();
 
         // Refresh responses often omit stable account metadata, and some providers
         // do not rotate refresh_token on every refresh. Preserve the stored config
@@ -399,6 +535,13 @@ impl ProviderOAuthAdapter for GenericProviderOAuthAdapter {
                 refreshed.token_set.refresh_token = Some(refresh_token.to_string());
                 merged.insert("refresh_token".to_string(), json!(refresh_token));
             }
+            if let Some(fingerprint) = existing_codex_identity_fingerprint {
+                merged.insert(
+                    CODEX_IDENTITY_FINGERPRINT_FIELD.to_string(),
+                    Value::String(fingerprint),
+                );
+            }
+            ensure_codex_identity_fingerprint(self.template.provider_type, &mut merged);
             refreshed.auth_config = Value::Object(merged);
         }
         Ok(refreshed)
@@ -412,6 +555,11 @@ impl ProviderOAuthAdapter for GenericProviderOAuthAdapter {
     }
 
     fn account_fingerprint(&self, account: &ProviderOAuthAccount) -> Option<String> {
+        if self.template.provider_type.eq_ignore_ascii_case("codex") {
+            return codex_identity_fingerprint_value(&account.auth_config).or_else(|| {
+                derive_codex_identity_fingerprint_from_auth_config(&account.auth_config)
+            });
+        }
         let refresh_token = account
             .auth_config
             .get("refresh_token")
@@ -419,6 +567,26 @@ impl ProviderOAuthAdapter for GenericProviderOAuthAdapter {
             .or(Some(account.access_token.as_str()))?;
         Some(secret_fingerprint(refresh_token))
     }
+}
+
+fn non_empty_environment_value(name: &str) -> Option<String> {
+    std::env::var(name).ok().and_then(non_empty_owned)
+}
+
+fn non_empty_owned(value: String) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
+}
+
+fn required_client_secret(
+    env_name: &'static str,
+    configured: Option<String>,
+) -> Result<String, OAuthError> {
+    configured.ok_or_else(|| {
+        OAuthError::invalid_request(format!(
+            "{env_name} must be configured for this OAuth provider"
+        ))
+    })
 }
 
 pub fn template_for_provider_type(provider_type: &str) -> Option<GenericProviderOAuthTemplate> {
@@ -455,12 +623,7 @@ fn json_headers(provider_type: &str) -> BTreeMap<String, String> {
 }
 
 fn truncate_body(body: &str) -> String {
-    let body = body.trim();
-    if body.is_empty() {
-        "-".to_string()
-    } else {
-        body.chars().take(500).collect()
-    }
+    redacted_oauth_error_body_excerpt(body)
 }
 
 fn secret_fingerprint(value: &str) -> String {
@@ -473,6 +636,89 @@ fn secret_fingerprint(value: &str) -> String {
     fingerprint
 }
 
+fn codex_identity_fingerprint_value(auth_config: &Value) -> Option<String> {
+    [
+        CODEX_IDENTITY_FINGERPRINT_FIELD,
+        "codex-identity-fingerprint",
+        "codexIdentityFingerprint",
+    ]
+    .iter()
+    .find_map(|field| auth_config.get(*field).and_then(Value::as_str))
+    .map(str::trim)
+    .filter(|value| !value.is_empty())
+    .map(ToOwned::to_owned)
+}
+
+fn codex_identity_claim(auth_config: &Value, fields: &[&str]) -> Option<String> {
+    fields
+        .iter()
+        .find_map(|field| auth_config.get(*field).and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase)
+}
+
+fn normalized_codex_identity_value(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase)
+}
+
+fn derive_codex_identity_fingerprint_from_auth_config(auth_config: &Value) -> Option<String> {
+    let account = codex_identity_claim(
+        auth_config,
+        &[
+            "account_id",
+            "accountId",
+            "chatgpt_account_id",
+            "chatgptAccountId",
+        ],
+    );
+    let account_user = codex_identity_claim(
+        auth_config,
+        &[
+            "account_user_id",
+            "accountUserId",
+            "chatgpt_account_user_id",
+            "chatgptAccountUserId",
+        ],
+    );
+    let user = codex_identity_claim(
+        auth_config,
+        &["user_id", "userId", "chatgpt_user_id", "chatgptUserId"],
+    );
+    let email = codex_identity_claim(
+        auth_config,
+        &["email", "email_address", "emailAddress", "outlook_email"],
+    );
+
+    derive_codex_identity_fingerprint(
+        account.as_deref(),
+        account_user.as_deref(),
+        user.as_deref(),
+        email.as_deref(),
+    )
+}
+
+fn ensure_codex_identity_fingerprint(
+    provider_type: &str,
+    auth_config: &mut serde_json::Map<String, Value>,
+) {
+    if !provider_type.eq_ignore_ascii_case("codex") {
+        return;
+    }
+    let auth_config_value = Value::Object(auth_config.clone());
+    let fingerprint = codex_identity_fingerprint_value(&auth_config_value)
+        .or_else(|| derive_codex_identity_fingerprint_from_auth_config(&auth_config_value));
+    if let Some(fingerprint) = fingerprint {
+        auth_config.insert(
+            CODEX_IDENTITY_FINGERPRINT_FIELD.to_string(),
+            Value::String(fingerprint),
+        );
+    }
+}
+
 fn enrich_generic_identity(
     provider_type: &str,
     auth_config: &mut serde_json::Map<String, Value>,
@@ -481,12 +727,21 @@ fn enrich_generic_identity(
     if let Some(object) = token_payload.as_object() {
         for field in [
             "email",
+            "email_address",
+            "emailAddress",
+            "outlook_email",
             "account_id",
+            "accountId",
             "account_user_id",
+            "accountUserId",
             "plan_type",
             "user_id",
+            "userId",
             "account_name",
             "is_fedramp",
+            CODEX_IDENTITY_FINGERPRINT_FIELD,
+            "codex-identity-fingerprint",
+            "codexIdentityFingerprint",
         ] {
             if !auth_config.contains_key(field) {
                 if let Some(value) = object.get(field).cloned() {
@@ -566,8 +821,11 @@ fn enrich_generic_identity(
                 .get("https://api.openai.com/profile")
                 .and_then(Value::as_object)
             {
-                if let Some(value) = profile.get("email").cloned() {
-                    auth_config.entry("email".to_string()).or_insert(value);
+                for field in ["email", "email_address", "emailAddress", "outlook_email"] {
+                    if let Some(value) = profile.get(field).cloned() {
+                        auth_config.entry("email".to_string()).or_insert(value);
+                        break;
+                    }
                 }
             }
         }
@@ -644,8 +902,21 @@ fn value_to_string(value: &Value) -> Option<String> {
 
 fn decode_jwt_claims(token: &str) -> Option<serde_json::Map<String, Value>> {
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    const MAX_UNVERIFIED_JWT_CLAIMS_BYTES: usize = 64 * 1024;
+
     let payload = token.split('.').nth(1)?;
+    let max_encoded_len = MAX_UNVERIFIED_JWT_CLAIMS_BYTES
+        .saturating_add(2)
+        .checked_div(3)
+        .unwrap_or(usize::MAX)
+        .saturating_mul(4);
+    if payload.len() > max_encoded_len {
+        return None;
+    }
     let bytes = URL_SAFE_NO_PAD.decode(payload.as_bytes()).ok()?;
+    if bytes.len() > MAX_UNVERIFIED_JWT_CLAIMS_BYTES {
+        return None;
+    }
     serde_json::from_slice::<Value>(&bytes)
         .ok()?
         .as_object()
@@ -654,13 +925,19 @@ fn decode_jwt_claims(token: &str) -> Option<serde_json::Map<String, Value>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{enrich_generic_identity, template_for_provider_type, GenericProviderOAuthAdapter};
+    use super::{
+        decode_jwt_claims, derive_codex_identity_fingerprint, enrich_generic_identity,
+        template_for_provider_type, GenericProviderOAuthAdapter,
+        ANTIGRAVITY_OAUTH_CLIENT_SECRET_ENV, CODEX_IDENTITY_FINGERPRINT_FIELD,
+        GEMINI_CLI_OAUTH_CLIENT_SECRET_ENV,
+    };
+    use crate::core::OAuthError;
     use crate::network::{OAuthHttpExecutor, OAuthHttpRequest, OAuthHttpResponse};
     use crate::provider::ProviderOAuthAdapter;
     use crate::provider::{ProviderOAuthAccount, ProviderOAuthTransportContext};
     use async_trait::async_trait;
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-    use serde_json::json;
+    use serde_json::{json, Value};
     use std::collections::BTreeMap;
     use std::sync::{Arc, Mutex};
 
@@ -679,6 +956,118 @@ mod tests {
         assert!(adapter.capabilities().supports_refresh_token_import);
     }
 
+    fn encoded_jwt(claims: &Value) -> String {
+        format!(
+            "header.{}.signature",
+            URL_SAFE_NO_PAD.encode(serde_json::to_vec(claims).expect("claims should encode"))
+        )
+    }
+
+    #[test]
+    fn google_oauth_templates_reference_external_client_secrets() {
+        let gemini = template_for_provider_type("gemini_cli").expect("gemini template");
+        let antigravity = template_for_provider_type("antigravity").expect("antigravity template");
+
+        assert_eq!(
+            gemini.client_secret_env,
+            Some(GEMINI_CLI_OAUTH_CLIENT_SECRET_ENV)
+        );
+        assert_eq!(
+            antigravity.client_secret_env,
+            Some(ANTIGRAVITY_OAUTH_CLIENT_SECRET_ENV)
+        );
+    }
+
+    #[tokio::test]
+    async fn google_default_credentials_support_authorization_and_refresh() {
+        for provider_type in ["gemini_cli", "antigravity"] {
+            let mut template = template_for_provider_type(provider_type).expect("template");
+            template.client_id_env = None;
+            template.client_secret_env = Some("AETHER_TEST_UNUSED_ANTIGRAVITY_SECRET");
+            let adapter = GenericProviderOAuthAdapter::new(template);
+            let ctx = transport_context(provider_type);
+            adapter
+                .build_authorize_url(&ctx, "state", None)
+                .expect("authorize");
+            let seen_request = Arc::new(Mutex::new(None));
+            let executor = StaticExecutor {
+                seen_request: Arc::clone(&seen_request),
+                response_payload: json!({"access_token": "new-token", "expires_in": 3600}),
+            };
+            adapter
+                .refresh(&executor, &ctx, &oauth_account(provider_type))
+                .await
+                .expect("refresh");
+            let seen = seen_request.lock().expect("lock").clone().expect("request");
+            let body = seen.body_bytes.expect("body");
+            let fields = url::form_urlencoded::parse(&body)
+                .into_owned()
+                .collect::<BTreeMap<_, _>>();
+            assert_eq!(fields["client_id"], template.client_id);
+            assert_eq!(
+                fields["client_secret"],
+                adapter.resolve_client_secret(None).expect("default")
+            );
+            assert_eq!(fields["refresh_token"], "old-refresh-token");
+            assert!(!format!("{adapter:?}").contains(&fields["client_secret"]));
+        }
+    }
+
+    #[test]
+    fn google_custom_client_requires_its_own_secret() {
+        for provider_type in ["gemini_cli", "antigravity"] {
+            let adapter = GenericProviderOAuthAdapter::for_provider_type(provider_type)
+                .expect("adapter")
+                .with_oauth_credentials_for_tests("custom-client", "custom-secret");
+            assert!(adapter.resolve_client_secret(None).is_err());
+            assert_eq!(
+                adapter
+                    .resolve_client_secret(Some("custom-secret".to_string()))
+                    .expect("configured secret"),
+                "custom-secret"
+            );
+            assert_eq!(
+                adapter.client_secret().expect("override"),
+                Some("custom-secret".to_string())
+            );
+        }
+    }
+
+    #[test]
+    fn google_configured_secret_overrides_the_native_app_default() {
+        for provider_type in ["gemini_cli", "antigravity"] {
+            let adapter =
+                GenericProviderOAuthAdapter::for_provider_type(provider_type).expect("adapter");
+            assert_eq!(
+                adapter
+                    .resolve_client_secret(Some("configured-secret".to_string()))
+                    .unwrap(),
+                "configured-secret"
+            );
+            let mut template = template_for_provider_type(provider_type).expect("template");
+            template.client_id = "custom-template-client";
+            template.client_id_env = None;
+            assert!(GenericProviderOAuthAdapter::new(template)
+                .resolve_client_secret(None)
+                .is_err());
+        }
+    }
+
+    #[test]
+    fn generic_adapter_debug_redacts_oauth_credentials() {
+        let adapter = GenericProviderOAuthAdapter::for_provider_type("gemini_cli")
+            .expect("gemini adapter")
+            .with_token_url_override("https://token.example.test/private-path")
+            .with_oauth_credentials_for_tests("private-client-id", "private-client-secret");
+
+        let debug = format!("{adapter:?}");
+
+        assert!(!debug.contains("private-client-id"));
+        assert!(!debug.contains("private-client-secret"));
+        assert!(!debug.contains("private-path"));
+        assert!(debug.contains(GEMINI_CLI_OAUTH_CLIENT_SECRET_ENV));
+    }
+
     #[test]
     fn codex_identity_extracts_fedramp_workspace_claim() {
         let claims = json!({
@@ -687,10 +1076,7 @@ mod tests {
                 "chatgpt_account_is_fedramp": true
             }
         });
-        let token = format!(
-            "header.{}.signature",
-            URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).expect("claims should encode"))
-        );
+        let token = encoded_jwt(&claims);
         let mut auth_config = serde_json::Map::new();
 
         enrich_generic_identity("codex", &mut auth_config, &json!({"access_token": token}));
@@ -699,9 +1085,87 @@ mod tests {
         assert_eq!(auth_config.get("is_fedramp"), Some(&json!(true)));
     }
 
+    #[test]
+    fn generic_identity_rejects_oversized_jwt_claims_before_decode() {
+        const MAX_UNVERIFIED_JWT_CLAIMS_BYTES: usize = 64 * 1024;
+        let max_encoded_len = MAX_UNVERIFIED_JWT_CLAIMS_BYTES
+            .saturating_add(2)
+            .checked_div(3)
+            .unwrap()
+            .saturating_mul(4);
+        let token = format!("header.{}.signature", "A".repeat(max_encoded_len + 1));
+
+        assert_eq!(decode_jwt_claims(&token), None);
+    }
+
+    #[test]
+    fn codex_persisted_fingerprint_is_member_scoped_and_token_independent() {
+        let adapter = GenericProviderOAuthAdapter::for_provider_type("codex")
+            .expect("codex adapter should exist");
+        let claims = json!({
+            "sub": "global-user-1",
+            "https://api.openai.com/auth": {
+                "chatgpt_account_id": "workspace-1",
+                "chatgpt_account_user_id": "member-1"
+            }
+        });
+        let rotated_claims = json!({
+            "sub": "global-user-1",
+            "iat": 12345,
+            "https://api.openai.com/auth": {
+                "chatgpt_account_id": "WORKSPACE-1",
+                "chatgpt_account_user_id": "MEMBER-1"
+            }
+        });
+        let other_member_claims = json!({
+            "sub": "global-user-2",
+            "https://api.openai.com/auth": {
+                "chatgpt_account_id": "workspace-1",
+                "chatgpt_account_user_id": "member-2"
+            }
+        });
+
+        let first = adapter
+            .token_set_from_payload(json!({"access_token": encoded_jwt(&claims)}))
+            .expect("first token should parse");
+        let rotated = adapter
+            .token_set_from_payload(json!({"access_token": encoded_jwt(&rotated_claims)}))
+            .expect("rotated token should parse");
+        let other_member = adapter
+            .token_set_from_payload(json!({"access_token": encoded_jwt(&other_member_claims)}))
+            .expect("other member token should parse");
+
+        let first_fingerprint = first.auth_config[CODEX_IDENTITY_FINGERPRINT_FIELD]
+            .as_str()
+            .expect("persisted fingerprint")
+            .to_string();
+        assert!(first_fingerprint.starts_with("codex-persisted-fingerprint:v1:"));
+        assert_eq!(
+            rotated.auth_config[CODEX_IDENTITY_FINGERPRINT_FIELD].as_str(),
+            Some(first_fingerprint.as_str())
+        );
+        assert_ne!(
+            other_member.auth_config[CODEX_IDENTITY_FINGERPRINT_FIELD].as_str(),
+            Some(first_fingerprint.as_str())
+        );
+
+        let account = ProviderOAuthAccount {
+            provider_type: "codex".to_string(),
+            access_token: "unrelated-rotated-token".to_string(),
+            auth_config: first.auth_config,
+            expires_at_unix_secs: None,
+            identity: BTreeMap::new(),
+        };
+        assert_eq!(
+            adapter.account_fingerprint(&account).as_deref(),
+            Some(first_fingerprint.as_str())
+        );
+    }
+
     #[derive(Debug, Clone)]
     struct StaticExecutor {
         seen_request: Arc<Mutex<Option<OAuthHttpRequest>>>,
+        response_payload: Value,
     }
 
     #[async_trait]
@@ -713,25 +1177,140 @@ mod tests {
             *self.seen_request.lock().expect("mutex should lock") = Some(request);
             Ok(OAuthHttpResponse {
                 status_code: 200,
-                body_text: json!({
-                    "access_token": "new-access-token",
-                    "expires_in": 3600
-                })
-                .to_string(),
+                body_text: self.response_payload.to_string(),
                 json_body: None,
             })
         }
     }
 
+    fn transport_context(provider_type: &str) -> ProviderOAuthTransportContext {
+        ProviderOAuthTransportContext {
+            provider_id: "provider-1".to_string(),
+            provider_type: provider_type.to_string(),
+            endpoint_id: None,
+            key_id: Some("key-1".to_string()),
+            auth_type: Some("oauth".to_string()),
+            decrypted_api_key: None,
+            decrypted_auth_config: None,
+            provider_config: None,
+            endpoint_config: None,
+            key_config: None,
+            network: crate::network::OAuthNetworkContext::provider_operation(None),
+        }
+    }
+
+    fn oauth_account(provider_type: &str) -> ProviderOAuthAccount {
+        ProviderOAuthAccount {
+            provider_type: provider_type.to_string(),
+            access_token: "old-access-token".to_string(),
+            auth_config: json!({
+                "provider_type": provider_type,
+                "refresh_token": "old-refresh-token",
+                "updated_at": 1
+            }),
+            expires_at_unix_secs: Some(1),
+            identity: BTreeMap::new(),
+        }
+    }
+
     #[tokio::test]
-    async fn refresh_preserves_existing_metadata_when_refresh_token_is_not_rotated() {
+    async fn google_oauth_fails_closed_before_network_without_client_secret() {
         let seen_request = Arc::new(Mutex::new(None));
         let executor = StaticExecutor {
             seen_request: Arc::clone(&seen_request),
+            response_payload: json!({}),
+        };
+        let adapter = GenericProviderOAuthAdapter::for_provider_type("gemini_cli")
+            .expect("gemini adapter")
+            .without_oauth_client_secret_for_tests();
+        let ctx = transport_context("gemini_cli");
+
+        let authorize_error = adapter
+            .build_authorize_url(&ctx, "state", None)
+            .expect_err("authorization must fail without the configured secret");
+        assert!(matches!(authorize_error, OAuthError::InvalidRequest(_)));
+
+        let refresh_error = adapter
+            .refresh(&executor, &ctx, &oauth_account("gemini_cli"))
+            .await
+            .expect_err("refresh must fail without the configured secret");
+        assert!(matches!(refresh_error, OAuthError::InvalidRequest(_)));
+        assert!(
+            seen_request.lock().expect("mutex should lock").is_none(),
+            "credential validation must happen before the HTTP executor runs"
+        );
+    }
+
+    #[tokio::test]
+    async fn google_oauth_injected_credentials_are_sent_in_token_form() {
+        let seen_request = Arc::new(Mutex::new(None));
+        let executor = StaticExecutor {
+            seen_request: Arc::clone(&seen_request),
+            response_payload: json!({
+                "access_token": "new-access-token",
+                "expires_in": 3600,
+            }),
+        };
+        let adapter = GenericProviderOAuthAdapter::for_provider_type("gemini_cli")
+            .expect("gemini adapter")
+            .with_oauth_credentials_for_tests("test-client-id", "test-client-secret");
+        let ctx = transport_context("gemini_cli");
+
+        adapter
+            .refresh(&executor, &ctx, &oauth_account("gemini_cli"))
+            .await
+            .expect("refresh should succeed");
+
+        let seen = seen_request
+            .lock()
+            .expect("mutex should lock")
+            .clone()
+            .expect("request should be captured");
+        let form = String::from_utf8(seen.body_bytes.expect("form body should exist"))
+            .expect("form body should be utf8");
+        let fields = url::form_urlencoded::parse(form.as_bytes())
+            .into_owned()
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            fields.get("client_id").map(String::as_str),
+            Some("test-client-id")
+        );
+        assert_eq!(
+            fields.get("client_secret").map(String::as_str),
+            Some("test-client-secret")
+        );
+        assert_eq!(
+            fields.get("refresh_token").map(String::as_str),
+            Some("old-refresh-token")
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_preserves_existing_metadata_when_refresh_token_is_not_rotated() {
+        let seen_request = Arc::new(Mutex::new(None));
+        let refreshed_token = encoded_jwt(&json!({
+            "https://api.openai.com/auth": {
+                "chatgpt_account_id": "acct-123",
+                "chatgpt_account_user_id": "replacement-member"
+            }
+        }));
+        let executor = StaticExecutor {
+            seen_request: Arc::clone(&seen_request),
+            response_payload: json!({
+                "access_token": refreshed_token,
+                "expires_in": 3600
+            }),
         };
         let adapter = GenericProviderOAuthAdapter::for_provider_type("codex")
             .expect("codex adapter should exist")
             .with_token_url_override("https://auth.example.test/token");
+        let expected_legacy_fingerprint = derive_codex_identity_fingerprint(
+            Some("acct-123"),
+            Some("original-member"),
+            None,
+            Some("alice@example.com"),
+        )
+        .expect("legacy identity should produce a fingerprint");
         let ctx = ProviderOAuthTransportContext {
             provider_id: "provider-1".to_string(),
             provider_type: "codex".to_string(),
@@ -753,6 +1332,7 @@ mod tests {
                 "refresh_token": "old-refresh-token",
                 "email": "alice@example.com",
                 "account_id": "acct-123",
+                "account_user_id": "original-member",
                 "updated_at": 1
             }),
             expires_at_unix_secs: Some(1),
@@ -764,7 +1344,7 @@ mod tests {
             .await
             .expect("refresh should succeed");
 
-        assert_eq!(refreshed.token_set.access_token, "new-access-token");
+        assert_eq!(refreshed.token_set.access_token, refreshed_token);
         assert_eq!(
             refreshed.token_set.refresh_token.as_deref(),
             Some("old-refresh-token")
@@ -772,6 +1352,10 @@ mod tests {
         assert_eq!(refreshed.auth_config["email"], "alice@example.com");
         assert_eq!(refreshed.auth_config["account_id"], "acct-123");
         assert_eq!(refreshed.auth_config["refresh_token"], "old-refresh-token");
+        assert_eq!(
+            refreshed.auth_config[CODEX_IDENTITY_FINGERPRINT_FIELD].as_str(),
+            Some(expected_legacy_fingerprint.as_str())
+        );
 
         let seen = seen_request
             .lock()

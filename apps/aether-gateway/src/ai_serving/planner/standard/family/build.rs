@@ -18,6 +18,7 @@ use crate::ai_serving::planner::spec_metadata::{
 };
 use crate::ai_serving::GatewayControlDecision;
 use crate::{AiExecutionDecision, AppState, GatewayError};
+use aether_routing_core::RoutingExecutionPolicy;
 
 use super::candidates::{
     build_local_standard_candidate_attempt_source, resolve_local_standard_decision_input,
@@ -177,6 +178,13 @@ pub(crate) async fn build_local_stream_attempt_source<'a>(
 
 #[async_trait]
 impl LocalExecutionAttemptSource<AiSyncAttempt> for LocalStandardSyncAttemptSource<'_> {
+    fn routing_execution_policy(&self) -> Option<RoutingExecutionPolicy> {
+        self.input
+            .routing_policy
+            .as_ref()
+            .map(|policy| policy.execution_policy.clone())
+    }
+
     async fn next_execution_attempt(&mut self) -> Result<Option<AiSyncAttempt>, GatewayError> {
         while let Some(attempt) = self.candidates.next_attempt().await? {
             match self.build_sync_attempt(attempt).await? {
@@ -220,6 +228,13 @@ impl LocalExecutionAttemptSource<AiSyncAttempt> for LocalStandardSyncAttemptSour
 
 #[async_trait]
 impl LocalExecutionAttemptSource<AiStreamAttempt> for LocalStandardStreamAttemptSource<'_> {
+    fn routing_execution_policy(&self) -> Option<RoutingExecutionPolicy> {
+        self.input
+            .routing_policy
+            .as_ref()
+            .map(|policy| policy.execution_policy.clone())
+    }
+
     async fn next_execution_attempt(&mut self) -> Result<Option<AiStreamAttempt>, GatewayError> {
         while let Some(attempt) = self.candidates.next_attempt().await? {
             match self.build_stream_attempt(attempt).await? {

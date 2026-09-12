@@ -10,7 +10,7 @@ use crate::AppState;
 
 use super::super::build_unhandled_public_support_response;
 use super::announcements_shared::{
-    announcements_bad_request_response, announcements_internal_detail,
+    announcement_is_public_at, announcements_bad_request_response, announcements_internal_detail,
     announcements_internal_error_response, announcements_not_found_response,
     build_public_announcement_list_payload, build_public_announcement_payload,
     parse_public_announcements_query, public_announcement_id_from_path,
@@ -37,7 +37,7 @@ pub(crate) async fn maybe_build_local_public_announcements_response(
                     "/api/announcements" | "/api/announcements/"
                 ) =>
         {
-            let query = match parse_public_announcements_query(
+            let mut query = match parse_public_announcements_query(
                 request_context.request_query_string.as_deref(),
                 true,
                 50,
@@ -45,6 +45,10 @@ pub(crate) async fn maybe_build_local_public_announcements_response(
                 Ok(value) => value,
                 Err(detail) => return Some(announcements_bad_request_response(detail)),
             };
+            // This route is anonymous. Drafts and scheduled announcements are
+            // only visible through the authenticated admin surface.
+            query.active_only = true;
+            query.now_unix_secs = Some(chrono::Utc::now().timestamp().max(0) as u64);
             let page = match state.list_announcements(&query).await {
                 Ok(value) => value,
                 Err(err) => {
@@ -93,6 +97,10 @@ pub(crate) async fn maybe_build_local_public_announcements_response(
                     ))
                 }
             };
+            let now_unix_secs = chrono::Utc::now().timestamp().max(0) as u64;
+            if !announcement_is_public_at(&announcement, now_unix_secs) {
+                return Some(announcements_not_found_response());
+            }
             Some(Json(build_public_announcement_payload(&announcement)).into_response())
         }
         _ => Some(build_unhandled_public_support_response(request_context)),

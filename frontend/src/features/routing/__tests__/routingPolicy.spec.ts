@@ -2,24 +2,17 @@ import { describe, expect, it } from 'vitest'
 
 import {
   DEFAULT_ROUTING_POLICY_MODEL,
-  allowedModelsMirrorPerModelPolicies,
-  clearAllowedModels,
-  copyPerModelRoutingConfig,
   createEmptyModelPolicy,
   createEmptyRoutingGroupConfig,
-  formatAllowedModelsInput,
   getDefaultModelPolicy,
   getModelScheduling,
   modelSchedulingRuleId,
   normalizeRoutingGroupConfig,
-  parseAllowedModelsInput,
-  removePerModelRoutingConfig,
-  routingModelScopeLabel,
-  savePerModelRoutingConfig,
+  normalizeStickyKeyAttempts,
+  resolveModelKeyPriorityOverride,
   setDefaultPoolPriorityOverrides,
   setDefaultProviderPriorityOverrides,
-  setRoutingSortingScope,
-  updateAllowedModelsFromInput,
+  setModelKeyPriorityOverridesForFormat,
   upsertModelSchedulingRule,
   upsertModelPolicy,
 } from '../utils/routingPolicy'
@@ -27,13 +20,32 @@ import { sortCandidateTraces, summarizeRoutingTrace, type RoutingDecisionTrace }
 
 describe('routingPolicy', () => {
   it('normalizes partial configs with stable defaults', () => {
-    const config = normalizeRoutingGroupConfig({
-      allowed_models: ['gpt-5'],
-    })
+    const config = normalizeRoutingGroupConfig({})
 
     expect(config.default_policy.priority_mode).toBe('provider')
     expect(config.default_policy.scheduling_mode).toBe('cache_affinity')
-    expect(config.allowed_models).toEqual(['gpt-5'])
+    expect(config.default_policy.cancel_on_client_disconnect).toBe(false)
+  })
+
+  it('preserves cancellation policy across model scheduling edits', () => {
+    const config = createEmptyRoutingGroupConfig()
+    config.default_policy.cancel_on_client_disconnect = true
+    const updated = upsertModelSchedulingRule(config, 'gpt-5', {
+      priority_mode: 'global_key',
+      scheduling_mode: 'fixed_order',
+    })
+    expect(normalizeRoutingGroupConfig(updated).default_policy.cancel_on_client_disconnect).toBe(true)
+    expect(getModelScheduling(updated, 'gpt-5').cancel_on_client_disconnect).toBe(true)
+    expect(getModelScheduling(updated, 'other-model').cancel_on_client_disconnect).toBe(true)
+    expect(createEmptyRoutingGroupConfig().default_policy.cancel_on_client_disconnect).toBe(false)
+  })
+
+  it('drops the legacy group model allowlist while normalizing config', () => {
+    const config = normalizeRoutingGroupConfig({
+      allowed_models: ['legacy-model'],
+    } as unknown as Parameters<typeof normalizeRoutingGroupConfig>[0])
+
+    expect(config).not.toHaveProperty('allowed_models')
   })
 
   it('upserts model policies by model name', () => {
@@ -75,6 +87,65 @@ describe('routingPolicy', () => {
     expect(policy.key_priority_overrides).toEqual({})
   })
 
+  it('defaults sticky key attempts to 2 and normalizes invalid values', () => {
+    expect(createEmptyRoutingGroupConfig().default_policy.sticky_key_attempts).toBe(2)
+    expect(normalizeRoutingGroupConfig({}).default_policy.sticky_key_attempts).toBe(2)
+    expect(normalizeRoutingGroupConfig({
+      default_policy: { ...createEmptyRoutingGroupConfig().default_policy, priority_mode: 'provider', scheduling_mode: 'cache_affinity', keep_priority_on_conversion: false, sticky_key_attempts: 3, enable_cf_heartbeat: false, cyber_continue_failover: false, cancel_on_client_disconnect: false },
+    }).default_policy.sticky_key_attempts).toBe(3)
+    expect(normalizeStickyKeyAttempts('5')).toBe(5)
+    expect(normalizeStickyKeyAttempts(-1)).toBe(2)
+    expect(normalizeStickyKeyAttempts('abc')).toBe(2)
+    expect(normalizeStickyKeyAttempts(500)).toBe(99)
+    expect(getModelScheduling(createEmptyRoutingGroupConfig(), 'gpt-5').sticky_key_attempts).toBe(2)
+  })
+
+  it('keeps key priority overrides independent per api format', () => {
+    let config = setModelKeyPriorityOverridesForFormat(
+      createEmptyRoutingGroupConfig(),
+      DEFAULT_ROUTING_POLICY_MODEL,
+      'OpenAI:Chat',
+      { 'key-a': 0, 'key-b': 1 },
+    )
+    config = setModelKeyPriorityOverridesForFormat(
+      config,
+      DEFAULT_ROUTING_POLICY_MODEL,
+      'claude:messages',
+      { 'key-a': 3 },
+    )
+
+    const policy = getDefaultModelPolicy(config)
+    expect(policy.key_priority_overrides).toEqual({})
+    expect(policy.key_priority_overrides_by_format).toEqual({
+      'openai:chat': { 'key-a': 0, 'key-b': 1 },
+      'claude:messages': { 'key-a': 3 },
+    })
+    expect(resolveModelKeyPriorityOverride(config, DEFAULT_ROUTING_POLICY_MODEL, 'openai:chat', 'key-a')).toBe(0)
+    expect(resolveModelKeyPriorityOverride(config, DEFAULT_ROUTING_POLICY_MODEL, 'claude:messages', 'key-a')).toBe(3)
+    expect(resolveModelKeyPriorityOverride(config, DEFAULT_ROUTING_POLICY_MODEL, 'claude:messages', 'key-b')).toBeUndefined()
+
+    const cleared = setModelKeyPriorityOverridesForFormat(config, DEFAULT_ROUTING_POLICY_MODEL, 'claude:messages', {})
+    expect(getDefaultModelPolicy(cleared).key_priority_overrides_by_format).toEqual({
+      'openai:chat': { 'key-a': 0, 'key-b': 1 },
+    })
+  })
+
+  it('falls back to format-agnostic key overrides and normalizes legacy configs', () => {
+    const config = normalizeRoutingGroupConfig({
+      model_policies: [{
+        ...createEmptyModelPolicy('gpt-5'),
+        key_priority_overrides: { 'key-a': 7 },
+        key_priority_overrides_by_format: { ' OpenAI:Chat ': { 'key-a': 1 } },
+      }],
+    })
+
+    expect(config.model_policies[0].key_priority_overrides_by_format).toEqual({
+      'openai:chat': { 'key-a': 1 },
+    })
+    expect(resolveModelKeyPriorityOverride(config, 'gpt-5', 'openai:chat', 'key-a')).toBe(1)
+    expect(resolveModelKeyPriorityOverride(config, 'gpt-5', 'gemini:generate_content', 'key-a')).toBe(7)
+  })
+
   it('stores per-model scheduling as generated routing rules', () => {
     const next = upsertModelSchedulingRule(createEmptyRoutingGroupConfig(), 'gpt-5', {
       priority_mode: 'global_key',
@@ -92,115 +163,6 @@ describe('routingPolicy', () => {
       priority_mode: 'global_key',
       scheduling_mode: 'fixed_order',
     })
-  })
-
-  it('updates the model allowlist only through explicit scope controls', () => {
-    const config = normalizeRoutingGroupConfig({
-      allowed_models: ['legacy-model'],
-    })
-
-    expect(parseAllowedModelsInput(' gpt-5\nclaude-*\nlegacy-model\ngpt-5 ')).toEqual([
-      'gpt-5',
-      'claude-*',
-      'legacy-model',
-    ])
-
-    const restricted = updateAllowedModelsFromInput(
-      config,
-      'gpt-5\nclaude-*\nlegacy-model\ngpt-5',
-    )
-    expect(restricted.allowed_models).toEqual(['gpt-5', 'claude-*', 'legacy-model'])
-    expect(formatAllowedModelsInput(restricted.allowed_models)).toBe('gpt-5\nclaude-*\nlegacy-model')
-    expect(routingModelScopeLabel(restricted)).toBe('3 个模型')
-
-    const unrestricted = clearAllowedModels(restricted)
-    expect(unrestricted.allowed_models).toEqual([])
-    expect(routingModelScopeLabel(unrestricted)).toBe('全部模型')
-  })
-
-  it('round-trips selectors containing commas and labels wildcard scope as unrestricted', () => {
-    const selectors = ['vendor,model', 'gpt-*']
-    expect(parseAllowedModelsInput(formatAllowedModelsInput(selectors))).toEqual(selectors)
-
-    const wildcard = normalizeRoutingGroupConfig({ allowed_models: ['gpt-*', '*'] })
-    expect(routingModelScopeLabel(wildcard)).toBe('全部模型')
-  })
-
-  it('preserves historical empty selectors until unrestricted scope is explicit', () => {
-    const legacy = normalizeRoutingGroupConfig({ allowed_models: ['', '  '] })
-
-    expect(updateAllowedModelsFromInput(legacy, '  \n')).toMatchObject({
-      allowed_models: ['', '  '],
-    })
-    expect(clearAllowedModels(legacy).allowed_models).toEqual([])
-  })
-
-  it('preserves an explicit model allowlist across per-model editing actions', () => {
-    const allowlist = ['gpt-*', 'legacy-model']
-    let config = normalizeRoutingGroupConfig({
-      allowed_models: allowlist,
-      model_policies: [{
-        ...createEmptyModelPolicy('special-model'),
-        allowed_providers: ['provider-special'],
-      }],
-    })
-    config = upsertModelSchedulingRule(config, 'special-model', {
-      priority_mode: 'global_key',
-      scheduling_mode: 'fixed_order',
-    })
-
-    const perModel = setRoutingSortingScope(config, 'per_model')
-    expect(perModel.allowed_models).toEqual(allowlist)
-    expect(getModelScheduling(perModel, 'special-model')).toMatchObject({
-      priority_mode: 'global_key',
-      scheduling_mode: 'fixed_order',
-    })
-
-    const saved = savePerModelRoutingConfig(perModel, 'new-special-model')
-    expect(saved.allowed_models).toEqual(allowlist)
-    expect(saved.model_policies.map(policy => policy.model)).toContain('new-special-model')
-
-    const copied = copyPerModelRoutingConfig(
-      saved,
-      saved,
-      'special-model',
-      'copied-special-model',
-    )
-    expect(copied.allowed_models).toEqual(allowlist)
-    expect(copied.model_policies.find(policy => policy.model === 'copied-special-model'))
-      .toMatchObject({ allowed_providers: ['provider-special'] })
-    expect(getModelScheduling(copied, 'copied-special-model')).toMatchObject({
-      priority_mode: 'global_key',
-      scheduling_mode: 'fixed_order',
-    })
-
-    const removed = removePerModelRoutingConfig(copied, 'special-model')
-    expect(removed.allowed_models).toEqual(allowlist)
-    expect(removed.model_policies.map(policy => policy.model)).not.toContain('special-model')
-    expect(removed.rules.map(rule => rule.id)).not.toContain(modelSchedulingRuleId('special-model'))
-
-    const unified = setRoutingSortingScope(removed, 'unified')
-    expect(unified.allowed_models).toEqual(allowlist)
-    expect(unified.model_policies.filter(policy => policy.model !== DEFAULT_ROUTING_POLICY_MODEL))
-      .toEqual([])
-    expect(unified.rules.some(rule => rule.id.startsWith('ui_model_scheduling:'))).toBe(false)
-  })
-
-  it('recognizes legacy allowlist mirrors without mutating historical values', () => {
-    const config = normalizeRoutingGroupConfig({
-      allowed_models: [' model-b ', 'model-a', 'model-a'],
-      model_policies: [
-        createEmptyModelPolicy('model-a'),
-        createEmptyModelPolicy('model-b'),
-      ],
-    })
-
-    expect(allowedModelsMirrorPerModelPolicies(config)).toBe(true)
-    expect(config.allowed_models).toEqual([' model-b ', 'model-a', 'model-a'])
-    expect(allowedModelsMirrorPerModelPolicies({
-      ...config,
-      allowed_models: ['model-*'],
-    })).toBe(false)
   })
 })
 

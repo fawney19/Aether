@@ -638,7 +638,7 @@
                       :copied="Boolean(copiedStates[activeTab])"
                       :custom-copy="true"
                       :expand-disabled="viewMode === 'compare' || (supportsConversationView && contentViewMode === 'conversation')"
-                      :copy-disabled="viewMode === 'compare'"
+                      :copy-disabled="viewMode === 'compare' || bodyCopying || (supportsConversationView && !hasValidConversation)"
                       max-height="500px"
                       @update:expand-depth="currentExpandDepth = $event"
                       @copy="copyContent(activeTab)"
@@ -723,12 +723,15 @@
                         <!-- 区域3：常驻按钮（展开/收缩、复制） -->
                         <div class="w-px h-3.5 bg-border mx-0.5" />
                       </template>
-                      <TabsContent value="request-headers">
+                      <TabsContent
+                        v-if="activeTab === 'request-headers'"
+                        value="request-headers"
+                      >
                         <RequestHeadersContent
                           :detail="detail"
                           :view-mode="viewMode"
                           :data-source="dataSource"
-                          :current-header-data="currentHeaderData"
+                          :current-header-data="currentHeaderData ?? null"
                           :current-expand-depth="currentExpandDepth"
                           :has-provider-headers="hasProviderHeaders"
                           :header-stats="headerStats"
@@ -736,7 +739,10 @@
                         />
                       </TabsContent>
 
-                      <TabsContent value="request-body">
+                      <TabsContent
+                        v-if="activeTab === 'request-body'"
+                        value="request-body"
+                      >
                         <div
                           v-if="isRequestBodyLoading"
                           class="p-4"
@@ -752,6 +758,7 @@
                             <span>{{ bodyLoadErrorMessage }}</span>
                           </div>
                           <Button
+                            v-if="canRetryBodyContentLoad"
                             variant="outline"
                             size="sm"
                             class="mt-3 h-8 border-destructive/40 text-destructive hover:bg-destructive/10 hover:text-destructive"
@@ -761,28 +768,36 @@
                             重试
                           </Button>
                         </div>
-                        <ConversationView
+                        <BodyConversationContent
                           v-else-if="contentViewMode === 'conversation'"
-                          :render-result="requestRenderResult"
+                          :body-document="currentRequestBody"
+                          kind="request"
+                          :api-format="currentRequestBodyApiFormat"
                           empty-message="无请求体信息"
+                          @load-error="handleBodyDocumentError"
                         />
                         <JsonContent
                           v-else
-                          :data="currentRequestBody"
+                          :data="null"
+                          :body-document="currentRequestBody"
                           :view-mode="viewMode"
                           :expand-depth="currentExpandDepth"
                           :is-dark="isDark"
                           empty-message="无请求体信息"
+                          @load-error="handleBodyDocumentError"
                         />
                       </TabsContent>
 
-                      <TabsContent value="response-headers">
+                      <TabsContent
+                        v-if="activeTab === 'response-headers'"
+                        value="response-headers"
+                      >
                         <RequestHeadersContent
                           v-if="viewMode === 'compare'"
                           :detail="detail"
                           :view-mode="viewMode"
                           :data-source="dataSource"
-                          :current-header-data="currentResponseHeaderData"
+                          :current-header-data="currentResponseHeaderData ?? null"
                           :current-expand-depth="currentExpandDepth"
                           :has-provider-headers="hasProviderResponseHeaders"
                           :header-stats="responseHeaderStats"
@@ -803,7 +818,10 @@
                         />
                       </TabsContent>
 
-                      <TabsContent value="response-body">
+                      <TabsContent
+                        v-if="activeTab === 'response-body'"
+                        value="response-body"
+                      >
                         <div
                           v-if="isResponseBodyLoading"
                           class="p-4"
@@ -819,6 +837,7 @@
                             <span>{{ bodyLoadErrorMessage }}</span>
                           </div>
                           <Button
+                            v-if="canRetryBodyContentLoad"
                             variant="outline"
                             size="sm"
                             class="mt-3 h-8 border-destructive/40 text-destructive hover:bg-destructive/10 hover:text-destructive"
@@ -828,22 +847,30 @@
                             重试
                           </Button>
                         </div>
-                        <ConversationView
+                        <BodyConversationContent
                           v-else-if="contentViewMode === 'conversation'"
-                          :render-result="responseRenderResult"
+                          :body-document="currentResponseBody"
+                          kind="response"
+                          :api-format="currentResponseBodyApiFormat"
                           empty-message="无响应体信息"
+                          @load-error="handleBodyDocumentError"
                         />
                         <JsonContent
                           v-else
-                          :data="currentResponseBody"
+                          :data="null"
+                          :body-document="currentResponseBody"
                           :view-mode="viewMode"
                           :expand-depth="currentExpandDepth"
                           :is-dark="isDark"
                           empty-message="无响应体信息"
+                          @load-error="handleBodyDocumentError"
                         />
                       </TabsContent>
 
-                      <TabsContent value="metadata">
+                      <TabsContent
+                        v-if="activeTab === 'metadata'"
+                        value="metadata"
+                      >
                         <JsonContent
                           :data="metadataPanelData"
                           :view-mode="viewMode"
@@ -873,7 +900,9 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch, computed, onMounted, onBeforeUnmount } from 'vue'
+import { getI18nLocale } from '@/i18n'
+import { ref, shallowRef, watch, computed, nextTick, onMounted, onBeforeUnmount } from 'vue'
+import axios from 'axios'
 import Button from '@/components/ui/button.vue'
 import { useEscapeKey } from '@/composables/useEscapeKey'
 import { useClipboard } from '@/composables/useClipboard'
@@ -885,7 +914,8 @@ import Skeleton from '@/components/ui/skeleton.vue'
 import Tabs from '@/components/ui/tabs.vue'
 import TabsContent from '@/components/ui/tabs-content.vue'
 import { AlertTriangle, Check, Columns2, RefreshCw, X, Monitor, Server, MessageSquareText, Code2, Terminal, Play } from 'lucide-vue-next'
-import { dashboardApi, type RequestDetail } from '@/api/dashboard'
+import { dashboardApi, type RequestBodyField, type RequestDetail } from '@/api/dashboard'
+import { formatRequestBodyLoadError, formatStoredBodyLoadError } from '../utils/body-load-error'
 import type { ImageProgress, RequestTrace } from '@/api/requestTrace'
 import type { UsageRecord } from '../types'
 import { formatApiFormat } from '@/api/endpoints/types/api-format'
@@ -927,7 +957,10 @@ import {
 import RequestHeadersContent from './RequestDetailDrawer/RequestHeadersContent.vue'
 import JsonContent from './RequestDetailDrawer/JsonContent.vue'
 import JsonContentPanel from './JsonContentPanel.vue'
-import ConversationView from './RequestDetailDrawer/ConversationView.vue'
+import BodyConversationContent from './RequestDetailDrawer/BodyConversationContent.vue'
+import { BodyDocument } from '../utils/body-document'
+import { BodyDocumentError, MAX_BODY_BYTES } from '../utils/body-document-protocol'
+import { useToast } from '@/composables/useToast'
 import HorizontalRequestTimeline from './HorizontalRequestTimeline.vue'
 import ReplayDialog from './ReplayDialog.vue'
 import ServiceTierFacts from './ServiceTierFacts.vue'
@@ -937,14 +970,6 @@ import {
   hasServiceTierFact,
   resolveServiceTierFacts,
 } from '../utils/service-tier'
-
-// 对话解析器
-import {
-  renderRequest,
-  renderResponse,
-  type RenderResult,
-  type RenderBlock,
-} from '../conversation'
 
 type RequestStateStatus = 'pending' | 'streaming' | 'completed' | 'failed' | 'cancelled'
 
@@ -1007,7 +1032,7 @@ const REQUEST_STATE_STATUSES = new Set<RequestStateStatus>([
 
 const loading = ref(false)
 const error = ref<string | null>(null)
-const detail = ref<RequestDetail | null>(null)
+const detail = shallowRef<RequestDetail | null>(null)
 const detailUsageAvailable = computed(() => detail.value?.usage_available !== false)
 const detailPricingAvailable = computed(() => (
   detailUsageAvailable.value && detail.value?.usage_pricing_available !== false
@@ -1025,6 +1050,7 @@ const currentExpandDepth = ref(0)
 const dataSource = ref<'client' | 'provider'>('provider')
 const contentViewMode = ref<'json' | 'conversation'>('json')
 const { copyToClipboard } = useClipboard()
+const { error: showBodyError } = useToast()
 const historicalPricing = ref<{
   input_price: string
   output_price: string
@@ -1404,14 +1430,17 @@ const curlCopied = ref(false)
 const replayDialogOpen = ref(false)
 const bodyLoading = ref(false)
 const bodyLoadError = ref<string | null>(null)
-const bodiesLoadedForRequestId = ref<string | null>(null)
+const bodyDocuments = shallowRef(new Map<RequestBodyField, BodyDocument>())
+const bodyCopying = ref(false)
+const bodyLoadFailures = new Map<RequestBodyField, string>()
+let bodyLoadController: AbortController | null = null
 const showTimeline = ref(false)
 const AUTO_REFRESH_INTERVAL_MS = 1000
 const TIMELINE_MOUNT_DELAY_MS = 120
 let loadDetailRequestId = 0
 let bodyLoadRequestId = 0
 let loadDetailInFlight = false
-let timelineMountTimer: ReturnType<typeof setTimeout> | null = null
+let timelineMountTimer: number | null = null
 
 const fullRequestId = computed(() => detail.value?.request_id || detail.value?.id || '-')
 const displayRequestId = computed(() => formatShortRequestId(fullRequestId.value))
@@ -1456,10 +1485,6 @@ watch(activeTab, (newTab) => {
     contentViewMode.value = 'json'
   }
   dataSource.value = getDefaultDataSourceForTab(newTab)
-
-  if (['request-body', 'response-body'].includes(newTab)) {
-    void ensureBodyContentLoaded()
-  }
 })
 
 const { isDark } = useDarkMode()
@@ -1665,6 +1690,33 @@ const hasResponseBodyAvailable = computed(() => {
     || hasBodyContent(detail.value?.has_client_response_body, detail.value?.client_response_body)
 })
 
+const requestBodyField = computed<RequestBodyField>(() => {
+  if (dataSource.value === 'provider' && hasBodyContent(detail.value?.has_provider_request_body, detail.value?.provider_request_body)) {
+    return 'provider_request_body'
+  }
+  return hasBodyContent(detail.value?.has_request_body, detail.value?.request_body)
+    ? 'request_body' : 'provider_request_body'
+})
+
+const responseBodyField = computed<RequestBodyField>(() => {
+  if (dataSource.value === 'client' && hasBodyContent(detail.value?.has_client_response_body, detail.value?.client_response_body)) {
+    return 'client_response_body'
+  }
+  return hasBodyContent(detail.value?.has_response_body, detail.value?.response_body)
+    ? 'response_body' : 'client_response_body'
+})
+
+const activeBodyField = computed(() => {
+  if (activeTab.value === 'request-body') return requestBodyField.value
+  if (activeTab.value === 'response-body') return responseBodyField.value
+  return null
+})
+
+watch([activeBodyField, () => props.isOpen, () => detail.value?.id], () => {
+  cancelBodyContentLoad()
+  void ensureBodyContentLoaded()
+})
+
 const isRequestBodyLoading = computed(() => {
   return bodyLoading.value && activeTab.value === 'request-body' && !currentRequestBody.value
 })
@@ -1675,16 +1727,23 @@ const isResponseBodyLoading = computed(() => {
 
 const requestBodyLoadFailed = computed(() => {
   const errors = detail.value?.body_load_errors
-  return Boolean(errors?.request_body || errors?.provider_request_body)
+  return Boolean(errors?.[requestBodyField.value])
 })
 
 const responseBodyLoadFailed = computed(() => {
   const errors = detail.value?.body_load_errors
-  return Boolean(errors?.response_body || errors?.client_response_body)
+  return Boolean(errors?.[responseBodyField.value])
 })
 
 const bodyLoadErrorMessage = computed(() => {
-  return bodyLoadError.value || '正文内容加载失败，请重试'
+  return bodyLoadError.value || formatStoredBodyLoadError(
+    activeBodyField.value ? detail.value?.body_load_error_codes?.[activeBodyField.value] : undefined,
+  )
+})
+
+const canRetryBodyContentLoad = computed(() => {
+  const code = activeBodyField.value ? detail.value?.body_load_error_codes?.[activeBodyField.value] : undefined
+  return code !== 'too_large' && code !== 'decode_failed'
 })
 
 const requestBodyLoadErrorVisible = computed(() => {
@@ -1801,20 +1860,12 @@ function setDataSource(source: 'client' | 'provider') {
 
 // 获取当前数据源的请求体数据
 const currentRequestBody = computed(() => {
-  if (!detail.value) return null
-  if (dataSource.value === 'provider' && detail.value.provider_request_body) {
-    return detail.value.provider_request_body
-  }
-  return detail.value.request_body
+  return bodyDocuments.value.get(requestBodyField.value) ?? null
 })
 
 // 获取当前数据源的响应体数据
 const currentResponseBody = computed(() => {
-  if (!detail.value) return null
-  if (dataSource.value === 'client' && detail.value.client_response_body) {
-    return detail.value.client_response_body
-  }
-  return detail.value.response_body
+  return bodyDocuments.value.get(responseBodyField.value) ?? null
 })
 
 const currentRequestBodyApiFormat = computed(() => {
@@ -1854,11 +1905,11 @@ const activeJsonPanelData = computed(() => {
     case 'request-headers':
       return currentHeaderData.value
     case 'request-body':
-      return currentRequestBody.value
+      return null
     case 'response-headers':
       return currentResponseHeaderData.value
     case 'response-body':
-      return currentResponseBody.value
+      return null
     case 'metadata':
       return metadataPanelData.value
     default:
@@ -1870,30 +1921,6 @@ const activeJsonPanelTitle = computed(() => {
   if (viewMode.value === 'compare') return '对比'
   if (supportsConversationView.value && contentViewMode.value === 'conversation') return 'Chat'
   return 'JSON'
-})
-
-// 请求体渲染结果
-const requestRenderResult = computed<RenderResult>(() => {
-  const body = currentRequestBody.value
-  if (!body) {
-    return { blocks: [], isStream: false }
-  }
-  if (activeTab.value !== 'request-body' || contentViewMode.value !== 'conversation') {
-    return { blocks: [], isStream: false }
-  }
-  return renderRequest(body, currentResponseBody.value, currentRequestBodyApiFormat.value)
-})
-
-// 响应体渲染结果
-const responseRenderResult = computed<RenderResult>(() => {
-  const body = currentResponseBody.value
-  if (!body) {
-    return { blocks: [], isStream: false }
-  }
-  if (activeTab.value !== 'response-body' || contentViewMode.value !== 'conversation') {
-    return { blocks: [], isStream: false }
-  }
-  return renderResponse(body, currentRequestBody.value, currentResponseBodyApiFormat.value)
 })
 
 // 当前 Tab 是否支持对话视图
@@ -1989,7 +2016,7 @@ const effectiveCacheCreationCost = computed(() => {
     getNestedNumber(billingCostBreakdown.value, 'cache_creation_uncategorized_cost'),
     getNestedNumber(billingCostBreakdown.value, 'cache_creation_ephemeral_5m_cost'),
     getNestedNumber(billingCostBreakdown.value, 'cache_creation_ephemeral_1h_cost'),
-  ].reduce((sum, value) => sum + (value ?? 0), 0)
+  ].reduce<number>((sum, value) => sum + (value ?? 0), 0)
   if (snapshotCost > 0) return snapshotCost
   return toNumber(detail.value?.cache_creation_cost) ?? 0
 })
@@ -2375,15 +2402,6 @@ function hasContent(data: unknown): boolean {
   return true
 }
 
-function hasBodyLoadErrors(errors: RequestDetail['body_load_errors'] | null | undefined): boolean {
-  return Boolean(
-    errors?.request_body ||
-    errors?.provider_request_body ||
-    errors?.response_body ||
-    errors?.client_response_body
-  )
-}
-
 function toFiniteNumber(value: unknown): number | null {
   const num = Number(value)
   return Number.isFinite(num) ? num : null
@@ -2580,9 +2598,11 @@ watch([() => props.isOpen, () => props.requestId], async ([isOpen, requestId]) =
     stopAutoRefresh()
     showTimeline.value = false
     clearTimelineMountTimer()
-    bodyLoading.value = false
-    bodyLoadError.value = null
-    bodiesLoadedForRequestId.value = null
+    resetBodyContentState()
+    detail.value = null
+    activeTab.value = 'request-headers'
+    ++loadDetailRequestId
+    loadDetailInFlight = false
   }
 })
 
@@ -2595,54 +2615,97 @@ function detailMatchesRequestId(
 }
 
 async function ensureBodyContentLoaded() {
-  if (!props.requestId || !detail.value) return
-
-  const cacheKey = detail.value.request_id || detail.value.id
-  if (bodiesLoadedForRequestId.value === cacheKey || bodyLoading.value) return
-  if (!hasRequestBodyAvailable.value && !hasResponseBodyAvailable.value) return
+  const field = activeBodyField.value
+  const usageId = props.requestId
+  if (!props.isOpen || !usageId || !field || !detailMatchesRequestId(detail.value, usageId)) return
+  if (!detail.value || bodyLoading.value) return
+  const cached = bodyDocuments.value.get(field)
+  if (cached) {
+    const documents = new Map(bodyDocuments.value)
+    documents.delete(field)
+    documents.set(field, cached)
+    bodyDocuments.value = documents
+    return
+  }
+  if (!hasBodyContent(detail.value[`has_${field}`], detail.value[field])) return
+  const previousFailure = bodyLoadFailures.get(field)
+  if (previousFailure) {
+    bodyLoadError.value = previousFailure
+    return
+  }
 
   const requestId = ++bodyLoadRequestId
+  const controller = new AbortController()
+  bodyLoadController = controller
   bodyLoading.value = true
   bodyLoadError.value = null
   try {
-    const response = await dashboardApi.getRequestDetail(props.requestId, { includeBodies: true })
-    if (requestId !== bodyLoadRequestId || !detail.value) return
-    detail.value = {
-      ...detail.value,
-      request_body: response.request_body,
-      provider_request_body: response.provider_request_body,
-      response_body: response.response_body,
-      client_response_body: response.client_response_body,
-      has_request_body: response.has_request_body,
-      has_provider_request_body: response.has_provider_request_body,
-      has_response_body: response.has_response_body,
-      has_client_response_body: response.has_client_response_body,
-      body_load_errors: response.body_load_errors,
-      request_error: response.request_error,
-      upstream_error: response.upstream_error,
-      client_error: response.client_error,
-      failure_summary: response.failure_summary,
-      errors: response.errors,
-      error_flow: response.error_flow,
-      scheduling_failure: response.scheduling_failure,
+    const response = await dashboardApi.getRequestBody(detail.value.id, field, controller.signal)
+    const document = await BodyDocument.load(response.bytes, response.encoding, controller.signal)
+    if (requestId !== bodyLoadRequestId || controller.signal.aborted || !detail.value ||
+      !props.isOpen || !detailMatchesRequestId(detail.value, usageId)) {
+      document.dispose()
+      return
     }
-    if (!hasBodyLoadErrors(response.body_load_errors)) {
-      bodiesLoadedForRequestId.value = cacheKey
+    const documents = new Map(bodyDocuments.value)
+    let cachedBytes = document.byteLength
+    for (const existing of documents.values()) cachedBytes += existing.byteLength
+    for (const [cachedField, existing] of documents) {
+      if (documents.size < 2 && cachedBytes <= MAX_BODY_BYTES) break
+      existing.dispose()
+      documents.delete(cachedField)
+      cachedBytes -= existing.byteLength
     }
+    documents.set(field, document)
+    bodyDocuments.value = documents
+    detail.value = { ...detail.value, body_load_errors: { ...detail.value.body_load_errors, [field]: false }, body_load_error_codes: { ...detail.value.body_load_error_codes, [field]: undefined } }
   } catch (err) {
-    if (requestId !== bodyLoadRequestId) return
+    if (requestId !== bodyLoadRequestId || controller.signal.aborted || axios.isCancel(err)) return
     log.error('Failed to load request bodies:', err)
-    bodyLoadError.value = '正文内容加载失败，请重试'
+    bodyLoadError.value = formatRequestBodyLoadError(err)
+    bodyLoadFailures.set(field, bodyLoadError.value)
+    const code = err instanceof BodyDocumentError ? err.code : axios.isAxiosError(err) ? err.response?.headers?.['x-aether-body-error'] : undefined
+    if ((code === 'too_large' || code === 'decode_failed') && detail.value) {
+      detail.value = { ...detail.value, body_load_error_codes: { ...detail.value.body_load_error_codes, [field]: code } }
+    }
   } finally {
     if (requestId === bodyLoadRequestId) {
       bodyLoading.value = false
+      bodyLoadController = null
     }
   }
 }
 
+function handleBodyDocumentError(error: unknown) {
+  const field = activeBodyField.value
+  if (!field) return
+  const documents = new Map(bodyDocuments.value)
+  documents.get(field)?.dispose()
+  documents.delete(field)
+  bodyDocuments.value = documents
+  bodyLoadError.value = formatRequestBodyLoadError(error)
+  bodyLoadFailures.set(field, bodyLoadError.value)
+}
+
 function retryBodyContentLoad() {
+  if (activeBodyField.value) bodyLoadFailures.delete(activeBodyField.value)
   bodyLoadError.value = null
   void ensureBodyContentLoaded()
+}
+
+function cancelBodyContentLoad() {
+  ++bodyLoadRequestId
+  bodyLoadController?.abort()
+  bodyLoadController = null
+  bodyLoading.value = false
+  bodyLoadError.value = null
+}
+
+function resetBodyContentState() {
+  cancelBodyContentLoad()
+  for (const document of bodyDocuments.value.values()) document.dispose()
+  bodyDocuments.value = new Map()
+  bodyLoadFailures.clear()
 }
 
 async function loadDetail(id: string, silent = false) {
@@ -2661,9 +2724,7 @@ async function loadDetail(id: string, silent = false) {
     timelineHasTrace.value = false
     showTimeline.value = false
     clearTimelineMountTimer()
-    ++bodyLoadRequestId
-    bodyLoading.value = false
-    bodyLoadError.value = null
+    resetBodyContentState()
   }
   error.value = null
   try {
@@ -2677,13 +2738,18 @@ async function loadDetail(id: string, silent = false) {
     const prevKey = previousDetail?.request_id || previousDetail?.id
     const currKey = response.request_id || response.id
     const sameRequest = !!prevKey && prevKey === currKey
+    const bodySnapshotChanged = sameRequest && previousDetail != null &&
+      ['pending', 'streaming'].includes(previousDetail.status ?? '') && previousDetail.status !== response.status
+    const preserveBodies = sameRequest && !bodySnapshotChanged
     const nextDetail: RequestDetail = {
       ...response,
       status: resolveRequestStateStatusFromDetail(response) ?? response.status,
-      request_body: sameRequest ? previousDetail?.request_body : undefined,
-      provider_request_body: sameRequest ? previousDetail?.provider_request_body : undefined,
-      response_body: sameRequest ? previousDetail?.response_body : undefined,
-      client_response_body: sameRequest ? previousDetail?.client_response_body : undefined,
+      request_body: preserveBodies ? previousDetail?.request_body : undefined,
+      provider_request_body: preserveBodies ? previousDetail?.provider_request_body : undefined,
+      response_body: preserveBodies ? previousDetail?.response_body : undefined,
+      client_response_body: preserveBodies ? previousDetail?.client_response_body : undefined,
+      body_load_errors: preserveBodies ? previousDetail?.body_load_errors : response.body_load_errors,
+      body_load_error_codes: preserveBodies ? previousDetail?.body_load_error_codes : response.body_load_error_codes,
       request_error: response.request_error,
       upstream_error: response.upstream_error,
       client_error: response.client_error,
@@ -2694,7 +2760,7 @@ async function loadDetail(id: string, silent = false) {
     }
     detailModelRevision.value = ++modelSnapshotRevision
     detail.value = nextDetail
-    bodiesLoadedForRequestId.value = sameRequest ? bodiesLoadedForRequestId.value : null
+    if (!sameRequest || bodySnapshotChanged) resetBodyContentState()
     emitDetailRequestState(nextDetail)
 
     // 首次加载时优先停留在轻量 tab，避免默认触发大 body 加载
@@ -2717,7 +2783,8 @@ async function loadDetail(id: string, silent = false) {
     }
 
     // 根据当前 Tab 的数据可用性自动选择默认数据源
-    dataSource.value = getDefaultDataSourceForTab(activeTab.value)
+    if (!silent || !sameRequest) dataSource.value = getDefaultDataSourceForTab(activeTab.value)
+    if (bodySnapshotChanged) void nextTick().then(ensureBodyContentLoaded)
 
     // 使用请求记录中保存的历史价格
     if (detail.value.input_price_per_1m || detail.value.output_price_per_1m || detail.value.price_per_request) {
@@ -2843,12 +2910,13 @@ onBeforeUnmount(() => {
   clearTimelineMountTimer()
   loadDetailRequestId += 1
   loadDetailInFlight = false
+  resetBodyContentState()
 })
 
 function formatDateTime(dateStr: string | null | undefined): string {
   if (!dateStr) return 'N/A'
   const date = new Date(dateStr)
-  return date.toLocaleString('zh-CN', {
+  return date.toLocaleString(getI18nLocale(), {
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
@@ -2935,108 +3003,37 @@ function getTierRangeText(tier: { up_to?: number | null }, index: number, tiers:
   return `> ${formatNumber(start)} tokens`
 }
 
-/** 将 RenderResult 格式化为可复制的文本 */
-function formatRenderResultAsText(result: RenderResult): string {
-  if (result.error) {
-    return `[Error] ${result.error}`
-  }
-
-  const parts: string[] = []
-
-  for (const block of result.blocks) {
-    const text = formatBlockAsText(block)
-    if (text) {
-      parts.push(text)
+async function copyContent(tabName: string) {
+  if (!detail.value || viewMode.value === 'compare' || bodyCopying.value) return
+  const usageId = detail.value.id
+  const document = tabName === 'request-body' ? currentRequestBody.value
+    : tabName === 'response-body' ? currentResponseBody.value : null
+  bodyCopying.value = true
+  try {
+    let text: string
+    if (document) {
+      text = await document.copy(contentViewMode.value === 'conversation' ? {
+        kind: tabName === 'request-body' ? 'request' : 'response',
+        apiFormat: tabName === 'request-body' ? currentRequestBodyApiFormat.value : currentResponseBodyApiFormat.value,
+      } : undefined)
+    } else {
+      const data = tabName === 'request-headers' ? (dataSource.value === 'provider' ? detail.value.provider_request_headers : detail.value.request_headers)
+        : tabName === 'response-headers' ? currentResponseHeaderData.value
+          : tabName === 'metadata' ? metadataPanelData.value : null
+      if (data == null) return
+      text = JSON.stringify(data, null, 2)
     }
-  }
-
-  return parts.join('\n\n---\n\n')
-}
-
-/** 将单个 RenderBlock 格式化为文本 */
-function formatBlockAsText(block: RenderBlock): string {
-  switch (block.type) {
-    case 'text':
-      return block.content
-    case 'code':
-      return block.language
-        ? `\`\`\`${block.language}\n${block.code}\n\`\`\``
-        : `\`\`\`\n${block.code}\n\`\`\``
-    case 'collapsible':
-      return `[${block.title}]\n${block.content.map(formatBlockAsText).filter(Boolean).join('\n')}`
-    case 'error':
-      return `[Error${block.code ? `: ${block.code}` : ''}] ${block.message}`
-    case 'image':
-      return `[Image: ${block.mimeType || block.alt || 'unknown'}]`
-    case 'tool_use':
-      return `[Tool: ${block.toolName}]\n${block.input}`
-    case 'tool_result':
-      return `[Tool Result${block.isError ? ' (Error)' : ''}]\n${block.content}`
-    case 'message': {
-      const roleLabel = block.roleLabel || block.role
-      const contentText = block.content.map(formatBlockAsText).filter(Boolean).join('\n\n')
-      return `[${roleLabel}]\n${contentText}`
+    if (!props.isOpen || detail.value?.id !== usageId) return
+    if (await copyToClipboard(text, false)) {
+      copiedStates.value[tabName] = true
+      setTimeout(() => { copiedStates.value[tabName] = false }, 2000)
+    } else {
+      showBodyError('复制失败，请检查剪贴板权限后重试。')
     }
-    case 'container':
-      return block.children.map(formatBlockAsText).filter(Boolean).join('\n')
-    case 'label':
-      return `${block.label}: ${block.value}`
-    case 'divider':
-      return '---'
-    case 'badge':
-      return ''
-    default:
-      return ''
-  }
-}
-
-// 复制内容（支持 JSON 和对话两种模式）
-function copyContent(tabName: string) {
-  if (!detail.value) return
-  if (viewMode.value === 'compare') return
-
-  let textToCopy = ''
-
-  // 对话视图模式：复制格式化的对话文本
-  if (contentViewMode.value === 'conversation') {
-    if (tabName === 'request-body') {
-      textToCopy = formatRenderResultAsText(requestRenderResult.value)
-    } else if (tabName === 'response-body') {
-      textToCopy = formatRenderResultAsText(responseRenderResult.value)
-    }
-  } else {
-    // JSON 视图模式：复制原始 JSON
-    let data: unknown = null
-    switch (tabName) {
-      case 'request-headers':
-        data = dataSource.value === 'provider'
-          ? detail.value.provider_request_headers
-          : detail.value.request_headers
-        break
-      case 'request-body':
-        data = currentRequestBody.value
-        break
-      case 'response-headers':
-        data = currentResponseHeaderData.value
-        break
-      case 'response-body':
-        data = currentResponseBody.value
-        break
-      case 'metadata':
-        data = metadataPanelData.value
-        break
-    }
-    if (data) {
-      textToCopy = JSON.stringify(data, null, 2)
-    }
-  }
-
-  if (textToCopy) {
-    copyToClipboard(textToCopy, false)
-    copiedStates.value[tabName] = true
-    setTimeout(() => {
-      copiedStates.value[tabName] = false
-    }, 2000)
+  } catch (error) {
+    if (props.isOpen && detail.value?.id === usageId) showBodyError(formatRequestBodyLoadError(error))
+  } finally {
+    bodyCopying.value = false
   }
 }
 

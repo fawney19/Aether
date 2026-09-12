@@ -5,7 +5,9 @@ use super::shared::{
     AdminStandaloneApiKeyToggleRequest, AdminStandaloneApiKeyUpdatePatch,
 };
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
-use crate::handlers::admin::shared::attach_admin_audit_response;
+use crate::handlers::admin::shared::{
+    attach_admin_audit_response, mark_sensitive_admin_response_no_store,
+};
 use crate::handlers::admin::users::{
     default_admin_user_api_key_name, format_optional_unix_secs_iso8601,
     generate_admin_user_api_key_plaintext, hash_admin_user_api_key, masked_user_api_key_display,
@@ -13,7 +15,9 @@ use crate::handlers::admin::users::{
     normalize_admin_user_api_formats, normalize_admin_user_ip_rules,
     normalize_admin_user_string_list,
 };
-use crate::handlers::shared::normalize_optional_api_key_concurrent_limit;
+use crate::handlers::shared::{
+    normalize_optional_api_key_concurrent_limit, seal_auth_api_key_secret,
+};
 use crate::GatewayError;
 use aether_admin::system::serialize_admin_system_users_export_wallet;
 use axum::{
@@ -58,6 +62,48 @@ fn normalize_standalone_initial_balance(
         return Err("initial_balance_usd 必须大于 0".to_string());
     }
     Ok((initial_balance_usd, false))
+}
+
+/// Compensate the rows created by a standalone API-key request when wallet
+/// provisioning cannot complete.  The wallet is deleted first, and only when
+/// its exact API-key owner and untouched state still match.  If a wallet has
+/// become funded or otherwise referenced, preserve both rows rather than
+/// deleting the key and leaving an orphaned financial account.
+async fn compensate_standalone_api_key_creation(
+    state: &AdminAppState<'_>,
+    api_key_id: &str,
+) -> Result<(), GatewayError> {
+    let wallet = state
+        .find_wallet(aether_data::repository::wallet::WalletLookupKey::ApiKeyId(
+            api_key_id,
+        ))
+        .await?;
+    if let Some(wallet) = wallet {
+        let removed = state
+            .delete_wallet_if_unreferenced(
+                &wallet.id,
+                aether_data::repository::wallet::WalletLookupKey::ApiKeyId(api_key_id),
+            )
+            .await?;
+        if !removed
+            && state
+                .find_wallet(aether_data::repository::wallet::WalletLookupKey::WalletId(
+                    &wallet.id,
+                ))
+                .await?
+                .is_some()
+        {
+            return Err(GatewayError::Internal(format!(
+                "refusing to delete standalone API key {api_key_id}: wallet is still referenced"
+            )));
+        }
+    }
+
+    // Treat an already-removed key as an idempotent successful cleanup.  The
+    // wallet owner check above prevents deleting a key while its funded wallet
+    // remains attached.
+    let _ = state.delete_standalone_api_key(api_key_id).await?;
+    Ok(())
 }
 
 pub(super) async fn build_admin_create_api_key_response(
@@ -148,7 +194,16 @@ pub(super) async fn build_admin_create_api_key_response(
     };
 
     let plaintext_key = generate_admin_user_api_key_plaintext();
-    let Some(key_encrypted) = state.encrypt_catalog_secret_with_fallbacks(&plaintext_key) else {
+    let api_key_id = uuid::Uuid::new_v4().to_string();
+    let key_hash = hash_admin_user_api_key(&plaintext_key);
+    let Ok(key_encrypted) = seal_auth_api_key_secret(
+        state.app(),
+        &operator_id,
+        &api_key_id,
+        &key_hash,
+        true,
+        &plaintext_key,
+    ) else {
         return Ok((
             http::StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "detail": "API密钥加密失败" })),
@@ -160,8 +215,8 @@ pub(super) async fn build_admin_create_api_key_response(
         .create_standalone_api_key(
             aether_data::repository::auth::CreateStandaloneApiKeyRecord {
                 user_id: operator_id,
-                api_key_id: uuid::Uuid::new_v4().to_string(),
-                key_hash: hash_admin_user_api_key(&plaintext_key),
+                api_key_id,
+                key_hash,
                 key_encrypted: Some(key_encrypted),
                 name: Some(name),
                 allowed_providers,
@@ -184,11 +239,39 @@ pub(super) async fn build_admin_create_api_key_response(
         return Ok(build_admin_api_keys_data_unavailable_response());
     };
     let wallet = match state
-        .initialize_auth_api_key_wallet(&created.api_key_id, initial_balance_usd, unlimited_balance)
-        .await?
+        .initialize_auth_api_key_wallet_with_outcome(
+            &created.api_key_id,
+            initial_balance_usd,
+            unlimited_balance,
+        )
+        .await
     {
-        Some(wallet) => wallet,
-        None => return Ok(build_admin_api_keys_data_unavailable_response()),
+        Ok(Some(initialized)) => initialized.wallet,
+        Ok(None) => {
+            if let Err(error) =
+                compensate_standalone_api_key_creation(state, &created.api_key_id).await
+            {
+                tracing::error!(
+                    api_key_id = %created.api_key_id,
+                    error = %crate::error::redact_error_debug(&error),
+                    "standalone API key wallet provisioning cleanup failed"
+                );
+                return Err(error);
+            }
+            return Ok(build_admin_api_keys_data_unavailable_response());
+        }
+        Err(error) => {
+            if let Err(cleanup_error) =
+                compensate_standalone_api_key_creation(state, &created.api_key_id).await
+            {
+                tracing::error!(
+                    api_key_id = %created.api_key_id,
+                    error = %crate::error::redact_error_debug(&cleanup_error),
+                    "standalone API key wallet provisioning cleanup failed"
+                );
+            }
+            return Err(error);
+        }
     };
     let created = if feature_settings.is_some() {
         state
@@ -199,30 +282,32 @@ pub(super) async fn build_admin_create_api_key_response(
         created
     };
 
-    Ok(attach_admin_audit_response(
-        Json(json!({
-            "id": created.api_key_id,
-            "key": plaintext_key,
-            "name": created.name,
-            "key_display": masked_user_api_key_display(state, created.key_encrypted.as_deref()),
-            "is_standalone": true,
-            "is_active": created.is_active,
-            "rate_limit": created.rate_limit,
-            "concurrent_limit": created.concurrent_limit,
-            "allowed_providers": created.allowed_providers,
-            "allowed_api_formats": created.allowed_api_formats,
-            "allowed_models": created.allowed_models,
-            "expires_at": format_optional_unix_secs_iso8601(created.expires_at_unix_secs),
-            "auto_delete_on_expiry": created.auto_delete_on_expiry,
-            "feature_settings": created.feature_settings,
-            "wallet": serialize_admin_system_users_export_wallet(Some(&wallet)),
-            "message": "独立余额Key创建成功，请妥善保存完整密钥，后续将无法查看",
-        }))
-        .into_response(),
-        "admin_standalone_api_key_created",
-        "create_standalone_api_key",
-        "api_key",
-        &created.api_key_id,
+    Ok(mark_sensitive_admin_response_no_store(
+        attach_admin_audit_response(
+            Json(json!({
+                "id": created.api_key_id,
+                "key": plaintext_key,
+                "name": created.name,
+                "key_display": masked_user_api_key_display(state, &created),
+                "is_standalone": true,
+                "is_active": created.is_active,
+                "rate_limit": created.rate_limit,
+                "concurrent_limit": created.concurrent_limit,
+                "allowed_providers": created.allowed_providers,
+                "allowed_api_formats": created.allowed_api_formats,
+                "allowed_models": created.allowed_models,
+                "expires_at": format_optional_unix_secs_iso8601(created.expires_at_unix_secs),
+                "auto_delete_on_expiry": created.auto_delete_on_expiry,
+                "feature_settings": created.feature_settings,
+                "wallet": serialize_admin_system_users_export_wallet(Some(&wallet)),
+                "message": "独立余额Key创建成功，请妥善保存完整密钥，后续将无法查看",
+            }))
+            .into_response(),
+            "admin_standalone_api_key_created",
+            "create_standalone_api_key",
+            "api_key",
+            &created.api_key_id,
+        ),
     ))
 }
 
@@ -405,7 +490,11 @@ pub(super) async fn build_admin_update_api_key_response(
         .update_standalone_api_key_basic(
             aether_data::repository::auth::UpdateStandaloneApiKeyBasicRecord {
                 api_key_id: api_key_id.clone(),
+                key_encrypted: None,
+                key_encrypted_present: false,
                 name,
+                name_present: field_presence.contains("name"),
+                force_capabilities: None,
                 rate_limit_present: field_presence.contains("rate_limit"),
                 rate_limit: payload.rate_limit,
                 concurrent_limit_present: field_presence.contains("concurrent_limit"),
@@ -538,5 +627,129 @@ pub(super) async fn build_admin_delete_api_key_response(
             &api_key_id,
         )),
         false => Ok(build_admin_api_keys_not_found_response()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::compensate_standalone_api_key_creation;
+    use crate::data::GatewayDataState;
+    use crate::handlers::admin::request::AdminAppState;
+    use crate::state::AppState;
+    use aether_data::repository::auth::{
+        AuthApiKeyReadRepository, AuthApiKeyWriteRepository, CreateStandaloneApiKeyRecord,
+        InMemoryAuthApiKeySnapshotRepository,
+    };
+    use aether_data::repository::wallet::{StoredWalletSnapshot, WalletLookupKey};
+    use std::sync::Arc;
+
+    async fn seed_standalone_key(
+        repository: &InMemoryAuthApiKeySnapshotRepository,
+        api_key_id: &str,
+    ) {
+        repository
+            .create_standalone_api_key(CreateStandaloneApiKeyRecord {
+                user_id: "admin-user".to_string(),
+                api_key_id: api_key_id.to_string(),
+                key_hash: format!("hash-{api_key_id}"),
+                key_encrypted: None,
+                name: Some("test-key".to_string()),
+                allowed_providers: None,
+                allowed_api_formats: None,
+                allowed_models: None,
+                ip_rules: None,
+                rate_limit: None,
+                concurrent_limit: None,
+                force_capabilities: None,
+                is_active: true,
+                expires_at_unix_secs: None,
+                auto_delete_on_expiry: false,
+                total_requests: 0,
+                total_tokens: 0,
+                total_cost_usd: 0.0,
+            })
+            .await
+            .expect("key creation should succeed")
+            .expect("key should be returned");
+    }
+
+    fn wallet_for_key(api_key_id: &str, balance: f64) -> StoredWalletSnapshot {
+        StoredWalletSnapshot::new(
+            format!("wallet-{api_key_id}"),
+            None,
+            Some(api_key_id.to_string()),
+            balance,
+            0.0,
+            "finite".to_string(),
+            "USD".to_string(),
+            "active".to_string(),
+            if balance > 0.0 { balance } else { 0.0 },
+            0.0,
+            0.0,
+            0.0,
+            1,
+        )
+        .expect("wallet should build")
+    }
+
+    #[tokio::test]
+    async fn standalone_key_compensation_removes_unreferenced_wallet_and_key() {
+        let api_key_id = "compensate-key";
+        let repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::default());
+        seed_standalone_key(&repository, api_key_id).await;
+        let wallet = wallet_for_key(api_key_id, 0.0);
+        let state = AppState::new()
+            .expect("state should build")
+            .with_auth_wallets_for_tests([wallet])
+            .with_data_state_for_tests(GatewayDataState::with_auth_api_key_repository_for_tests(
+                Arc::clone(&repository),
+            ));
+        let admin_state = AdminAppState::new(&state);
+
+        compensate_standalone_api_key_creation(&admin_state, api_key_id)
+            .await
+            .expect("compensation should succeed");
+
+        assert!(state
+            .find_wallet(WalletLookupKey::ApiKeyId(api_key_id))
+            .await
+            .expect("wallet lookup should succeed")
+            .is_none());
+        assert!(repository
+            .find_export_standalone_api_key_by_id(api_key_id)
+            .await
+            .expect("key lookup should succeed")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn standalone_key_compensation_preserves_funded_wallet_and_key() {
+        let api_key_id = "funded-compensate-key";
+        let repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::default());
+        seed_standalone_key(&repository, api_key_id).await;
+        let wallet = wallet_for_key(api_key_id, 5.0);
+        let state = AppState::new()
+            .expect("state should build")
+            .with_auth_wallets_for_tests([wallet])
+            .with_data_state_for_tests(GatewayDataState::with_auth_api_key_repository_for_tests(
+                Arc::clone(&repository),
+            ));
+        let admin_state = AdminAppState::new(&state);
+
+        assert!(
+            compensate_standalone_api_key_creation(&admin_state, api_key_id)
+                .await
+                .is_err()
+        );
+        assert!(state
+            .find_wallet(WalletLookupKey::ApiKeyId(api_key_id))
+            .await
+            .expect("wallet lookup should succeed")
+            .is_some());
+        assert!(repository
+            .find_export_standalone_api_key_by_id(api_key_id)
+            .await
+            .expect("key lookup should succeed")
+            .is_some());
     }
 }

@@ -54,13 +54,10 @@ use crate::executor::{
     record_failed_usage_for_exhausted_request, LocalExecutionExhaustion,
     LocalExecutionRequestOutcome,
 };
-use crate::handlers::shared::system_config_bool;
 use crate::request_diagnostics::{current_request_diagnostics, scope_request_diagnostics_with};
 use crate::stage_metrics::observe_gateway_stage_ms;
 use crate::{AiExecutionDecision, AppState, GatewayError};
 
-const ENABLE_OPENAI_IMAGE_SYNC_HEARTBEAT_CONFIG_KEY: &str = "enable_openai_image_sync_heartbeat";
-const ENABLE_STANDARD_TEXT_SYNC_HEARTBEAT_CONFIG_KEY: &str = "enable_standard_text_sync_heartbeat";
 const OPENAI_IMAGE_SYNC_HEARTBEAT_INTERNAL_ERROR_STATUS: u16 = 502;
 const OPENAI_IMAGE_SYNC_HEARTBEAT_EXHAUSTED_STATUS: u16 = 503;
 const OPENAI_IMAGE_SYNC_HEARTBEAT_ERROR_MESSAGE_LIMIT: usize = 4096;
@@ -107,7 +104,10 @@ pub(crate) async fn maybe_execute_sync_via_local_decision(
         return Ok(LocalExecutionRequestOutcome::NoPath);
     };
 
-    if standard_text_sync_heartbeat_should_wrap(state, plan_kind).await {
+    if standard_text_sync_heartbeat_should_wrap(
+        plan_kind,
+        attempt_source.routing_execution_policy(),
+    ) {
         let parts_for_task = parts.clone();
         let body_json_for_task = body_json.clone();
         let transfer_tracker_for_task = transfer_tracker.clone();
@@ -264,7 +264,10 @@ pub(crate) async fn maybe_execute_sync_via_local_openai_responses_decision(
         return Ok(LocalExecutionRequestOutcome::NoPath);
     };
 
-    if standard_text_sync_heartbeat_should_wrap(state, plan_kind).await {
+    if standard_text_sync_heartbeat_should_wrap(
+        plan_kind,
+        attempt_source.routing_execution_policy(),
+    ) {
         let parts_for_task = parts.clone();
         let body_json_for_task = body_json.clone();
         let transfer_tracker_for_task = transfer_tracker.clone();
@@ -381,7 +384,10 @@ pub(crate) async fn maybe_execute_sync_via_standard_family_decision(
         return Ok(LocalExecutionRequestOutcome::NoPath);
     };
 
-    if standard_text_sync_heartbeat_should_wrap(state, plan_kind).await {
+    if standard_text_sync_heartbeat_should_wrap(
+        plan_kind,
+        attempt_source.routing_execution_policy(),
+    ) {
         let parts_for_task = parts.clone();
         let body_json_for_task = body_json.clone();
         let transfer_tracker_for_task = transfer_tracker.clone();
@@ -609,7 +615,10 @@ pub(crate) async fn maybe_execute_sync_via_local_same_format_provider_decision(
         return Ok(LocalExecutionRequestOutcome::NoPath);
     };
 
-    if standard_text_sync_heartbeat_should_wrap(state, plan_kind).await {
+    if standard_text_sync_heartbeat_should_wrap(
+        plan_kind,
+        attempt_source.routing_execution_policy(),
+    ) {
         let parts_for_task = parts.clone();
         let body_json_for_task = body_json.clone();
         let transfer_tracker_for_task = transfer_tracker.clone();
@@ -746,42 +755,6 @@ pub(crate) async fn maybe_execute_sync_via_local_gemini_files_decision(
     .await
 }
 
-async fn openai_image_sync_heartbeat_enabled(state: &AppState) -> bool {
-    match state
-        .read_system_config_json_value(ENABLE_OPENAI_IMAGE_SYNC_HEARTBEAT_CONFIG_KEY)
-        .await
-    {
-        Ok(value) => system_config_bool(value.as_ref(), false),
-        Err(err) => {
-            tracing::warn!(
-                event_name = "openai_image_sync_heartbeat_config_read_failed",
-                log_type = "ops",
-                error = ?err,
-                "gateway failed to read sync image heartbeat config; defaulting disabled"
-            );
-            false
-        }
-    }
-}
-
-async fn standard_text_sync_heartbeat_enabled(state: &AppState) -> bool {
-    match state
-        .read_system_config_json_value(ENABLE_STANDARD_TEXT_SYNC_HEARTBEAT_CONFIG_KEY)
-        .await
-    {
-        Ok(value) => system_config_bool(value.as_ref(), false),
-        Err(err) => {
-            tracing::warn!(
-                event_name = "standard_text_sync_heartbeat_config_read_failed",
-                log_type = "ops",
-                error = ?err,
-                "gateway failed to read standard text sync heartbeat config; defaulting disabled"
-            );
-            false
-        }
-    }
-}
-
 fn standard_text_sync_heartbeat_applies_to_plan_kind(plan_kind: &str) -> bool {
     matches!(
         plan_kind,
@@ -795,9 +768,12 @@ fn standard_text_sync_heartbeat_applies_to_plan_kind(plan_kind: &str) -> bool {
     )
 }
 
-async fn standard_text_sync_heartbeat_should_wrap(state: &AppState, plan_kind: &str) -> bool {
+fn standard_text_sync_heartbeat_should_wrap(
+    plan_kind: &str,
+    execution_policy: Option<aether_routing_core::RoutingExecutionPolicy>,
+) -> bool {
     standard_text_sync_heartbeat_applies_to_plan_kind(plan_kind)
-        && standard_text_sync_heartbeat_enabled(state).await
+        && execution_policy.is_some_and(|policy| policy.enable_cf_heartbeat)
 }
 
 fn standard_text_sync_heartbeat_client_api_format_for_plan_kind(plan_kind: &str) -> &'static str {
@@ -846,15 +822,20 @@ where
     let started_at = Instant::now();
     let (tx, rx) = mpsc::channel::<Result<Bytes, IoError>>(1);
     let request_diagnostics = current_request_diagnostics();
+    let cancel_on_disconnect = crate::request_lifecycle::cancel_on_client_disconnect();
 
     tokio::spawn(async move {
         scope_request_diagnostics_with(request_diagnostics, async move {
-            let bytes = standard_text_sync_heartbeat_final_bytes(
+            let completion = standard_text_sync_heartbeat_final_bytes(
                 client_api_format.as_str(),
                 redaction_slot.as_ref(),
-                execute(state, parts, trace_id, decision, plan_kind, started_at).await,
-            )
-            .await;
+                tokio::select! {
+                    biased;
+                    _ = tx.closed(), if cancel_on_disconnect => return,
+                    result = execute(state, parts, trace_id, decision, plan_kind, started_at) => result,
+                },
+            );
+            let bytes = completion.await;
             let _ = tx.send(Ok(Bytes::from(bytes))).await;
         })
         .await;
@@ -923,10 +904,10 @@ async fn standard_text_sync_heartbeat_final_bytes(
             STANDARD_TEXT_SYNC_HEARTBEAT_EXHAUSTED_STATUS,
             "standard text sync exhausted all local candidates",
         ),
-        Err(err) => standard_text_sync_heartbeat_error_body(
+        Err(_err) => standard_text_sync_heartbeat_error_body(
             client_api_format,
             STANDARD_TEXT_SYNC_HEARTBEAT_INTERNAL_ERROR_STATUS,
-            &format!("{err:?}"),
+            "internal gateway error while executing request",
         ),
     }
 }
@@ -946,11 +927,11 @@ async fn standard_text_sync_heartbeat_response_body_bytes(
                 bytes.as_ref(),
             ) {
                 Ok(body) => body,
-                Err(err) => {
+                Err(_err) => {
                     return standard_text_sync_heartbeat_error_body(
                         client_api_format,
                         STANDARD_TEXT_SYNC_HEARTBEAT_INTERNAL_ERROR_STATUS,
-                        &format!("{err:?}"),
+                        "internal gateway error while restoring response",
                     );
                 }
             };
@@ -970,10 +951,10 @@ async fn standard_text_sync_heartbeat_response_body_bytes(
                 "empty standard text sync response",
             )
         }
-        Err(err) => standard_text_sync_heartbeat_error_body(
+        Err(_err) => standard_text_sync_heartbeat_error_body(
             client_api_format,
             STANDARD_TEXT_SYNC_HEARTBEAT_INTERNAL_ERROR_STATUS,
-            &err.to_string(),
+            "internal gateway error while reading response",
         ),
     }
 }
@@ -1121,23 +1102,26 @@ fn build_openai_image_sync_heartbeat_shell_response(
     let started_at = Instant::now();
     let (tx, rx) = mpsc::channel::<Result<Bytes, IoError>>(1);
     let request_diagnostics = current_request_diagnostics();
+    let cancel_on_disconnect = crate::request_lifecycle::cancel_on_client_disconnect();
 
     tokio::spawn(async move {
         scope_request_diagnostics_with(request_diagnostics, async move {
-            let bytes = openai_image_sync_heartbeat_final_bytes(
-                execute_openai_image_sync_heartbeat_attempts(
-                    state,
-                    request_path,
-                    trace_id,
-                    decision,
-                    plan_kind,
-                    attempts,
-                    transfer_tracker,
-                    started_at,
-                )
-                .await,
-            )
-            .await;
+            let execution = execute_openai_image_sync_heartbeat_attempts(
+                state,
+                request_path,
+                trace_id,
+                decision,
+                plan_kind,
+                attempts,
+                transfer_tracker,
+                started_at,
+            );
+            let outcome = tokio::select! {
+                biased;
+                _ = tx.closed(), if cancel_on_disconnect => return,
+                result = execution => result,
+            };
+            let bytes = openai_image_sync_heartbeat_final_bytes(outcome).await;
             let _ = tx.send(Ok(Bytes::from(bytes))).await;
         })
         .await;
@@ -1224,9 +1208,9 @@ async fn openai_image_sync_heartbeat_final_bytes(
             OPENAI_IMAGE_SYNC_HEARTBEAT_EXHAUSTED_STATUS,
             "OpenAI image sync exhausted all local candidates",
         ),
-        Err(err) => openai_image_sync_heartbeat_error_body(
+        Err(_err) => openai_image_sync_heartbeat_error_body(
             OPENAI_IMAGE_SYNC_HEARTBEAT_INTERNAL_ERROR_STATUS,
-            &format!("{err:?}"),
+            "internal gateway error while executing image request",
         ),
     }
 }
@@ -1247,9 +1231,9 @@ async fn openai_image_sync_heartbeat_response_body_bytes(response: Response<Body
             OPENAI_IMAGE_SYNC_HEARTBEAT_INTERNAL_ERROR_STATUS,
             "empty sync image response",
         ),
-        Err(err) => openai_image_sync_heartbeat_error_body(
+        Err(_err) => openai_image_sync_heartbeat_error_body(
             OPENAI_IMAGE_SYNC_HEARTBEAT_INTERNAL_ERROR_STATUS,
-            &err.to_string(),
+            "internal gateway error while reading image response",
         ),
     }
 }
@@ -1329,7 +1313,10 @@ pub(crate) async fn maybe_execute_sync_via_local_image_decision(
         return Ok(LocalExecutionRequestOutcome::NoPath);
     };
 
-    if openai_image_sync_heartbeat_enabled(state).await {
+    if attempt_source
+        .routing_execution_policy()
+        .is_some_and(|policy| policy.enable_cf_heartbeat)
+    {
         let mut attempts = Vec::new();
         while let Some(attempt) = attempt_source.next_execution_attempt().await? {
             attempts.push(attempt);
@@ -1664,12 +1651,29 @@ mod tests {
         endpoint_id: &str,
         candidate_id: &str,
     ) -> AiSyncAttempt {
+        test_openai_image_heartbeat_attempt_with_sticky_key_attempts(
+            candidate_index,
+            endpoint_id,
+            candidate_id,
+            1,
+        )
+    }
+
+    /// `sticky_key_attempts` is pinned so these tests exercise candidate
+    /// failover; the default same-key retry is covered separately.
+    fn test_openai_image_heartbeat_attempt_with_sticky_key_attempts(
+        candidate_index: u32,
+        endpoint_id: &str,
+        candidate_id: &str,
+        sticky_key_attempts: u32,
+    ) -> AiSyncAttempt {
         AiSyncAttempt {
             plan: test_openai_image_heartbeat_plan(endpoint_id, candidate_id),
             report_kind: None,
             report_context: Some(json!({
                 "candidate_index": candidate_index,
                 "retry_index": 0,
+                "sticky_key_attempts": sticky_key_attempts,
             })),
         }
     }
@@ -1828,6 +1832,9 @@ mod tests {
             report_context: Some(json!({
                 "candidate_index": candidate_index,
                 "retry_index": 0,
+                // Pin to a single attempt so this helper exercises candidate
+                // failover rather than the default same-key retry.
+                "sticky_key_attempts": 1,
                 "client_api_format": client_api_format,
                 "provider_api_format": client_api_format,
             })),
@@ -1847,11 +1854,10 @@ mod tests {
         assert_eq!(body, json!({"data": [{"b64_json": "x"}]}));
     }
 
-    #[tokio::test]
-    async fn openai_image_sync_heartbeat_missing_config_defaults_disabled() {
-        let state = AppState::new().expect("state should build");
-
-        assert!(!openai_image_sync_heartbeat_enabled(&state).await);
+    #[test]
+    fn openai_image_sync_heartbeat_missing_routing_policy_defaults_disabled() {
+        assert!(!Option::<aether_routing_core::RoutingExecutionPolicy>::None
+            .is_some_and(|policy| policy.enable_cf_heartbeat));
     }
 
     #[tokio::test]
@@ -1981,6 +1987,90 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn openai_image_sync_heartbeat_retries_sticky_key_lazily_before_failover() {
+        let seen_plans = Arc::new(std::sync::Mutex::new(Vec::<(String, Option<String>)>::new()));
+        let seen_plans_for_override = Arc::clone(&seen_plans);
+        let state = AppState::new()
+            .expect("state should build")
+            .with_execution_runtime_sync_override_for_tests(move |plan| {
+                seen_plans_for_override
+                    .lock()
+                    .expect("mutex should lock")
+                    .push((plan.endpoint_id.clone(), plan.candidate_id.clone()));
+                if plan.endpoint_id == "endpoint-retry" {
+                    Ok(test_openai_image_execution_result(
+                        plan,
+                        StatusCode::TOO_MANY_REQUESTS.as_u16(),
+                        json!({"error": {"message": "retry this candidate"}}),
+                    ))
+                } else {
+                    Ok(test_openai_image_execution_result(
+                        plan,
+                        StatusCode::OK.as_u16(),
+                        json!({"data": [{"b64_json": "second-candidate"}]}),
+                    ))
+                }
+            });
+        // Three total attempts on the sticky key; only one attempt is
+        // materialized up front, the other two are derived after each failure.
+        let attempts = vec![
+            test_openai_image_heartbeat_attempt_with_sticky_key_attempts(
+                0,
+                "endpoint-retry",
+                "candidate-retry",
+                3,
+            ),
+            test_openai_image_heartbeat_attempt_with_sticky_key_attempts(
+                1,
+                "endpoint-success",
+                "candidate-success",
+                3,
+            ),
+        ];
+        let outcome = execute_openai_image_sync_heartbeat_attempts(
+            state,
+            "/v1/images/generations".to_string(),
+            "trace-image-heartbeat-sticky-retry".to_string(),
+            test_openai_image_heartbeat_decision(),
+            TEST_OPENAI_IMAGE_SYNC_PLAN_KIND.to_string(),
+            attempts,
+            ProviderTransferTracker::default(),
+            Instant::now(),
+        )
+        .await
+        .expect("heartbeat attempts should execute");
+        let LocalExecutionRequestOutcome::Responded(response) = outcome else {
+            panic!("second candidate should return a response");
+        };
+        let bytes = openai_image_sync_heartbeat_response_body_bytes(response).await;
+        let body: Value = serde_json::from_slice(&bytes).expect("body should decode");
+
+        let seen_plans = seen_plans.lock().expect("mutex should lock").clone();
+        assert_eq!(
+            seen_plans
+                .iter()
+                .map(|(endpoint_id, _)| endpoint_id.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "endpoint-retry",
+                "endpoint-retry",
+                "endpoint-retry",
+                "endpoint-success"
+            ]
+        );
+        let sticky_candidate_ids = seen_plans[..3]
+            .iter()
+            .map(|(_, candidate_id)| candidate_id.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            sticky_candidate_ids.len(),
+            3,
+            "each derived same-key retry must carry a fresh candidate id"
+        );
+        assert_eq!(body, json!({"data": [{"b64_json": "second-candidate"}]}));
+    }
+
+    #[tokio::test]
     async fn openai_image_sync_heartbeat_honors_provider_transfer_limit() {
         let call_count = Arc::new(AtomicUsize::new(0));
         let call_count_for_override = Arc::clone(&call_count);
@@ -2013,6 +2103,7 @@ mod tests {
             attempt.report_context = Some(json!({
                 "candidate_index": index,
                 "retry_index": 0,
+                "sticky_key_attempts": 1,
                 "local_failover_policy": {
                     "max_transfer_count": 1,
                     "max_transfer_timeout_seconds": 0
@@ -2045,22 +2136,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn standard_text_sync_heartbeat_missing_config_defaults_disabled() {
-        let state = AppState::new().expect("state should build");
-
-        assert!(!standard_text_sync_heartbeat_enabled(&state).await);
-    }
-
-    #[tokio::test]
     async fn standard_text_sync_heartbeat_no_local_candidates_preserves_no_path() {
-        let state = AppState::new()
-            .expect("state should build")
-            .with_data_state_for_tests(
-                crate::data::GatewayDataState::disabled().with_system_config_values_for_tests([(
-                    ENABLE_STANDARD_TEXT_SYNC_HEARTBEAT_CONFIG_KEY.to_string(),
-                    json!(true),
-                )]),
-            );
+        let state = AppState::new().expect("state should build");
         let (parts, _) = http::Request::builder()
             .method(http::Method::POST)
             .uri("/v1/responses")
@@ -2196,6 +2273,109 @@ mod tests {
             .expect("heartbeat chunk should be ok");
         assert_eq!(first.as_ref(), b"\n");
         let _ = release_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn standard_text_sync_heartbeat_background_holds_request_admission_after_disconnect() {
+        let state = AppState::new().expect("state should build");
+        let gate = aether_runtime::ConcurrencyGate::new("heartbeat_request", 1);
+        let admission = aether_runtime::AdmissionPermit::from(
+            gate.try_acquire().expect("request admission permit"),
+        );
+        let (mut parts, _) = http::Request::builder()
+            .method(http::Method::POST)
+            .uri("/v1/responses")
+            .body(())
+            .expect("request should build")
+            .into_parts();
+        parts.extensions.insert(
+            crate::executor::candidate_loop::BackgroundAdmissionPermit::new(admission.clone()),
+        );
+        drop(admission);
+
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel::<()>();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let response = build_standard_text_sync_heartbeat_shell_response(
+            state,
+            parts,
+            "trace-standard-text-heartbeat-admission".to_string(),
+            test_standard_text_heartbeat_decision(),
+            TEST_STANDARD_TEXT_SYNC_PLAN_KIND.to_string(),
+            move |_state, parts, _trace_id, _decision, _plan_kind, _started_at| async move {
+                assert!(
+                    parts
+                        .extensions
+                        .get::<crate::executor::candidate_loop::BackgroundAdmissionPermit>()
+                        .is_some(),
+                    "background request parts should carry admission"
+                );
+                let _ = started_tx.send(());
+                let _ = release_rx.await;
+                Ok(LocalExecutionRequestOutcome::responded(
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .body(Body::from(r#"{"id":"resp_done","output":[]}"#))
+                        .expect("response should build"),
+                ))
+            },
+        )
+        .expect("heartbeat shell should build");
+
+        started_rx.await.expect("background execution should start");
+        drop(response);
+        assert_eq!(gate.snapshot().in_flight, 1);
+        assert!(
+            gate.try_acquire().is_err(),
+            "disconnect must not release background admission"
+        );
+
+        let _ = release_tx.send(());
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while gate.snapshot().in_flight != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("background completion should release admission");
+    }
+
+    #[tokio::test]
+    async fn standard_text_sync_heartbeat_cancels_when_routing_policy_enables_it() {
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (mut release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let response = crate::request_lifecycle::run_request(async move {
+            crate::request_lifecycle::configure_client_disconnect(
+                aether_routing_core::RoutingExecutionPolicy {
+                    cancel_on_client_disconnect: true,
+                    ..Default::default()
+                },
+            );
+            let (parts, _) = http::Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .body(())
+                .unwrap()
+                .into_parts();
+            build_standard_text_sync_heartbeat_shell_response(
+                AppState::new().unwrap(),
+                parts,
+                "trace-heartbeat-disconnect".to_string(),
+                test_standard_text_heartbeat_decision(),
+                TEST_STANDARD_TEXT_SYNC_PLAN_KIND.to_string(),
+                move |_, _, _, _, _, _| async move {
+                    started_tx.send(()).unwrap();
+                    release_rx.await.unwrap();
+                    Ok(LocalExecutionRequestOutcome::NoPath)
+                },
+            )
+        })
+        .await
+        .unwrap();
+        started_rx.await.unwrap();
+        drop(response);
+        tokio::time::timeout(Duration::from_secs(1), release_tx.closed())
+            .await
+            .expect("heartbeat must drop upstream execution immediately");
     }
 
     #[tokio::test]

@@ -30,6 +30,7 @@ use crate::handlers::admin::request::{AdminAppState, AdminGatewayProviderTranspo
 use crate::provider_key_auth::provider_key_is_oauth_managed;
 use crate::state::ProviderTransportCredentialFence;
 use crate::GatewayError;
+use aether_admin::provider::redaction::admin_provider_metadata_bucket_safe_json;
 use aether_contracts::ProxySnapshot;
 use aether_data_contracts::repository::provider_catalog::{
     ProviderCatalogKeyOAuthCredentialCasDelete,
@@ -282,10 +283,56 @@ fn truncate_codex_reset_credit_detail_error(message: impl Into<String>) -> Strin
     let message = message.into();
     let mut sanitized = message.replace('\n', " ");
     if sanitized.len() > 240 {
-        sanitized.truncate(240);
+        let mut truncate_at = 240;
+        while !sanitized.is_char_boundary(truncate_at) {
+            truncate_at -= 1;
+        }
+        sanitized.truncate(truncate_at);
         sanitized.push('…');
     }
     sanitized
+}
+
+fn safe_codex_quota_refresh_error(error: &GatewayError) -> &'static str {
+    if matches!(
+        error,
+        GatewayError::LocalExecutionPlanningTimeout { .. } | GatewayError::AdmissionTimeout { .. }
+    ) {
+        return "Quota refresh timed out";
+    }
+
+    let message = match error {
+        GatewayError::UpstreamUnavailable { message, .. }
+        | GatewayError::ControlUnavailable { message, .. }
+        | GatewayError::Client { message, .. }
+        | GatewayError::Internal(message) => message.as_str(),
+        GatewayError::PlanUsageLimited(_)
+        | GatewayError::LastActiveAdminUpdateDenied
+        | GatewayError::LastActiveAdminDeleteDenied => return "Quota refresh failed",
+        GatewayError::LocalExecutionPlanningTimeout { .. }
+        | GatewayError::AdmissionTimeout { .. } => unreachable!(),
+    };
+    let lower = message.to_ascii_lowercase();
+    if lower.contains("timeout") || lower.contains("timed out") {
+        "Quota refresh timed out"
+    } else if [
+        "connection",
+        "connect",
+        "dns",
+        "network",
+        "proxy",
+        "socket",
+        "tls",
+        "certificate",
+        "transport",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+    {
+        "Quota refresh connection failed"
+    } else {
+        "Quota refresh failed"
+    }
 }
 
 fn merge_codex_reset_credit_detail_metadata(
@@ -355,26 +402,21 @@ async fn enrich_codex_reset_credit_details(
             .await?
         {
             ProviderQuotaExecutionOutcome::Response(result) => result,
-            ProviderQuotaExecutionOutcome::Failure(detail) => {
+            ProviderQuotaExecutionOutcome::Failure(_) => {
                 mark_codex_reset_credit_detail_failed(
                     codex_metadata,
                     now_unix_secs,
-                    format!("reset credit detail 请求执行失败: {detail}"),
+                    "reset credit detail 请求执行失败".to_string(),
                 );
                 return Ok(());
             }
         };
 
     if result.status_code != 200 {
-        let detail = extract_execution_error_message(&result)
-            .unwrap_or_else(|| format!("HTTP {}", result.status_code));
         mark_codex_reset_credit_detail_failed(
             codex_metadata,
             now_unix_secs,
-            format!(
-                "reset credit detail 返回状态码 {}: {detail}",
-                result.status_code
-            ),
+            format!("reset credit detail 返回状态码 {}", result.status_code),
         );
         return Ok(());
     }
@@ -506,8 +548,7 @@ async fn finish_codex_reset_replay(
                 }
                 Err(err) => {
                     refresh_status = "failed".to_string();
-                    refresh_error =
-                        Some(truncate_codex_reset_credit_detail_error(err.into_message()));
+                    refresh_error = Some(safe_codex_quota_refresh_error(&err).to_string());
                 }
             }
         }
@@ -529,7 +570,10 @@ async fn finish_codex_reset_replay(
         payload.insert("refresh_error".to_string(), json!(refresh_error));
     }
     if let Some(metadata) = metadata {
-        payload.insert("metadata".to_string(), metadata);
+        payload.insert(
+            "metadata".to_string(),
+            admin_provider_metadata_bucket_safe_json("codex", Some(&metadata)),
+        );
     }
     if let Some(quota_snapshot) = quota_snapshot {
         payload.insert("quota_snapshot".to_string(), quota_snapshot);
@@ -702,14 +746,14 @@ pub(crate) async fn consume_codex_reset_credit_locally(
     let result =
         match execute_codex_reset_credit_plan(state, &transport, request_spec, None).await? {
             ProviderQuotaExecutionOutcome::Response(result) => result,
-            ProviderQuotaExecutionOutcome::Failure(detail) => {
+            ProviderQuotaExecutionOutcome::Failure(_) => {
                 return Ok((
                     StatusCode::BAD_GATEWAY,
                     json!({
                         "key_id": key.id,
                         "status": "error",
                         "outcome": "error",
-                        "message": format!("reset credit consume 请求执行失败: {detail}"),
+                        "message": "reset credit consume 请求执行失败",
                     }),
                 ));
             }
@@ -726,8 +770,6 @@ pub(crate) async fn consume_codex_reset_credit_locally(
         "reset" | "already_redeemed" | "nothing_to_reset" | "no_credit"
     );
     if !known_terminal_outcome {
-        let detail = extract_execution_error_message(&result)
-            .unwrap_or_else(|| format!("HTTP {}", result.status_code));
         return Ok((
             StatusCode::BAD_GATEWAY,
             json!({
@@ -735,7 +777,7 @@ pub(crate) async fn consume_codex_reset_credit_locally(
                 "status": "error",
                 "outcome": "error",
                 "idempotency_key": idempotency_key,
-                "message": format!("reset credit consume outcome is ambiguous: {detail}"),
+                "message": "reset credit consume outcome is ambiguous",
                 "status_code": result.status_code,
             }),
         ));
@@ -802,7 +844,7 @@ pub(crate) async fn consume_codex_reset_credit_locally(
                 }
                 Err(err) => (
                     "failed".to_string(),
-                    Some(truncate_codex_reset_credit_detail_error(err.into_message())),
+                    Some(safe_codex_quota_refresh_error(&err).to_string()),
                     None,
                     None,
                 ),
@@ -825,7 +867,7 @@ pub(crate) async fn consume_codex_reset_credit_locally(
             }
             Err(err) => (
                 "failed".to_string(),
-                Some(truncate_codex_reset_credit_detail_error(err.into_message())),
+                Some(safe_codex_quota_refresh_error(&err).to_string()),
                 None,
                 None,
             ),
@@ -845,7 +887,10 @@ pub(crate) async fn consume_codex_reset_credit_locally(
         payload.insert("refresh_error".to_string(), json!(refresh_error));
     }
     if let Some(metadata) = metadata {
-        payload.insert("metadata".to_string(), metadata);
+        payload.insert(
+            "metadata".to_string(),
+            admin_provider_metadata_bucket_safe_json("codex", Some(&metadata)),
+        );
     }
     if let Some(quota_snapshot) = quota_snapshot {
         payload.insert("quota_snapshot".to_string(), quota_snapshot);
@@ -1003,13 +1048,13 @@ async fn refresh_codex_provider_quota_locally_with_reset_fence(
         .await?
         {
             ProviderQuotaExecutionOutcome::Response(result) => result,
-            ProviderQuotaExecutionOutcome::Failure(detail) => {
+            ProviderQuotaExecutionOutcome::Failure(_) => {
                 failed_count += 1;
                 results.push(json!({
                     "key_id": key.id,
                     "key_name": key.name,
                     "status": "error",
-                    "message": format!("wham/usage 请求执行失败: {detail}"),
+                    "message": "wham/usage 请求执行失败",
                     "status_code": 502,
                 }));
                 continue;
@@ -1080,15 +1125,7 @@ async fn refresh_codex_provider_quota_locally_with_reset_fence(
             }
         } else {
             let err_msg = extract_execution_error_message(&result);
-            message = Some(match err_msg.as_deref() {
-                Some(detail) if !detail.is_empty() => {
-                    format!(
-                        "wham/usage API 返回状态码 {}: {}",
-                        result.status_code, detail
-                    )
-                }
-                _ => format!("wham/usage API 返回状态码 {}", result.status_code),
-            });
+            message = Some(format!("wham/usage API 返回状态码 {}", result.status_code));
 
             match result.status_code {
                 401 => {
@@ -1114,12 +1151,7 @@ async fn refresh_codex_provider_quota_locally_with_reset_fence(
                         codex_meta.insert("updated_at".to_string(), json!(now_unix_secs));
                         codex_meta.insert("account_disabled".to_string(), json!(true));
                         codex_meta.insert("reason".to_string(), json!("deactivated_workspace"));
-                        codex_meta.insert(
-                            "message".to_string(),
-                            json!(err_msg
-                                .clone()
-                                .unwrap_or_else(|| "deactivated_workspace".to_string())),
-                        );
+                        codex_meta.insert("message".to_string(), json!("deactivated_workspace"));
                         let plan_type = transport
                             .key
                             .decrypted_auth_config
@@ -1206,7 +1238,7 @@ async fn refresh_codex_provider_quota_locally_with_reset_fence(
                     account_reset_fence_id,
                     coverage: quota_window_coverage,
                 },
-                Some(&expected_credential.credential),
+                &expected_credential.credential,
             )
             .await?
         } else {
@@ -1214,9 +1246,6 @@ async fn refresh_codex_provider_quota_locally_with_reset_fence(
                 state,
                 &key.id,
                 metadata_update.as_ref(),
-                oauth_invalid_at_unix_secs,
-                oauth_invalid_reason.clone(),
-                None,
                 aether_admin::provider::quota::CodexQuotaMergeContext {
                     observed_at_unix_secs: now_unix_secs,
                     request_started_at_unix_ms: Some(quota_request_started_at_unix_ms),
@@ -1366,9 +1395,11 @@ async fn refresh_codex_provider_quota_locally_with_reset_fence(
         if let Some(metadata_update) = metadata_update
             .as_ref()
             .and_then(|value| value.get("codex"))
-            .cloned()
         {
-            payload.insert("metadata".to_string(), metadata_update);
+            payload.insert(
+                "metadata".to_string(),
+                admin_provider_metadata_bucket_safe_json("codex", Some(metadata_update)),
+            );
         }
         if let Some(quota_snapshot) = build_quota_snapshot_payload(
             "codex",
@@ -1468,6 +1499,53 @@ mod tests {
                 .and_then(|credits| credits.get("updated_at")),
             Some(&json!(1_777_000_000u64))
         );
+    }
+
+    #[test]
+    fn codex_reset_credit_detail_truncation_preserves_utf8_boundaries() {
+        let detail = format!("{}密钥", "a".repeat(239));
+
+        let truncated = truncate_codex_reset_credit_detail_error(detail);
+
+        assert_eq!(truncated, format!("{}…", "a".repeat(239)));
+    }
+
+    #[test]
+    fn codex_quota_refresh_error_projection_discards_internal_details() {
+        let secrets = [
+            "https://user:password@internal.test/v1/quota?q=secret",
+            "Authorization: Bearer upstream-secret",
+            "user:password",
+            "upstream-secret",
+        ];
+        let connection_error = GatewayError::Internal(format!(
+            "connection failed for {}; {}",
+            secrets[0], secrets[1]
+        ));
+        let generic_error = GatewayError::Internal(format!(
+            "repository failure while processing {}; {}",
+            secrets[0], secrets[1]
+        ));
+        let timeout_error = GatewayError::LocalExecutionPlanningTimeout {
+            trace_id: secrets[1].to_string(),
+            phase: "quota_refresh",
+            timeout_ms: 5_000,
+        };
+
+        let projected = [
+            safe_codex_quota_refresh_error(&connection_error),
+            safe_codex_quota_refresh_error(&generic_error),
+            safe_codex_quota_refresh_error(&timeout_error),
+        ];
+
+        assert_eq!(projected[0], "Quota refresh connection failed");
+        assert_eq!(projected[1], "Quota refresh failed");
+        assert_eq!(projected[2], "Quota refresh timed out");
+        for safe_error in projected {
+            for secret in secrets {
+                assert!(!safe_error.contains(secret));
+            }
+        }
     }
 
     #[test]

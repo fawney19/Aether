@@ -267,6 +267,7 @@ import { getApiUrl } from '@/utils/url'
 import { getOAuthIcon } from '@/utils/oauth-icons'
 import { navigateAfterLogin } from '@/features/auth/utils/loginRedirect'
 import { useI18n } from '@/i18n'
+import { safeInternalNavigationPath } from '@/utils/navigationSecurity'
 
 const props = defineProps<{
   modelValue: boolean
@@ -401,10 +402,8 @@ function consumeStoredRedirectPath(): string | null {
   if (redirectPath) {
     sessionStorage.removeItem('redirectPath')
   }
-  if (!redirectPath || redirectPath === '/' || !redirectPath.startsWith('/') || redirectPath.startsWith('//')) {
-    return null
-  }
-  return redirectPath
+  const safePath = safeInternalNavigationPath(redirectPath)
+  return safePath === '/' ? null : safePath
 }
 
 function handleOAuthLogin(providerType: string) {

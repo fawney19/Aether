@@ -16,6 +16,7 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use url::{form_urlencoded, Url};
 
+use crate::ai_serving::transport::ProviderOutboundRequestContext;
 use crate::ai_serving::{
     build_standard_stream_plan_from_decision,
     maybe_build_pinned_stream_local_same_format_provider_decision_payload, AiExecutionDecision,
@@ -49,6 +50,7 @@ pub(super) enum LiveAuthMode {
 pub(super) struct PlannedLiveCandidate {
     pub(super) execution: AiExecutionDecision,
     pub(super) pinned_candidate: ResponsesWebSocketPinnedCandidate,
+    pub(super) provider_outbound_context: ProviderOutboundRequestContext,
     pub(super) client_model: String,
     pub(super) provider_model: String,
     pub(super) auth_mode: LiveAuthMode,
@@ -196,6 +198,7 @@ pub(super) async fn plan_live_candidate(
     client_model: &str,
     dialect: LiveRouteDialect,
     pinned_candidate: Option<&ResponsesWebSocketPinnedCandidate>,
+    provider_outbound_context: Option<&ProviderOutboundRequestContext>,
 ) -> Result<LiveCandidatePlanningOutcome, GatewayError> {
     let diagnostic_guard = LiveRuntimeMissDiagnosticGuard::new(state, trace_id);
     let candidate = plan_live_candidate_inner(
@@ -207,6 +210,7 @@ pub(super) async fn plan_live_candidate(
         client_model,
         dialect,
         pinned_candidate,
+        provider_outbound_context,
     )
     .await?;
     Ok(LiveCandidatePlanningOutcome {
@@ -224,12 +228,18 @@ async fn plan_live_candidate_inner(
     client_model: &str,
     dialect: LiveRouteDialect,
     pinned_candidate: Option<&ResponsesWebSocketPinnedCandidate>,
+    provider_outbound_context: Option<&ProviderOutboundRequestContext>,
 ) -> Result<Option<PlannedLiveCandidate>, GatewayError> {
     if validate_model(client_model).is_err() || client_model.len() > MAX_LIVE_MODEL_BYTES {
         return Ok(None);
     }
-    let parts = build_live_planning_parts(headers, remote_addr);
+    let mut parts = build_live_planning_parts(headers, remote_addr);
     let body = json!({"model": client_model, "input": []});
+    if let Some(context) = provider_outbound_context {
+        crate::ai_serving::codex_context::restore_codex_logical_turn_context(&mut parts, context);
+    } else {
+        crate::ai_serving::codex_context::install_codex_fingerprint_context_slot(&mut parts);
+    }
     let execution = maybe_build_pinned_stream_local_same_format_provider_decision_payload(
         state,
         &parts,
@@ -338,6 +348,8 @@ async fn plan_live_candidate_inner(
     Ok(Some(PlannedLiveCandidate {
         execution,
         pinned_candidate,
+        provider_outbound_context:
+            crate::ai_serving::codex_context::resolve_codex_fingerprint_context(&parts, &body),
         client_model: client_model.to_string(),
         provider_model,
         auth_mode,
@@ -560,7 +572,11 @@ pub(super) fn build_live_stream_admission_attempt(
     remote_addr: &SocketAddr,
     upstream_url: String,
 ) -> Result<Option<AiStreamAttempt>, GatewayError> {
-    let parts = build_live_planning_parts(headers, remote_addr);
+    let mut parts = build_live_planning_parts(headers, remote_addr);
+    crate::ai_serving::codex_context::restore_codex_logical_turn_context(
+        &mut parts,
+        &candidate.provider_outbound_context,
+    );
     let body = json!({"model": candidate.client_model.as_str(), "input": []});
     let mut execution = candidate.execution.clone();
     execution.upstream_url = Some(upstream_url);
@@ -569,6 +585,7 @@ pub(super) fn build_live_stream_admission_attempt(
 }
 
 fn live_auth_mode(provider_type: &str, effective_auth_type: &str) -> Option<LiveAuthMode> {
+    let provider_type = provider_type.trim();
     match effective_auth_type.trim().to_ascii_lowercase().as_str() {
         "api_key" | "bearer" => Some(LiveAuthMode::ApiKey),
         "oauth" if provider_type.eq_ignore_ascii_case("codex") => Some(LiveAuthMode::ChatGptOauth),
@@ -922,6 +939,7 @@ mod tests {
                 "key-1",
             )
             .unwrap(),
+            provider_outbound_context: ProviderOutboundRequestContext::new("test-live-turn", 1),
             client_model: "global-model".to_string(),
             provider_model: "provider-model".to_string(),
             auth_mode,

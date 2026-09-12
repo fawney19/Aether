@@ -1,6 +1,34 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use aether_contracts::USAGE_SERVER_NOW_UNIX_MS_HEADER;
+
+/// Return the case-insensitive field names nominated by all `Connection`
+/// header values in a request.  Those fields are hop-by-hop even when their
+/// names are application-defined and therefore must not cross to a provider.
+pub(crate) fn declared_connection_header_names(
+    headers: &http::HeaderMap,
+    extra_headers: &BTreeMap<String, String>,
+) -> BTreeSet<String> {
+    let mut values = headers
+        .get_all(http::header::CONNECTION)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .collect::<Vec<_>>();
+    values.extend(
+        extra_headers
+            .iter()
+            .filter(|(name, _)| name.eq_ignore_ascii_case(http::header::CONNECTION.as_str()))
+            .map(|(_, value)| value.as_str()),
+    );
+    aether_http::connection_declared_header_names(values)
+}
+
+pub(crate) fn is_declared_connection_header(
+    name: &str,
+    declared_connection_headers: &BTreeSet<String>,
+) -> bool {
+    declared_connection_headers.contains(&name.trim().to_ascii_lowercase())
+}
 
 const UPSTREAM_CREDENTIAL_HEADER_NAMES: &[&str] = &[
     "authorization",
@@ -30,7 +58,10 @@ pub(crate) fn is_aether_internal_header(name: &str) -> bool {
 
 pub fn should_skip_request_header(name: &str) -> bool {
     let normalized = name.to_ascii_lowercase();
-    if is_aether_internal_header(&normalized) {
+    if is_aether_internal_header(&normalized)
+        || is_untrusted_forwarding_metadata_header(&normalized)
+        || is_untrusted_routing_override_header(&normalized)
+    {
         return true;
     }
     matches!(
@@ -47,6 +78,27 @@ pub fn should_skip_request_header(name: &str) -> bool {
             | "set-cookie"
             | USAGE_SERVER_NOW_UNIX_MS_HEADER
     )
+}
+
+fn is_untrusted_forwarding_metadata_header(normalized_name: &str) -> bool {
+    matches!(normalized_name, "forwarded" | "via")
+        || normalized_name.starts_with("x-forwarded-")
+        || normalized_name.starts_with("x_forwarded_")
+        || normalized_name.starts_with("x-real-")
+        || normalized_name.starts_with("x_real_")
+}
+
+fn is_untrusted_routing_override_header(normalized_name: &str) -> bool {
+    matches!(
+        normalized_name,
+        "x-http-method"
+            | "x-http-method-override"
+            | "x-method-override"
+            | "x-override-url"
+            | "x-rewrite-url"
+    ) || normalized_name.starts_with("x-original-")
+        || normalized_name.starts_with("x_original_")
+        || normalized_name.starts_with("x-envoy-original-")
 }
 
 pub fn should_skip_upstream_passthrough_header(name: &str) -> bool {
@@ -82,6 +134,14 @@ pub fn should_skip_upstream_passthrough_header(name: &str) -> bool {
         || should_skip_request_header(name)
 }
 
+pub(crate) fn should_skip_upstream_passthrough_header_with_connection(
+    name: &str,
+    declared_connection_headers: &BTreeSet<String>,
+) -> bool {
+    should_skip_upstream_passthrough_header(name)
+        || is_declared_connection_header(name, declared_connection_headers)
+}
+
 pub(crate) fn should_skip_upstream_complete_passthrough_header(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     is_upstream_credential_header(&lower)
@@ -101,6 +161,33 @@ pub(crate) fn should_skip_upstream_complete_passthrough_header(name: &str) -> bo
                 | "x-forwarded-port"
         )
         || should_skip_request_header(name)
+}
+
+pub(crate) fn should_skip_upstream_complete_passthrough_header_with_connection(
+    name: &str,
+    declared_connection_headers: &BTreeSet<String>,
+) -> bool {
+    should_skip_upstream_complete_passthrough_header(name)
+        || is_declared_connection_header(name, declared_connection_headers)
+}
+
+pub(crate) fn remove_declared_connection_headers(
+    headers: &mut BTreeMap<String, String>,
+    declared_connection_headers: &BTreeSet<String>,
+) {
+    let mut all_declared = declared_connection_headers.clone();
+    let connection_values = headers
+        .iter()
+        .filter(|(name, _)| name.eq_ignore_ascii_case("connection"))
+        .map(|(_, value)| value.as_str())
+        .collect::<Vec<_>>();
+    all_declared.extend(aether_http::connection_declared_header_names(
+        connection_values,
+    ));
+    headers.retain(|name, _| {
+        !name.eq_ignore_ascii_case("connection")
+            && !is_declared_connection_header(name, &all_declared)
+    });
 }
 
 pub fn normalize_upstream_accept_encoding(value: &str) -> Option<String> {
@@ -338,6 +425,44 @@ mod tests {
     }
 
     #[test]
+    fn strips_all_client_supplied_forwarding_metadata() {
+        for header in [
+            "Forwarded",
+            "Via",
+            "X-Forwarded-For",
+            "X-Forwarded-Host",
+            "X-Forwarded-Prefix",
+            "X-Forwarded-Server",
+            "x_forwarded_for",
+            "X-Real-IP",
+            "X-Real-Host",
+            "x_real_ip",
+        ] {
+            assert!(should_skip_request_header(header));
+            assert!(should_skip_upstream_passthrough_header(header));
+            assert!(should_skip_upstream_complete_passthrough_header(header));
+        }
+    }
+
+    #[test]
+    fn strips_client_supplied_upstream_routing_overrides() {
+        for header in [
+            "X-HTTP-Method-Override",
+            "X-Method-Override",
+            "X-Original-URL",
+            "X-Original-URI",
+            "x_original_url",
+            "X-Rewrite-URL",
+            "X-Override-URL",
+            "X-Envoy-Original-Path",
+        ] {
+            assert!(should_skip_request_header(header));
+            assert!(should_skip_upstream_passthrough_header(header));
+            assert!(should_skip_upstream_complete_passthrough_header(header));
+        }
+    }
+
+    #[test]
     fn strips_usage_server_time_header_from_provider_requests() {
         for h in [
             USAGE_SERVER_NOW_UNIX_MS_HEADER,
@@ -364,5 +489,24 @@ mod tests {
                 "should allow {h}"
             );
         }
+    }
+
+    #[test]
+    fn declared_connection_names_are_case_insensitive_and_multi_line() {
+        let mut headers = http::HeaderMap::new();
+        headers.append(
+            http::header::CONNECTION,
+            http::HeaderValue::from_static("X-Hop, keep-alive"),
+        );
+        headers.append(
+            http::header::CONNECTION,
+            http::HeaderValue::from_static("x-other-hop"),
+        );
+
+        let names = super::declared_connection_header_names(&headers, &BTreeMap::new());
+        assert!(names.contains("x-hop"));
+        assert!(names.contains("keep-alive"));
+        assert!(names.contains("x-other-hop"));
+        assert!(super::is_declared_connection_header("X-HOP", &names));
     }
 }

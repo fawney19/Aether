@@ -54,6 +54,7 @@
       <article
         v-else
         class="prose prose-sm dark:prose-invert max-w-none rounded-lg border border-border bg-background/70 p-6"
+        translate="no"
         v-html="renderedPolicy"
       />
       <!-- eslint-enable vue/no-v-html -->

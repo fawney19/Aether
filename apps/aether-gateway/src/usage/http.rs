@@ -52,7 +52,12 @@ pub(crate) async fn get_request_audit_bundle(
         .map_err(|err| GatewayError::Internal(err.to_string()).into_response())?;
 
     match bundle {
-        Some(bundle) => Ok(Json(bundle)),
+        Some(mut bundle) => {
+            if let Some(trace) = bundle.decision_trace.as_mut() {
+                trace.sanitize_sensitive_diagnostics();
+            }
+            Ok(Json(bundle))
+        }
         None => Err((
             axum::http::StatusCode::NOT_FOUND,
             Json(json!({

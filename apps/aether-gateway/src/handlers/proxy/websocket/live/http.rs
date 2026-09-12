@@ -19,6 +19,9 @@ use crate::api::response::{
 };
 use crate::control::{execution_plan_balance_capacity_rejection, GatewayPublicRequestContext};
 use crate::execution_runtime::execute_execution_runtime_sync_plan_with_report_context;
+use crate::execution_runtime::transport::{
+    decode_base64_body_with_limit, serialize_json_body_with_limit,
+};
 use crate::handlers::proxy::websocket::responses::ResponsesWebSocketTurnAdmission;
 use crate::{AppState, GatewayError};
 
@@ -186,6 +189,7 @@ async fn handle_live_http(
         client_model,
         dialect,
         None,
+        None,
     )
     .await
     {
@@ -240,6 +244,12 @@ async fn handle_live_http(
         );
     };
     let lease = LivePoolLeaseGuard::new(state, &candidate);
+    let provider_outbound_context = candidate
+        .execution
+        .provider_type
+        .as_deref()
+        .is_some_and(|provider_type| provider_type.trim().eq_ignore_ascii_case("codex"))
+        .then(|| candidate.provider_outbound_context.clone());
     let binding = LiveCallBinding::from_candidate(&candidate);
     let mut provider_session = offer.session.clone();
     provider_session
@@ -525,6 +535,7 @@ async fn handle_live_http(
             auth_context.api_key_id.as_str(),
             call_id.as_str(),
             &binding,
+            provider_outbound_context.as_ref(),
         )
         .await
     {
@@ -601,6 +612,10 @@ fn gateway_error_status(error: &GatewayError) -> StatusCode {
         }
         GatewayError::LocalExecutionPlanningTimeout { .. } => StatusCode::GATEWAY_TIMEOUT,
         GatewayError::AdmissionTimeout { .. } => StatusCode::TOO_MANY_REQUESTS,
+        GatewayError::PlanUsageLimited(_) => StatusCode::TOO_MANY_REQUESTS,
+        GatewayError::LastActiveAdminUpdateDenied | GatewayError::LastActiveAdminDeleteDenied => {
+            StatusCode::BAD_REQUEST
+        }
         GatewayError::Client { status, .. } => *status,
         GatewayError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
     }
@@ -740,10 +755,18 @@ fn execution_result_body(result: &ExecutionResult) -> Result<LiveResponseBody, G
             preserves_wire_encoding: false,
         });
     };
+    // A Codex Live call-create response is an SDP/control envelope, not an
+    // arbitrary model payload.  Bound both representations before decoding or
+    // serializing so a forged execution-runtime result cannot force an
+    // attacker-sized allocation at this public boundary.
+    let body_limit =
+        crate::headers::max_internal_buffered_body_bytes().min(MAX_LIVE_HTTP_BODY_BYTES);
     if let Some(encoded) = body.body_bytes_b64.as_deref() {
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(encoded)
-            .map_err(|error| GatewayError::Internal(error.to_string()))?;
+        let bytes = decode_base64_body_with_limit(encoded, body_limit).map_err(|_| {
+            GatewayError::Internal(
+                "Codex Live upstream response body is invalid or too large".to_string(),
+            )
+        })?;
         return Ok(LiveResponseBody {
             bytes,
             preserves_wire_encoding: true,
@@ -752,10 +775,14 @@ fn execution_result_body(result: &ExecutionResult) -> Result<LiveResponseBody, G
     let bytes = body
         .json_body
         .as_ref()
-        .map(serde_json::to_vec)
+        .map(|body| serialize_json_body_with_limit(body, body_limit))
         .transpose()
         .map(|body| body.unwrap_or_default())
-        .map_err(|error| GatewayError::Internal(error.to_string()))?;
+        .map_err(|_| {
+            GatewayError::Internal(
+                "Codex Live upstream response body is invalid or too large".to_string(),
+            )
+        })?;
     Ok(LiveResponseBody {
         bytes,
         preserves_wire_encoding: false,
@@ -1001,6 +1028,7 @@ mod tests {
             request_query_string: None,
             request_content_type: None,
             host_header: None,
+            client_ip: None,
             control_decision: None,
         };
         let (parts, _) = http::Request::builder()
@@ -1036,6 +1064,7 @@ mod tests {
             request_query_string: None,
             request_content_type: Some("application/sdp".to_string()),
             host_header: None,
+            client_ip: None,
             control_decision: Some(decision),
         };
         let (parts, _) = http::Request::builder()
@@ -1081,6 +1110,7 @@ mod tests {
             local_rejection: None,
             allowed_models: None,
             ip_rules: None,
+            verified_api_key_hash: None,
         });
         let request_context = GatewayPublicRequestContext {
             trace_id: "trace-codex-realtime-call".to_string(),
@@ -1089,6 +1119,7 @@ mod tests {
             request_query_string: Some("intent=quicksilver&architecture=avas".to_string()),
             request_content_type: Some("multipart/form-data".to_string()),
             host_header: None,
+            client_ip: None,
             control_decision: Some(decision),
         };
         let (parts, _) = http::Request::builder()
@@ -1135,6 +1166,7 @@ mod tests {
             local_rejection: None,
             allowed_models: None,
             ip_rules: None,
+            verified_api_key_hash: None,
         });
         let request_context = GatewayPublicRequestContext {
             trace_id: "trace-live-finite".to_string(),
@@ -1143,6 +1175,7 @@ mod tests {
             request_query_string: None,
             request_content_type: None,
             host_header: None,
+            client_ip: None,
             control_decision: Some(decision),
         };
         let (parts, _) = http::Request::builder()
@@ -1201,6 +1234,7 @@ mod tests {
             local_rejection: None,
             allowed_models: None,
             ip_rules: None,
+            verified_api_key_hash: None,
         });
         let request_context = GatewayPublicRequestContext {
             trace_id: "trace-live-unmapped".to_string(),
@@ -1209,6 +1243,7 @@ mod tests {
             request_query_string: None,
             request_content_type: Some("multipart/form-data".to_string()),
             host_header: None,
+            client_ip: None,
             control_decision: Some(decision),
         };
         let (content_type, body) = build_live_multipart(

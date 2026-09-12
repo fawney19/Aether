@@ -3,18 +3,6 @@ use std::collections::BTreeMap;
 
 pub(super) use aether_admin::provider::ops::ProviderOpsCheckinOutcome as AdminProviderOpsCheckinOutcome;
 
-pub(super) const ADMIN_PROVIDER_OPS_SENSITIVE_FIELDS: &[&str] = &[
-    "api_key",
-    "password",
-    "refresh_token",
-    "_cached_access_token",
-    "session_token",
-    "session_cookie",
-    "token_cookie",
-    "auth_cookie",
-    "cookie_string",
-    "cookie",
-];
 pub(super) const ADMIN_PROVIDER_OPS_CONNECT_RUST_ONLY_MESSAGE: &str =
     "Provider 连接仅支持 Rust execution runtime";
 pub(super) const ADMIN_PROVIDER_OPS_ACTION_RUST_ONLY_MESSAGE: &str =
@@ -22,7 +10,7 @@ pub(super) const ADMIN_PROVIDER_OPS_ACTION_RUST_ONLY_MESSAGE: &str =
 pub(super) const ADMIN_PROVIDER_OPS_VERIFY_RUST_ONLY_MESSAGE: &str =
     "认证验证仅支持 Rust execution runtime";
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub(super) struct AdminProviderOpsSaveConfigRequest {
     #[serde(default = "default_admin_provider_ops_architecture_id")]
     pub(crate) architecture_id: String,
@@ -37,7 +25,7 @@ pub(super) struct AdminProviderOpsSaveConfigRequest {
     pub(crate) quota_alert: Option<AdminProviderOpsQuotaAlertConfigRequest>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub(super) struct AdminProviderOpsConnectorConfigRequest {
     pub(crate) auth_type: String,
     #[serde(default)]
@@ -46,7 +34,7 @@ pub(super) struct AdminProviderOpsConnectorConfigRequest {
     pub(crate) credentials: serde_json::Map<String, serde_json::Value>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub(super) struct AdminProviderOpsActionConfigRequest {
     #[serde(default = "default_admin_provider_ops_action_enabled")]
     pub(crate) enabled: bool,
@@ -54,7 +42,7 @@ pub(super) struct AdminProviderOpsActionConfigRequest {
     pub(crate) config: serde_json::Map<String, serde_json::Value>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub(super) struct AdminProviderOpsQuotaAlertConfigRequest {
     #[serde(default)]
     pub(crate) enabled: bool,
@@ -64,13 +52,13 @@ pub(super) struct AdminProviderOpsQuotaAlertConfigRequest {
     pub(crate) fetch_interval_seconds: Option<u64>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub(super) struct AdminProviderOpsConnectRequest {
     #[serde(default)]
     pub(crate) credentials: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub(super) struct AdminProviderOpsExecuteActionRequest {
     #[serde(default)]
     pub(crate) config: Option<serde_json::Map<String, serde_json::Value>>,

@@ -1,7 +1,8 @@
 use std::collections::BTreeMap;
+use std::fmt;
 
 use aether_ai_formats::api::ExecutionRuntimeAuthContext;
-use aether_contracts::{ExecutionPlan, RequestBody};
+use aether_contracts::{redact_url_for_debug, ExecutionPlan, RequestBody};
 use url::Url;
 
 use crate::dto::{AiExecutionDecision, AiRequestGzipPolicy};
@@ -18,13 +19,23 @@ pub struct AiDecisionPlanCore {
     pub client_api_format: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct AiUpstreamAuthPair {
     pub header: String,
     pub value: String,
 }
 
-#[derive(Debug)]
+impl fmt::Debug for AiUpstreamAuthPair {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AiUpstreamAuthPair")
+            .field("header", &self.header)
+            .field("has_value", &(!self.value.is_empty()))
+            .field("value_len", &self.value.len())
+            .finish()
+    }
+}
+
 pub struct AiExecutionPlanFromDecisionParts {
     pub core: AiDecisionPlanCore,
     pub method: String,
@@ -35,7 +46,21 @@ pub struct AiExecutionPlanFromDecisionParts {
     pub stream: bool,
 }
 
-#[derive(Debug)]
+impl fmt::Debug for AiExecutionPlanFromDecisionParts {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AiExecutionPlanFromDecisionParts")
+            .field("core", &self.core)
+            .field("method", &self.method)
+            .field("url", &redact_url_for_debug(&self.url))
+            .field("header_names", &self.headers.keys().collect::<Vec<_>>())
+            .field("content_type", &self.content_type)
+            .field("body", &self.body)
+            .field("stream", &self.stream)
+            .finish()
+    }
+}
+
 pub struct AiExecutionDecisionFromPlanParts {
     pub action: String,
     pub decision_kind: Option<String>,
@@ -46,6 +71,33 @@ pub struct AiExecutionDecisionFromPlanParts {
     pub report_kind: Option<String>,
     pub report_context: Option<serde_json::Value>,
     pub auth_context: Option<ExecutionRuntimeAuthContext>,
+}
+
+impl fmt::Debug for AiExecutionDecisionFromPlanParts {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AiExecutionDecisionFromPlanParts")
+            .field("action", &self.action)
+            .field("decision_kind", &self.decision_kind)
+            .field("request_id", &self.request_id)
+            .field(
+                "upstream_base_url",
+                &self.upstream_base_url.as_deref().map(redact_url_for_debug),
+            )
+            .field("include_auth_pair", &self.include_auth_pair)
+            .field("plan", &self.plan)
+            .field("report_kind", &self.report_kind)
+            .field("has_report_context", &self.report_context.is_some())
+            .field(
+                "report_context_bytes",
+                &self
+                    .report_context
+                    .as_ref()
+                    .and_then(|value| serde_json::to_vec(value).ok().map(|bytes| bytes.len())),
+            )
+            .field("has_auth_context", &self.auth_context.is_some())
+            .finish()
+    }
 }
 
 pub fn take_ai_non_empty_string(value: &mut Option<String>) -> Option<String> {

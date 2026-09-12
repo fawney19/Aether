@@ -20,6 +20,17 @@ fn provider_requires_credential_cas_cleanup(provider: &StoredProviderCatalogProv
     provider.provider_type.trim().eq_ignore_ascii_case("codex")
 }
 
+fn build_model_sync_failure_payload(requested: usize) -> Value {
+    json!({
+        "requested": requested,
+        "attempted": 0,
+        "succeeded": 0,
+        "failed": requested,
+        "skipped": 0,
+        "error": "Model synchronization failed",
+    })
+}
+
 impl<'a> AdminAppState<'a> {
     pub(crate) async fn clear_admin_provider_pool_cooldown(&self, provider_id: &str, key_id: &str) {
         crate::handlers::admin::provider::pool::runtime::clear_admin_provider_pool_cooldown(
@@ -185,8 +196,12 @@ impl<'a> AdminAppState<'a> {
             .collect::<BTreeSet<_>>();
         let mut known_api_keys = existing_keys
             .iter()
-            .filter_map(|key| key.encrypted_api_key.as_deref())
-            .filter_map(|ciphertext| self.decrypt_catalog_secret_with_fallbacks(ciphertext))
+            .filter_map(|key| {
+                self.app()
+                    .decrypt_provider_catalog_key_api_key(key)
+                    .ok()
+                    .flatten()
+            })
             .filter(|value| value != "__placeholder__")
             .collect::<BTreeSet<_>>();
         let mut imported = 0usize;
@@ -281,7 +296,10 @@ impl<'a> AdminAppState<'a> {
                 continue;
             }
 
-            let Some(encrypted_api_key) = self.encrypt_catalog_secret_with_fallbacks(api_key)
+            let key_id = uuid::Uuid::new_v4().to_string();
+            let Ok(encrypted_api_key) =
+                self.app()
+                    .seal_provider_catalog_key_api_key(&provider.id, &key_id, api_key)
             else {
                 errors.push(json!({
                     "index": index,
@@ -290,7 +308,7 @@ impl<'a> AdminAppState<'a> {
                 continue;
             };
             let record = match admin_provider_pool_pure::build_admin_pool_batch_import_key_record(
-                uuid::Uuid::new_v4().to_string(),
+                key_id,
                 provider.id.clone(),
                 name.to_string(),
                 auth_type,
@@ -819,7 +837,7 @@ impl<'a> AdminAppState<'a> {
                 .unwrap_or(0);
             let score_ensure_budget =
                 (pool_config.score_fallback_scan_limit as usize).clamp(1, 50_000);
-            if let Err(err) = ensure_provider_key_pool_scores_for_keys(
+            if ensure_provider_key_pool_scores_for_keys(
                 self.as_ref(),
                 &provider,
                 &pool_config,
@@ -829,11 +847,12 @@ impl<'a> AdminAppState<'a> {
                 score_ensure_budget,
             )
             .await
+            .is_err()
             {
                 tracing::debug!(
                     provider_id = %provider.id,
                     updated_keys = updated_keys.len(),
-                    error = ?err,
+                    error_category = "pool_score_repository_unavailable",
                     "gateway admin provider key batch update: failed to seed pool score rows"
                 );
             }
@@ -853,14 +872,7 @@ impl<'a> AdminAppState<'a> {
                     "failed": summary.failed,
                     "skipped": summary.skipped,
                 }),
-                Err(err) => json!({
-                    "requested": requested,
-                    "attempted": 0,
-                    "succeeded": 0,
-                    "failed": requested,
-                    "skipped": 0,
-                    "error": err.into_message(),
-                }),
+                Err(_) => build_model_sync_failure_payload(requested),
             }
         };
 
@@ -876,7 +888,13 @@ impl<'a> AdminAppState<'a> {
 
 #[cfg(test)]
 mod automatic_cleanup_tests {
-    use super::{provider_requires_credential_cas_cleanup, AdminAppState};
+    use super::{
+        build_model_sync_failure_payload, provider_requires_credential_cas_cleanup, AdminAppState,
+    };
+    use crate::handlers::shared::{
+        seal_provider_catalog_credential, ProviderCatalogCredentialField,
+    };
+    use aether_crypto::DEVELOPMENT_ENCRYPTION_KEY;
     use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
     use aether_data_contracts::repository::provider_catalog::{
         ProviderCatalogReadRepository, StoredProviderCatalogKey, StoredProviderCatalogProvider,
@@ -900,11 +918,49 @@ mod automatic_cleanup_tests {
         assert!(!provider_requires_credential_cas_cleanup(&provider("kiro")));
     }
 
+    #[test]
+    fn model_sync_failure_payload_does_not_accept_internal_error_details() {
+        assert_eq!(
+            build_model_sync_failure_payload(3),
+            serde_json::json!({
+                "requested": 3,
+                "attempted": 0,
+                "succeeded": 0,
+                "failed": 3,
+                "skipped": 0,
+                "error": "Model synchronization failed",
+            })
+        );
+    }
+
     #[tokio::test]
     async fn cleanup_removes_existing_hard_invalid_codex_key() {
         let provider = provider("codex");
+        let credential_state = crate::AppState::new()
+            .expect("credential state should build")
+            .with_data_state_for_tests(
+                crate::data::GatewayDataState::disabled()
+                    .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+            );
+        let key_id = "key-codex-invalid";
+        let encrypted_api_key = seal_provider_catalog_credential(
+            &credential_state,
+            &provider.id,
+            key_id,
+            ProviderCatalogCredentialField::ApiKey,
+            "test-api-key",
+        )
+        .expect("api key should seal");
+        let encrypted_auth_config = seal_provider_catalog_credential(
+            &credential_state,
+            &provider.id,
+            key_id,
+            ProviderCatalogCredentialField::AuthConfig,
+            r#"{"provider_type":"codex"}"#,
+        )
+        .expect("auth config should seal");
         let mut key = StoredProviderCatalogKey::new(
-            "key-codex-invalid".to_string(),
+            key_id.to_string(),
             provider.id.clone(),
             "Invalid Codex OAuth".to_string(),
             "oauth".to_string(),
@@ -914,8 +970,8 @@ mod automatic_cleanup_tests {
         .expect("key should build")
         .with_transport_fields(
             None,
-            "encrypted-api-key".to_string(),
-            Some("encrypted-auth-config".to_string()),
+            encrypted_api_key,
+            Some(encrypted_auth_config),
             None,
             None,
             None,
@@ -939,7 +995,8 @@ mod automatic_cleanup_tests {
             .with_data_state_for_tests(
                 crate::data::GatewayDataState::with_provider_catalog_repository_for_tests(
                     repository.clone(),
-                ),
+                )
+                .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
             );
         let admin_state = AdminAppState::new(&state);
 

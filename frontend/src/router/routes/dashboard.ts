@@ -64,6 +64,11 @@ export const dashboardRoutes: RouteRecordRaw[] = [
         component: view(() => import('@/views/user/ModelCatalog.vue'))
       },
       {
+        path: 'vscodex',
+        name: 'VscodeControl',
+        component: view(() => import('@/views/user/VscodeControl.vue'))
+      },
+      {
         path: 'async-tasks',
         name: 'UserAsyncTasks',
         component: view(() => import('@/views/admin/AsyncTasks.vue'))

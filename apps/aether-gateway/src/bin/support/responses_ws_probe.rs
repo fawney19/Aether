@@ -193,6 +193,7 @@ pub(crate) fn parse_probe_url(raw: &str) -> Result<Url, ProbeFailure> {
         || url.password().is_some()
         || url.query().is_some()
         || url.fragment().is_some()
+        || (url.scheme() == "ws" && !aether_http::url_has_literal_loopback_host(&url))
     {
         return Err(ProbeFailure::InvalidEndpoint);
     }
@@ -210,6 +211,7 @@ pub(crate) const fn turn_timeout(args: &ProbeArgs) -> Duration {
 
 async fn run_probe(config: &ProbeConfig, started_at: Instant) -> Result<ProbeReport, ProbeFailure> {
     let client = wreq::Client::builder()
+        .no_proxy()
         .connect_timeout(config.turn_timeout)
         .timeout(config.turn_timeout)
         .build()
@@ -434,7 +436,14 @@ mod tests {
     #[test]
     fn probe_url_rejects_credentials_and_query_strings() {
         assert!(parse_probe_url("wss://example.test/v1/responses").is_ok());
+        assert!(parse_probe_url("ws://localhost:8080/v1/responses").is_ok());
+        assert!(parse_probe_url("ws://127.42.0.1:8080/v1/responses").is_ok());
+        assert!(parse_probe_url("ws://[::1]:8080/v1/responses").is_ok());
         assert!(parse_probe_url("https://example.test/v1/responses").is_err());
+        assert!(parse_probe_url("ws://example.test/v1/responses").is_err());
+        assert!(parse_probe_url("ws://10.0.0.1/v1/responses").is_err());
+        assert!(parse_probe_url("ws://0.0.0.0:8080/v1/responses").is_err());
+        assert!(parse_probe_url("ws://[::ffff:127.0.0.1]:8080/v1/responses").is_err());
         assert!(parse_probe_url("wss://token@example.test/v1/responses").is_err());
         assert!(parse_probe_url("wss://example.test/v1/responses?token=secret").is_err());
     }

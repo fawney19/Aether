@@ -6,20 +6,33 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::Mutex;
 
-use crate::{DataLayerError, RuntimeQueueEntry, RuntimeQueueReclaimConfig, RuntimeQueueStats};
+use crate::{
+    DataLayerError, RuntimeQueueEntry, RuntimeQueueReclaimConfig, RuntimeQueueReclaimPage,
+    RuntimeQueueStats, RuntimeQueueTransferOutcome,
+};
+use crate::{ScoreWindowU64Stats, UsageLimitCheck, SCORE_WINDOW_AGGREGATION_MEMBER_LIMIT};
 
 const MEMORY_RATE_LIMIT_COUNTER_SHARD_COUNT: usize = 64;
 const MEMORY_RATE_LIMIT_COUNTER_PRUNE_INTERVAL: u64 = 256;
+const MEMORY_USAGE_LIMIT_PRUNE_INTERVAL: u64 = 256;
+const DEFAULT_MAX_USAGE_LIMIT_WINDOWS: usize = 10_000;
+const DEFAULT_MAX_USAGE_LIMIT_EVENTS: usize = 100_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MemoryRuntimeStateConfig {
     pub max_kv_entries: usize,
+    /// Maximum number of active sliding-window keys retained by the memory backend.
+    pub max_usage_limit_windows: usize,
+    /// Maximum number of event identities retained across all usage-limit windows.
+    pub max_usage_limit_events: usize,
 }
 
 impl Default for MemoryRuntimeStateConfig {
     fn default() -> Self {
         Self {
             max_kv_entries: 10_000,
+            max_usage_limit_windows: DEFAULT_MAX_USAGE_LIMIT_WINDOWS,
+            max_usage_limit_events: DEFAULT_MAX_USAGE_LIMIT_EVENTS,
         }
     }
 }
@@ -42,6 +55,7 @@ pub(crate) struct MemoryRuntimeBackend {
     config: MemoryRuntimeStateConfig,
     kv: Mutex<HashMap<String, MemoryKvEntry>>,
     counters: MemoryRateLimitCounters,
+    usage_limits: Mutex<MemoryUsageLimitState>,
     sets: Mutex<HashMap<String, MemorySetEntry>>,
     scores: Mutex<HashMap<String, MemoryScoreEntry>>,
     queues: Mutex<HashMap<String, MemoryQueueStream>>,
@@ -49,6 +63,111 @@ pub(crate) struct MemoryRuntimeBackend {
     locks: Mutex<HashMap<String, MemoryLockEntry>>,
     lock_fencing_seq: AtomicU64,
     semaphores: Mutex<HashMap<String, BTreeMap<String, u64>>>,
+}
+
+#[derive(Debug, Clone)]
+struct MemoryUsageLimitWindow {
+    window_ms: u64,
+    expires_at_unix_ms: u64,
+    events: HashMap<String, u64>,
+}
+
+#[derive(Debug, Default)]
+struct MemoryUsageLimitState {
+    windows: HashMap<String, MemoryUsageLimitWindow>,
+    total_events: usize,
+    operations_since_prune: u64,
+    next_expiry_unix_ms: Option<u64>,
+}
+
+impl MemoryUsageLimitState {
+    fn amortized_prune(&mut self, now_unix_ms: u64) {
+        self.operations_since_prune = self.operations_since_prune.saturating_add(1);
+        if self.operations_since_prune < MEMORY_USAGE_LIMIT_PRUNE_INTERVAL {
+            return;
+        }
+        self.operations_since_prune = 0;
+        if self
+            .next_expiry_unix_ms
+            .is_some_and(|expires_at| expires_at <= now_unix_ms)
+        {
+            self.prune_all(now_unix_ms);
+        }
+    }
+
+    fn prune_all(&mut self, now_unix_ms: u64) {
+        self.operations_since_prune = 0;
+        let mut total_events = 0_usize;
+        let mut next_expiry_unix_ms = None;
+        self.windows.retain(|_, window| {
+            if window.expires_at_unix_ms <= now_unix_ms {
+                return false;
+            }
+            prune_usage_limit_events(&mut window.events, now_unix_ms, window.window_ms);
+            if window.events.is_empty() {
+                return false;
+            }
+            total_events = total_events.saturating_add(window.events.len());
+            update_earliest_expiry(&mut next_expiry_unix_ms, window.expires_at_unix_ms);
+            for timestamp in window.events.values() {
+                update_earliest_expiry(
+                    &mut next_expiry_unix_ms,
+                    timestamp.saturating_add(window.window_ms),
+                );
+            }
+            true
+        });
+        self.total_events = total_events;
+        self.next_expiry_unix_ms = next_expiry_unix_ms;
+    }
+
+    fn prune_rule_window(&mut self, key: &str, now_unix_ms: u64, window_ms: u64) {
+        if self
+            .windows
+            .get(key)
+            .is_some_and(|window| window.expires_at_unix_ms <= now_unix_ms)
+        {
+            if let Some(window) = self.windows.remove(key) {
+                self.total_events = self.total_events.saturating_sub(window.events.len());
+            }
+            return;
+        }
+        let Some(window) = self.windows.get_mut(key) else {
+            return;
+        };
+        let before = window.events.len();
+        window.window_ms = window_ms;
+        prune_usage_limit_events(&mut window.events, now_unix_ms, window_ms);
+        self.total_events = self
+            .total_events
+            .saturating_sub(before.saturating_sub(window.events.len()));
+        update_earliest_expiry(&mut self.next_expiry_unix_ms, window.expires_at_unix_ms);
+        for timestamp in window.events.values() {
+            update_earliest_expiry(
+                &mut self.next_expiry_unix_ms,
+                timestamp.saturating_add(window_ms),
+            );
+        }
+        if window.events.is_empty() {
+            self.windows.remove(key);
+        }
+    }
+
+    fn additions_for(&self, input: crate::UsageLimitInput<'_>) -> (usize, usize) {
+        input.rules.iter().fold(
+            (0_usize, 0_usize),
+            |(additional_windows, additional_events), rule| match self.windows.get(rule.key) {
+                Some(window) if window.events.contains_key(input.event_id) => {
+                    (additional_windows, additional_events)
+                }
+                Some(_) => (additional_windows, additional_events.saturating_add(1)),
+                None => (
+                    additional_windows.saturating_add(1),
+                    additional_events.saturating_add(1),
+                ),
+            },
+        )
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -204,6 +323,34 @@ impl MemoryRuntimeBackend {
                 expires_at: ttl.map(|ttl| now + ttl),
             },
         );
+    }
+
+    pub(crate) async fn kv_set_if_absent(&self, key: &str, value: String, ttl: Duration) -> bool {
+        let mut kv = self.kv.lock().await;
+        let now = Instant::now();
+        prune_kv(&mut kv, now);
+        if kv.contains_key(key) {
+            return false;
+        }
+        while kv.len() >= self.config.max_kv_entries.max(1) {
+            let Some(oldest_key) = kv
+                .iter()
+                .min_by_key(|(_, entry)| entry.inserted_at)
+                .map(|(key, _)| key.clone())
+            else {
+                break;
+            };
+            kv.remove(&oldest_key);
+        }
+        kv.insert(
+            key.to_string(),
+            MemoryKvEntry {
+                value,
+                inserted_at: now,
+                expires_at: Some(now + ttl),
+            },
+        );
+        true
     }
 
     pub(crate) fn kv_set_nowait(&self, key: &str, value: String, ttl: Option<Duration>) -> bool {
@@ -502,6 +649,143 @@ impl MemoryRuntimeBackend {
         })
     }
 
+    pub(crate) async fn check_and_consume_usage_limits(
+        &self,
+        input: crate::UsageLimitInput<'_>,
+    ) -> Result<UsageLimitCheck, DataLayerError> {
+        let mut state = self.usage_limits.lock().await;
+        state.amortized_prune(input.now_unix_ms);
+
+        for (index, rule) in input.rules.iter().enumerate() {
+            let window_ms = rule.window_seconds.saturating_mul(1_000);
+            state.prune_rule_window(rule.key, input.now_unix_ms, window_ms);
+            let Some(window) = state.windows.get(rule.key) else {
+                continue;
+            };
+            if window.events.contains_key(input.event_id) {
+                continue;
+            }
+            if window.events.len() as u64 >= rule.limit {
+                let earliest = window
+                    .events
+                    .values()
+                    .copied()
+                    .min()
+                    .unwrap_or(input.now_unix_ms);
+                let retry_after_ms = earliest
+                    .saturating_add(window_ms)
+                    .saturating_sub(input.now_unix_ms);
+                return Ok(UsageLimitCheck::Rejected {
+                    rule_index: index,
+                    limit: rule.limit,
+                    retry_after: retry_after_ms.saturating_add(999) / 1_000,
+                });
+            }
+        }
+
+        let (mut additional_windows, mut additional_events) = state.additions_for(input);
+        if state.windows.len().saturating_add(additional_windows)
+            > self.config.max_usage_limit_windows
+            || state.total_events.saturating_add(additional_events)
+                > self.config.max_usage_limit_events
+        {
+            // Redis drops an idle sorted-set key after its retention TTL. Force the equivalent full
+            // cleanup before rejecting capacity so stale high-cardinality keys cannot pin memory.
+            if state
+                .next_expiry_unix_ms
+                .is_some_and(|expires_at| expires_at <= input.now_unix_ms)
+            {
+                state.prune_all(input.now_unix_ms);
+            }
+            (additional_windows, additional_events) = state.additions_for(input);
+        }
+        if state.windows.len().saturating_add(additional_windows)
+            > self.config.max_usage_limit_windows
+            || state.total_events.saturating_add(additional_events)
+                > self.config.max_usage_limit_events
+        {
+            return Err(DataLayerError::UnexpectedValue(format!(
+                "runtime memory usage-limit capacity exhausted (windows {}/{}, events {}/{})",
+                state.windows.len(),
+                self.config.max_usage_limit_windows,
+                state.total_events,
+                self.config.max_usage_limit_events,
+            )));
+        }
+
+        for rule in input.rules {
+            let window_ms = rule.window_seconds.saturating_mul(1_000);
+            let expires_at_unix_ms = input
+                .now_unix_ms
+                .saturating_add(rule.retention_seconds.saturating_mul(1_000));
+            let inserted = match state.windows.entry(rule.key.to_string()) {
+                std::collections::hash_map::Entry::Occupied(mut entry) => {
+                    let window = entry.get_mut();
+                    window.window_ms = window_ms;
+                    window.expires_at_unix_ms = expires_at_unix_ms;
+                    match window.events.entry(input.event_id.to_string()) {
+                        std::collections::hash_map::Entry::Occupied(_) => false,
+                        std::collections::hash_map::Entry::Vacant(entry) => {
+                            entry.insert(input.now_unix_ms);
+                            true
+                        }
+                    }
+                }
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(MemoryUsageLimitWindow {
+                        window_ms,
+                        expires_at_unix_ms,
+                        events: HashMap::from([(input.event_id.to_string(), input.now_unix_ms)]),
+                    });
+                    true
+                }
+            };
+            update_earliest_expiry(&mut state.next_expiry_unix_ms, expires_at_unix_ms);
+            if inserted {
+                state.total_events = state.total_events.saturating_add(1);
+                update_earliest_expiry(
+                    &mut state.next_expiry_unix_ms,
+                    input.now_unix_ms.saturating_add(window_ms),
+                );
+            }
+        }
+        Ok(UsageLimitCheck::Allowed)
+    }
+
+    pub(crate) async fn release_usage_limits(
+        &self,
+        input: crate::UsageLimitReleaseInput<'_>,
+    ) -> Result<(), DataLayerError> {
+        let mut state = self.usage_limits.lock().await;
+        for rule in input.rules {
+            let mut remove_window = false;
+            let mut removed_event = false;
+            if let Some(window) = state.windows.get_mut(rule.key) {
+                removed_event = window.events.remove(input.event_id).is_some();
+                remove_window = window.events.is_empty();
+            }
+            if removed_event {
+                state.total_events = state.total_events.saturating_sub(1);
+            }
+            if remove_window {
+                state.windows.remove(rule.key);
+            }
+        }
+        state.next_expiry_unix_ms = state
+            .windows
+            .values()
+            .flat_map(|window| {
+                std::iter::once(window.expires_at_unix_ms).chain(
+                    window
+                        .events
+                        .values()
+                        .map(|timestamp| timestamp.saturating_add(window.window_ms)),
+                )
+            })
+            .min();
+        Ok(())
+    }
+
     pub(crate) fn rate_limit_count(&self, key: &str, bucket: u64) -> Result<u32, DataLayerError> {
         let now = Instant::now();
         let mut total = 0_u32;
@@ -602,6 +886,29 @@ impl MemoryRuntimeBackend {
             .unwrap_or_default()
     }
 
+    pub(crate) async fn score_window_u64_stats_by_min(
+        &self,
+        keys: &[String],
+        min_score: f64,
+    ) -> Vec<Option<ScoreWindowU64Stats>> {
+        let mut scores = self.scores.lock().await;
+        keys.iter()
+            .map(|key| {
+                prune_memory_key(&mut scores, key, Instant::now());
+                let members = scores
+                    .get(key)
+                    .into_iter()
+                    .flat_map(|entry| entry.scores.iter())
+                    .filter(|(_, score)| **score >= min_score)
+                    .take(SCORE_WINDOW_AGGREGATION_MEMBER_LIMIT + 1)
+                    .map(|(member, _)| member.as_str())
+                    .collect::<Vec<_>>();
+                (members.len() <= SCORE_WINDOW_AGGREGATION_MEMBER_LIMIT)
+                    .then(|| ScoreWindowU64Stats::from_members(members))
+            })
+            .collect()
+    }
+
     pub(crate) async fn score_remove_by_score(&self, key: &str, max_score: f64) -> usize {
         let mut scores = self.scores.lock().await;
         prune_memory_key(&mut scores, key, Instant::now());
@@ -656,12 +963,13 @@ impl MemoryRuntimeBackend {
         fields: BTreeMap<String, String>,
         maxlen: Option<usize>,
     ) -> String {
+        // Stream IDs must follow insertion order, including when appenders wait for this lock.
+        let mut queues = self.queues.lock().await;
         let sequence = self
             .queue_seq
             .fetch_add(1, Ordering::Relaxed)
             .saturating_add(1);
         let id = format!("{sequence}-0");
-        let mut queues = self.queues.lock().await;
         prune_memory_key(&mut queues, stream, Instant::now());
         let stream_state = queues.entry(stream.to_string()).or_default();
         stream_state.entries.push_back(MemoryQueuedEntry {
@@ -738,14 +1046,12 @@ impl MemoryRuntimeBackend {
                 let now = Instant::now();
                 let mut delivered = Vec::new();
                 let last_delivered_sequence = group_state.last_delivered_sequence;
-                let queued_entries = stream_state
+                for queued in stream_state
                     .entries
                     .iter()
                     .filter(|entry| entry.sequence > last_delivered_sequence)
                     .take(count.max(1))
-                    .cloned()
-                    .collect::<Vec<_>>();
-                for queued in queued_entries {
+                {
                     group_state.last_delivered_sequence = queued.sequence;
                     group_state.pending.insert(
                         queued.entry.id.clone(),
@@ -773,7 +1079,8 @@ impl MemoryRuntimeBackend {
         }
     }
 
-    pub(crate) async fn queue_claim_stale(
+    #[cfg(test)]
+    async fn queue_claim_stale(
         &self,
         stream: &str,
         group: &str,
@@ -781,6 +1088,20 @@ impl MemoryRuntimeBackend {
         start_id: &str,
         config: RuntimeQueueReclaimConfig,
     ) -> Result<Vec<RuntimeQueueEntry>, DataLayerError> {
+        Ok(self
+            .queue_claim_stale_page(stream, group, consumer, start_id, config)
+            .await?
+            .entries)
+    }
+
+    pub(crate) async fn queue_claim_stale_page(
+        &self,
+        stream: &str,
+        group: &str,
+        consumer: &str,
+        start_id: &str,
+        config: RuntimeQueueReclaimConfig,
+    ) -> Result<RuntimeQueueReclaimPage, DataLayerError> {
         let start_sequence = parse_memory_stream_sequence(start_id)?;
         let min_idle = Duration::from_millis(config.min_idle_ms.max(1));
         let now = Instant::now();
@@ -805,16 +1126,106 @@ impl MemoryRuntimeBackend {
             .collect::<Vec<_>>();
         let mut ids = ids;
         ids.sort_by_key(|(sequence, _)| *sequence);
+        let count = config.count.max(1);
+        let next_start_id = ids
+            .get(count)
+            .map(|(_, id)| id.clone())
+            .unwrap_or_else(|| "0-0".to_string());
 
         let mut claimed = Vec::new();
-        for (_, id) in ids.into_iter().take(config.count.max(1)) {
+        for (_, id) in ids.into_iter().take(count) {
             if let Some(pending) = group_state.pending.get_mut(&id) {
                 pending.consumer = consumer.to_string();
                 pending.delivered_at = now;
                 claimed.push(pending.entry.clone());
             }
         }
-        Ok(claimed)
+        Ok(RuntimeQueueReclaimPage {
+            next_start_id,
+            entries: claimed,
+            deleted_ids: Vec::new(),
+        })
+    }
+
+    pub(crate) async fn queue_transfer_pending_to_stream(
+        &self,
+        source: &str,
+        group: &str,
+        entry_id: &str,
+        destination: &str,
+        destination_fields: &BTreeMap<String, String>,
+    ) -> Result<RuntimeQueueTransferOutcome, DataLayerError> {
+        crate::validate_runtime_queue_transfer(
+            source,
+            group,
+            entry_id,
+            destination,
+            destination_fields,
+        )?;
+        // Match ordinary memory append ownership without copying a large payload while locked.
+        let destination_fields = destination_fields.clone();
+        let mut queues = self.queues.lock().await;
+        let now = Instant::now();
+        prune_memory_key(&mut queues, source, now);
+        let source_state = queues.get(source).ok_or_else(|| {
+            DataLayerError::InvalidInput(format!("runtime queue stream {source} does not exist"))
+        })?;
+        let group_state = source_state.groups.get(group).ok_or_else(|| {
+            DataLayerError::InvalidInput(format!(
+                "runtime queue group {group} does not exist for stream {source}"
+            ))
+        })?;
+        // Memory trimming/deletion already removes PEL entries. Absence here cannot prove
+        // archival, and must not delete an unread entry or append another dead letter.
+        if !group_state.pending.contains_key(entry_id) {
+            return Ok(RuntimeQueueTransferOutcome::NotPending);
+        }
+
+        let previous_sequence = self
+            .queue_seq
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |sequence| {
+                sequence.checked_add(1)
+            })
+            .map_err(|_| {
+                DataLayerError::UnexpectedValue("runtime queue sequence exhausted".to_string())
+            })?;
+        let sequence = previous_sequence + 1;
+        let destination_id = format!("{sequence}-0");
+        prune_memory_key(&mut queues, destination, now);
+        queues
+            .entry(destination.to_string())
+            .or_default()
+            .entries
+            .push_back(MemoryQueuedEntry {
+                sequence,
+                entry: RuntimeQueueEntry {
+                    id: destination_id.clone(),
+                    fields: destination_fields,
+                },
+            });
+
+        // No await occurs between archive creation and source removal. Cancellation can only
+        // happen while waiting for the mutex, so it cannot leave a half-completed transfer.
+        let source_state = queues.get_mut(source).expect("validated source stream");
+        let acked = usize::from(
+            source_state
+                .groups
+                .get_mut(group)
+                .expect("validated source group")
+                .pending
+                .remove(entry_id)
+                .is_some(),
+        );
+        let before = source_state.entries.len();
+        source_state
+            .entries
+            .retain(|entry| entry.entry.id != entry_id);
+        remove_pending_from_all_groups(source_state, entry_id);
+        Ok(RuntimeQueueTransferOutcome::Transferred {
+            destination_id,
+            acked,
+            deleted: before.saturating_sub(source_state.entries.len()),
+        })
     }
 
     pub(crate) async fn queue_ack(
@@ -1013,6 +1424,17 @@ impl MemoryRuntimeBackend {
     }
 }
 
+fn prune_usage_limit_events(events: &mut HashMap<String, u64>, now_unix_ms: u64, window_ms: u64) {
+    let Some(cutoff) = now_unix_ms.checked_sub(window_ms) else {
+        return;
+    };
+    events.retain(|_, timestamp| *timestamp > cutoff);
+}
+
+fn update_earliest_expiry(current: &mut Option<u64>, candidate: u64) {
+    *current = Some(current.map_or(candidate, |existing| existing.min(candidate)));
+}
+
 fn get_fresh_locked(
     kv: &mut HashMap<String, MemoryKvEntry>,
     key: &str,
@@ -1157,6 +1579,793 @@ fn unix_time_ms() -> u64 {
 mod tests {
     use super::*;
 
+    fn memory_queue_test_fields(index: usize) -> BTreeMap<String, String> {
+        BTreeMap::from([
+            (
+                "payload".to_string(),
+                format!("record-{index}:{}\n\"\\\u{03bb}", "payload".repeat(8_192)),
+            ),
+            ("kind".to_string(), format!("event-{index}")),
+            (String::new(), String::new()),
+        ])
+    }
+
+    async fn age_memory_queue_pending(backend: &MemoryRuntimeBackend, stream: &str) {
+        let stale = Instant::now()
+            .checked_sub(Duration::from_secs(1))
+            .expect("test clock should support one second of history");
+        let mut queues = backend.queues.lock().await;
+        for group in queues
+            .get_mut(stream)
+            .expect("test stream")
+            .groups
+            .values_mut()
+        {
+            for pending in group.pending.values_mut() {
+                pending.delivered_at = stale;
+            }
+        }
+    }
+
+    async fn memory_queue_transfer_fixture(
+        backend: &MemoryRuntimeBackend,
+        count: usize,
+    ) -> Vec<RuntimeQueueEntry> {
+        backend
+            .queue_ensure_consumer_group("transfer:source", "workers", "0-0")
+            .await
+            .expect("source group");
+        for index in 0..count {
+            backend
+                .queue_append("transfer:source", memory_queue_test_fields(index), None)
+                .await;
+        }
+        backend
+            .queue_read("transfer:source", "workers", "reader", count, None)
+            .await
+            .expect("pending source entries")
+    }
+
+    #[tokio::test]
+    async fn memory_queue_transfer_preserves_fields_and_only_removes_the_target_entry() {
+        let backend = MemoryRuntimeBackend::new(MemoryRuntimeStateConfig::default());
+        let entries = memory_queue_transfer_fixture(&backend, 3).await;
+        backend
+            .queue_ensure_consumer_group("transfer:source", "other-workers", "0-0")
+            .await
+            .expect("second source group");
+        backend
+            .queue_read("transfer:source", "other-workers", "reader", 3, None)
+            .await
+            .expect("second group pending entries");
+        let mut archived_fields = entries[1].fields.clone();
+        archived_fields.insert("source_id".to_string(), entries[1].id.clone());
+        archived_fields.insert(
+            "error".to_string(),
+            "invalid payload\noriginal retained".to_string(),
+        );
+        let outcome = backend
+            .queue_transfer_pending_to_stream(
+                "transfer:source",
+                "workers",
+                &entries[1].id,
+                "transfer:archive",
+                &archived_fields,
+            )
+            .await
+            .expect("atomic transfer");
+        let RuntimeQueueTransferOutcome::Transferred {
+            destination_id,
+            acked,
+            deleted,
+        } = outcome
+        else {
+            panic!("pending entry should transfer");
+        };
+        assert_eq!((acked, deleted), (1, 1));
+        let queues = backend.queues.lock().await;
+        let source = &queues["transfer:source"];
+        let remaining = source
+            .entries
+            .iter()
+            .map(|entry| &entry.entry)
+            .collect::<Vec<_>>();
+        assert_eq!(remaining, [&entries[0], &entries[2]]);
+        for group in ["workers", "other-workers"] {
+            let pending = &source.groups[group].pending;
+            assert_eq!(pending.len(), 2);
+            assert!(pending.contains_key(&entries[0].id));
+            assert!(pending.contains_key(&entries[2].id));
+        }
+        let archive = &queues["transfer:archive"];
+        assert_eq!(archive.entries.len(), 1);
+        assert_eq!(archive.entries[0].entry.id, destination_id);
+        assert_eq!(archive.entries[0].entry.fields, archived_fields);
+    }
+
+    #[tokio::test]
+    async fn memory_queue_transfer_concurrent_and_repeated_attempts_archive_once() {
+        let backend = std::sync::Arc::new(MemoryRuntimeBackend::new(
+            MemoryRuntimeStateConfig::default(),
+        ));
+        let entries = memory_queue_transfer_fixture(&backend, 1).await;
+        let fields = std::sync::Arc::new(entries[0].fields.clone());
+        let mut tasks = tokio::task::JoinSet::new();
+        for _ in 0..16 {
+            let backend = std::sync::Arc::clone(&backend);
+            let fields = std::sync::Arc::clone(&fields);
+            let entry_id = entries[0].id.clone();
+            tasks.spawn(async move {
+                backend
+                    .queue_transfer_pending_to_stream(
+                        "transfer:source",
+                        "workers",
+                        &entry_id,
+                        "transfer:archive",
+                        &fields,
+                    )
+                    .await
+                    .expect("transfer attempt")
+            });
+        }
+        let mut transferred = 0;
+        let mut not_pending = 0;
+        while let Some(outcome) = tasks.join_next().await {
+            match outcome.expect("transfer task") {
+                RuntimeQueueTransferOutcome::Transferred { acked, deleted, .. } => {
+                    assert_eq!((acked, deleted), (1, 1));
+                    transferred += 1;
+                }
+                RuntimeQueueTransferOutcome::NotPending => not_pending += 1,
+            }
+        }
+        assert_eq!((transferred, not_pending), (1, 15));
+        assert_eq!(
+            backend
+                .queue_transfer_pending_to_stream(
+                    "transfer:source",
+                    "workers",
+                    &entries[0].id,
+                    "transfer:archive",
+                    &fields,
+                )
+                .await
+                .expect("sequential retry"),
+            RuntimeQueueTransferOutcome::NotPending
+        );
+        let stats = backend
+            .queue_stats("transfer:source", Some("workers"))
+            .await;
+        assert_eq!((stats.stream_length, stats.group_pending), (0, 0));
+        assert_eq!(
+            backend
+                .queue_stats("transfer:archive", None)
+                .await
+                .stream_length,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_queue_transfer_retry_after_lost_response_does_not_archive_twice() {
+        async fn commit_then_lose_response(
+            backend: &MemoryRuntimeBackend,
+            entry: &RuntimeQueueEntry,
+        ) -> Result<RuntimeQueueTransferOutcome, DataLayerError> {
+            backend
+                .queue_transfer_pending_to_stream(
+                    "transfer:source",
+                    "workers",
+                    &entry.id,
+                    "transfer:archive",
+                    &entry.fields,
+                )
+                .await?;
+            Err(DataLayerError::TimedOut(
+                "transfer response lost after commit".to_string(),
+            ))
+        }
+
+        let backend = MemoryRuntimeBackend::new(MemoryRuntimeStateConfig::default());
+        let entries = memory_queue_transfer_fixture(&backend, 1).await;
+        assert!(matches!(
+            commit_then_lose_response(&backend, &entries[0]).await,
+            Err(DataLayerError::TimedOut(_))
+        ));
+        assert_eq!(
+            backend
+                .queue_transfer_pending_to_stream(
+                    "transfer:source",
+                    "workers",
+                    &entries[0].id,
+                    "transfer:archive",
+                    &entries[0].fields,
+                )
+                .await
+                .expect("retry after lost response"),
+            RuntimeQueueTransferOutcome::NotPending
+        );
+        let queues = backend.queues.lock().await;
+        assert!(queues["transfer:source"].entries.is_empty());
+        assert!(queues["transfer:source"].groups["workers"]
+            .pending
+            .is_empty());
+        assert_eq!(queues["transfer:archive"].entries.len(), 1);
+        assert_eq!(
+            queues["transfer:archive"].entries[0].entry.fields,
+            entries[0].fields
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_queue_transfer_rejects_invalid_input_before_any_mutation() {
+        let backend = MemoryRuntimeBackend::new(MemoryRuntimeStateConfig::default());
+        let entries = memory_queue_transfer_fixture(&backend, 1).await;
+        let entry = &entries[0];
+        for invalid_id in [
+            "",
+            "1",
+            "1-",
+            "-1-0",
+            "+1-0",
+            "01-0",
+            "1-00",
+            "1-+0",
+            "1-0x",
+            "1-0-0",
+            " 1-0",
+            "1-0 ",
+            "\u{0661}-0",
+            "18446744073709551616-0",
+            "1-18446744073709551616",
+        ] {
+            assert!(
+                matches!(
+                    backend
+                        .queue_transfer_pending_to_stream(
+                            "transfer:source",
+                            "workers",
+                            invalid_id,
+                            "transfer:archive",
+                            &entry.fields,
+                        )
+                        .await,
+                    Err(DataLayerError::InvalidInput(_))
+                ),
+                "invalid entry id {invalid_id:?}"
+            );
+        }
+        for (source, group, destination) in [
+            ("", "workers", "transfer:archive"),
+            ("transfer:source", " ", "transfer:archive"),
+            ("transfer:source", "workers", ""),
+            ("transfer:source", "workers", "transfer:source"),
+            ("missing-source", "workers", "transfer:archive"),
+            ("transfer:source", "missing-group", "transfer:archive"),
+        ] {
+            assert!(matches!(
+                backend
+                    .queue_transfer_pending_to_stream(
+                        source,
+                        group,
+                        &entry.id,
+                        destination,
+                        &entry.fields
+                    )
+                    .await,
+                Err(DataLayerError::InvalidInput(_))
+            ));
+        }
+        assert!(matches!(
+            backend
+                .queue_transfer_pending_to_stream(
+                    "transfer:source",
+                    "workers",
+                    &entry.id,
+                    "transfer:archive",
+                    &BTreeMap::new(),
+                )
+                .await,
+            Err(DataLayerError::InvalidInput(_))
+        ));
+        let queues = backend.queues.lock().await;
+        assert_eq!(queues.len(), 1);
+        assert_eq!(queues["transfer:source"].entries[0].entry, *entry);
+        assert!(queues["transfer:source"].groups["workers"]
+            .pending
+            .contains_key(&entry.id));
+        assert_eq!(backend.queue_seq.load(Ordering::Acquire), 1);
+    }
+
+    #[tokio::test]
+    async fn memory_queue_transfer_archive_failure_keeps_source_pending() {
+        let backend = MemoryRuntimeBackend::new(MemoryRuntimeStateConfig::default());
+        let entries = memory_queue_transfer_fixture(&backend, 1).await;
+        backend.queue_seq.store(u64::MAX, Ordering::Release);
+        assert!(matches!(
+            backend
+                .queue_transfer_pending_to_stream(
+                    "transfer:source",
+                    "workers",
+                    &entries[0].id,
+                    "transfer:archive",
+                    &entries[0].fields,
+                )
+                .await,
+            Err(DataLayerError::UnexpectedValue(_))
+        ));
+        let queues = backend.queues.lock().await;
+        assert_eq!(queues.len(), 1);
+        assert_eq!(queues["transfer:source"].entries[0].entry, entries[0]);
+        assert!(queues["transfer:source"].groups["workers"]
+            .pending
+            .contains_key(&entries[0].id));
+    }
+
+    #[tokio::test]
+    async fn memory_queue_transfer_cancelled_lock_wait_has_no_side_effects() {
+        use std::future::Future;
+        use std::task::Poll;
+
+        let backend = MemoryRuntimeBackend::new(MemoryRuntimeStateConfig::default());
+        let entries = memory_queue_transfer_fixture(&backend, 1).await;
+        let queues = backend.queues.lock().await;
+        let mut transfer = Box::pin(backend.queue_transfer_pending_to_stream(
+            "transfer:source",
+            "workers",
+            &entries[0].id,
+            "transfer:archive",
+            &entries[0].fields,
+        ));
+        std::future::poll_fn(|cx| {
+            assert!(transfer.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        drop(transfer);
+        assert_eq!(backend.queue_seq.load(Ordering::Acquire), 1);
+        assert_eq!(queues.len(), 1);
+        assert_eq!(queues["transfer:source"].entries[0].entry, entries[0]);
+        assert!(queues["transfer:source"].groups["workers"]
+            .pending
+            .contains_key(&entries[0].id));
+        drop(queues);
+        assert_eq!(
+            backend
+                .queue_stats("transfer:archive", None)
+                .await
+                .stream_length,
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_queue_transfer_not_pending_does_not_archive_or_delete_unread_or_acked_entries()
+    {
+        let backend = MemoryRuntimeBackend::new(MemoryRuntimeStateConfig::default());
+        let entries = memory_queue_transfer_fixture(&backend, 1).await;
+        let unread_id = backend
+            .queue_append("transfer:source", memory_queue_test_fields(1), None)
+            .await;
+        backend
+            .queue_ack("transfer:source", "workers", &[entries[0].id.clone()])
+            .await
+            .expect("ack without deleting");
+        for id in [
+            entries[0].id.as_str(),
+            unread_id.as_str(),
+            "1-1",
+            "0-0",
+            "18446744073709551615-18446744073709551615",
+        ] {
+            assert_eq!(
+                backend
+                    .queue_transfer_pending_to_stream(
+                        "transfer:source",
+                        "workers",
+                        id,
+                        "transfer:archive",
+                        &entries[0].fields,
+                    )
+                    .await
+                    .expect("valid but non-pending entry id"),
+                RuntimeQueueTransferOutcome::NotPending
+            );
+        }
+        let stats = backend
+            .queue_stats("transfer:source", Some("workers"))
+            .await;
+        assert_eq!(
+            (stats.stream_length, stats.group_pending, stats.group_lag),
+            (2, 0, Some(1))
+        );
+        assert_eq!(
+            backend
+                .queue_stats("transfer:archive", None)
+                .await
+                .stream_length,
+            0
+        );
+        assert_eq!(backend.queue_seq.load(Ordering::Acquire), 2);
+    }
+
+    #[tokio::test]
+    async fn memory_queue_transfer_retains_existing_trimmed_pending_semantics() {
+        let backend = MemoryRuntimeBackend::new(MemoryRuntimeStateConfig::default());
+        let entries = memory_queue_transfer_fixture(&backend, 1).await;
+        backend
+            .queue_append("transfer:source", memory_queue_test_fields(1), Some(1))
+            .await;
+        // Memory retention already removed both the original entry and its PEL copy.
+        // NotPending does not claim that the retained caller copy was archived elsewhere.
+        assert_eq!(
+            backend
+                .queue_transfer_pending_to_stream(
+                    "transfer:source",
+                    "workers",
+                    &entries[0].id,
+                    "transfer:archive",
+                    &entries[0].fields,
+                )
+                .await
+                .expect("trimmed entry"),
+            RuntimeQueueTransferOutcome::NotPending
+        );
+        let stats = backend
+            .queue_stats("transfer:source", Some("workers"))
+            .await;
+        assert_eq!((stats.stream_length, stats.group_pending), (1, 0));
+        assert_eq!(
+            backend
+                .queue_stats("transfer:archive", None)
+                .await
+                .stream_length,
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_queue_waiting_append_does_not_reserve_an_out_of_order_sequence() {
+        use std::future::Future;
+        use std::task::Poll;
+
+        let backend = MemoryRuntimeBackend::new(MemoryRuntimeStateConfig::default());
+        let stream = "queue:append-order";
+        backend
+            .queue_ensure_consumer_group(stream, "workers", "0-0")
+            .await
+            .expect("consumer group");
+        let lock = backend.queues.lock().await;
+        let mut first = Box::pin(backend.queue_append(
+            stream,
+            BTreeMap::from([("payload".to_string(), "first".to_string())]),
+            None,
+        ));
+        let mut second = Box::pin(backend.queue_append(
+            stream,
+            BTreeMap::from([("payload".to_string(), "second".to_string())]),
+            None,
+        ));
+        std::future::poll_fn(|cx| {
+            assert!(first.as_mut().poll(cx).is_pending());
+            assert!(second.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        assert_eq!(
+            backend.queue_seq.load(Ordering::Acquire),
+            0,
+            "an appender must own the insertion lock before assigning a stream sequence"
+        );
+        drop(lock);
+        let (first_id, second_id) = tokio::join!(first, second);
+        assert_eq!(first_id, "1-0");
+        assert_eq!(second_id, "2-0");
+        for (expected_id, expected_payload) in [(first_id, "first"), (second_id, "second")] {
+            let entries = backend
+                .queue_read(stream, "workers", "reader", 1, None)
+                .await
+                .expect("ordered delivery");
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].id, expected_id);
+            assert_eq!(entries[0].fields["payload"], expected_payload);
+        }
+        assert!(backend
+            .queue_read(stream, "workers", "reader", 1, None)
+            .await
+            .expect("all entries delivered exactly once")
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn memory_queue_reclaim_page_advances_and_rescans_after_reaching_the_end() {
+        let backend = MemoryRuntimeBackend::new(MemoryRuntimeStateConfig::default());
+        let stream = "queue:reclaim-page";
+        backend
+            .queue_ensure_consumer_group(stream, "workers", "0-0")
+            .await
+            .expect("consumer group");
+        for index in 0..4 {
+            backend
+                .queue_append(stream, memory_queue_test_fields(index), None)
+                .await;
+        }
+        let expected = backend
+            .queue_read(stream, "workers", "reader", 4, None)
+            .await
+            .expect("initial delivery");
+        age_memory_queue_pending(&backend, stream).await;
+        backend
+            .queues
+            .lock()
+            .await
+            .get_mut(stream)
+            .unwrap()
+            .groups
+            .get_mut("workers")
+            .unwrap()
+            .pending
+            .get_mut(&expected[0].id)
+            .unwrap()
+            .delivered_at = Instant::now();
+        let config = RuntimeQueueReclaimConfig {
+            min_idle_ms: 500,
+            count: 1,
+        };
+        let mut cursor = "0-0".to_string();
+        for index in 1..4 {
+            let page = backend
+                .queue_claim_stale_page(stream, "workers", "reclaimer", &cursor, config)
+                .await
+                .expect("reclaim page");
+            assert_eq!(page.entries.as_slice(), &expected[index..index + 1]);
+            assert!(page.deleted_ids.is_empty());
+            cursor = page.next_start_id;
+            assert_eq!(
+                cursor,
+                expected
+                    .get(index + 1)
+                    .map_or("0-0", |entry| entry.id.as_str())
+            );
+        }
+        let stale = Instant::now().checked_sub(Duration::from_secs(1)).unwrap();
+        backend
+            .queues
+            .lock()
+            .await
+            .get_mut(stream)
+            .unwrap()
+            .groups
+            .get_mut("workers")
+            .unwrap()
+            .pending
+            .get_mut(&expected[0].id)
+            .unwrap()
+            .delivered_at = stale;
+        let page = backend
+            .queue_claim_stale_page(stream, "workers", "reclaimer", &cursor, config)
+            .await
+            .expect("next scan rechecks the earlier fresh entry");
+        assert_eq!(page.entries.as_slice(), &expected[..1]);
+        assert_eq!(page.next_start_id, "0-0");
+        assert!(page.deleted_ids.is_empty());
+    }
+
+    #[tokio::test]
+    async fn memory_queue_read_batches_preserve_fields_and_independent_ownership() {
+        let backend = MemoryRuntimeBackend::new(MemoryRuntimeStateConfig::default());
+        let stream = "queue:read-ownership";
+        backend
+            .queue_ensure_consumer_group(stream, "workers", "0-0")
+            .await
+            .expect("consumer group");
+        let mut expected = Vec::new();
+        for index in 0..3 {
+            let fields = memory_queue_test_fields(index);
+            let id = backend.queue_append(stream, fields.clone(), None).await;
+            expected.push(RuntimeQueueEntry { id, fields });
+        }
+
+        let mut first_batch = backend
+            .queue_read(stream, "workers", "consumer-a", 2, None)
+            .await
+            .expect("first batch");
+        assert_eq!(first_batch.as_slice(), &expected[..2]);
+        let stats = backend.queue_stats(stream, Some("workers")).await;
+        assert_eq!(stats.group_pending, 2);
+        assert_eq!(stats.group_lag, Some(1));
+        first_batch[0].id.clear();
+        first_batch[0].fields.get_mut("payload").unwrap().clear();
+        first_batch[0].fields.remove("kind");
+        first_batch[1].fields.clear();
+
+        let second_batch = backend
+            .queue_read(stream, "workers", "consumer-a", 2, None)
+            .await
+            .expect("second batch");
+        assert_eq!(second_batch.as_slice(), &expected[2..]);
+        assert!(backend
+            .queue_read(stream, "workers", "consumer-a", 2, None)
+            .await
+            .expect("all entries have been delivered")
+            .is_empty());
+
+        age_memory_queue_pending(&backend, stream).await;
+        let mut reclaimed = backend
+            .queue_claim_stale(
+                stream,
+                "workers",
+                "consumer-b",
+                "0-0",
+                RuntimeQueueReclaimConfig {
+                    min_idle_ms: 500,
+                    count: 1,
+                },
+            )
+            .await
+            .expect("bounded reclaim");
+        assert_eq!(reclaimed.as_slice(), &expected[..1]);
+        reclaimed[0].fields.clear();
+        age_memory_queue_pending(&backend, stream).await;
+        assert_eq!(
+            backend
+                .queue_claim_stale(
+                    stream,
+                    "workers",
+                    "consumer-c",
+                    "0-0",
+                    RuntimeQueueReclaimConfig {
+                        min_idle_ms: 500,
+                        count: 3
+                    },
+                )
+                .await
+                .expect("reclaim still owns original fields"),
+            expected
+        );
+
+        backend
+            .queue_ensure_consumer_group(stream, "later-group", "0-0")
+            .await
+            .expect("independent consumer group");
+        assert_eq!(
+            backend
+                .queue_read(stream, "later-group", "consumer-d", 3, None)
+                .await
+                .expect("stream still owns original fields"),
+            expected
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_queue_read_ack_and_delete_preserve_pending_group_semantics() {
+        let backend = MemoryRuntimeBackend::new(MemoryRuntimeStateConfig::default());
+        let stream = "queue:ack-delete";
+        let mut expected = Vec::new();
+        for index in 0..3 {
+            let fields = memory_queue_test_fields(index);
+            let id = backend.queue_append(stream, fields.clone(), None).await;
+            expected.push(RuntimeQueueEntry { id, fields });
+        }
+        for group in ["workers-a", "workers-b"] {
+            backend
+                .queue_ensure_consumer_group(stream, group, "0-0")
+                .await
+                .expect("consumer group");
+            assert_eq!(
+                backend
+                    .queue_read(stream, group, "reader", 3, None)
+                    .await
+                    .expect("read batch"),
+                expected
+            );
+        }
+        assert_eq!(
+            backend
+                .queue_ack(stream, "workers-a", std::slice::from_ref(&expected[0].id))
+                .await
+                .expect("ack only the first group"),
+            1
+        );
+        assert_eq!(
+            backend
+                .queue_delete(stream, &[expected[1].id.clone(), "missing-0".to_string()])
+                .await,
+            1
+        );
+        age_memory_queue_pending(&backend, stream).await;
+        for (group, wanted) in [
+            ("workers-a", vec![expected[2].clone()]),
+            ("workers-b", vec![expected[0].clone(), expected[2].clone()]),
+        ] {
+            let stats = backend.queue_stats(stream, Some(group)).await;
+            assert_eq!(stats.stream_length, 2);
+            assert_eq!(stats.group_pending, wanted.len() as u64);
+            assert_eq!(
+                backend
+                    .queue_claim_stale(
+                        stream,
+                        group,
+                        "reclaimer",
+                        "0-0",
+                        RuntimeQueueReclaimConfig {
+                            min_idle_ms: 500,
+                            count: 3
+                        },
+                    )
+                    .await
+                    .expect("deleted entries cannot be reclaimed"),
+                wanted
+            );
+        }
+        assert_eq!(
+            backend
+                .queue_delete(stream, &[expected[0].id.clone(), expected[2].id.clone()])
+                .await,
+            2
+        );
+        for group in ["workers-a", "workers-b"] {
+            let stats = backend.queue_stats(stream, Some(group)).await;
+            assert_eq!(stats.stream_length, 0);
+            assert_eq!(stats.group_pending, 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn memory_queue_read_retains_returned_fields_after_pending_trim() {
+        let backend = MemoryRuntimeBackend::new(MemoryRuntimeStateConfig::default());
+        let stream = "queue:pending-trim";
+        backend
+            .queue_ensure_consumer_group(stream, "workers", "0-0")
+            .await
+            .expect("consumer group");
+        let mut expected = Vec::new();
+        for index in 0..2 {
+            let fields = memory_queue_test_fields(index);
+            let id = backend.queue_append(stream, fields.clone(), Some(2)).await;
+            expected.push(RuntimeQueueEntry { id, fields });
+        }
+        let delivered = backend
+            .queue_read(stream, "workers", "reader", 2, None)
+            .await
+            .expect("read batch before trim");
+        let next_fields = memory_queue_test_fields(2);
+        let next_id = backend
+            .queue_append(stream, next_fields.clone(), Some(2))
+            .await;
+        assert_eq!(
+            delivered, expected,
+            "trimming must not invalidate returned entries"
+        );
+        age_memory_queue_pending(&backend, stream).await;
+        assert_eq!(
+            backend
+                .queue_claim_stale(
+                    stream,
+                    "workers",
+                    "reclaimer",
+                    "0-0",
+                    RuntimeQueueReclaimConfig {
+                        min_idle_ms: 500,
+                        count: 2
+                    },
+                )
+                .await
+                .expect("trimmed entry is removed from the PEL"),
+            vec![expected[1].clone()]
+        );
+        assert_eq!(
+            backend
+                .queue_read(stream, "workers", "reader", 2, None)
+                .await
+                .expect("read the remaining new entry"),
+            vec![RuntimeQueueEntry {
+                id: next_id,
+                fields: next_fields
+            }]
+        );
+    }
+
     #[tokio::test]
     async fn rate_limit_shard_amortizes_expired_entry_cleanup() {
         let backend = MemoryRuntimeBackend::new(MemoryRuntimeStateConfig::default());
@@ -1196,5 +2405,139 @@ mod tests {
             .expect("rate-limit shard should lock");
         assert!(!shard.entries.contains_key("expired-unrelated-key"));
         assert_eq!(shard.operations_since_prune, 0);
+    }
+
+    #[tokio::test]
+    async fn usage_limit_capacity_is_atomic_and_fail_closed() {
+        let backend = MemoryRuntimeBackend::new(MemoryRuntimeStateConfig {
+            max_usage_limit_windows: 2,
+            max_usage_limit_events: 2,
+            ..MemoryRuntimeStateConfig::default()
+        });
+        let first = [crate::UsageLimitRule {
+            key: "usage:{user-1}:one",
+            limit: 10,
+            window_seconds: 60,
+            retention_seconds: 60,
+        }];
+        backend
+            .check_and_consume_usage_limits(crate::UsageLimitInput {
+                rules: &first,
+                event_id: "event-1",
+                now_unix_ms: 1_000,
+            })
+            .await
+            .expect("first event");
+
+        let two_new_windows = [
+            crate::UsageLimitRule {
+                key: "usage:{user-1}:two",
+                limit: 10,
+                window_seconds: 60,
+                retention_seconds: 60,
+            },
+            crate::UsageLimitRule {
+                key: "usage:{user-1}:three",
+                limit: 10,
+                window_seconds: 60,
+                retention_seconds: 60,
+            },
+        ];
+        let error = backend
+            .check_and_consume_usage_limits(crate::UsageLimitInput {
+                rules: &two_new_windows,
+                event_id: "event-2",
+                now_unix_ms: 2_000,
+            })
+            .await
+            .expect_err("capacity must fail closed");
+        assert!(error.to_string().contains("capacity exhausted"));
+
+        let state = backend.usage_limits.lock().await;
+        assert_eq!(state.windows.len(), 1);
+        assert_eq!(state.total_events, 1);
+        assert!(!state.windows.contains_key(two_new_windows[0].key));
+        assert!(!state.windows.contains_key(two_new_windows[1].key));
+    }
+
+    #[tokio::test]
+    async fn usage_limit_capacity_reclaims_expired_windows_before_rejecting() {
+        let backend = MemoryRuntimeBackend::new(MemoryRuntimeStateConfig {
+            max_usage_limit_windows: 1,
+            max_usage_limit_events: 1,
+            ..MemoryRuntimeStateConfig::default()
+        });
+        let old = [crate::UsageLimitRule {
+            key: "usage:{user-1}:old",
+            limit: 1,
+            window_seconds: 1,
+            retention_seconds: 1,
+        }];
+        backend
+            .check_and_consume_usage_limits(crate::UsageLimitInput {
+                rules: &old,
+                event_id: "event-old",
+                now_unix_ms: 1_000,
+            })
+            .await
+            .expect("old event");
+
+        let current = [crate::UsageLimitRule {
+            key: "usage:{user-1}:current",
+            limit: 1,
+            window_seconds: 1,
+            retention_seconds: 1,
+        }];
+        assert_eq!(
+            backend
+                .check_and_consume_usage_limits(crate::UsageLimitInput {
+                    rules: &current,
+                    event_id: "event-current",
+                    now_unix_ms: 2_000,
+                })
+                .await
+                .expect("expired capacity should be reclaimed"),
+            UsageLimitCheck::Allowed
+        );
+
+        let state = backend.usage_limits.lock().await;
+        assert_eq!(state.windows.len(), 1);
+        assert_eq!(state.total_events, 1);
+        assert!(state.windows.contains_key(current[0].key));
+    }
+
+    #[tokio::test]
+    async fn usage_limit_idempotent_replay_does_not_consume_event_capacity() {
+        let backend = MemoryRuntimeBackend::new(MemoryRuntimeStateConfig {
+            max_usage_limit_windows: 1,
+            max_usage_limit_events: 1,
+            ..MemoryRuntimeStateConfig::default()
+        });
+        let rules = [crate::UsageLimitRule {
+            key: "usage:{user-1}:idempotent",
+            limit: 10,
+            window_seconds: 60,
+            retention_seconds: 60,
+        }];
+        for now_unix_ms in [1_000, 2_000] {
+            assert_eq!(
+                backend
+                    .check_and_consume_usage_limits(crate::UsageLimitInput {
+                        rules: &rules,
+                        event_id: "same-event",
+                        now_unix_ms,
+                    })
+                    .await
+                    .expect("idempotent replay"),
+                UsageLimitCheck::Allowed
+            );
+        }
+
+        let state = backend.usage_limits.lock().await;
+        assert_eq!(state.total_events, 1);
+        assert_eq!(
+            state.windows[rules[0].key].events["same-event"], 1_000,
+            "idempotent replay must preserve the original Redis ZADD NX timestamp"
+        );
     }
 }

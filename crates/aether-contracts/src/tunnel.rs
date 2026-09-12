@@ -1,18 +1,205 @@
+use std::fmt;
 use std::io::Read;
 
+use base64::Engine as _;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
+use hmac::{Hmac, Mac};
+use sha2::{Digest as _, Sha256};
 
 pub const HEADER_SIZE: usize = 10;
 pub const TUNNEL_RELAY_FORWARDED_BY_HEADER: &str = "x-aether-tunnel-forwarded-by";
 pub const TUNNEL_RELAY_OWNER_INSTANCE_HEADER: &str = "x-aether-tunnel-owner-instance-id";
+pub const TUNNEL_RELAY_AUTH_SENDER_HEADER: &str = "x-aether-tunnel-relay-sender";
+pub const TUNNEL_RELAY_AUTH_TIMESTAMP_HEADER: &str = "x-aether-tunnel-relay-timestamp";
+pub const TUNNEL_RELAY_AUTH_NONCE_HEADER: &str = "x-aether-tunnel-relay-nonce";
+pub const TUNNEL_RELAY_AUTH_PAYLOAD_HEADER: &str = "x-aether-tunnel-relay-payload";
+pub const TUNNEL_RELAY_AUTH_SIGNATURE_HEADER: &str = "x-aether-tunnel-relay-signature";
 pub const TUNNEL_PROTOCOL_VERSION_HEADER: &str = "x-aether-tunnel-protocol-version";
 pub const TUNNEL_NODE_NAME_B64_HEADER: &str = "x-aether-tunnel-node-name-b64";
 pub const CURRENT_TUNNEL_PROTOCOL_VERSION: u8 = 3;
 pub const CURRENT_TUNNEL_PROTOCOL_VERSION_STR: &str = "3";
 pub const MAX_TUNNEL_RELAY_META_LEN: usize = 256 * 1024;
+/// Keep decoded tunnel frames within the same size envelope enforced by the
+/// WebSocket transports. This also bounds gzip expansion for untrusted peers.
+pub const MAX_TUNNEL_DECOMPRESSED_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
+
+const TUNNEL_RELAY_AUTH_CONTEXT: &[u8] = b"aether-tunnel-relay-auth-v2";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TunnelRelayPayloadDigest {
+    metadata_sha256: [u8; 32],
+    body_len: u64,
+    body_sha256: [u8; 32],
+}
+
+impl TunnelRelayPayloadDigest {
+    pub fn body_len(self) -> u64 {
+        self.body_len
+    }
+
+    pub fn encode_header_value(self) -> String {
+        let mut encoded = [0_u8; 72];
+        encoded[..32].copy_from_slice(&self.metadata_sha256);
+        encoded[32..40].copy_from_slice(&self.body_len.to_be_bytes());
+        encoded[40..].copy_from_slice(&self.body_sha256);
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(encoded)
+    }
+
+    pub fn decode_header_value(value: &str) -> Option<Self> {
+        let value = value.trim();
+        if value.len() > 96 {
+            return None;
+        }
+        let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(value)
+            .ok()?;
+        let encoded: [u8; 72] = decoded.try_into().ok()?;
+        Some(Self {
+            metadata_sha256: encoded[..32].try_into().ok()?,
+            body_len: u64::from_be_bytes(encoded[32..40].try_into().ok()?),
+            body_sha256: encoded[40..].try_into().ok()?,
+        })
+    }
+
+    pub fn matches_metadata(self, metadata_envelope: &[u8]) -> bool {
+        self.metadata_sha256 == <[u8; 32]>::from(Sha256::digest(metadata_envelope))
+    }
+
+    pub fn matches_body(self, body: &[u8]) -> bool {
+        self.matches_body_hash(body.len() as u64, Sha256::digest(body).into())
+    }
+
+    pub fn matches_body_hash(self, body_len: u64, body_sha256: [u8; 32]) -> bool {
+        self.body_len == body_len && self.body_sha256 == body_sha256
+    }
+}
+
+pub fn tunnel_relay_payload_digest(
+    metadata_envelope: &[u8],
+    body: &[u8],
+) -> TunnelRelayPayloadDigest {
+    TunnelRelayPayloadDigest {
+        metadata_sha256: Sha256::digest(metadata_envelope).into(),
+        body_len: body.len() as u64,
+        body_sha256: Sha256::digest(body).into(),
+    }
+}
+
+pub fn tunnel_relay_payload_digest_from_hashes(
+    metadata_envelope: &[u8],
+    body_len: u64,
+    body_sha256: [u8; 32],
+) -> TunnelRelayPayloadDigest {
+    TunnelRelayPayloadDigest {
+        metadata_sha256: Sha256::digest(metadata_envelope).into(),
+        body_len,
+        body_sha256,
+    }
+}
+
+// Keep the explicit protocol arguments in this public API: their order is
+// reflected in the relay authentication MAC and changing it would break
+// interoperability with deployed tunnel peers.
+#[allow(clippy::too_many_arguments)]
+pub fn sign_tunnel_relay_request(
+    secret: &[u8],
+    sender_instance_id: &str,
+    owner_instance_id: &str,
+    node_id: &str,
+    forwarded_by: &str,
+    rollout_probe: bool,
+    timestamp_unix_secs: u64,
+    nonce: &str,
+    payload_digest: &TunnelRelayPayloadDigest,
+) -> String {
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret).expect("HMAC accepts keys of any size");
+    update_tunnel_relay_auth_mac(
+        &mut mac,
+        sender_instance_id,
+        owner_instance_id,
+        node_id,
+        forwarded_by,
+        rollout_probe,
+        timestamp_unix_secs,
+        nonce,
+        payload_digest,
+    );
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes())
+}
+
+// The verifier mirrors `sign_tunnel_relay_request` field-for-field so the
+// authenticated transcript remains stable across crate versions.
+#[allow(clippy::too_many_arguments)]
+pub fn verify_tunnel_relay_request_signature(
+    secret: &[u8],
+    sender_instance_id: &str,
+    owner_instance_id: &str,
+    node_id: &str,
+    forwarded_by: &str,
+    rollout_probe: bool,
+    timestamp_unix_secs: u64,
+    nonce: &str,
+    payload_digest: &TunnelRelayPayloadDigest,
+    signature: &str,
+) -> bool {
+    let signature = signature.trim();
+    if signature.len() > 43 {
+        return false;
+    }
+    let Ok(signature) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(signature) else {
+        return false;
+    };
+    let Ok(mut mac) = Hmac::<Sha256>::new_from_slice(secret) else {
+        return false;
+    };
+    update_tunnel_relay_auth_mac(
+        &mut mac,
+        sender_instance_id,
+        owner_instance_id,
+        node_id,
+        forwarded_by,
+        rollout_probe,
+        timestamp_unix_secs,
+        nonce,
+        payload_digest,
+    );
+    mac.verify_slice(&signature).is_ok()
+}
+
+// This helper deliberately accepts the wire fields separately to make the
+// authenticated-field order visible next to the MAC construction.
+#[allow(clippy::too_many_arguments)]
+fn update_tunnel_relay_auth_mac(
+    mac: &mut Hmac<Sha256>,
+    sender_instance_id: &str,
+    owner_instance_id: &str,
+    node_id: &str,
+    forwarded_by: &str,
+    rollout_probe: bool,
+    timestamp_unix_secs: u64,
+    nonce: &str,
+    payload_digest: &TunnelRelayPayloadDigest,
+) {
+    mac.update(TUNNEL_RELAY_AUTH_CONTEXT);
+    update_tunnel_relay_auth_field(mac, sender_instance_id.as_bytes());
+    update_tunnel_relay_auth_field(mac, owner_instance_id.as_bytes());
+    update_tunnel_relay_auth_field(mac, node_id.as_bytes());
+    update_tunnel_relay_auth_field(mac, forwarded_by.as_bytes());
+    mac.update(&[u8::from(rollout_probe)]);
+    mac.update(&timestamp_unix_secs.to_be_bytes());
+    update_tunnel_relay_auth_field(mac, nonce.as_bytes());
+    mac.update(&payload_digest.metadata_sha256);
+    mac.update(&payload_digest.body_len.to_be_bytes());
+    mac.update(&payload_digest.body_sha256);
+}
+
+fn update_tunnel_relay_auth_field(mac: &mut Hmac<Sha256>, value: &[u8]) {
+    mac.update(&(value.len() as u64).to_be_bytes());
+    mac.update(value);
+}
 
 pub mod flags {
     pub const END_STREAM: u8 = 0x01;
@@ -111,12 +298,24 @@ impl FrameHeader {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Frame {
     pub stream_id: u32,
     pub msg_type: MsgType,
     pub flags: u8,
     pub payload: Bytes,
+}
+
+impl fmt::Debug for Frame {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Frame")
+            .field("stream_id", &self.stream_id)
+            .field("msg_type", &self.msg_type)
+            .field("flags", &self.flags)
+            .field("payload_len", &self.payload.len())
+            .finish()
+    }
 }
 
 impl Frame {
@@ -170,6 +369,12 @@ impl Frame {
                 actual: HEADER_SIZE + data.remaining(),
             });
         }
+        if data.remaining() > payload_len {
+            return Err(ProtocolError::Trailing {
+                expected: HEADER_SIZE + payload_len,
+                actual: HEADER_SIZE + data.remaining(),
+            });
+        }
 
         let msg_type =
             MsgType::from_u8(msg_type_raw).ok_or(ProtocolError::UnknownMsgType(msg_type_raw))?;
@@ -190,11 +395,13 @@ pub enum ProtocolError {
     TooShort { expected: usize, actual: usize },
     #[error("frame incomplete: expected {expected} bytes, got {actual}")]
     Incomplete { expected: usize, actual: usize },
+    #[error("frame has trailing bytes: expected {expected} bytes, got {actual}")]
+    Trailing { expected: usize, actual: usize },
     #[error("unknown message type: 0x{0:02x}")]
     UnknownMsgType(u8),
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct RequestMeta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_id: Option<String>,
@@ -219,6 +426,30 @@ pub struct RequestMeta {
     pub http1_only: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transport_profile: Option<crate::ResolvedTransportProfile>,
+}
+
+impl fmt::Debug for RequestMeta {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RequestMeta")
+            .field("provider_id", &self.provider_id)
+            .field("endpoint_id", &self.endpoint_id)
+            .field("key_id", &self.key_id)
+            .field("method", &self.method)
+            .field("url", &crate::redact_url_for_debug(&self.url))
+            .field("header_names", &self.headers.keys().collect::<Vec<_>>())
+            .field("stream", &self.stream)
+            .field("request_timeout_ms", &self.request_timeout_ms)
+            .field(
+                "stream_first_byte_timeout_ms",
+                &self.stream_first_byte_timeout_ms,
+            )
+            .field("timeout", &self.timeout)
+            .field("follow_redirects", &self.follow_redirects)
+            .field("http1_only", &self.http1_only)
+            .field("transport_profile", &self.transport_profile)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -316,10 +547,27 @@ where
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct ResponseMeta {
     pub status: u16,
     pub headers: Vec<(String, String)>,
+}
+
+impl fmt::Debug for ResponseMeta {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ResponseMeta")
+            .field("status", &self.status)
+            .field(
+                "header_names",
+                &self
+                    .headers
+                    .iter()
+                    .map(|(name, _)| name)
+                    .collect::<Vec<_>>(),
+            )
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -338,6 +586,68 @@ pub struct SettingsPayload {
     pub initial_stream_window_bytes: u32,
     pub min_window_update_bytes: u32,
     pub drain_deadline_ms: u64,
+}
+
+impl SettingsPayload {
+    pub fn is_valid(&self) -> bool {
+        self.initial_stream_window_bytes > 0
+            && u64::from(self.initial_stream_window_bytes)
+                <= MAX_TUNNEL_DECOMPRESSED_PAYLOAD_BYTES as u64
+            && self.min_window_update_bytes > 0
+            && self.min_window_update_bytes <= self.initial_stream_window_bytes
+            && self.drain_deadline_ms > 0
+    }
+
+    pub fn negotiate(&self, initial_window_bytes: u32, drain_deadline_ms: u64) -> Self {
+        let window = self
+            .initial_stream_window_bytes
+            .min(initial_window_bytes)
+            .max(1);
+        Self {
+            initial_stream_window_bytes: window,
+            min_window_update_bytes: self.min_window_update_bytes.min((window / 4).max(1)),
+            drain_deadline_ms: self.drain_deadline_ms.min(drain_deadline_ms),
+        }
+    }
+}
+
+#[cfg(test)]
+mod settings_tests {
+    use super::*;
+
+    #[test]
+    fn negotiation_bounds_window_updates_by_the_smaller_window() {
+        let settings = SettingsPayload {
+            initial_stream_window_bytes: 512 * 1024,
+            min_window_update_bytes: 128 * 1024,
+            drain_deadline_ms: 30_000,
+        };
+        let negotiated = settings.negotiate(4 * 1024 * 1024, 1000);
+        assert_eq!(negotiated.initial_stream_window_bytes, 512 * 1024);
+        assert_eq!(negotiated.min_window_update_bytes, 128 * 1024);
+        assert_eq!(negotiated.drain_deadline_ms, 1000);
+        assert!(negotiated.is_valid());
+        let tiny = settings.negotiate(1, 1);
+        assert_eq!(tiny.initial_stream_window_bytes, 1);
+        assert_eq!(tiny.min_window_update_bytes, 1);
+        assert!(tiny.is_valid());
+    }
+
+    #[test]
+    fn invalid_window_settings_are_rejected() {
+        let mut settings = SettingsPayload {
+            initial_stream_window_bytes: 1024,
+            min_window_update_bytes: 256,
+            drain_deadline_ms: 1,
+        };
+        settings.min_window_update_bytes = 1025;
+        assert!(!settings.is_valid());
+        settings.min_window_update_bytes = 0;
+        assert!(!settings.is_valid());
+        settings.initial_stream_window_bytes = u32::MAX;
+        settings.min_window_update_bytes = 1;
+        assert!(!settings.is_valid());
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -453,30 +763,47 @@ fn encode_json_control<T: serde::Serialize>(msg_type: u8, payload: &T) -> Vec<u8
 pub fn frame_payload_by_header<'a>(data: &'a [u8], header: &FrameHeader) -> Option<&'a [u8]> {
     let payload_len = header.payload_len as usize;
     let end = HEADER_SIZE.checked_add(payload_len)?;
-    if data.len() < end {
+    if data.len() != end {
         return None;
     }
     Some(&data[HEADER_SIZE..end])
 }
 
 pub fn decode_payload(data: &[u8], header: &FrameHeader) -> Result<Vec<u8>, String> {
+    decode_payload_with_limit(data, header, MAX_TUNNEL_DECOMPRESSED_PAYLOAD_BYTES)
+}
+
+pub fn decode_payload_with_limit(
+    data: &[u8],
+    header: &FrameHeader,
+    max_decoded_bytes: usize,
+) -> Result<Vec<u8>, String> {
     let payload = frame_payload_by_header(data, header)
         .ok_or_else(|| "incomplete frame payload".to_string())?;
     if header.flags & FLAG_GZIP_COMPRESSED != 0 {
-        let mut decoder = GzDecoder::new(payload);
-        let mut decoded = Vec::new();
-        decoder
-            .read_to_end(&mut decoded)
-            .map_err(|err| format!("failed to decompress payload: {err}"))?;
-        Ok(decoded)
+        decompress_gzip_with_limit(payload, max_decoded_bytes)
+            .map_err(|err| format!("failed to decompress payload: {err}"))
+    } else if payload.len() > max_decoded_bytes {
+        Err(format!(
+            "decoded tunnel payload exceeds {max_decoded_bytes} bytes"
+        ))
     } else {
         Ok(payload.to_vec())
     }
 }
 
 pub fn decompress_if_gzip(frame: &Frame) -> Result<Bytes, std::io::Error> {
+    decompress_if_gzip_with_limit(frame, MAX_TUNNEL_DECOMPRESSED_PAYLOAD_BYTES)
+}
+
+pub fn decompress_if_gzip_with_limit(
+    frame: &Frame,
+    max_decoded_bytes: usize,
+) -> Result<Bytes, std::io::Error> {
     if frame.is_gzip() {
-        decompress_gzip(&frame.payload)
+        decompress_gzip_with_limit(&frame.payload, max_decoded_bytes).map(Bytes::from)
+    } else if frame.payload.len() > max_decoded_bytes {
+        Err(decoded_payload_too_large(max_decoded_bytes))
     } else {
         Ok(frame.payload.clone())
     }
@@ -499,11 +826,43 @@ pub fn raw_payload(data: Bytes) -> (Bytes, u8) {
 
 const COMPRESS_MIN_SIZE: usize = 512;
 
-fn decompress_gzip(data: &[u8]) -> Result<Bytes, std::io::Error> {
+fn decompress_gzip_with_limit(
+    data: &[u8],
+    max_decoded_bytes: usize,
+) -> Result<Vec<u8>, std::io::Error> {
     let mut decoder = GzDecoder::new(data);
-    let mut buf = Vec::new();
-    decoder.read_to_end(&mut buf)?;
-    Ok(Bytes::from(buf))
+    let mut decoded = Vec::with_capacity(max_decoded_bytes.min(8 * 1024));
+    let mut chunk = [0_u8; 8 * 1024];
+    loop {
+        let remaining = max_decoded_bytes.saturating_sub(decoded.len());
+        let read_len = remaining.saturating_add(1).min(chunk.len());
+        let read = match decoder.read(&mut chunk[..read_len]) {
+            Ok(read) => read,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        };
+        if read == 0 {
+            return Ok(decoded);
+        }
+        if read > remaining {
+            return Err(decoded_payload_too_large(max_decoded_bytes));
+        }
+        if decoded.capacity().saturating_sub(decoded.len()) < read {
+            decoded.try_reserve_exact(read).map_err(|error| {
+                std::io::Error::other(format!(
+                    "failed to allocate decoded tunnel payload: {error}"
+                ))
+            })?;
+        }
+        decoded.extend_from_slice(&chunk[..read]);
+    }
+}
+
+fn decoded_payload_too_large(max_decoded_bytes: usize) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!("decoded tunnel payload exceeds {max_decoded_bytes} bytes"),
+    )
 }
 
 fn compress_gzip(data: &[u8]) -> Result<Bytes, std::io::Error> {
@@ -518,12 +877,15 @@ fn compress_gzip(data: &[u8]) -> Result<Bytes, std::io::Error> {
 #[cfg(test)]
 mod tests {
     use super::{
-        compress_payload, decode_payload, encode_frame, encode_goaway_v3, encode_ping,
-        encode_reset_stream, encode_window_update, raw_payload, resolve_tunnel_request_timeouts,
-        try_decode_tunnel_relay_request_meta, Frame, FrameHeader, GoAwayPayload, MsgType,
-        RequestMeta, ResetStreamPayload, WindowUpdatePayload, CURRENT_TUNNEL_PROTOCOL_VERSION,
-        CURRENT_TUNNEL_PROTOCOL_VERSION_STR, FLAG_GZIP_COMPRESSED, MAX_TUNNEL_RELAY_META_LEN,
-        REQUEST_HEADERS, TUNNEL_PROTOCOL_VERSION_HEADER,
+        compress_payload, decode_payload, decode_payload_with_limit, decompress_if_gzip_with_limit,
+        encode_frame, encode_goaway_v3, encode_ping, encode_reset_stream, encode_window_update,
+        frame_payload_by_header, raw_payload, resolve_tunnel_request_timeouts,
+        sign_tunnel_relay_request, try_decode_tunnel_relay_request_meta,
+        tunnel_relay_payload_digest, verify_tunnel_relay_request_signature, Frame, FrameHeader,
+        GoAwayPayload, MsgType, ProtocolError, RequestMeta, ResetStreamPayload, ResponseMeta,
+        WindowUpdatePayload, CURRENT_TUNNEL_PROTOCOL_VERSION, CURRENT_TUNNEL_PROTOCOL_VERSION_STR,
+        FLAG_GZIP_COMPRESSED, HEADER_SIZE, MAX_TUNNEL_RELAY_META_LEN, REQUEST_HEADERS,
+        RESPONSE_BODY, TUNNEL_PROTOCOL_VERSION_HEADER,
     };
     use bytes::Bytes;
 
@@ -629,6 +991,71 @@ mod tests {
     }
 
     #[test]
+    fn tunnel_relay_signature_binds_routing_metadata_and_body() {
+        let digest = tunnel_relay_payload_digest(b"metadata", b"request-body");
+        let signature = sign_tunnel_relay_request(
+            b"shared-secret",
+            "gateway-a",
+            "gateway-b",
+            "node-1",
+            "gateway-a",
+            false,
+            123,
+            "nonce-1",
+            &digest,
+        );
+
+        assert!(verify_tunnel_relay_request_signature(
+            b"shared-secret",
+            "gateway-a",
+            "gateway-b",
+            "node-1",
+            "gateway-a",
+            false,
+            123,
+            "nonce-1",
+            &digest,
+            &signature,
+        ));
+        assert!(!verify_tunnel_relay_request_signature(
+            b"shared-secret",
+            "gateway-a",
+            "gateway-b",
+            "node-2",
+            "gateway-a",
+            false,
+            123,
+            "nonce-1",
+            &digest,
+            &signature,
+        ));
+        assert!(!verify_tunnel_relay_request_signature(
+            b"shared-secret",
+            "gateway-a",
+            "gateway-b",
+            "node-1",
+            "gateway-a",
+            false,
+            123,
+            "nonce-1",
+            &tunnel_relay_payload_digest(b"tampered", b"request-body"),
+            &signature,
+        ));
+        assert!(!verify_tunnel_relay_request_signature(
+            b"shared-secret",
+            "gateway-a",
+            "gateway-b",
+            "node-1",
+            "gateway-a",
+            false,
+            123,
+            "nonce-1",
+            &tunnel_relay_payload_digest(b"metadata", b"tampered-body"),
+            &signature,
+        ));
+    }
+
+    #[test]
     fn request_meta_accepts_integer_timeout() {
         let raw = br#"{"method":"GET","url":"https://example.com","headers":{},"timeout":15}"#;
         let meta: RequestMeta = serde_json::from_slice(raw).expect("parse request meta");
@@ -650,6 +1077,34 @@ mod tests {
         assert_eq!(decoded.stream_id, 7);
         assert_eq!(decoded.msg_type, MsgType::ResponseBody);
         assert_eq!(decoded.payload, Bytes::from_static(b"hello"));
+    }
+
+    #[test]
+    fn frame_decode_rejects_trailing_bytes() {
+        let frame = Frame::new(7, MsgType::ResponseBody, 0, Bytes::from_static(b"hello"));
+        let mut encoded = frame.encode().to_vec();
+        encoded.extend_from_slice(b"hidden");
+
+        let error = Frame::decode(Bytes::from(encoded)).expect_err("trailing bytes rejected");
+        assert!(matches!(
+            error,
+            ProtocolError::Trailing { expected, actual }
+                if expected == HEADER_SIZE + 5 && actual == HEADER_SIZE + 11
+        ));
+    }
+
+    #[test]
+    fn frame_payload_lookup_rejects_trailing_bytes() {
+        let encoded = encode_frame(7, RESPONSE_BODY, 0, b"hello");
+        let header = FrameHeader::parse(&encoded).expect("frame header should parse");
+        let mut with_trailing = encoded.clone();
+        with_trailing.push(0);
+
+        assert!(frame_payload_by_header(&with_trailing, &header).is_none());
+        assert_eq!(
+            frame_payload_by_header(&encoded, &header),
+            Some(&encoded[HEADER_SIZE..])
+        );
     }
 
     #[test]
@@ -679,6 +1134,56 @@ mod tests {
         let header = FrameHeader::parse(&encoded).expect("frame should parse");
         let decoded = decode_payload(&encoded, &header).expect("payload should decode");
         assert_eq!(decoded, control_payload.to_vec());
+    }
+
+    #[test]
+    fn compressed_tunnel_payload_is_rejected_before_exceeding_decode_limit() {
+        const LIMIT: usize = 1024;
+
+        let at_limit = Bytes::from(vec![b'a'; LIMIT]);
+        let (at_limit_compressed, at_limit_flags) = compress_payload(at_limit.clone());
+        assert_ne!(at_limit_flags & FLAG_GZIP_COMPRESSED, 0);
+        let at_limit_frame = Frame::new(
+            1,
+            MsgType::RequestHeaders,
+            at_limit_flags,
+            at_limit_compressed,
+        );
+        assert_eq!(
+            decompress_if_gzip_with_limit(&at_limit_frame, LIMIT)
+                .expect("payload at the limit should decode"),
+            at_limit
+        );
+
+        let over_limit = Bytes::from(vec![b'a'; LIMIT + 1]);
+        let (compressed, flags) = compress_payload(over_limit);
+        assert_ne!(flags & FLAG_GZIP_COMPRESSED, 0);
+        let frame = Frame::new(1, MsgType::RequestHeaders, flags, compressed.clone());
+        let error = decompress_if_gzip_with_limit(&frame, LIMIT)
+            .expect_err("gzip expansion must be bounded");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("exceeds 1024 bytes"));
+
+        let encoded = encode_frame(1, REQUEST_HEADERS, flags, &compressed);
+        let header = FrameHeader::parse(&encoded).expect("frame should parse");
+        let error = decode_payload_with_limit(&encoded, &header, LIMIT)
+            .expect_err("compatibility decoder must apply the same bound");
+        assert!(error.contains("exceeds 1024 bytes"));
+
+        let raw_at_limit = Frame::new(1, MsgType::RequestBody, 0, Bytes::from(vec![b'x'; LIMIT]));
+        assert!(decompress_if_gzip_with_limit(&raw_at_limit, LIMIT).is_ok());
+        let raw_over_limit = Frame::new(
+            1,
+            MsgType::RequestBody,
+            0,
+            Bytes::from(vec![b'x'; LIMIT + 1]),
+        );
+        assert_eq!(
+            decompress_if_gzip_with_limit(&raw_over_limit, LIMIT)
+                .expect_err("raw payloads must use the same bound")
+                .kind(),
+            std::io::ErrorKind::InvalidData
+        );
     }
 
     #[test]
@@ -718,5 +1223,51 @@ mod tests {
         assert_eq!(goaway_payload.last_accepted_stream_id, 42);
         assert_eq!(goaway_payload.drain_deadline_ms, 30_000);
         assert_eq!(goaway_payload.reason, "rolling restart");
+    }
+
+    #[test]
+    fn debug_does_not_render_tunnel_credentials_or_payload_bytes() {
+        let meta = RequestMeta {
+            provider_id: Some("provider".into()),
+            endpoint_id: Some("endpoint".into()),
+            key_id: Some("key".into()),
+            method: "POST".into(),
+            url: "https://user:password@example.test/path?token=url-secret".into(),
+            headers: std::collections::HashMap::from([(
+                "authorization".into(),
+                "Bearer header-secret".into(),
+            )]),
+            stream: false,
+            request_timeout_ms: None,
+            stream_first_byte_timeout_ms: None,
+            timeout: 60,
+            follow_redirects: None,
+            http1_only: false,
+            transport_profile: None,
+        };
+        let response = ResponseMeta {
+            status: 200,
+            headers: vec![("set-cookie".into(), "session=response-secret".into())],
+        };
+        let frame = Frame::new(
+            1,
+            MsgType::RequestBody,
+            0,
+            Bytes::from_static(b"request-body-secret"),
+        );
+
+        let debug = format!("{meta:?} {response:?} {frame:?}");
+        for secret in [
+            "user",
+            "password",
+            "url-secret",
+            "header-secret",
+            "response-secret",
+            "request-body-secret",
+        ] {
+            assert!(!debug.contains(secret), "debug leaked {secret}: {debug}");
+        }
+        assert!(debug.contains("header_names"));
+        assert!(debug.contains("payload_len"));
     }
 }

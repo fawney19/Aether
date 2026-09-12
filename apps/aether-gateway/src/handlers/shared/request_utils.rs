@@ -93,13 +93,27 @@ pub(crate) fn sanitize_upstream_path_and_query(
     let Some(decision) = decision else {
         return base;
     };
-    if !rust_auth_terminates_provider_credentials(Some(decision))
-        || decision.route_family.as_deref() != Some("gemini")
-    {
+    if !rust_auth_terminates_provider_credentials(Some(decision)) {
         return base;
     }
 
     strip_query_param(&base, "key")
+}
+
+pub(crate) fn security_log_url_origin(value: &str) -> String {
+    let Ok(parsed) = url::Url::parse(value.trim()) else {
+        return "-".to_string();
+    };
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return "-".to_string();
+    }
+    let Some(host) = parsed.host_str() else {
+        return "-".to_string();
+    };
+    match parsed.port() {
+        Some(port) => format!("{}://{host}:{port}", parsed.scheme()),
+        None => format!("{}://{host}", parsed.scheme()),
+    }
 }
 
 pub(crate) fn strip_query_param(path_and_query: &str, key_to_strip: &str) -> String {
@@ -495,8 +509,14 @@ pub(crate) fn public_support_local_requires_buffered_body(
                     Some(
                         "api_keys_create"
                             | "api_key_install_session_create"
-                            | "management_tokens_create",
+                            | "management_tokens_create"
+                            | "vscodex_pairing_create"
+                            | "vscodex_ws_ticket_create",
                     ),
+                ) | (
+                    Some("vscodex"),
+                    http::Method::POST,
+                    Some("pairing_exchange"),
                 ) | (
                     Some("wallet"),
                     http::Method::POST,
@@ -524,4 +544,69 @@ pub(crate) fn local_proxy_route_requires_buffered_body(
     admin_proxy_local_requires_buffered_body(request_context)
         || internal_proxy_local_requires_buffered_body(request_context)
         || public_support_local_requires_buffered_body(request_context)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_upstream_path_and_query;
+    use crate::control::{GatewayControlAuthContext, GatewayControlDecision};
+
+    fn authenticated_ai_decision(
+        route_family: &str,
+        path_and_query: &str,
+    ) -> GatewayControlDecision {
+        let (path, query) = path_and_query
+            .split_once('?')
+            .map_or((path_and_query, None), |(path, query)| (path, Some(query)));
+        let mut decision = GatewayControlDecision::synthetic(
+            path,
+            Some("ai_public".to_string()),
+            Some(route_family.to_string()),
+            Some("chat".to_string()),
+            Some(format!("{route_family}:chat")),
+        );
+        decision.public_query_string = query.map(str::to_string);
+        decision.auth_context = Some(GatewayControlAuthContext {
+            user_id: "user-1".to_string(),
+            api_key_id: "key-1".to_string(),
+            username: None,
+            api_key_name: None,
+            balance_remaining: None,
+            access_allowed: true,
+            user_rate_limit: None,
+            api_key_rate_limit: None,
+            api_key_is_standalone: false,
+            admin_bypass_limits: false,
+            local_rejection: None,
+            allowed_models: None,
+            ip_rules: None,
+            verified_api_key_hash: None,
+        });
+        decision
+    }
+
+    #[test]
+    fn authenticated_ai_routes_strip_query_api_keys_across_formats() {
+        for route_family in ["openai", "claude", "gemini"] {
+            let decision = authenticated_ai_decision(
+                route_family,
+                "/v1/chat/completions?key=client-secret&stream=true",
+            );
+            assert_eq!(
+                sanitize_upstream_path_and_query(
+                    Some(&decision),
+                    "/v1/chat/completions?key=client-secret&stream=true",
+                ),
+                "/v1/chat/completions?stream=true"
+            );
+        }
+    }
+
+    #[test]
+    fn unauthenticated_routes_preserve_query_parameters() {
+        assert_eq!(
+            sanitize_upstream_path_and_query(None, "/v1/chat/completions?key=passthrough"),
+            "/v1/chat/completions?key=passthrough"
+        );
+    }
 }

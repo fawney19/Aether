@@ -48,6 +48,7 @@ ALTER TABLE ONLY public.oauth_providers ADD CONSTRAINT oauth_providers_pkey PRIM
 
 CREATE TABLE IF NOT EXISTS public.ldap_configs (
     id bigserial NOT NULL,
+    singleton_key integer DEFAULT 1 NOT NULL,
     server_url character varying(255) NOT NULL,
     bind_dn text NOT NULL,
     bind_password_encrypted text,
@@ -65,6 +66,7 @@ CREATE TABLE IF NOT EXISTS public.ldap_configs (
 );
 
 ALTER TABLE ONLY public.ldap_configs ADD CONSTRAINT ldap_configs_pkey PRIMARY KEY (id);
+ALTER TABLE ONLY public.ldap_configs ADD CONSTRAINT ldap_configs_singleton_key_key UNIQUE (singleton_key);
 
 CREATE TABLE IF NOT EXISTS public.user_oauth_links (
     id character varying(64) NOT NULL,

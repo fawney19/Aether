@@ -3,8 +3,10 @@ use super::{
     sample_models_candidate_row, sample_provider, unrestricted_models_snapshot,
     InMemoryAuthApiKeySnapshotRepository, InMemoryMinimalCandidateSelectionReadRepository,
     InMemoryProviderCatalogReadRepository, InMemoryRequestCandidateRepository,
+    InMemoryVideoTaskRepository, UpsertVideoTask, VideoTaskStatus, VideoTaskWriteRepository,
     DEVELOPMENT_ENCRYPTION_KEY,
 };
+use crate::data::GatewayDataState;
 use crate::tests::{
     any, build_router, build_router_with_state, build_state_with_execution_runtime_override, json,
     start_server, strip_sse_keepalive_comments, AppState, Arc, Body, HeaderValue, Json, Mutex,
@@ -16,6 +18,330 @@ use aether_data::repository::billing::InMemoryBillingReadRepository;
 use aether_data::repository::usage::InMemoryUsageReadRepository;
 use aether_data::repository::wallet::{InMemoryWalletRepository, StoredWalletSnapshot};
 use base64::Engine as _;
+
+const INTERNAL_REPORT_CAPABILITY_FIELD: &str = "_aether_internal_report_capability";
+const INTERNAL_REPORT_CLIENT_KEY: &str = "sk-internal-report-capability";
+const INTERNAL_REPORT_USER_ID: &str = "user-internal-report-capability";
+const INTERNAL_REPORT_API_KEY_ID: &str = "api-key-internal-report-capability";
+
+fn internal_report_planner_state() -> AppState {
+    let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+        Some(hash_api_key(INTERNAL_REPORT_CLIENT_KEY)),
+        unrestricted_models_snapshot(INTERNAL_REPORT_API_KEY_ID, INTERNAL_REPORT_USER_ID),
+    )]));
+    let candidate_repository =
+        Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
+            sample_models_candidate_row(
+                "provider-internal-report",
+                "openai",
+                "openai:chat",
+                "gpt-5",
+                10,
+            ),
+        ]));
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![sample_provider("provider-internal-report", "openai", 10)],
+        vec![sample_endpoint(
+            "endpoint-provider-internal-report",
+            "provider-internal-report",
+            "openai:chat",
+            "https://api.openai.example",
+        )],
+        vec![sample_key(
+            "key-provider-internal-report",
+            "provider-internal-report",
+            "openai:chat",
+            "sk-upstream-openai",
+        )],
+    ));
+    let request_candidate_repository = Arc::new(InMemoryRequestCandidateRepository::default());
+
+    AppState::new()
+        .expect("state should build")
+        .with_data_state_for_tests(
+            crate::data::GatewayDataState::with_auth_candidate_selection_provider_catalog_and_request_candidate_repository_for_tests(
+                auth_repository,
+                candidate_repository,
+                provider_catalog_repository,
+                request_candidate_repository,
+                DEVELOPMENT_ENCRYPTION_KEY,
+            ),
+        )
+}
+
+fn internal_video_create_planner_state(api_format: &str, model: &str) -> AppState {
+    let family = api_format
+        .split_once(':')
+        .map(|(family, _)| family)
+        .expect("video api format should contain a family");
+    let provider_id = format!("provider-internal-{family}-video");
+    let mut candidate = sample_models_candidate_row(&provider_id, family, api_format, model, 10);
+    candidate.endpoint_api_family = Some(family.to_string());
+    candidate.endpoint_kind = Some("video".to_string());
+    candidate.global_model_supports_streaming = Some(false);
+    candidate.model_supports_streaming = Some(false);
+
+    let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+        Some(hash_api_key(INTERNAL_REPORT_CLIENT_KEY)),
+        unrestricted_models_snapshot(INTERNAL_REPORT_API_KEY_ID, INTERNAL_REPORT_USER_ID),
+    )]));
+    let candidate_repository =
+        Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
+            candidate,
+        ]));
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![sample_provider(&provider_id, family, 10)],
+        vec![sample_endpoint(
+            &format!("endpoint-{provider_id}"),
+            &provider_id,
+            api_format,
+            if family == "gemini" {
+                "https://generativelanguage.googleapis.com"
+            } else {
+                "https://api.openai.example"
+            },
+        )],
+        vec![sample_key(
+            &format!("key-{provider_id}"),
+            &provider_id,
+            api_format,
+            "sk-upstream-video",
+        )],
+    ));
+    let request_candidate_repository = Arc::new(InMemoryRequestCandidateRepository::default());
+
+    AppState::new()
+        .expect("state should build")
+        .with_data_state_for_tests(
+            crate::data::GatewayDataState::with_auth_candidate_selection_provider_catalog_and_request_candidate_repository_for_tests(
+                auth_repository,
+                candidate_repository,
+                provider_catalog_repository,
+                request_candidate_repository,
+                DEVELOPMENT_ENCRYPTION_KEY,
+            ),
+        )
+}
+
+async fn internal_video_followup_planner_state(
+    api_format: &str,
+    task_id: &str,
+    short_id: Option<&str>,
+    external_task_id: &str,
+    model: &str,
+) -> AppState {
+    let family = api_format
+        .split_once(':')
+        .map(|(family, _)| family)
+        .expect("video api format should contain a family");
+    let provider_id = format!("provider-internal-{family}-video-followup");
+    let endpoint_id = format!("endpoint-{provider_id}");
+    let key_id = format!("key-{provider_id}");
+    let repository = Arc::new(InMemoryVideoTaskRepository::default());
+    repository
+        .upsert(UpsertVideoTask {
+            id: task_id.to_string(),
+            short_id: short_id.map(ToOwned::to_owned),
+            request_id: format!("request-{task_id}"),
+            user_id: Some(INTERNAL_REPORT_USER_ID.to_string()),
+            api_key_id: Some(INTERNAL_REPORT_API_KEY_ID.to_string()),
+            username: Some("alice".to_string()),
+            api_key_name: Some("default".to_string()),
+            external_task_id: Some(external_task_id.to_string()),
+            provider_id: Some(provider_id.clone()),
+            endpoint_id: Some(endpoint_id.clone()),
+            key_id: Some(key_id.clone()),
+            client_api_format: Some(api_format.to_string()),
+            provider_api_format: Some(api_format.to_string()),
+            format_converted: false,
+            model: Some(model.to_string()),
+            prompt: Some("internal capability video".to_string()),
+            original_request_body: Some(json!({
+                "model": model,
+                "prompt": "internal capability video",
+            })),
+            duration_seconds: Some(4),
+            resolution: Some("720p".to_string()),
+            aspect_ratio: Some("16:9".to_string()),
+            size: Some("1280x720".to_string()),
+            status: if family == "openai" {
+                VideoTaskStatus::Completed
+            } else {
+                VideoTaskStatus::Submitted
+            },
+            progress_percent: if family == "openai" { 100 } else { 0 },
+            progress_message: None,
+            retry_count: 0,
+            poll_interval_seconds: 10,
+            next_poll_at_unix_secs: (family != "openai").then_some(1_700_000_010),
+            poll_count: 0,
+            max_poll_count: 360,
+            created_at_unix_ms: 1_700_000_000_000,
+            submitted_at_unix_secs: Some(1_700_000_000),
+            completed_at_unix_secs: (family == "openai").then_some(1_700_000_100),
+            updated_at_unix_secs: 1_700_000_000,
+            error_code: None,
+            error_message: None,
+            video_url: None,
+            request_metadata: None,
+        })
+        .await
+        .expect("video task should seed");
+
+    let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+        Some(hash_api_key(INTERNAL_REPORT_CLIENT_KEY)),
+        unrestricted_models_snapshot(INTERNAL_REPORT_API_KEY_ID, INTERNAL_REPORT_USER_ID),
+    )]));
+    let provider_catalog_repository = crate::tests::video::video_provider_catalog_repository(
+        &provider_id,
+        family,
+        &endpoint_id,
+        api_format,
+        if family == "gemini" {
+            "https://generativelanguage.googleapis.com"
+        } else {
+            "https://api.openai.example/v1"
+        },
+        &key_id,
+        "sk-upstream-video",
+    );
+    let request_candidate_repository = Arc::new(InMemoryRequestCandidateRepository::default());
+    let data_state = crate::data::GatewayDataState::with_video_task_provider_transport_and_request_candidate_repository_for_tests(
+        repository,
+        provider_catalog_repository,
+        request_candidate_repository,
+        DEVELOPMENT_ENCRYPTION_KEY,
+    )
+    .with_auth_api_key_reader(auth_repository);
+
+    AppState::new()
+        .expect("state should build")
+        .with_video_task_truth_source_mode(crate::VideoTaskTruthSourceMode::RustAuthoritative)
+        .with_data_state_for_tests(data_state)
+}
+
+async fn issue_internal_gateway_report_capability(
+    client: &reqwest::Client,
+    gateway_url: &str,
+    endpoint: &str,
+    trace_id: &str,
+    method: &str,
+    path: &str,
+    request_headers: serde_json::Value,
+    body_json: serde_json::Value,
+) -> (String, serde_json::Value) {
+    let response = client
+        .post(format!("{gateway_url}/api/internal/gateway/{endpoint}"))
+        .json(&json!({
+            "trace_id": trace_id,
+            "method": method,
+            "path": path,
+            "headers": request_headers,
+            "body_json": body_json,
+        }))
+        .send()
+        .await
+        .expect("planner request should succeed");
+    let status = response.status();
+    let payload: serde_json::Value = response.json().await.expect("planner body should parse");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "planner should issue a report capability: {payload}"
+    );
+    let report_kind = payload["report_kind"]
+        .as_str()
+        .expect("planner should return a report kind")
+        .to_string();
+    let report_context = payload["report_context"].clone();
+    assert!(
+        report_context[INTERNAL_REPORT_CAPABILITY_FIELD]
+            .as_str()
+            .is_some_and(|value| !value.is_empty()),
+        "planner should return an opaque report capability: {payload}"
+    );
+    (report_kind, report_context)
+}
+
+async fn issue_openai_chat_report_capability(
+    client: &reqwest::Client,
+    gateway_url: &str,
+    endpoint: &str,
+    trace_id: &str,
+    stream: bool,
+) -> (String, serde_json::Value) {
+    issue_internal_gateway_report_capability(
+        client,
+        gateway_url,
+        endpoint,
+        trace_id,
+        "POST",
+        "/v1/chat/completions",
+        json!({
+            "content-type": "application/json",
+            "x-api-key": INTERNAL_REPORT_CLIENT_KEY,
+        }),
+        json!({
+            "model": "gpt-5",
+            "messages": [],
+            "stream": stream,
+        }),
+    )
+    .await
+}
+
+async fn post_internal_sync_report(
+    client: &reqwest::Client,
+    gateway_url: &str,
+    trace_id: &str,
+    report_kind: &str,
+    report_context: serde_json::Value,
+) -> reqwest::Response {
+    client
+        .post(format!("{gateway_url}/api/internal/gateway/report-sync"))
+        .json(&json!({
+            "trace_id": trace_id,
+            "report_kind": report_kind,
+            "report_context": report_context,
+            "status_code": 200,
+            "headers": {
+                "content-type": "application/json",
+            },
+            "body_json": {
+                "id": "chatcmpl-internal-capability",
+                "usage": {
+                    "input_tokens": 1,
+                    "output_tokens": 2,
+                    "total_tokens": 3,
+                }
+            }
+        }))
+        .send()
+        .await
+        .expect("report request should succeed")
+}
+
+async fn assert_internal_report_capability_rejected(response: reqwest::Response) {
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(
+        payload,
+        json!({
+            "detail": "internal gateway report context does not carry a valid planner capability",
+        })
+    );
+}
+
+async fn assert_supplied_auth_context_rejected(response: reqwest::Response) {
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(
+        payload,
+        json!({
+            "detail": "supplied auth_context is not accepted; authenticate through request headers",
+        })
+    );
+}
 
 #[tokio::test]
 async fn gateway_handles_internal_gateway_resolve_without_proxying_upstream() {
@@ -281,21 +607,11 @@ async fn gateway_handles_internal_gateway_execute_sync_locally_impl() {
         .await
         .expect("request should succeed");
 
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(
-        response
-            .headers()
-            .get(EXECUTION_PATH_HEADER)
-            .and_then(|value| value.to_str().ok()),
-        Some(EXECUTION_PATH_EXECUTION_RUNTIME_SYNC)
-    );
-    let payload: serde_json::Value = response.json().await.expect("json body should parse");
-    assert_eq!(payload["id"], "chatcmpl-local-execute-sync");
-    assert_eq!(payload["object"], "chat.completion");
+    assert_supplied_auth_context_rejected(response).await;
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
     assert_eq!(
         *execution_runtime_hits.lock().expect("mutex should lock"),
-        1
+        0
     );
 
     gateway_handle.abort();
@@ -460,22 +776,11 @@ async fn gateway_handles_internal_gateway_execute_stream_locally() {
         .await
         .expect("request should succeed");
 
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(
-        response
-            .headers()
-            .get(EXECUTION_PATH_HEADER)
-            .and_then(|value| value.to_str().ok()),
-        Some(EXECUTION_PATH_EXECUTION_RUNTIME_STREAM)
-    );
-    assert_eq!(
-        strip_sse_keepalive_comments(&response.text().await.expect("body should read")),
-        "data: one\n\ndata: [DONE]\n\n"
-    );
+    assert_supplied_auth_context_rejected(response).await;
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
     assert_eq!(
         *execution_runtime_hits.lock().expect("mutex should lock"),
-        1
+        0
     );
 
     gateway_handle.abort();
@@ -613,18 +918,25 @@ async fn gateway_handles_internal_gateway_report_sync_locally() {
     );
 
     let (upstream_url, upstream_handle) = start_server(upstream).await;
-    let gateway = build_router().expect("gateway should build");
+    let gateway = build_router_with_state(internal_report_planner_state());
     let (gateway_url, gateway_handle) = start_server(gateway).await;
+    let client = reqwest::Client::new();
+    let (report_kind, report_context) = issue_openai_chat_report_capability(
+        &client,
+        &gateway_url,
+        "decision-sync",
+        "trace-internal-report-sync",
+        false,
+    )
+    .await;
+    assert_eq!(report_kind, "openai_chat_sync_success");
 
-    let response = reqwest::Client::new()
+    let response = client
         .post(format!("{gateway_url}/api/internal/gateway/report-sync"))
         .json(&json!({
             "trace_id": "trace-internal-report-sync",
-            "report_kind": "openai_chat_sync_success",
-            "report_context": {
-                "user_id": "user-report-sync",
-                "api_key_id": "api-key-report-sync",
-            },
+            "report_kind": report_kind,
+            "report_context": report_context,
             "status_code": 200,
             "headers": {
                 "content-type": "application/json",
@@ -667,18 +979,25 @@ async fn gateway_handles_internal_gateway_report_stream_locally() {
     );
 
     let (upstream_url, upstream_handle) = start_server(upstream).await;
-    let gateway = build_router().expect("gateway should build");
+    let gateway = build_router_with_state(internal_report_planner_state());
     let (gateway_url, gateway_handle) = start_server(gateway).await;
+    let client = reqwest::Client::new();
+    let (report_kind, report_context) = issue_openai_chat_report_capability(
+        &client,
+        &gateway_url,
+        "decision-stream",
+        "trace-internal-report-stream",
+        true,
+    )
+    .await;
+    assert_eq!(report_kind, "openai_chat_stream_success");
 
-    let response = reqwest::Client::new()
+    let response = client
         .post(format!("{gateway_url}/api/internal/gateway/report-stream"))
         .json(&json!({
             "trace_id": "trace-internal-report-stream",
-            "report_kind": "openai_chat_stream_success",
-            "report_context": {
-                "user_id": "user-report-stream",
-                "api_key_id": "api-key-report-stream",
-            },
+            "report_kind": report_kind,
+            "report_context": report_context,
             "status_code": 200,
             "headers": {
                 "content-type": "text/event-stream",
@@ -699,6 +1018,181 @@ async fn gateway_handles_internal_gateway_report_stream_locally() {
 }
 
 #[tokio::test]
+async fn gateway_rejects_internal_gateway_report_with_tampered_protected_context() {
+    let gateway = build_router_with_state(internal_report_planner_state());
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+    let client = reqwest::Client::new();
+    let (report_kind, report_context) = issue_openai_chat_report_capability(
+        &client,
+        &gateway_url,
+        "decision-sync",
+        "trace-internal-report-tampered-context",
+        false,
+    )
+    .await;
+
+    for (field, forged_value) in [
+        ("user_id", json!("user-unrelated-victim")),
+        ("api_key_id", json!("api-key-unrelated-victim")),
+        ("provider_id", json!("provider-unrelated-victim")),
+        ("endpoint_id", json!("endpoint-unrelated-victim")),
+        ("key_id", json!("key-unrelated-victim")),
+        ("client_api_format", json!("gemini:video")),
+        ("task_id", json!("task-unrelated-victim")),
+        ("local_task_id", json!("local-task-unrelated-victim")),
+        ("local_short_id", json!("short-unrelated-victim")),
+        ("file_name", json!("files/unrelated-victim")),
+        ("file_key_id", json!("file-key-unrelated-victim")),
+    ] {
+        let mut tampered_context = report_context.clone();
+        tampered_context
+            .as_object_mut()
+            .expect("planner report context should be an object")
+            .insert(field.to_string(), forged_value);
+        let response = post_internal_sync_report(
+            &client,
+            &gateway_url,
+            "trace-internal-report-tampered-context",
+            &report_kind,
+            tampered_context,
+        )
+        .await;
+        assert_internal_report_capability_rejected(response).await;
+    }
+
+    gateway_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_rejects_internal_gateway_report_without_a_known_capability() {
+    let gateway = build_router_with_state(internal_report_planner_state());
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+    let client = reqwest::Client::new();
+    let (report_kind, report_context) = issue_openai_chat_report_capability(
+        &client,
+        &gateway_url,
+        "decision-sync",
+        "trace-internal-report-missing-capability",
+        false,
+    )
+    .await;
+
+    let mut missing_capability = report_context.clone();
+    missing_capability
+        .as_object_mut()
+        .expect("planner report context should be an object")
+        .remove(INTERNAL_REPORT_CAPABILITY_FIELD);
+    let response = post_internal_sync_report(
+        &client,
+        &gateway_url,
+        "trace-internal-report-missing-capability",
+        &report_kind,
+        missing_capability,
+    )
+    .await;
+    assert_internal_report_capability_rejected(response).await;
+
+    let mut unknown_capability = report_context;
+    unknown_capability[INTERNAL_REPORT_CAPABILITY_FIELD] =
+        json!("00000000-0000-4000-8000-000000000000");
+    let response = post_internal_sync_report(
+        &client,
+        &gateway_url,
+        "trace-internal-report-missing-capability",
+        &report_kind,
+        unknown_capability,
+    )
+    .await;
+    assert_internal_report_capability_rejected(response).await;
+
+    gateway_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_rejects_internal_gateway_report_for_wrong_trace_or_scope() {
+    let gateway = build_router_with_state(internal_report_planner_state());
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+    let client = reqwest::Client::new();
+    let (report_kind, report_context) = issue_openai_chat_report_capability(
+        &client,
+        &gateway_url,
+        "decision-sync",
+        "trace-internal-report-boundary",
+        false,
+    )
+    .await;
+
+    let response = post_internal_sync_report(
+        &client,
+        &gateway_url,
+        "trace-internal-report-wrong-trace",
+        &report_kind,
+        report_context.clone(),
+    )
+    .await;
+    assert_internal_report_capability_rejected(response).await;
+
+    let response = post_internal_sync_report(
+        &client,
+        &gateway_url,
+        "trace-internal-report-boundary",
+        "openai_image_sync_success",
+        report_context,
+    )
+    .await;
+    assert_internal_report_capability_rejected(response).await;
+
+    gateway_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_allows_internal_gateway_report_observation_fields() {
+    let gateway = build_router_with_state(internal_report_planner_state());
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+    let client = reqwest::Client::new();
+    let (report_kind, mut report_context) = issue_openai_chat_report_capability(
+        &client,
+        &gateway_url,
+        "decision-sync",
+        "trace-internal-report-observations",
+        false,
+    )
+    .await;
+    let context = report_context
+        .as_object_mut()
+        .expect("planner report context should be an object");
+    context.insert(
+        "provider_response_headers".to_string(),
+        json!({"x-request-id": "upstream-request-123"}),
+    );
+    context.insert(
+        "client_response_headers".to_string(),
+        json!({"content-type": "application/json"}),
+    );
+    context.insert("upstream_response".to_string(), json!({"status_code": 200}));
+    context.insert("error_flow".to_string(), json!({"attempted": false}));
+
+    let response = post_internal_sync_report(
+        &client,
+        &gateway_url,
+        "trace-internal-report-observations",
+        &report_kind,
+        report_context,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .json::<serde_json::Value>()
+            .await
+            .expect("json body should parse"),
+        json!({"ok": true})
+    );
+
+    gateway_handle.abort();
+}
+
+#[tokio::test]
 async fn gateway_handles_internal_gateway_finalize_sync_locally() {
     let upstream_hits = Arc::new(Mutex::new(0usize));
     let upstream_hits_clone = Arc::clone(&upstream_hits);
@@ -714,20 +1208,24 @@ async fn gateway_handles_internal_gateway_finalize_sync_locally() {
     );
 
     let (upstream_url, upstream_handle) = start_server(upstream).await;
-    let gateway = build_router().expect("gateway should build");
+    let gateway = build_router_with_state(internal_report_planner_state());
     let (gateway_url, gateway_handle) = start_server(gateway).await;
+    let client = reqwest::Client::new();
+    let (_report_kind, report_context) = issue_openai_chat_report_capability(
+        &client,
+        &gateway_url,
+        "plan-sync",
+        "trace-internal-finalize-sync",
+        false,
+    )
+    .await;
 
-    let response = reqwest::Client::new()
+    let response = client
         .post(format!("{gateway_url}/api/internal/gateway/finalize-sync"))
         .json(&json!({
             "trace_id": "trace-internal-finalize-sync",
             "report_kind": "openai_chat_sync_finalize",
-            "report_context": {
-                "user_id": "user-finalize-sync",
-                "api_key_id": "api-key-finalize-sync",
-                "client_api_format": "openai:chat",
-                "provider_api_format": "openai:chat",
-            },
+            "report_context": report_context,
             "status_code": 200,
             "headers": {
                 "content-type": "application/json",
@@ -781,24 +1279,37 @@ async fn gateway_handles_internal_gateway_finalize_sync_openai_video_locally() {
     );
 
     let (upstream_url, upstream_handle) = start_server(upstream).await;
-    let gateway = build_router().expect("gateway should build");
+    let gateway = build_router_with_state(internal_video_create_planner_state(
+        "openai:video",
+        "sora-2",
+    ));
     let (gateway_url, gateway_handle) = start_server(gateway).await;
+    let client = reqwest::Client::new();
+    let (report_kind, report_context) = issue_internal_gateway_report_capability(
+        &client,
+        &gateway_url,
+        "decision-sync",
+        "trace-internal-finalize-video",
+        "POST",
+        "/v1/videos",
+        json!({
+            "authorization": format!("Bearer {INTERNAL_REPORT_CLIENT_KEY}"),
+            "content-type": "application/json",
+        }),
+        json!({
+            "model": "sora-2",
+            "prompt": "make a trailer",
+        }),
+    )
+    .await;
+    assert_eq!(report_kind, "openai_video_create_sync_finalize");
 
-    let response = reqwest::Client::new()
+    let response = client
         .post(format!("{gateway_url}/api/internal/gateway/finalize-sync"))
         .json(&json!({
             "trace_id": "trace-internal-finalize-video",
-            "report_kind": "openai_video_create_sync_finalize",
-            "report_context": {
-                "user_id": "user-finalize-video",
-                "api_key_id": "api-key-finalize-video",
-                "model": "sora-2",
-                "local_task_id": "local-video-task-123",
-                "local_created_at": 1712345678u64,
-                "original_request_body": {
-                    "prompt": "make a trailer"
-                }
-            },
+            "report_kind": report_kind,
+            "report_context": report_context,
             "status_code": 200,
             "headers": {
                 "content-type": "application/json",
@@ -821,18 +1332,15 @@ async fn gateway_handles_internal_gateway_finalize_sync_openai_video_locally() {
         "true"
     );
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
-    assert_eq!(
-        payload,
-        json!({
-            "id": "local-video-task-123",
-            "object": "video",
-            "status": "queued",
-            "progress": 0,
-            "created_at": 1712345678u64,
-            "model": "sora-2",
-            "prompt": "make a trailer",
-        })
-    );
+    assert!(payload["id"]
+        .as_str()
+        .is_some_and(|value| !value.is_empty() && value != "vid-ext-123"));
+    assert_eq!(payload["object"], "video");
+    assert_eq!(payload["status"], "queued");
+    assert_eq!(payload["progress"], 0);
+    assert!(payload["created_at"].as_u64().is_some());
+    assert_eq!(payload["model"], "sora-2");
+    assert_eq!(payload["prompt"], "make a trailer");
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();
@@ -855,20 +1363,34 @@ async fn gateway_handles_internal_gateway_finalize_sync_gemini_video_locally() {
     );
 
     let (upstream_url, upstream_handle) = start_server(upstream).await;
-    let gateway = build_router().expect("gateway should build");
+    let gateway =
+        build_router_with_state(internal_video_create_planner_state("gemini:video", "veo-3"));
     let (gateway_url, gateway_handle) = start_server(gateway).await;
+    let client = reqwest::Client::new();
+    let (report_kind, report_context) = issue_internal_gateway_report_capability(
+        &client,
+        &gateway_url,
+        "plan-sync",
+        "trace-internal-finalize-gemini-video",
+        "POST",
+        "/v1beta/models/veo-3:predictLongRunning",
+        json!({
+            "content-type": "application/json",
+            "x-goog-api-key": INTERNAL_REPORT_CLIENT_KEY,
+        }),
+        json!({
+            "prompt": "make a gemini trailer",
+        }),
+    )
+    .await;
+    assert_eq!(report_kind, "gemini_video_create_sync_finalize");
 
-    let response = reqwest::Client::new()
+    let response = client
         .post(format!("{gateway_url}/api/internal/gateway/finalize-sync"))
         .json(&json!({
             "trace_id": "trace-internal-finalize-gemini-video",
-            "report_kind": "gemini_video_create_sync_finalize",
-            "report_context": {
-                "user_id": "user-finalize-gemini-video",
-                "api_key_id": "api-key-finalize-gemini-video",
-                "model": "veo-3",
-                "local_short_id": "gemini-short-123"
-            },
+            "report_kind": report_kind,
+            "report_context": report_context,
             "status_code": 200,
             "headers": {
                 "content-type": "application/json",
@@ -892,14 +1414,11 @@ async fn gateway_handles_internal_gateway_finalize_sync_gemini_video_locally() {
         "true"
     );
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
-    assert_eq!(
-        payload,
-        json!({
-            "name": "models/veo-3/operations/gemini-short-123",
-            "done": false,
-            "metadata": {},
-        })
-    );
+    assert!(payload["name"]
+        .as_str()
+        .is_some_and(|value| value.starts_with("models/veo-3/operations/")));
+    assert_eq!(payload["done"], false);
+    assert_eq!(payload["metadata"], json!({}));
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();
@@ -922,17 +1441,39 @@ async fn gateway_handles_internal_gateway_finalize_sync_openai_video_delete_loca
     );
 
     let (upstream_url, upstream_handle) = start_server(upstream).await;
-    let gateway = build_router().expect("gateway should build");
+    let state = internal_video_followup_planner_state(
+        "openai:video",
+        "video-delete-123",
+        None,
+        "ext-video-delete-123",
+        "sora-2",
+    )
+    .await;
+    let gateway = build_router_with_state(state);
     let (gateway_url, gateway_handle) = start_server(gateway).await;
+    let client = reqwest::Client::new();
+    let (report_kind, report_context) = issue_internal_gateway_report_capability(
+        &client,
+        &gateway_url,
+        "decision-sync",
+        "trace-internal-finalize-video-delete",
+        "DELETE",
+        "/v1/videos/video-delete-123",
+        json!({
+            "authorization": format!("Bearer {INTERNAL_REPORT_CLIENT_KEY}"),
+            "content-type": "application/json",
+        }),
+        json!({}),
+    )
+    .await;
+    assert_eq!(report_kind, "openai_video_delete_sync_finalize");
 
-    let response = reqwest::Client::new()
+    let response = client
         .post(format!("{gateway_url}/api/internal/gateway/finalize-sync"))
         .json(&json!({
             "trace_id": "trace-internal-finalize-video-delete",
-            "report_kind": "openai_video_delete_sync_finalize",
-            "report_context": {
-                "task_id": "video-delete-123"
-            },
+            "report_kind": report_kind,
+            "report_context": report_context,
             "status_code": 200,
             "headers": {
                 "content-type": "application/json",
@@ -982,18 +1523,39 @@ async fn gateway_handles_internal_gateway_finalize_sync_gemini_video_cancel_loca
     );
 
     let (upstream_url, upstream_handle) = start_server(upstream).await;
-    let gateway = build_router().expect("gateway should build");
+    let state = internal_video_followup_planner_state(
+        "gemini:video",
+        "gemini-cancel-task-record",
+        Some("gemini-cancel-123"),
+        "operations/ext-gemini-cancel-123",
+        "veo-3",
+    )
+    .await;
+    let gateway = build_router_with_state(state);
     let (gateway_url, gateway_handle) = start_server(gateway).await;
+    let client = reqwest::Client::new();
+    let (report_kind, report_context) = issue_internal_gateway_report_capability(
+        &client,
+        &gateway_url,
+        "plan-sync",
+        "trace-internal-finalize-gemini-video-cancel",
+        "POST",
+        "/v1beta/models/veo-3/operations/gemini-cancel-123:cancel",
+        json!({
+            "content-type": "application/json",
+            "x-goog-api-key": INTERNAL_REPORT_CLIENT_KEY,
+        }),
+        json!({}),
+    )
+    .await;
+    assert_eq!(report_kind, "gemini_video_cancel_sync_finalize");
 
-    let response = reqwest::Client::new()
+    let response = client
         .post(format!("{gateway_url}/api/internal/gateway/finalize-sync"))
         .json(&json!({
             "trace_id": "trace-internal-finalize-gemini-video-cancel",
-            "report_kind": "gemini_video_cancel_sync_finalize",
-            "report_context": {
-                "task_id": "gemini-cancel-123",
-                "model": "veo-3"
-            },
+            "report_kind": report_kind,
+            "report_context": report_context,
             "status_code": 200,
             "headers": {
                 "content-type": "application/json",
@@ -1148,17 +1710,7 @@ async fn gateway_handles_internal_gateway_decision_sync_locally_with_supplied_au
         .await
         .expect("request should succeed");
 
-    assert_eq!(response.status(), StatusCode::OK);
-    let payload: serde_json::Value = response.json().await.expect("json body should parse");
-    assert_eq!(payload["action"], "execution_runtime_sync_decision");
-    assert_eq!(payload["decision_kind"], "openai_chat_sync");
-    assert_eq!(payload["provider_id"], "provider-1");
-    assert_eq!(payload["endpoint_id"], "endpoint-provider-1");
-    assert_eq!(payload["key_id"], "key-provider-1");
-    assert_eq!(payload["provider_api_format"], "openai:chat");
-    assert_eq!(payload["client_api_format"], "openai:chat");
-    assert_eq!(payload["model_name"], "gpt-5");
-    assert_eq!(payload["auth_context"], serde_json::Value::Null);
+    assert_supplied_auth_context_rejected(response).await;
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();
@@ -1267,10 +1819,7 @@ async fn gateway_internal_decision_sync_revalidates_supplied_auth_context_wallet
         .await
         .expect("request should succeed");
 
-    assert_eq!(response.status(), StatusCode::OK);
-    let payload: serde_json::Value = response.json().await.expect("json body should parse");
-    assert_eq!(payload["action"], "fallback_plan");
-    assert_eq!(payload["auth_context"], serde_json::Value::Null);
+    assert_supplied_auth_context_rejected(response).await;
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();
@@ -1301,7 +1850,10 @@ async fn gateway_returns_internal_gateway_decision_sync_fallback_with_resolved_a
     let gateway = build_router_with_state(
         AppState::new()
             .expect("gateway should build")
-            .with_auth_api_key_data_reader_for_tests(auth_repository),
+            .with_data_state_for_tests(
+                GatewayDataState::with_auth_api_key_reader_for_tests(auth_repository)
+                    .with_system_default_routing_group_for_tests(),
+            ),
     );
     let (gateway_url, gateway_handle) = start_server(gateway).await;
 
@@ -1418,14 +1970,7 @@ async fn gateway_handles_internal_gateway_decision_stream_locally_with_supplied_
         .await
         .expect("request should succeed");
 
-    assert_eq!(response.status(), StatusCode::OK);
-    let payload: serde_json::Value = response.json().await.expect("json body should parse");
-    assert_eq!(payload["action"], "execution_runtime_stream_decision");
-    assert_eq!(payload["decision_kind"], "openai_chat_stream");
-    assert_eq!(payload["provider_id"], "provider-stream-1");
-    assert_eq!(payload["endpoint_id"], "endpoint-provider-stream-1");
-    assert_eq!(payload["key_id"], "key-provider-stream-1");
-    assert_eq!(payload["auth_context"], serde_json::Value::Null);
+    assert_supplied_auth_context_rejected(response).await;
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();
@@ -1517,17 +2062,7 @@ async fn gateway_handles_internal_gateway_plan_sync_locally_with_supplied_auth_c
         .await
         .expect("request should succeed");
 
-    assert_eq!(response.status(), StatusCode::OK);
-    let payload: serde_json::Value = response.json().await.expect("json body should parse");
-    assert_eq!(payload["action"], "execution_runtime_sync");
-    assert_eq!(payload["plan_kind"], "openai_chat_sync");
-    assert_eq!(payload["plan"]["provider_id"], "provider-plan-sync-1");
-    assert_eq!(
-        payload["plan"]["endpoint_id"],
-        "endpoint-provider-plan-sync-1"
-    );
-    assert_eq!(payload["plan"]["key_id"], "key-provider-plan-sync-1");
-    assert_eq!(payload["auth_context"], serde_json::Value::Null);
+    assert_supplied_auth_context_rejected(response).await;
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();
@@ -1620,18 +2155,7 @@ async fn gateway_handles_internal_gateway_plan_stream_locally_with_supplied_auth
         .await
         .expect("request should succeed");
 
-    assert_eq!(response.status(), StatusCode::OK);
-    let payload: serde_json::Value = response.json().await.expect("json body should parse");
-    assert_eq!(payload["action"], "execution_runtime_stream");
-    assert_eq!(payload["plan_kind"], "openai_chat_stream");
-    assert_eq!(payload["plan"]["provider_id"], "provider-plan-stream-1");
-    assert_eq!(
-        payload["plan"]["endpoint_id"],
-        "endpoint-provider-plan-stream-1"
-    );
-    assert_eq!(payload["plan"]["key_id"], "key-provider-plan-stream-1");
-    assert_eq!(payload["plan"]["stream"], true);
-    assert_eq!(payload["auth_context"], serde_json::Value::Null);
+    assert_supplied_auth_context_rejected(response).await;
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();

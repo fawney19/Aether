@@ -11,8 +11,9 @@ pub use auth::{
     VERTEX_SERVICE_ACCOUNT_AUTH_HEADER, VERTEX_SERVICE_ACCOUNT_PROVIDER_TYPE,
 };
 pub use context::{
-    is_vertex_api_key_transport_context, is_vertex_service_account_transport_context,
-    is_vertex_transport_context, looks_like_vertex_ai_host, uses_vertex_api_key_query_auth,
+    is_valid_vertex_region, is_vertex_api_key_transport_context,
+    is_vertex_service_account_transport_context, is_vertex_transport_context,
+    looks_like_vertex_ai_host, uses_vertex_api_key_query_auth,
 };
 pub use policy::{
     local_vertex_api_key_gemini_transport_unsupported_reason_with_network,

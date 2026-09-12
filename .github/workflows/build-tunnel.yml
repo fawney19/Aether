@@ -6,7 +6,8 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  actions: read
+  contents: read
 
 concurrency:
   group: build-tunnel-${{ github.ref }}
@@ -17,7 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Ensure tunnel tag matches Cargo version
         shell: bash
@@ -78,10 +79,10 @@ jobs:
             use_cross: false
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
           targets: ${{ matrix.target }}
 
@@ -89,14 +90,14 @@ jobs:
         run: rustup target add ${{ matrix.target }}
 
       - name: Rust cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
           workspaces: apps/aether-tunnel -> target
           key: ${{ matrix.target }}
 
       - name: Install cross
         if: matrix.use_cross
-        uses: taiki-e/install-action@cross
+        uses: taiki-e/install-action@1ae7257be536a92d9218a6b343dc6e6ba650f7e1 # cross
 
       - name: Build
         working-directory: apps/aether-tunnel
@@ -122,9 +123,10 @@ jobs:
         run: |
           cd target/${{ matrix.target }}/release
           7z a ../../../aether-tunnel-${{ matrix.name }}.zip aether-tunnel.exe
+          tar czf ../../../aether-tunnel-${{ matrix.name }}.tar.gz aether-tunnel.exe
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
           name: aether-tunnel-${{ matrix.name }}
           path: |
@@ -137,9 +139,14 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      actions: read
+      attestations: write
+      contents: write
+      id-token: write
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
           merge-multiple: true
           path: artifacts
@@ -147,6 +154,20 @@ jobs:
       - name: Generate checksums
         working-directory: artifacts
         run: sha256sum aether-tunnel-* > SHA256SUMS.txt
+
+      - name: Attest tunnel release provenance
+        id: attest-release
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            artifacts/aether-tunnel-*.tar.gz
+            artifacts/aether-tunnel-*.zip
+            artifacts/SHA256SUMS.txt
+
+      - name: Bundle tunnel release provenance
+        env:
+          ATTESTATION_BUNDLE: ${{ steps.attest-release.outputs.bundle-path }}
+        run: install -m 0644 "${ATTESTATION_BUNDLE}" artifacts/AETHER_TUNNEL_RELEASE_PROVENANCE.sigstore.json
 
       - name: Delete stale draft releases for tag
         env:
@@ -170,12 +191,13 @@ jobs:
           done <<< "${draft_ids}"
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           name: "${{ github.ref_name }}"
           generate_release_notes: true
           files: |
             artifacts/aether-tunnel-*
+            artifacts/AETHER_TUNNEL_RELEASE_PROVENANCE.sigstore.json
             artifacts/SHA256SUMS.txt
           fail_on_unmatched_files: true
 
@@ -183,8 +205,10 @@ jobs:
     needs: release
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           ref: main
 

@@ -2,12 +2,17 @@ use crate::handlers::admin::request::AdminAppState;
 use crate::handlers::admin::shared::unix_secs_to_rfc3339;
 use crate::handlers::shared::round_to;
 use crate::GatewayError;
-use serde_json::json;
+use aether_data::repository::wallet::stored_timestamp_unix_secs;
+use serde_json::{json, Map, Value};
 
 #[derive(Clone)]
 pub(in super::super) struct AdminWalletOwnerSummary {
     pub(in super::super) owner_type: &'static str,
     pub(in super::super) owner_name: Option<String>,
+}
+
+fn api_key_display_prefix(api_key_id: &str) -> String {
+    api_key_id.chars().take(8).collect()
 }
 
 pub(in super::super) fn build_admin_wallet_payment_order_payload(
@@ -92,7 +97,7 @@ pub(in super::super) fn wallet_owner_summary_from_fields(
             owner_type: "api_key",
             owner_name: api_key_name
                 .filter(|value| !value.trim().is_empty())
-                .or_else(|| Some(format!("Key-{}", &api_key_id[..api_key_id.len().min(8)]))),
+                .or_else(|| Some(format!("Key-{}", api_key_display_prefix(api_key_id)))),
         };
     }
     AdminWalletOwnerSummary {
@@ -121,7 +126,7 @@ pub(in super::super) async fn resolve_admin_wallet_owner_summary(
             .find(|snapshot| snapshot.api_key_id == api_key_id)
             .and_then(|snapshot| snapshot.api_key_name)
             .filter(|value| !value.trim().is_empty())
-            .or_else(|| Some(format!("Key-{}", &api_key_id[..api_key_id.len().min(8)])));
+            .or_else(|| Some(format!("Key-{}", api_key_display_prefix(api_key_id))));
         Ok(AdminWalletOwnerSummary {
             owner_type: "api_key",
             owner_name,
@@ -234,6 +239,104 @@ pub(in super::super) async fn enrich_admin_wallet_package_summary(
     Ok(())
 }
 
+fn admin_refund_proof_identifier(value: Option<&Value>, max_bytes: usize) -> Option<String> {
+    let value = value?.as_str()?.trim();
+    if value.is_empty()
+        || value.len() > max_bytes
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        return None;
+    }
+    Some(value.to_string())
+}
+
+fn admin_gateway_refund_proof_projection(value: &Value) -> Option<Value> {
+    let source = value.as_object()?;
+    let mut projected = Map::new();
+
+    if let Some(gateway) = source
+        .get("gateway")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+        .filter(|value| matches!(value.as_str(), "alipay" | "wxpay"))
+    {
+        projected.insert("gateway".to_string(), json!(gateway));
+    }
+    for (key, max_bytes) in [
+        ("id", 128usize),
+        ("order_no", 64usize),
+        ("refund_no", 64usize),
+    ] {
+        if let Some(value) = admin_refund_proof_identifier(source.get(key), max_bytes) {
+            projected.insert(key.to_string(), json!(value));
+        }
+    }
+    if let Some(status) = source
+        .get("status")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+        .and_then(|value| match value.as_str() {
+            "success" | "succeeded" => Some("success"),
+            "pending" | "processing" => Some("processing"),
+            "failed" | "closed" | "abnormal" => Some("failed"),
+            _ => None,
+        })
+    {
+        projected.insert("status".to_string(), json!(status));
+    }
+    if let Some(amount) = source
+        .get("amount")
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite() && *value > 0.0)
+    {
+        projected.insert("amount".to_string(), json!(amount));
+    }
+    if let Some(currency) = source
+        .get("currency")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| value.len() == 3 && value.bytes().all(|byte| byte.is_ascii_alphabetic()))
+        .map(str::to_ascii_uppercase)
+    {
+        projected.insert("currency".to_string(), json!(currency));
+    }
+    if let Some(processed_at) = source
+        .get("processed_at")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| chrono::DateTime::parse_from_rfc3339(value).is_ok())
+    {
+        projected.insert("processed_at".to_string(), json!(processed_at));
+    }
+
+    (!projected.is_empty()).then_some(Value::Object(projected))
+}
+
+pub(in super::super) fn admin_wallet_payout_proof_projection(
+    payout_proof: Option<&Value>,
+) -> Option<Value> {
+    let source = payout_proof?.as_object()?;
+    let mut projected = source.clone();
+    if source.contains_key("gateway_refund") {
+        match source
+            .get("gateway_refund")
+            .and_then(admin_gateway_refund_proof_projection)
+        {
+            Some(gateway_refund) => {
+                projected.insert("gateway_refund".to_string(), gateway_refund);
+            }
+            None => {
+                projected.remove("gateway_refund");
+            }
+        }
+    }
+    Some(Value::Object(projected))
+}
+
 pub(in super::super) fn build_admin_wallet_refund_payload(
     wallet: &aether_data::repository::wallet::StoredWalletSnapshot,
     owner: &AdminWalletOwnerSummary,
@@ -258,13 +361,94 @@ pub(in super::super) fn build_admin_wallet_refund_payload(
         "gateway_refund_id": refund.gateway_refund_id.clone(),
         "payout_method": refund.payout_method.clone(),
         "payout_reference": refund.payout_reference.clone(),
-        "payout_proof": refund.payout_proof.clone(),
+        "payout_proof": admin_wallet_payout_proof_projection(refund.payout_proof.as_ref()),
         "requested_by": refund.requested_by.clone(),
         "approved_by": refund.approved_by.clone(),
         "processed_by": refund.processed_by.clone(),
-        "created_at": unix_secs_to_rfc3339(refund.created_at_unix_ms),
+        "created_at": unix_secs_to_rfc3339(stored_timestamp_unix_secs(refund.created_at_unix_ms)),
         "updated_at": unix_secs_to_rfc3339(refund.updated_at_unix_secs),
         "processed_at": refund.processed_at_unix_secs.and_then(unix_secs_to_rfc3339),
         "completed_at": refund.completed_at_unix_secs.and_then(unix_secs_to_rfc3339),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::admin_wallet_payout_proof_projection;
+    use serde_json::json;
+
+    #[test]
+    fn admin_refund_proof_projection_removes_historical_gateway_payloads() {
+        let proof = json!({
+            "channel": "manual",
+            "gateway_refund": {
+                "gateway": "WXPAY",
+                "id": "refund-1",
+                "status": "SUCCESS",
+                "order_no": "order-1",
+                "refund_no": "request-1",
+                "amount": 8.5,
+                "currency": "cny",
+                "processed_at": "2026-08-27T12:00:00Z",
+                "payload": {
+                    "authorization": "Bearer payment-secret",
+                    "url": "https://internal.example/refund?token=secret",
+                    "payer": {"openid": "openid-secret"},
+                    "credential": "gateway-credential"
+                },
+                "message": "upstream secret message"
+            }
+        });
+
+        let projection = admin_wallet_payout_proof_projection(Some(&proof))
+            .expect("object payout proof should be projected");
+        assert_eq!(projection["channel"], "manual");
+        assert_eq!(projection["gateway_refund"]["gateway"], "wxpay");
+        assert_eq!(projection["gateway_refund"]["status"], "success");
+        assert_eq!(
+            projection["gateway_refund"]
+                .as_object()
+                .expect("gateway proof should be an object")
+                .len(),
+            8
+        );
+        let encoded = projection.to_string();
+        for sensitive in [
+            "payment-secret",
+            "?token=secret",
+            "openid-secret",
+            "gateway-credential",
+            "upstream secret message",
+            "payload",
+            "authorization",
+            "payer",
+            "openid",
+            "credential",
+            "message",
+        ] {
+            assert!(!encoded.contains(sensitive));
+        }
+    }
+
+    #[test]
+    fn admin_refund_proof_projection_drops_mistyped_gateway_fields() {
+        let proof = json!({
+            "operator": "finance",
+            "gateway_refund": {
+                "gateway": {"credential": "secret"},
+                "id": ["refund-1"],
+                "status": "unknown-secret-status",
+                "order_no": "https://example.test/?token=secret",
+                "refund_no": 123,
+                "amount": "8.5",
+                "currency": "CNY?token=secret",
+                "processed_at": "Bearer secret"
+            }
+        });
+
+        let projection = admin_wallet_payout_proof_projection(Some(&proof))
+            .expect("manual payout proof should remain available");
+        assert_eq!(projection, json!({"operator": "finance"}));
+        assert!(!projection.to_string().contains("secret"));
+    }
 }

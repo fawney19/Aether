@@ -84,6 +84,13 @@ pub struct StoredVideoTask {
 }
 
 impl StoredVideoTask {
+    pub fn effective_api_format(&self) -> Option<&str> {
+        effective_video_task_api_format(
+            self.client_api_format.as_deref(),
+            self.provider_api_format.as_deref(),
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: String,
@@ -168,7 +175,7 @@ impl StoredVideoTask {
             None => None,
         };
 
-        Ok(Self {
+        let mut task = Self {
             id,
             short_id,
             request_id,
@@ -206,7 +213,79 @@ impl StoredVideoTask {
             error_message,
             video_url,
             request_metadata,
-        })
+        };
+        task.sanitize_persisted_diagnostics();
+        Ok(task)
+    }
+
+    fn sanitize_persisted_diagnostics(&mut self) {
+        self.original_request_body = None;
+        self.progress_message = None;
+        self.error_code = sanitize_video_task_error_code(self.error_code.take());
+        self.error_message = None;
+        self.video_url = sanitize_video_task_url(self.video_url.take());
+        self.request_metadata = None;
+    }
+
+    /// Verifies that an update still refers to the task identity persisted for `id`.
+    ///
+    /// These fields select the owner, upstream target, request shape, or immutable
+    /// creation identity of a video task. Repository implementations must reject an
+    /// upsert that changes any of them instead of treating possession of `id` as
+    /// permission to replace the row.
+    ///
+    /// `created_at_unix_ms` is deliberately not compared because some snapshot
+    /// projections recompute it. Repositories preserve the already stored creation
+    /// time while accepting an otherwise matching lifecycle update.
+    pub fn ensure_immutable_identity_matches(
+        &self,
+        incoming: &UpsertVideoTask,
+    ) -> Result<(), crate::DataLayerError> {
+        let mismatched_field = if self.id != incoming.id {
+            Some("id")
+        } else if self.short_id != incoming.short_id {
+            Some("short_id")
+        } else if self.request_id != incoming.request_id {
+            Some("request_id")
+        } else if self.user_id != incoming.user_id {
+            Some("user_id")
+        } else if self.api_key_id != incoming.api_key_id {
+            Some("api_key_id")
+        } else if self.external_task_id != incoming.external_task_id {
+            Some("external_task_id")
+        } else if self.provider_id != incoming.provider_id {
+            Some("provider_id")
+        } else if self.endpoint_id != incoming.endpoint_id {
+            Some("endpoint_id")
+        } else if self.key_id != incoming.key_id {
+            Some("key_id")
+        } else if self.client_api_format != incoming.client_api_format {
+            Some("client_api_format")
+        } else if self.provider_api_format != incoming.provider_api_format {
+            Some("provider_api_format")
+        } else if self.format_converted != incoming.format_converted {
+            Some("format_converted")
+        } else if self.model != incoming.model {
+            Some("model")
+        } else if self.duration_seconds != incoming.duration_seconds {
+            Some("duration_seconds")
+        } else if self.resolution != incoming.resolution {
+            Some("resolution")
+        } else if self.aspect_ratio != incoming.aspect_ratio {
+            Some("aspect_ratio")
+        } else if self.size != incoming.size {
+            Some("size")
+        } else {
+            None
+        };
+
+        match mismatched_field {
+            Some(field) => Err(crate::DataLayerError::InvalidInput(format!(
+                "video task {} conflicts with persisted immutable field {field}",
+                incoming.id
+            ))),
+            None => Ok(()),
+        }
     }
 }
 
@@ -252,7 +331,17 @@ pub struct UpsertVideoTask {
 }
 
 impl UpsertVideoTask {
-    pub fn into_stored(self) -> StoredVideoTask {
+    pub fn sanitize_for_persistence(&mut self) {
+        self.original_request_body = None;
+        self.progress_message = None;
+        self.error_code = sanitize_video_task_error_code(self.error_code.take());
+        self.error_message = None;
+        self.video_url = sanitize_video_task_url(self.video_url.take());
+        self.request_metadata = None;
+    }
+
+    pub fn into_stored(mut self) -> StoredVideoTask {
+        self.sanitize_for_persistence();
         StoredVideoTask {
             id: self.id,
             short_id: self.short_id,
@@ -293,6 +382,57 @@ impl UpsertVideoTask {
             request_metadata: self.request_metadata,
         }
     }
+}
+
+fn sanitize_video_task_error_code(value: Option<String>) -> Option<String> {
+    let value = value?.trim().to_ascii_lowercase();
+    if value.is_empty() {
+        return None;
+    }
+    Some(match value.as_str() {
+        "authentication_error"
+        | "cancelled"
+        | "content_policy_violation"
+        | "expired"
+        | "invalid_request"
+        | "not_found"
+        | "permission_denied"
+        | "poll_permanent_error"
+        | "poll_timeout"
+        | "provider_error"
+        | "rate_limit_exceeded"
+        | "server_error"
+        | "unknown" => value,
+        _ => "provider_error".to_string(),
+    })
+}
+
+fn sanitize_video_task_url(value: Option<String>) -> Option<String> {
+    let mut url = url::Url::parse(value?.trim()).ok()?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return None;
+    }
+
+    url.set_fragment(None);
+    Some(url.into())
+}
+
+fn effective_video_task_api_format<'a>(
+    client_api_format: Option<&'a str>,
+    provider_api_format: Option<&'a str>,
+) -> Option<&'a str> {
+    provider_api_format
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            client_api_format
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        })
 }
 
 impl From<StoredVideoTask> for UpsertVideoTask {
@@ -374,6 +514,15 @@ pub trait VideoTaskReadRepository: Send + Sync {
     async fn find(
         &self,
         key: VideoTaskLookupKey<'_>,
+    ) -> Result<Option<StoredVideoTask>, crate::DataLayerError>;
+
+    /// Resolve a public task identifier only when the persisted task belongs
+    /// to `user_id`. The lookup key and owner predicate must be evaluated by
+    /// one repository operation.
+    async fn find_for_user(
+        &self,
+        key: VideoTaskLookupKey<'_>,
+        user_id: &str,
     ) -> Result<Option<StoredVideoTask>, crate::DataLayerError>;
 
     async fn list_active(
@@ -468,7 +617,7 @@ fn coerce_optional_unix_secs(
 
 #[cfg(test)]
 mod tests {
-    use super::{StoredVideoTask, VideoTaskStatus};
+    use super::{StoredVideoTask, UpsertVideoTask, VideoTaskStatus};
 
     #[allow(clippy::type_complexity)]
     fn base_new_args() -> (
@@ -614,5 +763,232 @@ mod tests {
             args.28, args.29, args.30, args.31, args.32, args.33, args.34, args.35, args.36,
         )
         .is_err());
+    }
+
+    #[test]
+    fn immutable_identity_validation_rejects_every_protected_field() {
+        let task = UpsertVideoTask {
+            id: "task-1".to_string(),
+            short_id: Some("short-1".to_string()),
+            request_id: "request-1".to_string(),
+            user_id: Some("user-1".to_string()),
+            api_key_id: Some("api-key-1".to_string()),
+            username: None,
+            api_key_name: None,
+            external_task_id: Some("external-1".to_string()),
+            provider_id: Some("provider-1".to_string()),
+            endpoint_id: Some("endpoint-1".to_string()),
+            key_id: Some("key-1".to_string()),
+            client_api_format: Some("openai:video".to_string()),
+            provider_api_format: Some("gemini:video".to_string()),
+            format_converted: true,
+            model: Some("video-model".to_string()),
+            prompt: None,
+            original_request_body: None,
+            duration_seconds: Some(4),
+            resolution: Some("720p".to_string()),
+            aspect_ratio: Some("16:9".to_string()),
+            size: Some("1280x720".to_string()),
+            status: VideoTaskStatus::Submitted,
+            progress_percent: 0,
+            progress_message: None,
+            retry_count: 0,
+            poll_interval_seconds: 10,
+            next_poll_at_unix_secs: Some(10),
+            poll_count: 0,
+            max_poll_count: 360,
+            created_at_unix_ms: 1,
+            submitted_at_unix_secs: Some(1),
+            completed_at_unix_secs: None,
+            updated_at_unix_secs: 1,
+            error_code: None,
+            error_message: None,
+            video_url: None,
+            request_metadata: None,
+        };
+        let stored = task.clone().into_stored();
+
+        let same_identity_update = UpsertVideoTask {
+            status: VideoTaskStatus::Completed,
+            progress_percent: 100,
+            created_at_unix_ms: 2,
+            completed_at_unix_secs: Some(2),
+            updated_at_unix_secs: 2,
+            ..task.clone()
+        };
+        stored
+            .ensure_immutable_identity_matches(&same_identity_update)
+            .expect("mutable state changes should keep the same identity");
+
+        macro_rules! assert_identity_conflict {
+            ($field:ident, $value:expr) => {{
+                let mut conflicting = task.clone();
+                conflicting.$field = $value;
+                let error = stored
+                    .ensure_immutable_identity_matches(&conflicting)
+                    .expect_err(concat!(stringify!($field), " should be immutable"));
+                assert!(
+                    error
+                        .to_string()
+                        .contains(concat!("immutable field ", stringify!($field))),
+                    "unexpected error for {}: {error}",
+                    stringify!($field)
+                );
+            }};
+        }
+
+        assert_identity_conflict!(id, "task-2".to_string());
+        assert_identity_conflict!(short_id, Some("short-2".to_string()));
+        assert_identity_conflict!(request_id, "request-2".to_string());
+        assert_identity_conflict!(user_id, Some("user-2".to_string()));
+        assert_identity_conflict!(api_key_id, Some("api-key-2".to_string()));
+        assert_identity_conflict!(external_task_id, Some("external-2".to_string()));
+        assert_identity_conflict!(provider_id, Some("provider-2".to_string()));
+        assert_identity_conflict!(endpoint_id, Some("endpoint-2".to_string()));
+        assert_identity_conflict!(key_id, Some("key-2".to_string()));
+        assert_identity_conflict!(client_api_format, Some("gemini:video".to_string()));
+        assert_identity_conflict!(provider_api_format, Some("openai:video".to_string()));
+        assert_identity_conflict!(format_converted, false);
+        assert_identity_conflict!(model, Some("other-model".to_string()));
+        assert_identity_conflict!(duration_seconds, Some(8));
+        assert_identity_conflict!(resolution, Some("1080p".to_string()));
+        assert_identity_conflict!(aspect_ratio, Some("9:16".to_string()));
+        assert_identity_conflict!(size, Some("1920x1080".to_string()));
+    }
+
+    #[test]
+    fn upsert_sanitization_drops_sensitive_diagnostics() {
+        let mut task = UpsertVideoTask {
+            id: "task-1".to_string(),
+            short_id: None,
+            request_id: "request-1".to_string(),
+            user_id: Some("user-1".to_string()),
+            api_key_id: Some("api-key-1".to_string()),
+            username: Some("private-user-name".to_string()),
+            api_key_name: Some("private-key-name".to_string()),
+            external_task_id: Some("upstream-1".to_string()),
+            provider_id: Some("provider-1".to_string()),
+            endpoint_id: Some("endpoint-1".to_string()),
+            key_id: Some("key-1".to_string()),
+            client_api_format: Some("openai:video".to_string()),
+            provider_api_format: Some("openai:video".to_string()),
+            format_converted: false,
+            model: Some("video-model".to_string()),
+            prompt: Some("prompt".to_string()),
+            original_request_body: Some(serde_json::json!({
+                "prompt": "private prompt",
+                "api_key": "secret"
+            })),
+            duration_seconds: Some(4),
+            resolution: Some("720p".to_string()),
+            aspect_ratio: Some("16:9".to_string()),
+            size: Some("1280x720".to_string()),
+            status: VideoTaskStatus::Failed,
+            progress_percent: 100,
+            progress_message: Some("provider response: secret".to_string()),
+            retry_count: 1,
+            poll_interval_seconds: 10,
+            next_poll_at_unix_secs: None,
+            poll_count: 2,
+            max_poll_count: 360,
+            created_at_unix_ms: 1,
+            submitted_at_unix_secs: Some(1),
+            completed_at_unix_secs: Some(2),
+            updated_at_unix_secs: 2,
+            error_code: Some("secret provider code".to_string()),
+            error_message: Some("Authorization: Bearer secret".to_string()),
+            video_url: Some("https://cdn.example.test/video.mp4?token=secret".to_string()),
+            request_metadata: Some(serde_json::json!({
+                "rust_local_snapshot": {"transport": {"headers": {"authorization": "secret"}}},
+                "poll_raw_response": {"error": "secret"}
+            })),
+        };
+
+        task.sanitize_for_persistence();
+
+        assert_eq!(task.user_id.as_deref(), Some("user-1"));
+        assert_eq!(task.api_key_id.as_deref(), Some("api-key-1"));
+        assert_eq!(task.username.as_deref(), Some("private-user-name"));
+        assert_eq!(task.api_key_name.as_deref(), Some("private-key-name"));
+        assert_eq!(task.original_request_body, None);
+        assert_eq!(task.progress_message, None);
+        assert_eq!(task.error_message, None);
+        assert_eq!(task.error_code.as_deref(), Some("provider_error"));
+        assert_eq!(
+            task.video_url.as_deref(),
+            Some("https://cdn.example.test/video.mp4?token=secret")
+        );
+        assert_eq!(task.request_metadata, None);
+        assert_eq!(task.prompt.as_deref(), Some("prompt"));
+        assert_eq!(task.duration_seconds, Some(4));
+    }
+
+    #[test]
+    fn stored_task_preserves_prompt_and_signed_download_url() {
+        let mut args = base_new_args();
+        args.12 = Some("gemini:video".to_string());
+        args.15 = Some("private prompt".to_string());
+        args.35 = Some(
+            "https://cdn.example.test/video.mp4?key=secret&alt=media&signature=private#fragment"
+                .to_string(),
+        );
+        let task = StoredVideoTask::new(
+            args.0, args.1, args.2, args.3, args.4, args.5, args.6, args.7, args.8, args.9,
+            args.10, args.11, args.12, args.13, args.14, args.15, args.16, args.17, args.18,
+            args.19, args.20, args.21, args.22, args.23, args.24, args.25, args.26, args.27,
+            args.28, args.29, args.30, args.31, args.32, args.33, args.34, args.35, args.36,
+        )
+        .expect("stored task should build");
+        assert_eq!(task.prompt.as_deref(), Some("private prompt"));
+        assert_eq!(
+            task.video_url.as_deref(),
+            Some("https://cdn.example.test/video.mp4?key=secret&alt=media&signature=private")
+        );
+    }
+
+    #[test]
+    fn stored_task_preserves_download_url_when_legacy_provider_format_is_blank() {
+        let mut args = base_new_args();
+        args.11 = Some("gemini:video".to_string());
+        args.12 = Some("   ".to_string());
+        args.35 =
+            Some("https://cdn.example.test/video.mp4?key=secret&alt=media#fragment".to_string());
+        let task = StoredVideoTask::new(
+            args.0, args.1, args.2, args.3, args.4, args.5, args.6, args.7, args.8, args.9,
+            args.10, args.11, args.12, args.13, args.14, args.15, args.16, args.17, args.18,
+            args.19, args.20, args.21, args.22, args.23, args.24, args.25, args.26, args.27,
+            args.28, args.29, args.30, args.31, args.32, args.33, args.34, args.35, args.36,
+        )
+        .expect("legacy stored task should build");
+
+        assert_eq!(
+            task.video_url.as_deref(),
+            Some("https://cdn.example.test/video.mp4?key=secret&alt=media")
+        );
+    }
+
+    #[test]
+    fn video_url_sanitization_preserves_signed_query_encoding_and_order() {
+        let video_url =
+            "https://cdn.example.test/video.mp4?signature=a%2Fb%2Bc%3D&part=2&part=1&name=a%20b";
+        assert_eq!(
+            super::sanitize_video_task_url(Some(format!("{video_url}#fragment"))).as_deref(),
+            Some(video_url)
+        );
+    }
+
+    #[test]
+    fn video_url_sanitization_rejects_invalid_schemes_and_embedded_credentials() {
+        for video_url in [
+            "file:///etc/passwd",
+            "javascript:alert(1)",
+            "data:video/mp4;base64,AAAA",
+            "https://user:password@cdn.example.test/video.mp4",
+            "https://user@cdn.example.test/video.mp4",
+            "/relative/video.mp4",
+            "not a url",
+        ] {
+            assert!(super::sanitize_video_task_url(Some(video_url.to_string())).is_none());
+        }
     }
 }

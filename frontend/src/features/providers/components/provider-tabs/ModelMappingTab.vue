@@ -345,18 +345,22 @@
     :request-body-draft="testRequestBodyDraft"
     :request-body-reset-value="testRequestBodyResetValue"
     :request-body-error="testRequestBodyError"
-    :start-disabled="!selectedTestEndpoint || !!testRequestHeadersError || !!testRequestBodyError"
+    :key-options="testKeyOptions"
+    :selected-key-ids="selectedTestKeyIds"
+    :key-options-loading="loadingTestKeys"
+    :start-disabled="loadingTestKeys || !selectedTestEndpoint || !!testRequestHeadersError || !!testRequestBodyError"
     @close="handleTestDialogClose"
     @back="handleTestDialogBack"
     @select-endpoint="handleSelectTestEndpoint"
     @start="handleStartMappingTest"
     @update:request-headers-draft="testRequestHeadersDraft = $event"
     @update:request-body-draft="testRequestBodyDraft = $event"
+    @update:selected-key-ids="selectedTestKeyIds = $event"
   />
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { useSmartPagination } from '@/composables/useSmartPagination'
 import { useModelTest } from '@/composables/useModelTest'
 import { Tag, Plus, Edit, Trash2, ChevronRight, Loader2, Play } from 'lucide-vue-next'
@@ -374,7 +378,7 @@ import {
   type ProviderMappingPreviewResponse,
 } from '@/api/endpoints'
 import { formatApiFormat } from '@/api/endpoints/types/api-format'
-import { type EndpointAPIKey } from '@/api/endpoints/keys'
+import { getProviderKeys, type EndpointAPIKey } from '@/api/endpoints/keys'
 import { updateModel } from '@/api/endpoints/models'
 import { useI18n } from '@/i18n'
 import { parseApiError } from '@/utils/errorParser'
@@ -391,6 +395,7 @@ import {
   isModelTestableApiFormat,
   isModelTestableEndpoint,
   modelTestMappingScopeMatchesEndpoint,
+  modelTestKeySupportsEndpoint,
   parseModelTestRequestHeadersDraft,
   parseModelTestRequestBodyDraft,
   selectPreferredModelTestEndpoint,
@@ -452,6 +457,56 @@ const testingModelName = ref<string | null>(null)
 const testingSourceModel = ref<Model | null>(null)
 const preselectedModelId = ref<string | null>(null)
 const selectedTestEndpoint = ref<ProviderEndpoint | null>(null)
+const selectedTestKeyIds = ref<string[]>([])
+const testKeys = ref<EndpointAPIKey[] | null>(null)
+const loadingTestKeys = ref(false)
+let testKeysLoadVersion = 0
+const testKeyOptions = computed(() => {
+  const endpoint = selectedTestEndpoint.value
+  if (!endpoint) return []
+  return [...new Map((testKeys.value ?? props.providerKeys ?? []).map(key => [key.id, key])).values()]
+    .filter(key => modelTestKeySupportsEndpoint(key, endpoint, props.provider.provider_type))
+    .sort((left, right) => left.internal_priority - right.internal_priority)
+    .map(key => ({
+      value: key.id,
+      label: [
+        key.name?.trim() || key.api_key_masked?.trim() || key.id,
+        key.name?.trim() ? key.api_key_masked?.trim() : '',
+        key.auth_type?.trim(),
+      ].filter(Boolean).join(' · '),
+    }))
+})
+
+function pruneSelectedTestKeyIds() {
+  const allowed = new Set(testKeyOptions.value.map(option => option.value))
+  selectedTestKeyIds.value = [...new Set(selectedTestKeyIds.value.filter(id => allowed.has(id)))]
+}
+
+async function loadTestKeys() {
+  const version = ++testKeysLoadVersion
+  const providerId = props.provider.id
+  loadingTestKeys.value = true
+  try {
+    const keys = await getProviderKeys(providerId)
+    if (version === testKeysLoadVersion && providerId === props.provider.id) {
+      testKeys.value = keys
+    }
+  } catch (err: unknown) {
+    if (version === testKeysLoadVersion && providerId === props.provider.id) {
+      showError(parseApiError(err, '加载测试 Key 失败'), '错误')
+    }
+  } finally {
+    if (version === testKeysLoadVersion) loadingTestKeys.value = false
+  }
+}
+
+watch(testKeyOptions, pruneSelectedTestKeyIds)
+watch(() => props.provider.id, () => {
+  testKeysLoadVersion += 1
+  testKeys.value = null
+  selectedTestKeyIds.value = []
+  loadingTestKeys.value = false
+})
 const testRequestHeadersDraft = ref('')
 const testRequestHeadersResetValue = ref('')
 const testRequestBodyDraft = ref('')
@@ -789,11 +844,15 @@ async function onDialogSaved() {
 
 function handleTestDialogClose() {
   modelTest.resetState()
+  testKeysLoadVersion += 1
+  loadingTestKeys.value = false
+  testKeys.value = null
   pendingMappingKey.value = null
   testingModelName.value = null
   testingSourceModel.value = null
   testingMapping.value = null
   selectedTestEndpoint.value = null
+  selectedTestKeyIds.value = []
   mappingTestEndpoints.value = null
   testRequestHeadersDraft.value = ''
   testRequestHeadersResetValue.value = ''
@@ -811,6 +870,7 @@ function handleSelectTestEndpoint(endpointId: string) {
   const endpoint = selectableTestEndpoints.value.find(item => item.id === endpointId)
   if (!endpoint) return
   selectedTestEndpoint.value = endpoint
+  pruneSelectedTestKeyIds()
   syncMappingTestRequestBody()
 }
 
@@ -839,6 +899,8 @@ function runMappingTest(
     return
   }
   pendingMappingKey.value = testingKey
+  selectedTestKeyIds.value = []
+  void loadTestKeys()
   modelTest.testResult.value = null
   modelTest.dialogOpen.value = true
   testingMapping.value = null
@@ -884,7 +946,7 @@ function syncMappingTestRequestBody() {
 }
 
 async function handleStartMappingTest() {
-  if (modelTest.testing.value || !testingModelName.value) return
+  if (modelTest.testing.value || loadingTestKeys.value || !testingModelName.value) return
   const endpoint = selectedTestEndpoint.value || selectableTestEndpoints.value[0]
   if (!endpoint) {
     showError('请选择要测试的端点')
@@ -905,6 +967,7 @@ async function handleStartMappingTest() {
 
   const currentMappingKey = pendingMappingKey.value || testingModelName.value
   testingMapping.value = pendingMappingKey.value ? currentMappingKey : null
+  pruneSelectedTestKeyIds()
   await modelTest.startTest({
     mode: 'direct',
     modelName: testingModelName.value,
@@ -912,6 +975,7 @@ async function handleStartMappingTest() {
     apiFormat: endpoint.api_format,
     endpointId: endpoint.id,
     endpointBaseUrl: endpoint.base_url,
+    apiKeyIds: selectedTestKeyIds.value,
     requestHeaders,
     requestBody,
   })

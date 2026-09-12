@@ -16,9 +16,10 @@ impl VideoTaskService {
     pub(crate) fn with_file_store(
         mode: VideoTaskTruthSourceMode,
         path: impl Into<PathBuf>,
+        encryption_key: impl Into<String>,
     ) -> std::io::Result<Self> {
         Ok(Self(
-            aether_video_tasks_core::VideoTaskService::with_file_store(mode, path)?,
+            aether_video_tasks_core::VideoTaskService::with_file_store(mode, path, encryption_key)?,
         ))
     }
 
@@ -40,6 +41,43 @@ impl VideoTaskService {
             body_json,
             auth_context.map(|value| value.user_id.as_str()),
             auth_context.map(|value| value.api_key_id.as_str()),
+            trace_id,
+        )
+    }
+
+    pub(crate) fn prepare_follow_up_sync_plan_for_user(
+        &self,
+        plan_kind: &str,
+        request_path: &str,
+        body_json: Option<&serde_json::Value>,
+        auth_context: Option<&GatewayControlAuthContext>,
+        trace_id: &str,
+    ) -> Option<LocalVideoTaskFollowUpPlan> {
+        self.0.prepare_follow_up_sync_plan_for_user(
+            plan_kind,
+            request_path,
+            body_json,
+            auth_context.map(|value| value.user_id.as_str()),
+            auth_context.map(|value| value.api_key_id.as_str()),
+            trace_id,
+        )
+    }
+
+    pub(crate) fn prepare_follow_up_sync_plan_for_user_id(
+        &self,
+        plan_kind: &str,
+        request_path: &str,
+        body_json: Option<&serde_json::Value>,
+        user_id: &str,
+        api_key_id: Option<&str>,
+        trace_id: &str,
+    ) -> Option<LocalVideoTaskFollowUpPlan> {
+        self.0.prepare_follow_up_sync_plan_for_user(
+            plan_kind,
+            request_path,
+            body_json,
+            Some(user_id),
+            api_key_id,
             trace_id,
         )
     }

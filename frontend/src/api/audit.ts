@@ -57,13 +57,13 @@ export const auditApi = {
     limit?: number
     offset?: number
   }): Promise<AuditLogsResponse> {
-    const response = await apiClient.get('/api/monitoring/my-audit-logs', { params: filters })
+    const response = await apiClient.get<Record<string, unknown>>('/api/monitoring/my-audit-logs', { params: filters })
     return normalizeAuditResponse(response.data)
   },
 
   // 获取所有审计日志 (管理员)
   async getAuditLogs(filters?: AuditFilters): Promise<AuditLogsResponse> {
-    const response = await apiClient.get('/api/admin/monitoring/audit-logs', { params: filters })
+    const response = await apiClient.get<Record<string, unknown>>('/api/admin/monitoring/audit-logs', { params: filters })
     return normalizeAuditResponse(response.data)
   },
 
@@ -72,7 +72,10 @@ export const auditApi = {
     activities: AuditLog[]
     count: number
   }> {
-    const response = await apiClient.get('/api/admin/monitoring/suspicious-activities', {
+    const response = await apiClient.get<{
+    activities: AuditLog[]
+    count: number
+  }>('/api/admin/monitoring/suspicious-activities', {
       params: { hours, limit }
     })
     return response.data
@@ -83,7 +86,10 @@ export const auditApi = {
     analysis: Record<string, unknown>
     recommendations: string[]
   }> {
-    const response = await apiClient.get(`/api/admin/monitoring/user-behavior/${userId}`, {
+    const response = await apiClient.get<{
+    analysis: Record<string, unknown>
+    recommendations: string[]
+  }>(`/api/admin/monitoring/user-behavior/${userId}`, {
       params: { days }
     })
     return response.data

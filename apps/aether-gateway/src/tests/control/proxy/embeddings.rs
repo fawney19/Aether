@@ -10,7 +10,7 @@ use serde_json::json;
 
 use super::super::{
     any, build_router_with_state, build_state_with_execution_runtime_override, hash_api_key,
-    sample_currently_usable_auth_snapshot, sample_endpoint, sample_key, sample_provider,
+    sample_bound_key, sample_currently_usable_auth_snapshot, sample_endpoint, sample_provider,
     start_server, AppState, GatewayDataState, InMemoryAuthApiKeySnapshotRepository,
     InMemoryProviderCatalogReadRepository, Json, Router,
 };
@@ -74,7 +74,7 @@ fn embedding_success_state(execution_runtime_url: String) -> AppState {
             "openai:embedding",
             "https://api.openai.example",
         )],
-        vec![sample_key(
+        vec![sample_bound_key(
             "key-upstream-embedding",
             "provider-embedding",
             "openai:embedding",
@@ -135,7 +135,7 @@ fn gemini_embedding_success_state(
             "gemini:embedding",
             "https://generativelanguage.googleapis.com/v1beta",
         )],
-        vec![sample_key(
+        vec![sample_bound_key(
             "key-upstream-gemini-embedding",
             "provider-gemini-embedding",
             "gemini:embedding",
@@ -175,7 +175,7 @@ fn vertex_gemini_embedding_success_state(execution_runtime_url: String) -> AppSt
         ]));
     let mut provider = sample_provider("provider-vertex-gemini-embedding", "Vertex AI", 1);
     provider.provider_type = "vertex_ai".to_string();
-    let mut key = sample_key(
+    let mut key = sample_bound_key(
         "key-upstream-vertex-gemini-embedding",
         "provider-vertex-gemini-embedding",
         "gemini:embedding",
@@ -233,7 +233,7 @@ fn aliyun_embedding_success_state(execution_runtime_url: String) -> AppState {
             "aliyun:multimodal_embedding",
             "https://dashscope.aliyuncs.com",
         )],
-        vec![sample_key(
+        vec![sample_bound_key(
             "key-upstream-aliyun-embedding",
             "provider-aliyun-embedding",
             "aliyun:multimodal_embedding",
@@ -301,13 +301,13 @@ fn mixed_embedding_success_state(execution_runtime_url: String) -> AppState {
             ),
         ],
         vec![
-            sample_key(
+            sample_bound_key(
                 "key-upstream-embedding",
                 "provider-embedding",
                 "openai:embedding",
                 "sk-upstream-embedding",
             ),
-            sample_key(
+            sample_bound_key(
                 "key-upstream-aliyun-embedding",
                 "provider-aliyun-embedding",
                 "aliyun:multimodal_embedding",

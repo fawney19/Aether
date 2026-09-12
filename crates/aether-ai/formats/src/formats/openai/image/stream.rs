@@ -1,17 +1,33 @@
 use std::collections::BTreeSet;
 
 use aether_contracts::{ExecutionStreamTerminalSummary, StandardizedUsage};
-use base64::Engine as _;
 use serde_json::{Map, Value};
+use sha2::{Digest as _, Sha256};
 
 use crate::contracts::OPENAI_IMAGE_SYNC_FINALIZE_REPORT_KIND;
+use crate::formats::openai::image::{
+    bounded_openai_image_revised_prompt, is_safe_openai_image_base64_payload,
+    normalize_openai_image_output_format,
+};
 use crate::formats::openai::responses::codex::CODEX_OPENAI_IMAGE_DEFAULT_OUTPUT_FORMAT;
 use crate::formats::shared::sse::{encode_done_sse, encode_json_sse};
 use crate::formats::shared::stream_core::common::{
     build_openai_chat_chunk, build_openai_chat_finish_chunk,
     build_openai_chat_usage_chunk_with_cache,
 };
-use crate::formats::shared::AiSurfaceFinalizeError;
+use crate::formats::shared::{decode_sync_report_body_base64, AiSurfaceFinalizeError};
+
+// Bound parser carry state while still allowing the largest supported image
+// records. A 3840x2160 RGBA image is about 33 MiB before base64 encoding, so
+// 64 MiB leaves room for encoding and event metadata. This is a per-stream
+// parser limit, not a response-body or concurrency limit.
+const MAX_STREAM_REWRITE_BUFFER_BYTES: usize = 64 * 1024 * 1024;
+
+// OpenAI image responses currently allow at most a small number of output
+// images per request. Keep enough room for valid multi-image responses while
+// preventing an untrusted provider from growing the de-duplication sets
+// without bound.
+const MAX_IMAGE_OUTPUT_KEYS: usize = 64;
 
 #[derive(Default)]
 pub struct OpenAiImageStreamState {
@@ -49,7 +65,8 @@ struct OpenAiImageChatFrame {
 #[derive(Default)]
 pub struct OpenAiImageStreamTerminalState {
     event_name: Option<String>,
-    data_lines: Vec<String>,
+    data: Option<String>,
+    buffered_data_bytes: usize,
     response_id: Option<String>,
     model: Option<String>,
     image_count: u64,
@@ -65,14 +82,15 @@ impl OpenAiImageStreamState {
         report_context: &Value,
         chunk: &[u8],
     ) -> Result<Vec<u8>, AiSurfaceFinalizeError> {
-        self.buffered.extend_from_slice(chunk);
-        let mut output = Vec::new();
-        while let Some(block_end) = find_sse_block_end(&self.buffered) {
-            let block = self.buffered.drain(..block_end).collect::<Vec<_>>();
-            output.extend(self.transform_block(report_context, &block)?);
-            drain_sse_separator(&mut self.buffered);
-        }
-        Ok(output)
+        let mut buffered = std::mem::take(&mut self.buffered);
+        let result = process_bounded_sse_chunk(
+            &mut buffered,
+            chunk,
+            MAX_STREAM_REWRITE_BUFFER_BYTES,
+            |block| self.transform_block(report_context, block),
+        );
+        self.buffered = buffered;
+        result
     }
 
     pub fn finish(&mut self, report_context: &Value) -> Result<Vec<u8>, AiSurfaceFinalizeError> {
@@ -91,16 +109,21 @@ impl OpenAiImageStreamState {
         let text = std::str::from_utf8(block)
             .map_err(|err| AiSurfaceFinalizeError::new(err.to_string()))?;
         let mut event_name = None::<String>;
-        let mut data_lines = Vec::new();
+        let mut data = None::<String>;
         for raw_line in text.lines() {
             let line = raw_line.trim_end_matches('\r');
             if let Some(value) = line.strip_prefix("event:") {
                 event_name = Some(value.trim().to_string());
             } else if let Some(value) = line.strip_prefix("data:") {
-                data_lines.push(value.trim().to_string());
+                let had_data = data.is_some();
+                let data_value = data.get_or_insert_with(String::new);
+                if had_data {
+                    data_value.push('\n');
+                }
+                data_value.push_str(value.trim());
             }
         }
-        let data = data_lines.join("\n");
+        let data = data.unwrap_or_default();
         if data.is_empty() || data == "[DONE]" {
             return Ok(Vec::new());
         }
@@ -137,7 +160,7 @@ impl OpenAiImageStreamState {
             .or_else(|| event.get("b64_json"))
             .and_then(Value::as_str)
             .map(str::trim)
-            .filter(|value| !value.is_empty())
+            .filter(|value| is_safe_openai_image_base64_payload(value))
         else {
             return Ok(Vec::new());
         };
@@ -181,7 +204,7 @@ impl OpenAiImageStreamState {
         let Some(result) = item.get("result").and_then(Value::as_str).map(str::trim) else {
             return Ok(Vec::new());
         };
-        if result.is_empty() {
+        if !is_safe_openai_image_base64_payload(result) {
             return Ok(Vec::new());
         }
         self.latest_image = Some(OpenAiImageFrame {
@@ -274,14 +297,15 @@ impl OpenAiImageChatStreamState {
         report_context: &Value,
         chunk: &[u8],
     ) -> Result<Vec<u8>, AiSurfaceFinalizeError> {
-        self.buffered.extend_from_slice(chunk);
-        let mut output = Vec::new();
-        while let Some(block_end) = find_sse_block_end(&self.buffered) {
-            let block = self.buffered.drain(..block_end).collect::<Vec<_>>();
-            output.extend(self.transform_block(report_context, &block)?);
-            drain_sse_separator(&mut self.buffered);
-        }
-        Ok(output)
+        let mut buffered = std::mem::take(&mut self.buffered);
+        let result = process_bounded_sse_chunk(
+            &mut buffered,
+            chunk,
+            MAX_STREAM_REWRITE_BUFFER_BYTES,
+            |block| self.transform_block(report_context, block),
+        );
+        self.buffered = buffered;
+        result
     }
 
     pub fn finish(&mut self, report_context: &Value) -> Result<Vec<u8>, AiSurfaceFinalizeError> {
@@ -305,16 +329,21 @@ impl OpenAiImageChatStreamState {
         let text = std::str::from_utf8(block)
             .map_err(|err| AiSurfaceFinalizeError::new(err.to_string()))?;
         let mut event_name = None::<String>;
-        let mut data_lines = Vec::new();
+        let mut data = None::<String>;
         for raw_line in text.lines() {
             let line = raw_line.trim_end_matches('\r');
             if let Some(value) = line.strip_prefix("event:") {
                 event_name = Some(value.trim().to_string());
             } else if let Some(value) = line.strip_prefix("data:") {
-                data_lines.push(value.trim().to_string());
+                let had_data = data.is_some();
+                let data_value = data.get_or_insert_with(String::new);
+                if had_data {
+                    data_value.push('\n');
+                }
+                data_value.push_str(value.trim());
             }
         }
-        let data = data_lines.join("\n");
+        let data = data.unwrap_or_default();
         if data.is_empty() || data == "[DONE]" {
             return Ok(Vec::new());
         }
@@ -355,16 +384,15 @@ impl OpenAiImageChatStreamState {
             return Ok(Vec::new());
         }
         if let Some(result) = item.get("result").and_then(Value::as_str).map(str::trim) {
-            if !result.is_empty() {
+            if is_safe_openai_image_base64_payload(result) {
                 let key = image_chat_output_key(item, result);
-                if self.emitted_image_keys.insert(key) {
+                if insert_bounded_image_key(&mut self.emitted_image_keys, key) {
                     self.latest_image = Some(OpenAiImageChatFrame {
                         b64_json: result.to_string(),
                         output_format: item
                             .get("output_format")
                             .and_then(Value::as_str)
-                            .map(str::trim)
-                            .filter(|value| !value.is_empty())
+                            .and_then(normalize_openai_image_output_format)
                             .map(ToOwned::to_owned),
                     });
                     self.emitted_image_count = self.emitted_image_count.saturating_add(1);
@@ -417,15 +445,14 @@ impl OpenAiImageChatStreamState {
             .or_else(|| event.get("result"))
             .and_then(Value::as_str)
             .map(str::trim)
-            .filter(|value| !value.is_empty())
+            .filter(|value| is_safe_openai_image_base64_payload(value))
         {
             self.latest_image = Some(OpenAiImageChatFrame {
                 b64_json: result.to_string(),
                 output_format: event
                     .get("output_format")
                     .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
+                    .and_then(normalize_openai_image_output_format)
                     .map(ToOwned::to_owned),
             });
             self.emitted_image_count = self.emitted_image_count.max(1);
@@ -592,7 +619,11 @@ impl OpenAiImageStreamTerminalState {
         if let Some(value) = trimmed.strip_prefix("event:") {
             self.event_name = Some(value.trim().to_string());
         } else if let Some(value) = trimmed.strip_prefix("data:") {
-            self.data_lines.push(value.trim().to_string());
+            append_bounded_sse_data_line(
+                &mut self.data,
+                &mut self.buffered_data_bytes,
+                value.trim(),
+            )?;
         }
         Ok(self.latest_summary(report_context))
     }
@@ -609,11 +640,12 @@ impl OpenAiImageStreamTerminalState {
     }
 
     fn flush_event(&mut self, report_context: &Value) -> Result<(), AiSurfaceFinalizeError> {
-        if self.data_lines.is_empty() {
+        let Some(data) = self.data.take() else {
+            self.buffered_data_bytes = 0;
             self.event_name = None;
             return Ok(());
-        }
-        let data = std::mem::take(&mut self.data_lines).join("\n");
+        };
+        self.buffered_data_bytes = 0;
         let event_name = self.event_name.take();
         if data.is_empty() || data == "[DONE]" {
             return Ok(());
@@ -660,12 +692,12 @@ impl OpenAiImageStreamTerminalState {
             .get("result")
             .and_then(Value::as_str)
             .map(str::trim)
-            .filter(|value| !value.is_empty())
+            .filter(|value| is_safe_openai_image_base64_payload(value))
         else {
             return;
         };
         let key = image_chat_output_key(item, result);
-        if self.image_keys.insert(key) {
+        if insert_bounded_image_key(&mut self.image_keys, key) {
             self.image_count = self.image_count.saturating_add(1);
         }
     }
@@ -695,7 +727,7 @@ impl OpenAiImageStreamTerminalState {
                 .or_else(|| event.get("result"))
                 .and_then(Value::as_str)
                 .map(str::trim)
-                .is_some_and(|value| !value.is_empty())
+                .is_some_and(is_safe_openai_image_base64_payload)
         {
             self.image_count = 1;
         }
@@ -759,7 +791,7 @@ fn completed_response_image_chat_frame(response: &Value) -> Option<OpenAiImageCh
         .filter(|item| item.get("type").and_then(Value::as_str) == Some("image_generation_call"))
         .find_map(|item| {
             let result = item.get("result").and_then(Value::as_str)?.trim();
-            if result.is_empty() {
+            if !is_safe_openai_image_base64_payload(result) {
                 return None;
             }
             Some(OpenAiImageChatFrame {
@@ -767,8 +799,7 @@ fn completed_response_image_chat_frame(response: &Value) -> Option<OpenAiImageCh
                 output_format: item
                     .get("output_format")
                     .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
+                    .and_then(normalize_openai_image_output_format)
                     .map(ToOwned::to_owned),
             })
         })
@@ -785,19 +816,33 @@ fn completed_response_image_count(response: &Value) -> u64 {
             item.get("result")
                 .and_then(Value::as_str)
                 .map(str::trim)
-                .is_some_and(|value| !value.is_empty())
+                .is_some_and(is_safe_openai_image_base64_payload)
         })
+        .take(MAX_IMAGE_OUTPUT_KEYS)
         .count() as u64
 }
 
 fn image_chat_output_key(item: &Map<String, Value>, result: &str) -> String {
-    item.get("id")
+    let (source, value) = item
+        .get("id")
         .or_else(|| item.get("call_id"))
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| result.to_string())
+        .map(|value| ("id", value))
+        .unwrap_or(("result", result.trim()));
+    let mut digest = Sha256::new();
+    digest.update(source.as_bytes());
+    digest.update([0]);
+    digest.update(value.as_bytes());
+    format!("{source}:{:x}", digest.finalize())
+}
+
+fn insert_bounded_image_key(keys: &mut BTreeSet<String>, key: String) -> bool {
+    if keys.contains(&key) || keys.len() >= MAX_IMAGE_OUTPUT_KEYS {
+        return false;
+    }
+    keys.insert(key)
 }
 
 fn openai_image_stream_standardized_usage(
@@ -895,19 +940,13 @@ fn openai_image_usage_to_standardized_usage(value: &Value) -> Option<Standardize
 }
 
 fn image_chat_markdown(frame: &OpenAiImageChatFrame) -> String {
-    let mime_type = match frame
-        .output_format
-        .as_deref()
-        .unwrap_or("png")
-        .trim()
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "jpg" | "jpeg" => "image/jpeg".to_string(),
-        "webp" => "image/webp".to_string(),
-        "png" => "image/png".to_string(),
-        value if !value.is_empty() => format!("image/{value}"),
-        _ => "image/png".to_string(),
+    let mime_type = match frame.output_format.as_deref().map(str::trim) {
+        Some(value) if value.eq_ignore_ascii_case("jpg") || value.eq_ignore_ascii_case("jpeg") => {
+            "image/jpeg"
+        }
+        Some(value) if value.eq_ignore_ascii_case("webp") => "image/webp",
+        Some(value) if value.eq_ignore_ascii_case("png") => "image/png",
+        _ => "image/png",
     };
     format!(
         "![generated image](data:{mime_type};base64,{})",
@@ -1040,7 +1079,7 @@ fn completed_response_image_result(event: &Value) -> Option<&str> {
         .filter(|item| item.get("type").and_then(Value::as_str) == Some("image_generation_call"))
         .filter_map(|item| item.get("result").and_then(Value::as_str))
         .map(str::trim)
-        .find(|value| !value.is_empty())
+        .find(|value| is_safe_openai_image_base64_payload(value))
 }
 
 fn requested_partial_images(report_context: &Value) -> u64 {
@@ -1126,6 +1165,82 @@ fn image_bridge_model(report_context: Option<&Value>) -> Option<String> {
     })
 }
 
+fn process_bounded_sse_chunk<F>(
+    buffered: &mut Vec<u8>,
+    chunk: &[u8],
+    max_bytes: usize,
+    mut transform: F,
+) -> Result<Vec<u8>, AiSurfaceFinalizeError>
+where
+    F: FnMut(&[u8]) -> Result<Vec<u8>, AiSurfaceFinalizeError>,
+{
+    let mut remaining = chunk;
+    let mut output = Vec::new();
+    loop {
+        if let Some(block_end) = find_sse_block_end(buffered) {
+            let block = buffered.drain(..block_end).collect::<Vec<_>>();
+            output.extend(transform(&block)?);
+            drain_sse_separator(buffered);
+            continue;
+        }
+        if remaining.is_empty() {
+            break;
+        }
+        let available = max_bytes.saturating_sub(buffered.len());
+        if available == 0 {
+            return Err(AiSurfaceFinalizeError::new(format!(
+                "image stream buffer exceeds {max_bytes} bytes"
+            )));
+        }
+        let take = available.min(remaining.len());
+        append_bounded_stream_rewrite_chunk(buffered, &remaining[..take], max_bytes)?;
+        remaining = &remaining[take..];
+    }
+    Ok(output)
+}
+
+fn append_bounded_stream_rewrite_chunk(
+    buffered: &mut Vec<u8>,
+    chunk: &[u8],
+    max_bytes: usize,
+) -> Result<(), AiSurfaceFinalizeError> {
+    let next_len = buffered
+        .len()
+        .checked_add(chunk.len())
+        .ok_or_else(|| AiSurfaceFinalizeError::new("image stream buffer length overflow"))?;
+    if next_len > max_bytes {
+        return Err(AiSurfaceFinalizeError::new(format!(
+            "image stream buffer exceeds {max_bytes} bytes"
+        )));
+    }
+    buffered.extend_from_slice(chunk);
+    Ok(())
+}
+
+fn append_bounded_sse_data_line(
+    data: &mut Option<String>,
+    buffered_data_bytes: &mut usize,
+    value: &str,
+) -> Result<(), AiSurfaceFinalizeError> {
+    let separator_bytes = usize::from(data.is_some());
+    let next_len = buffered_data_bytes
+        .checked_add(separator_bytes)
+        .and_then(|length| length.checked_add(value.len()))
+        .ok_or_else(|| AiSurfaceFinalizeError::new("image stream data buffer length overflow"))?;
+    if next_len > MAX_STREAM_REWRITE_BUFFER_BYTES {
+        return Err(AiSurfaceFinalizeError::new(format!(
+            "image stream data buffer exceeds {MAX_STREAM_REWRITE_BUFFER_BYTES} bytes"
+        )));
+    }
+    let data_value = data.get_or_insert_with(String::new);
+    if separator_bytes != 0 {
+        data_value.push('\n');
+    }
+    data_value.push_str(value);
+    *buffered_data_bytes = next_len;
+    Ok(())
+}
+
 fn find_sse_block_end(buffer: &[u8]) -> Option<usize> {
     buffer
         .windows(2)
@@ -1198,8 +1313,16 @@ pub fn maybe_build_openai_image_sync_finalize_product(
     }
     if let Some(provider_body_json) = body_json {
         if openai_image_response_has_standard_data(provider_body_json) {
+            let Some(client_body_json) = crate::formats::shared::image_bridge::
+                build_openai_image_response_from_standard_image_response(
+                    provider_body_json,
+                    Some(report_context),
+                )
+            else {
+                return Ok(None);
+            };
             return Ok(Some(OpenAiImageSyncFinalizeProduct {
-                client_body_json: provider_body_json.clone(),
+                client_body_json,
                 provider_body_json: provider_body_json.clone(),
             }));
         }
@@ -1223,16 +1346,16 @@ pub fn maybe_build_openai_image_sync_finalize_product(
         .get("image_request")
         .and_then(|value| value.get("output_format"))
         .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+        .and_then(normalize_openai_image_output_format)
         .unwrap_or(CODEX_OPENAI_IMAGE_DEFAULT_OUTPUT_FORMAT);
-    let body_bytes = base64::engine::general_purpose::STANDARD.decode(body_base64)?;
+    let body_bytes = decode_sync_report_body_base64(body_base64)?;
     let text = std::str::from_utf8(&body_bytes)
         .map_err(|err| AiSurfaceFinalizeError::new(err.to_string()))?;
 
     let mut created = None;
     let mut completed_response = None;
     let mut images = Vec::new();
+    let mut image_keys = BTreeSet::new();
 
     for raw_block in text.split("\n\n") {
         let block = raw_block.trim();
@@ -1271,10 +1394,30 @@ pub fn maybe_build_openai_image_sync_finalize_product(
                 let Some(result) = item.get("result").and_then(Value::as_str) else {
                     continue;
                 };
+                let result = result.trim();
+                if !is_safe_openai_image_base64_payload(result)
+                    || !insert_bounded_image_key(
+                        &mut image_keys,
+                        image_chat_output_key(item, result),
+                    )
+                {
+                    continue;
+                }
+                let output_format = item
+                    .get("output_format")
+                    .and_then(Value::as_str)
+                    .and_then(normalize_openai_image_output_format)
+                    .unwrap_or(default_output_format);
+                let revised_prompt = item
+                    .get("revised_prompt")
+                    .and_then(Value::as_str)
+                    .and_then(bounded_openai_image_revised_prompt)
+                    .map(|value| Value::String(value.to_string()))
+                    .unwrap_or(Value::Null);
                 images.push(serde_json::json!({
                     "b64_json": result,
-                    "output_format": item.get("output_format").cloned().unwrap_or(Value::String(default_output_format.to_string())),
-                    "revised_prompt": item.get("revised_prompt").cloned().unwrap_or(Value::Null),
+                    "output_format": output_format,
+                    "revised_prompt": revised_prompt,
                 }));
             }
             "response.completed" => {
@@ -1357,10 +1500,16 @@ fn openai_image_response_has_standard_data(body_json: &Value) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use base64::Engine as _;
-    use serde_json::json;
+    use std::collections::BTreeSet;
 
-    use super::{maybe_build_openai_image_sync_finalize_product, OpenAiImageStreamState};
+    use base64::Engine as _;
+    use serde_json::{json, Value};
+
+    use super::{
+        completed_response_image_count, image_chat_output_key, insert_bounded_image_key,
+        maybe_build_openai_image_sync_finalize_product, process_bounded_sse_chunk,
+        OpenAiImageChatStreamState, OpenAiImageStreamState, OpenAiImageStreamTerminalState,
+    };
 
     fn utf8(bytes: Vec<u8>) -> String {
         String::from_utf8(bytes).expect("utf8 should decode")
@@ -1515,6 +1664,308 @@ mod tests {
     }
 
     #[test]
+    fn image_stream_rejects_unbounded_incomplete_sse_buffer() {
+        let report_context = json!({
+            "provider_api_format": "openai:image",
+            "client_api_format": "openai:image",
+            "needs_conversion": false,
+            "image_request": {"operation": "generate"}
+        });
+        let mut rewriter = OpenAiImageStreamState::default();
+        let oversized = vec![b'x'; super::MAX_STREAM_REWRITE_BUFFER_BYTES + 1];
+
+        let error = rewriter
+            .push_chunk(&report_context, &oversized)
+            .expect_err("incomplete image SSE block must be bounded");
+        assert!(error.0.contains("image stream buffer exceeds"));
+    }
+
+    #[test]
+    fn image_chat_stream_rejects_unbounded_incomplete_sse_buffer() {
+        let report_context = json!({
+            "provider_api_format": "openai:image",
+            "client_api_format": "openai:chat",
+            "needs_conversion": true,
+            "image_request": {"operation": "generate"}
+        });
+        let mut rewriter = OpenAiImageChatStreamState::default();
+        let oversized = vec![b'x'; super::MAX_STREAM_REWRITE_BUFFER_BYTES + 1];
+
+        let error = rewriter
+            .push_chunk(&report_context, &oversized)
+            .expect_err("incomplete image SSE block must be bounded");
+        assert!(error.0.contains("image stream buffer exceeds"));
+    }
+
+    #[test]
+    fn image_terminal_observer_rejects_unbounded_data_lines() {
+        let report_context = json!({
+            "provider_api_format": "openai:image",
+            "client_api_format": "openai:image",
+            "needs_conversion": false,
+            "image_request": {"operation": "generate"}
+        });
+        let mut observer = OpenAiImageStreamTerminalState::default();
+        let first_len = super::MAX_STREAM_REWRITE_BUFFER_BYTES / 2;
+        let second_len = super::MAX_STREAM_REWRITE_BUFFER_BYTES - first_len;
+        let data_line = |length: usize| {
+            let mut line = Vec::with_capacity(6 + length);
+            line.extend_from_slice(b"data: ");
+            line.extend(std::iter::repeat_n(b'x', length));
+            line.push(b'\n');
+            line
+        };
+
+        observer
+            .push_line(&report_context, data_line(first_len))
+            .expect("first data line should fit");
+        let error = observer
+            .push_line(&report_context, data_line(second_len))
+            .expect_err("data lines without a blank separator must be bounded");
+        assert!(error.0.contains("image stream data buffer exceeds"));
+    }
+
+    #[test]
+    fn image_terminal_observer_preserves_multiline_data_semantics() {
+        let report_context = json!({
+            "provider_api_format": "openai:image",
+            "client_api_format": "openai:image",
+            "needs_conversion": false,
+            "image_request": {"operation": "generate"}
+        });
+        let mut observer = OpenAiImageStreamTerminalState::default();
+
+        // An empty first data line must still contribute the SSE newline when
+        // the following line contains the JSON event.
+        observer
+            .push_line(&report_context, b"data:\n".to_vec())
+            .expect("empty data line should be accepted");
+        observer
+            .push_line(
+                &report_context,
+                b"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_multiline\",\"model\":\"gpt-image-2\"}}\n".to_vec(),
+            )
+            .expect("second data line should be accepted");
+        observer
+            .push_line(&report_context, b"\n".to_vec())
+            .expect("event separator should flush");
+
+        let summary = observer
+            .finish(&report_context)
+            .expect("observer finish should succeed")
+            .expect("completed event should produce a summary");
+        assert_eq!(summary.response_id.as_deref(), Some("resp_multiline"));
+        assert_eq!(summary.model.as_deref(), Some("gpt-image-2"));
+        assert!(summary.observed_finish);
+    }
+
+    #[test]
+    fn image_terminal_observer_compacts_empty_data_lines() {
+        let mut observer = OpenAiImageStreamTerminalState::default();
+        let mut data = None;
+        let mut buffered_bytes = 0;
+        for _ in 0..10_000 {
+            super::append_bounded_sse_data_line(&mut data, &mut buffered_bytes, "")
+                .expect("empty data line should fit");
+        }
+
+        assert_eq!(buffered_bytes, 9_999);
+        let expected = "\n".repeat(9_999);
+        assert_eq!(data.as_deref(), Some(expected.as_str()));
+        // Keep the state type exercised as well; this guards against changing
+        // the compact representation back to per-line allocations.
+        observer.data = data;
+        observer.buffered_data_bytes = buffered_bytes;
+        assert_eq!(observer.data.as_ref().map(String::len), Some(9_999));
+    }
+
+    #[test]
+    fn image_output_keys_are_hashed_to_a_fixed_length() {
+        let long_id = "provider-id-".to_string() + &"x".repeat(32 * 1024);
+        let item_with_id = json!({"id": long_id});
+        let id_key = image_chat_output_key(
+            item_with_id.as_object().expect("object item"),
+            "result-that-is-ignored-when-id-is-present",
+        );
+        assert_eq!(id_key.len(), "id:".len() + 64);
+        assert!(id_key.starts_with("id:"));
+        assert!(!id_key.contains("provider-id-"));
+
+        let long_result = "r".repeat(32 * 1024);
+        let item_without_id = json!({});
+        let result_key = image_chat_output_key(
+            item_without_id.as_object().expect("object item"),
+            &long_result,
+        );
+        assert_eq!(result_key.len(), "result:".len() + 64);
+        assert!(result_key.starts_with("result:"));
+        assert!(!result_key.contains(&long_result));
+    }
+
+    #[test]
+    fn image_output_key_set_is_bounded_and_keeps_dedupe_semantics() {
+        let mut keys = BTreeSet::new();
+        let duplicate = "id:duplicate".to_string();
+        assert!(insert_bounded_image_key(&mut keys, duplicate.clone()));
+        assert!(!insert_bounded_image_key(&mut keys, duplicate.clone()));
+
+        for index in 1..super::MAX_IMAGE_OUTPUT_KEYS {
+            assert!(insert_bounded_image_key(
+                &mut keys,
+                format!("id:{index:064x}"),
+            ));
+        }
+        assert_eq!(keys.len(), super::MAX_IMAGE_OUTPUT_KEYS);
+        assert!(!insert_bounded_image_key(
+            &mut keys,
+            "id:overflow".to_string()
+        ));
+        assert_eq!(keys.len(), super::MAX_IMAGE_OUTPUT_KEYS);
+    }
+
+    #[test]
+    fn image_chat_markdown_does_not_embed_untrusted_output_format() {
+        let frame = super::OpenAiImageChatFrame {
+            b64_json: "aGVsbG8=".to_string(),
+            output_format: Some("png);https://attacker.invalid/?x=(x".to_string()),
+        };
+
+        assert_eq!(
+            super::image_chat_markdown(&frame),
+            "![generated image](data:image/png;base64,aGVsbG8=)"
+        );
+    }
+
+    #[test]
+    fn completed_response_image_count_is_bounded() {
+        let output = (0..(super::MAX_IMAGE_OUTPUT_KEYS + 8))
+            .map(|index| {
+                json!({
+                    "type": "image_generation_call",
+                    "result": format!("aGVsbG{index:02x}"),
+                })
+            })
+            .collect::<Vec<_>>();
+        let response = json!({"output": output});
+
+        assert_eq!(
+            completed_response_image_count(&response),
+            super::MAX_IMAGE_OUTPUT_KEYS as u64
+        );
+    }
+
+    #[test]
+    fn image_sync_finalize_dedupes_and_bounds_output_images() {
+        let report_context = json!({
+            "client_api_format": "openai:image",
+            "provider_api_format": "openai:image",
+            "image_request": {
+                "operation": "generate",
+                "output_format": "png"
+            }
+        });
+        let mut stream = String::new();
+        let append_output_item = |stream: &mut String, id: &str, result: &str| {
+            stream.push_str("data: ");
+            stream.push_str(
+                &serde_json::to_string(&json!({
+                    "type": "response.output_item.done",
+                    "item": {
+                        "id": id,
+                        "type": "image_generation_call",
+                        "result": result,
+                    }
+                }))
+                .expect("event should serialize"),
+            );
+            stream.push_str("\n\n");
+        };
+
+        append_output_item(&mut stream, "duplicate", "Zmlyc3QtaW1hZ2U=");
+        append_output_item(&mut stream, "duplicate", "c2Vjb25kLWltYWdl");
+        for index in 0..super::MAX_IMAGE_OUTPUT_KEYS {
+            let id = format!("image-{index}");
+            append_output_item(&mut stream, &id, "aGVsbG8=");
+        }
+        stream.push_str(
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-images\"}}\n\n",
+        );
+        let body_base64 = base64::engine::general_purpose::STANDARD.encode(stream.as_bytes());
+
+        let product = maybe_build_openai_image_sync_finalize_product(
+            "openai_image_sync_finalize",
+            200,
+            Some(&report_context),
+            None,
+            Some(&body_base64),
+        )
+        .expect("finalize should succeed")
+        .expect("image stream should finalize");
+
+        assert_eq!(
+            product.client_body_json["data"]
+                .as_array()
+                .expect("client data array")
+                .len(),
+            super::MAX_IMAGE_OUTPUT_KEYS
+        );
+        assert_eq!(
+            product.provider_body_json["output"]
+                .as_array()
+                .expect("provider output array")
+                .len(),
+            super::MAX_IMAGE_OUTPUT_KEYS
+        );
+        assert_eq!(
+            product.client_body_json["data"][0]["b64_json"],
+            "Zmlyc3QtaW1hZ2U="
+        );
+        assert!(product.client_body_json["data"]
+            .as_array()
+            .expect("client data array")
+            .iter()
+            .all(|image| image["b64_json"] != "c2Vjb25kLWltYWdl"));
+    }
+
+    #[test]
+    fn image_stream_consumes_complete_frames_before_chunk_limit() {
+        let frame = b"data: {\"type\":\"noop\"}\n\n";
+        let mut chunk = Vec::with_capacity(frame.len() * 2);
+        chunk.extend_from_slice(frame);
+        chunk.extend_from_slice(frame);
+        let mut buffered = Vec::new();
+
+        let output = process_bounded_sse_chunk(&mut buffered, &chunk, frame.len(), |block| {
+            Ok(block.to_vec())
+        })
+        .expect("complete frames should be consumed even when the chunk is larger than the cap");
+
+        assert_eq!(output, chunk);
+        assert!(buffered.is_empty());
+    }
+
+    #[test]
+    fn image_stream_bounds_incomplete_frame_with_small_test_limit() {
+        let mut buffered = Vec::new();
+        let error = process_bounded_sse_chunk(&mut buffered, b"123456789", 8, |_| Ok(Vec::new()))
+            .expect_err("an incomplete frame above the cap must be rejected");
+        assert!(error.0.contains("image stream buffer exceeds 8 bytes"));
+    }
+
+    #[test]
+    fn image_stream_buffer_budget_covers_gpt_image_2_max_resolution() {
+        // gpt-image-2 accepts up to 3840x2160. A worst-case raw RGBA payload
+        // still fits after base64 encoding with room for SSE/JSON metadata.
+        let raw_rgba_bytes = 3840usize * 2160 * 4;
+        let base64_bytes = raw_rgba_bytes.div_ceil(3) * 4;
+        let metadata_margin = 8 * 1024 * 1024;
+        assert!(
+            super::MAX_STREAM_REWRITE_BUFFER_BYTES >= base64_bytes + metadata_margin,
+            "image parser cap must cover the largest supported image payload"
+        );
+    }
+
+    #[test]
     fn sync_finalize_product_maps_stream_response_to_client_and_provider_bodies() {
         let report_context = json!({
             "client_api_format": "openai:image",
@@ -1593,5 +2044,88 @@ mod tests {
         assert_eq!(product.client_body_json["created"], 1779273523);
         assert_eq!(product.client_body_json["data"][0]["b64_json"], "aGVsbG8=");
         assert_eq!(product.provider_body_json, provider_body);
+    }
+
+    #[test]
+    fn sync_finalize_filters_untrusted_standard_openai_image_fields() {
+        let oversized_prompt = "p".repeat(256 * 1024 + 1);
+        let provider_body = json!({
+            "created": 1779273523,
+            "model": "gpt-image-2",
+            "data": [
+                {"url": "javascript:alert(1)"},
+                {"url": "data:text/html;base64,PGh0bWw+"},
+                {
+                    "b64_json": "aGVsbG8=",
+                    "output_format": "text/html;javascript:alert(1)",
+                    "revised_prompt": oversized_prompt.clone()
+                },
+                {"b64_json": "d29ybGQ=", "output_format": "JPG"}
+            ],
+            "usage": {"input_tokens": 1, "output_tokens": 2}
+        });
+        let report_context = json!({
+            "client_api_format": "openai:image",
+            "provider_api_format": "openai:image",
+            "image_request": {"operation": "generate", "output_format": "png"}
+        });
+
+        let product = maybe_build_openai_image_sync_finalize_product(
+            "openai_image_sync_finalize",
+            200,
+            Some(&report_context),
+            Some(&provider_body),
+            None,
+        )
+        .expect("standard image response should finalize")
+        .expect("at least one safe image should remain");
+
+        let client_data = product.client_body_json["data"]
+            .as_array()
+            .expect("client data array");
+        assert_eq!(client_data.len(), 2);
+        assert_eq!(client_data[0]["b64_json"], "aGVsbG8=");
+        assert_eq!(client_data[0]["revised_prompt"], Value::Null);
+        assert!(client_data[0].get("output_format").is_none());
+        assert_eq!(client_data[1]["b64_json"], "d29ybGQ=");
+        assert_eq!(client_data[1]["output_format"], "jpeg");
+        let serialized = serde_json::to_string(&product.client_body_json).expect("json");
+        assert!(!serialized.contains("javascript:"));
+        assert!(!serialized.contains("text/html"));
+        assert!(!serialized.contains(&oversized_prompt));
+        assert_eq!(product.provider_body_json, provider_body);
+    }
+
+    #[test]
+    fn sync_finalize_accepts_maximum_safe_base64_image_payload() {
+        let payload = "A".repeat(crate::formats::openai::image::MAX_OPENAI_IMAGE_DATA_BYTES);
+        let provider_body = json!({
+            "created": 1779273523,
+            "data": [{"b64_json": payload}]
+        });
+        let report_context = json!({
+            "client_api_format": "openai:image",
+            "provider_api_format": "openai:image",
+            "image_request": {"operation": "generate"}
+        });
+
+        let product = maybe_build_openai_image_sync_finalize_product(
+            "openai_image_sync_finalize",
+            200,
+            Some(&report_context),
+            Some(&provider_body),
+            None,
+        )
+        .expect("maximum safe image response should finalize")
+        .expect("maximum safe image should be retained");
+
+        let returned = product.client_body_json["data"][0]["b64_json"]
+            .as_str()
+            .expect("base64 payload");
+        assert_eq!(
+            returned.len(),
+            crate::formats::openai::image::MAX_OPENAI_IMAGE_DATA_BYTES
+        );
+        assert!(returned.as_bytes().iter().all(|byte| *byte == b'A'));
     }
 }

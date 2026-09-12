@@ -41,7 +41,7 @@ export const featureCards = [
     descKey: 'site.home.feature.cards.collaborationDesc',
     status: 'in-progress' as const
   }
-]
+] as const
 
 // CLI configuration generators
 export function useCliConfigs(baseUrl: Ref<string>) {

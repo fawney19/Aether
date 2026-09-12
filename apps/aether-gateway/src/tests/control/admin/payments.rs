@@ -249,10 +249,9 @@ async fn gateway_handles_admin_payments_expire_order_locally_with_trusted_admin_
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
     assert_eq!(payload["expired"], true);
     assert_eq!(payload["order"]["status"], "expired");
-    assert_eq!(
-        payload["order"]["gateway_response"]["expire_reason"],
-        "admin_mark_expired"
-    );
+    assert!(payload["order"]["gateway_response"]
+        .get("expire_reason")
+        .is_none());
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();
@@ -305,15 +304,13 @@ async fn gateway_handles_admin_payments_credit_order_locally_with_trusted_admin_
     assert_eq!(payload["order"]["pay_amount"], 91.25);
     assert_eq!(payload["order"]["pay_currency"], "CNY");
     assert_eq!(payload["order"]["exchange_rate"], 7.3);
-    assert_eq!(
-        payload["order"]["gateway_response"]["channel"],
-        "manual-review"
-    );
+    assert!(payload["order"]["gateway_response"]
+        .get("channel")
+        .is_none());
     assert_eq!(payload["order"]["gateway_response"]["manual_credit"], true);
-    assert_eq!(
-        payload["order"]["gateway_response"]["credited_by"],
-        "admin-user-123"
-    );
+    assert!(payload["order"]["gateway_response"]
+        .get("credited_by")
+        .is_none());
     assert!(payload["order"]["paid_at"].as_str().is_some());
     assert!(payload["order"]["credited_at"].as_str().is_some());
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
@@ -354,10 +351,9 @@ async fn gateway_handles_admin_payments_fail_order_locally_with_trusted_admin_pr
     assert_eq!(response.status(), StatusCode::OK);
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
     assert_eq!(payload["order"]["status"], "failed");
-    assert_eq!(
-        payload["order"]["gateway_response"]["failure_reason"],
-        "admin_mark_failed"
-    );
+    assert!(payload["order"]["gateway_response"]
+        .get("failure_reason")
+        .is_none());
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();
@@ -410,7 +406,8 @@ async fn gateway_handles_admin_payments_callbacks_locally_with_trusted_admin_pri
     assert_eq!(items[0]["callback_key"], "callback-key-1");
     assert_eq!(items[0]["signature_valid"], true);
     assert_eq!(items[0]["status"], "processed");
-    assert_eq!(items[0]["payload"]["source"], "callback-1");
+    assert!(items[0]["payload"].is_null());
+    assert_eq!(items[0]["payload_summary"]["objects"], 1);
     assert!(items[0]["processed_at"].as_str().is_some());
     assert_eq!(payload["total"], 1);
     assert_eq!(payload["limit"], 10);

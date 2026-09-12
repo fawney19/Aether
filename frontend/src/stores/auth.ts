@@ -9,13 +9,12 @@ import { getErrorStatus } from '@/types/api-error'
 export const useAuthStore = defineStore('auth', () => {
   const CURRENT_USER_FAILURE_BACKOFF_MS = 15_000
 
-  // 初始化时从 localStorage 恢复 token
-  const storedToken = apiClient.getToken()
-
   const user = ref<User | null>(null)
-  const token = ref<string | null>(storedToken)
+  const token = ref<string | null>(apiClient.getToken())
   const loading = ref(false)
   const error = ref<string | null>(null)
+  let sessionRestoreAttempted = false
+  let sessionRestorePromise: Promise<boolean> | null = null
   let fetchCurrentUserPromise: Promise<User | null> | null = null
   let fetchCurrentUserToken: string | null = null
   let lastCurrentUserFailureAt = 0
@@ -33,21 +32,64 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   const isAuthenticated = computed(() => {
-    // 使用 store 中的 token 状态判断认证状态
-    // 如果需要同步 localStorage，应该在 checkAuth 或专门的 syncToken 方法中处理
+    // The access token only exists in this tab's memory.
     return !!token.value
   })
 
-  /**
-   * 同步 localStorage 中的 token 到 store
-   * 用于处理多标签页或外部 token 变更的情况
-   */
+  /** Synchronize the store with the access token held in this tab's memory. */
   function syncToken() {
     const currentToken = apiClient.getToken()
     if (token.value !== currentToken) {
       token.value = currentToken
       markAuthStateChanged()
     }
+  }
+
+  async function restoreSession(force = false, notifyOtherTabs = false): Promise<boolean> {
+    syncToken()
+    if (token.value && !force) {
+      return true
+    }
+    if (sessionRestorePromise) {
+      return sessionRestorePromise
+    }
+    if (sessionRestoreAttempted && !force) {
+      return false
+    }
+
+    sessionRestoreAttempted = true
+    const requestAuthStateVersion = authStateVersion
+    const requestToken = token.value
+    const request = (async () => {
+      try {
+        const accessToken = await apiClient.restoreSession(notifyOtherTabs)
+        if (requestAuthStateVersion !== authStateVersion) {
+          return token.value === accessToken
+        }
+        token.value = accessToken
+        markAuthStateChanged()
+        return true
+      } catch {
+        if (requestAuthStateVersion === authStateVersion && token.value === requestToken) {
+          // A forced refresh can race with another tab or fail transiently.
+          // Preserve an already-issued in-memory access token; its next
+          // authenticated request remains the authority on whether it is valid.
+          if (!requestToken) {
+            apiClient.clearAuth(false, false)
+            token.value = null
+            user.value = null
+          }
+        }
+        return false
+      }
+    })().finally(() => {
+      if (sessionRestorePromise === request) {
+        sessionRestorePromise = null
+      }
+    })
+
+    sessionRestorePromise = request
+    return request
   }
   const isAdmin = computed(() => user.value?.role === 'admin')
   const isAuditAdmin = computed(() => user.value?.role === 'audit_admin')
@@ -61,6 +103,7 @@ export const useAuthStore = defineStore('auth', () => {
     try {
       const response = await authApi.login({ email, password, auth_type: authType })
       token.value = response.access_token
+      sessionRestoreAttempted = true
       markAuthStateChanged()
 
       // 获取用户信息
@@ -94,6 +137,7 @@ export const useAuthStore = defineStore('auth', () => {
     user.value = null
     token.value = null
     markAuthStateChanged()
+    sessionRestoreAttempted = true
     await authApi.logout()
   }
 
@@ -102,6 +146,23 @@ export const useAuthStore = defineStore('auth', () => {
     token.value = null
     error.value = null
     markAuthStateChanged()
+    sessionRestoreAttempted = true
+    apiClient.clearAuth(false, false)
+  }
+
+  async function applyExternalLogin(): Promise<boolean> {
+    user.value = null
+    token.value = null
+    error.value = null
+    markAuthStateChanged()
+    apiClient.clearAuth(false, false)
+    sessionRestoreAttempted = false
+    const restored = await restoreSession(true)
+    if (!restored) {
+      return false
+    }
+    await fetchCurrentUser()
+    return !!user.value
   }
 
   function fetchCurrentUser(): Promise<User | null> {
@@ -154,20 +215,20 @@ export const useAuthStore = defineStore('auth', () => {
         // 保留登录状态；短暂退避后允许再次校验。
         log.info('Keeping session despite error, as per user requirement')
         return null
-      } finally {
-        if (fetchCurrentUserPromise === request) {
-          fetchCurrentUserPromise = null
-          fetchCurrentUserToken = null
-        }
       }
-    })()
+    })().finally(() => {
+      if (fetchCurrentUserPromise === request) {
+        fetchCurrentUserPromise = null
+        fetchCurrentUserToken = null
+      }
+    })
 
     fetchCurrentUserPromise = request
     return request
   }
 
   async function checkAuth() {
-    syncToken()
+    await restoreSession()
     if (token.value && !user.value) {
       // 即使获取用户信息失败,也保留 token。
       await fetchCurrentUser()
@@ -187,8 +248,10 @@ export const useAuthStore = defineStore('auth', () => {
     login,
     logout,
     applyExternalLogout,
+    applyExternalLogin,
     fetchCurrentUser,
     checkAuth,
+    restoreSession,
     syncToken
   }
 })

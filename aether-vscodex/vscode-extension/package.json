@@ -1,0 +1,211 @@
+{
+  "name": "codex-remote-collab",
+  "displayName": "%extension.displayName%",
+  "description": "%extension.description%",
+  "version": "0.4.0",
+  "publisher": "local",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "l10n": "./l10n",
+  "activationEvents": [
+    "onStartupFinished",
+    "onCommand:codexRemoteCollab.openWeb",
+    "onCommand:codexRemoteCollab.start",
+    "onCommand:codexRemoteCollab.stop",
+    "onCommand:codexRemoteCollab.setThreadId",
+    "onCommand:codexRemoteCollab.sendInput",
+    "onCommand:codexRemoteCollab.setRelayToken",
+    "onCommand:codexRemoteCollab.configureCloud",
+    "onCommand:codexRemoteCollab.pairCloud",
+    "onCommand:codexRemoteCollab.snapshot"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "codexRemoteCollab.openWeb",
+        "title": "%command.openWeb%"
+      },
+      {
+        "command": "codexRemoteCollab.start",
+        "title": "%command.start%"
+      },
+      {
+        "command": "codexRemoteCollab.stop",
+        "title": "%command.stop%"
+      },
+      {
+        "command": "codexRemoteCollab.setThreadId",
+        "title": "%command.setThreadId%"
+      },
+      {
+        "command": "codexRemoteCollab.sendInput",
+        "title": "%command.sendInput%"
+      },
+      {
+        "command": "codexRemoteCollab.setRelayToken",
+        "title": "%command.setRelayToken%"
+      },
+      {
+        "command": "codexRemoteCollab.configureCloud",
+        "title": "%command.configureCloud%"
+      },
+      {
+        "command": "codexRemoteCollab.pairCloud",
+        "title": "%command.pairCloud%"
+      },
+      {
+        "command": "codexRemoteCollab.snapshot",
+        "title": "%command.snapshot%"
+      }
+    ],
+    "configuration": {
+      "title": "%configuration.title%",
+      "properties": {
+        "codexRemoteCollab.localRelayUrl": {
+          "type": "string",
+          "default": "ws://127.0.0.1:8787/v1/connect",
+          "description": "%configuration.localRelayUrl%"
+        },
+        "codexRemoteCollab.relayUrl": {
+          "type": "string",
+          "default": "ws://127.0.0.1:8787/v1/connect",
+          "description": "%configuration.relayUrl%",
+          "deprecationMessage": "%configuration.relayUrl.deprecation%"
+        },
+        "codexRemoteCollab.cloudRelayUrl": {
+          "type": "string",
+          "default": "",
+          "description": "%configuration.cloudRelayUrl%"
+        },
+        "codexRemoteCollab.aetherUrl": {
+          "type": "string",
+          "default": "",
+          "description": "%configuration.aetherUrl%"
+        },
+        "codexRemoteCollab.autoStart": {
+          "type": "boolean",
+          "default": true,
+          "description": "%configuration.autoStart%"
+        },
+        "codexRemoteCollab.autoStartLocalRelay": {
+          "type": "boolean",
+          "default": true,
+          "description": "%configuration.autoStartLocalRelay%"
+        },
+        "codexRemoteCollab.mode": {
+          "type": "string",
+          "enum": [
+            "attach",
+            "spawn"
+          ],
+          "default": "attach",
+          "description": "%configuration.mode%",
+          "deprecationMessage": "%configuration.mode.deprecation%"
+        },
+        "codexRemoteCollab.controlMode": {
+          "type": "string",
+          "enum": [
+            "sync",
+            "async"
+          ],
+          "enumDescriptions": [
+            "%configuration.controlMode.sync%",
+            "%configuration.controlMode.async%"
+          ],
+          "default": "sync",
+          "description": "%configuration.controlMode%"
+        },
+        "codexRemoteCollab.threadId": {
+          "type": "string",
+          "default": "",
+          "description": "%configuration.threadId%"
+        },
+        "codexRemoteCollab.autoDiscoverThread": {
+          "type": "boolean",
+          "default": true,
+          "description": "%configuration.autoDiscoverThread%"
+        },
+        "codexRemoteCollab.followVscodeSession": {
+          "type": "boolean",
+          "default": true,
+          "description": "%configuration.followVscodeSession%"
+        },
+        "codexRemoteCollab.ipcSocketPath": {
+          "type": "string",
+          "default": "",
+          "description": "%configuration.ipcSocketPath%"
+        },
+        "codexRemoteCollab.hostId": {
+          "type": "string",
+          "default": "local",
+          "description": "%configuration.hostId%"
+        },
+        "codexRemoteCollab.ipcStrictVersions": {
+          "type": "boolean",
+          "default": true,
+          "description": "%configuration.ipcStrictVersions%"
+        },
+        "codexRemoteCollab.codexCommand": {
+          "type": "string",
+          "default": "codex",
+          "description": "%configuration.codexCommand%"
+        },
+        "codexRemoteCollab.codexArgs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "app-server",
+            "--stdio"
+          ],
+          "description": "%configuration.codexArgs%"
+        },
+        "codexRemoteCollab.defaultCwd": {
+          "type": "string",
+          "default": "",
+          "description": "%configuration.defaultCwd%"
+        },
+        "codexRemoteCollab.approvalTimeoutMs": {
+          "type": "number",
+          "default": 300000,
+          "minimum": 1000,
+          "description": "%configuration.approvalTimeoutMs%"
+        },
+        "codexRemoteCollab.allowHighRiskApprovals": {
+          "type": "boolean",
+          "default": false,
+          "description": "%configuration.allowHighRiskApprovals%"
+        },
+        "codexRemoteCollab.relayReconnect": {
+          "type": "boolean",
+          "default": true,
+          "description": "%configuration.relayReconnect%"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run build:web && npm run build",
+    "build:web": "npm --prefix ../web run build",
+    "build": "tsc -p tsconfig.json && node scripts/sync-local-relay.cjs",
+    "compile": "npm run build",
+    "check": "tsc --noEmit -p tsconfig.json",
+    "start:stdio": "node dist/cli.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/vscode": "^1.85.0",
+    "@types/ws": "^8.5.12",
+    "typescript": "^5.4.5"
+  }
+}

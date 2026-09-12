@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::fmt;
 
 use serde_json::{json, Value};
 
@@ -17,13 +18,36 @@ pub enum GeminiFilesRequestBodyError {
     BodyRulesApplyFailed,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct GeminiFilesRequestBodyParts {
     pub provider_request_body: Option<Value>,
     pub provider_request_body_base64: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy)]
+impl fmt::Debug for GeminiFilesRequestBodyParts {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GeminiFilesRequestBodyParts")
+            .field(
+                "has_provider_request_body",
+                &self.provider_request_body.is_some(),
+            )
+            .field(
+                "provider_request_body_bytes",
+                &self
+                    .provider_request_body
+                    .as_ref()
+                    .and_then(|body| serde_json::to_vec(body).ok().map(|bytes| bytes.len())),
+            )
+            .field(
+                "provider_request_body_base64_len",
+                &self.provider_request_body_base64.as_ref().map(String::len),
+            )
+            .finish()
+    }
+}
+
+#[derive(Clone, Copy)]
 pub struct GeminiFilesHeadersInput<'a> {
     pub headers: &'a http::HeaderMap,
     pub auth_header: &'a str,
@@ -33,6 +57,40 @@ pub struct GeminiFilesHeadersInput<'a> {
     pub provider_request_body_base64: Option<&'a str>,
     pub original_request_body_json: &'a Value,
     pub original_body_is_empty: bool,
+}
+
+impl fmt::Debug for GeminiFilesHeadersInput<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GeminiFilesHeadersInput")
+            .field(
+                "request_header_names",
+                &self
+                    .headers
+                    .keys()
+                    .map(|name| name.as_str())
+                    .collect::<Vec<_>>(),
+            )
+            .field("auth_header", &self.auth_header)
+            .field("has_auth_value", &(!self.auth_value.is_empty()))
+            .field("has_header_rules", &self.header_rules.is_some())
+            .field(
+                "has_provider_request_body",
+                &self.provider_request_body.is_some(),
+            )
+            .field(
+                "provider_request_body_base64_len",
+                &self.provider_request_body_base64.map(str::len),
+            )
+            .field(
+                "original_request_body_bytes",
+                &serde_json::to_vec(self.original_request_body_json)
+                    .ok()
+                    .map(|bytes| bytes.len()),
+            )
+            .field("original_body_is_empty", &self.original_body_is_empty)
+            .finish()
+    }
 }
 
 pub fn gemini_files_transport_unsupported_reason(
@@ -135,6 +193,12 @@ pub fn build_gemini_files_headers(
     ) {
         return None;
     }
+    let declared_connection_headers =
+        crate::headers::declared_connection_header_names(input.headers, &BTreeMap::new());
+    crate::headers::remove_declared_connection_headers(
+        &mut provider_request_headers,
+        &declared_connection_headers,
+    );
     Some(provider_request_headers)
 }
 

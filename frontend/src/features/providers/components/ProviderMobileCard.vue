@@ -5,16 +5,17 @@
   >
     <!-- 第一行：名称 + 状态 + 操作 -->
     <div class="flex items-start justify-between gap-3">
+      <slot name="drag-handle" />
       <div class="flex-1 min-w-0 space-y-0.5">
         <div class="flex items-center gap-1.5">
           <span class="font-medium text-foreground truncate">{{ provider.name }}</span>
           <a
-            v-if="provider.website"
-            :href="provider.website"
+            v-if="safeProviderWebsite"
+            :href="safeProviderWebsite"
             target="_blank"
             rel="noopener noreferrer"
             class="text-muted-foreground hover:text-primary transition-colors shrink-0"
-            :title="provider.website"
+            :title="safeProviderWebsite"
             @click.stop
           >
             <ExternalLink class="w-3.5 h-3.5" />
@@ -203,7 +204,7 @@
             {{ formatApiFormatShort(endpoint.api_format) }}
           </span>
           <span class="font-medium text-muted-foreground/80">
-            {{ isEndpointAvailable(endpoint) ? `${(endpoint.health_score * 100).toFixed(0)}%` : '-' }}
+            {{ getEndpointHealthLabel(endpoint) }}
           </span>
         </div>
 
@@ -212,7 +213,7 @@
           <div
             class="h-full rounded-full transition-all duration-300"
             :class="getEndpointDotColor(endpoint)"
-            :style="{ width: isEndpointAvailable(endpoint) ? `${Math.max(endpoint.health_score * 100, 5)}%` : '100%' }"
+            :style="{ width: getEndpointHealthBarWidth(endpoint) }"
           />
         </div>
       </div>
@@ -221,7 +222,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import {
   Edit,
   Eye,
@@ -238,9 +239,16 @@ import Button from '@/components/ui/button.vue'
 import Badge from '@/components/ui/badge.vue'
 import { type ProviderWithEndpointsSummary, formatApiFormatShort } from '@/api/endpoints'
 import { formatBillingType } from '@/utils/format'
-import { sortEndpoints, isEndpointAvailable, getEndpointDotColor, getEndpointTooltip } from '@/features/providers/composables/useEndpointStatus'
+import {
+  sortEndpoints,
+  getEndpointHealthLabel,
+  getEndpointHealthBarWidth,
+  getEndpointDotColor,
+  getEndpointTooltip,
+} from '@/features/providers/composables/useEndpointStatus'
 import { isKeyManagedProviderType } from '../utils/providerTypeUtils'
 import { useI18n } from '@/i18n'
+import { safeExternalWebUrl } from '@/utils/navigationSecurity'
 
 const props = defineProps<{
   provider: ProviderWithEndpointsSummary
@@ -272,6 +280,7 @@ const vAutoFocus = {
 
 const localDescriptionValue = ref('')
 const { legacyT, locale } = useI18n()
+const safeProviderWebsite = computed(() => safeExternalWebUrl(props.provider.website))
 
 watch(
   () => props.editingDescriptionId,

@@ -71,6 +71,9 @@ impl OpenAiImageNormalizeOptions {
 
 pub const CHATGPT_WEB_IMAGE_MAX_AREA: u64 = 1_500_000;
 pub const OPENAI_IMAGE_MAX_GENERATION_COUNT: u64 = 10;
+const MAX_MULTIPART_PARTS: usize = 128;
+const MAX_MULTIPART_PART_HEADER_BYTES: usize = 64 * 1024;
+const MAX_MULTIPART_BODY_BYTES: usize = 256 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChatGptWebImageRequestError {
@@ -1653,34 +1656,69 @@ fn parse_multipart_fields_from_base64(
         .get(http::header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())?;
     let boundary = multipart_boundary(content_type)?;
-    let body_bytes = base64::engine::general_purpose::STANDARD
+    let body_bytes =
+        decode_multipart_body_base64_with_limit(body_base64, MAX_MULTIPART_BODY_BYTES)?;
+    Some(parse_multipart_fields(&body_bytes, boundary.as_str()))
+}
+
+fn decode_multipart_body_base64_with_limit(
+    body_base64: &str,
+    decoded_limit: usize,
+) -> Option<Vec<u8>> {
+    let max_encoded_len = decoded_limit
+        .checked_add(2)
+        .and_then(|value| value.checked_div(3))
+        .and_then(|value| value.checked_mul(4))
+        .unwrap_or(usize::MAX);
+    if body_base64.len() > max_encoded_len {
+        return None;
+    }
+    let body = base64::engine::general_purpose::STANDARD
         .decode(body_base64)
         .ok()?;
-    Some(parse_multipart_fields(&body_bytes, boundary.as_str()))
+    (body.len() <= decoded_limit).then_some(body)
 }
 
 fn parse_multipart_fields(body: &[u8], boundary: &str) -> Vec<MultipartField> {
     let delimiter = format!("--{boundary}").into_bytes();
     let mut parts = Vec::new();
     let mut cursor = 0usize;
+    let mut part_count = 0usize;
 
-    while let Some(index) = find_subslice(&body[cursor..], &delimiter) {
+    while let Some(index) = find_multipart_boundary(&body[cursor..], &delimiter, true) {
         let start = cursor + index + delimiter.len();
         if body.get(start..start + 2) == Some(b"--") {
+            let closing_suffix = body.get(start + 2..).unwrap_or_default();
+            if !(closing_suffix.is_empty() || closing_suffix.starts_with(b"\r\n")) {
+                return Vec::new();
+            }
             break;
+        }
+        part_count = part_count.saturating_add(1);
+        if part_count > MAX_MULTIPART_PARTS {
+            return Vec::new();
         }
         let mut part = &body[start..];
         if part.starts_with(b"\r\n") {
             part = &part[2..];
         }
-        let Some(next) = find_subslice(part, &delimiter) else {
-            break;
+        // Do not return fields parsed before a truncated part.  Callers use
+        // an empty result as the invalid-multipart signal, so retaining a
+        // prefix would turn malformed input into an accepted request.
+        let Some(next) = find_multipart_boundary(part, &delimiter, false) else {
+            return Vec::new();
         };
         let raw = &part[..next];
         let raw = raw.strip_suffix(b"\r\n").unwrap_or(raw);
-        if let Some(field) = parse_multipart_field(raw) {
-            parts.push(field);
+        if find_subslice(raw, b"\r\n\r\n")
+            .is_some_and(|header_end| header_end > MAX_MULTIPART_PART_HEADER_BYTES)
+        {
+            return Vec::new();
         }
+        let Some(field) = parse_multipart_field(raw) else {
+            return Vec::new();
+        };
+        parts.push(field);
         cursor = start + next;
     }
 
@@ -1688,34 +1726,219 @@ fn parse_multipart_fields(body: &[u8], boundary: &str) -> Vec<MultipartField> {
 }
 
 fn multipart_boundary(content_type: &str) -> Option<String> {
-    content_type.split(';').find_map(|segment| {
-        let (key, value) = segment.trim().split_once('=')?;
-        if !key.trim().eq_ignore_ascii_case("boundary") {
+    let segments = split_multipart_content_type_parameters(content_type)?;
+    let media_type = segments.first()?.trim();
+    if !media_type.eq_ignore_ascii_case("multipart/form-data") {
+        return None;
+    }
+
+    let mut boundary = None;
+    let mut seen_keys = Vec::new();
+    for segment in segments.into_iter().skip(1) {
+        let segment = segment.trim();
+        if segment.is_empty() {
             return None;
         }
-        let boundary = value.trim().trim_matches('"').trim();
-        (!boundary.is_empty()).then(|| boundary.to_string())
-    })
+        let (raw_key, raw_value) = segment.split_once('=')?;
+        let key = raw_key.trim();
+        if key.is_empty() || !key.as_bytes().iter().copied().all(is_http_token_byte) {
+            return None;
+        }
+        if seen_keys
+            .iter()
+            .any(|seen: &String| seen.eq_ignore_ascii_case(key))
+        {
+            return None;
+        }
+        seen_keys.push(key.to_ascii_lowercase());
+
+        let (value, had_escape) = parse_multipart_content_type_parameter_value(raw_value.trim())?;
+        if !key.eq_ignore_ascii_case("boundary") {
+            continue;
+        }
+        if had_escape || !is_valid_multipart_boundary(&value) {
+            return None;
+        }
+        boundary = Some(value);
+    }
+
+    boundary
+}
+
+fn split_multipart_content_type_parameters(value: &str) -> Option<Vec<&str>> {
+    let mut segments = Vec::new();
+    let mut start = 0usize;
+    let mut in_quotes = false;
+    let mut escaped = false;
+
+    for (index, character) in value.char_indices() {
+        if character.is_ascii_control() {
+            return None;
+        }
+        if in_quotes {
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == '"' {
+                in_quotes = false;
+            }
+        } else if character == '"' {
+            in_quotes = true;
+        } else if character == ';' {
+            segments.push(&value[start..index]);
+            start = index + character.len_utf8();
+        }
+    }
+
+    if in_quotes || escaped {
+        return None;
+    }
+    segments.push(&value[start..]);
+    Some(segments)
+}
+
+fn parse_multipart_content_type_parameter_value(value: &str) -> Option<(String, bool)> {
+    if value.is_empty() {
+        return None;
+    }
+    if value.starts_with('"') {
+        if value.len() < 2 || !value.ends_with('"') {
+            return None;
+        }
+        let inner = &value[1..value.len() - 1];
+        let mut parsed = String::with_capacity(inner.len());
+        let mut escaped = false;
+        let mut had_escape = false;
+        for character in inner.chars() {
+            if escaped {
+                if character.is_ascii_control() {
+                    return None;
+                }
+                parsed.push(character);
+                escaped = false;
+                had_escape = true;
+            } else if character == '\\' {
+                escaped = true;
+            } else {
+                if character == '"' || character.is_ascii_control() {
+                    return None;
+                }
+                parsed.push(character);
+            }
+        }
+        if escaped {
+            return None;
+        }
+        return Some((parsed, had_escape));
+    }
+
+    value
+        .as_bytes()
+        .iter()
+        .copied()
+        .all(is_http_token_byte)
+        .then(|| (value.to_string(), false))
+}
+
+fn find_multipart_boundary(haystack: &[u8], delimiter: &[u8], allow_start: bool) -> Option<usize> {
+    if delimiter.is_empty() {
+        return None;
+    }
+    let mut search_start = 0usize;
+    while search_start <= haystack.len() {
+        let relative = find_subslice(&haystack[search_start..], delimiter)?;
+        let index = search_start + relative;
+        let at_line_start = index == 0
+            || (index >= 2
+                && haystack
+                    .get(index - 2..index)
+                    .is_some_and(|prefix| prefix == b"\r\n"));
+        let allowed_position = if allow_start {
+            at_line_start
+        } else {
+            index >= 2
+                && haystack
+                    .get(index - 2..index)
+                    .is_some_and(|prefix| prefix == b"\r\n")
+        };
+        if allowed_position && multipart_boundary_suffix_is_valid(haystack, index, delimiter) {
+            return Some(index);
+        }
+        search_start = index.saturating_add(1);
+    }
+    None
+}
+
+fn multipart_boundary_suffix_is_valid(haystack: &[u8], index: usize, delimiter: &[u8]) -> bool {
+    let suffix_start = index.saturating_add(delimiter.len());
+    let Some(suffix) = haystack.get(suffix_start..) else {
+        return false;
+    };
+    suffix.starts_with(b"\r\n")
+        || suffix
+            .strip_prefix(b"--")
+            .is_some_and(|remaining| remaining.is_empty() || remaining.starts_with(b"\r\n"))
+}
+
+const MAX_MULTIPART_BOUNDARY_BYTES: usize = 70;
+
+fn is_valid_multipart_boundary(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_MULTIPART_BOUNDARY_BYTES
+        && value.as_bytes().iter().copied().all(is_http_token_byte)
+}
+
+fn is_http_token_byte(byte: u8) -> bool {
+    matches!(
+        byte,
+        b'0'..=b'9'
+            | b'A'..=b'Z'
+            | b'a'..=b'z'
+            | b'!'
+            | b'#'
+            | b'$'
+            | b'%'
+            | b'&'
+            | b'\''
+            | b'*'
+            | b'+'
+            | b'-'
+            | b'.'
+            | b'^'
+            | b'_'
+            | b'`'
+            | b'|'
+            | b'~'
+    )
 }
 
 fn parse_multipart_field(raw: &[u8]) -> Option<MultipartField> {
     let header_end = find_subslice(raw, b"\r\n\r\n")?;
     let headers = &raw[..header_end];
     let data = raw.get(header_end + 4..)?.to_vec();
-    let header_text = String::from_utf8_lossy(headers);
+    let header_text = std::str::from_utf8(headers).ok()?;
 
     let mut name = None;
     let mut content_type = None;
-    for line in header_text.lines() {
-        let trimmed = line.trim();
-        let lower = trimmed.to_ascii_lowercase();
-        if lower.starts_with("content-disposition:") {
-            name = extract_quoted_header_value(trimmed, "name");
-        } else if lower.starts_with("content-type:") {
-            content_type = trimmed
-                .split_once(':')
-                .map(|(_, value)| value.trim().to_string())
-                .filter(|value| !value.is_empty());
+    let mut disposition_seen = false;
+    let mut content_type_seen = false;
+    for line in header_text.split("\r\n") {
+        let (header_name, header_value) = line.split_once(':')?;
+        let header_name = header_name.trim();
+        let header_value = header_value.trim();
+        if header_name.eq_ignore_ascii_case("content-disposition") {
+            if disposition_seen {
+                return None;
+            }
+            disposition_seen = true;
+            name = parse_multipart_content_disposition_name(header_value);
+        } else if header_name.eq_ignore_ascii_case("content-type") {
+            if content_type_seen || header_value.is_empty() {
+                return None;
+            }
+            content_type_seen = true;
+            content_type = Some(header_value.to_string());
         }
     }
 
@@ -1726,12 +1949,114 @@ fn parse_multipart_field(raw: &[u8]) -> Option<MultipartField> {
     })
 }
 
-fn extract_quoted_header_value(header: &str, key: &str) -> Option<String> {
-    let pattern = format!("{key}=\"");
-    let start = header.find(&pattern)? + pattern.len();
-    let rest = &header[start..];
-    let end = rest.find('"')?;
-    Some(rest[..end].to_string())
+fn parse_multipart_content_disposition_name(value: &str) -> Option<String> {
+    let segments = split_multipart_header_parameters(value)?;
+    let disposition = segments.first()?.trim();
+    if !disposition.eq_ignore_ascii_case("form-data") {
+        return None;
+    }
+
+    let mut seen_keys = Vec::new();
+    let mut name = None;
+    for segment in segments.into_iter().skip(1) {
+        let segment = segment.trim();
+        if segment.is_empty() {
+            return None;
+        }
+        let (raw_key, raw_value) = segment.split_once('=')?;
+        let key = raw_key.trim();
+        if key.is_empty() || !key.as_bytes().iter().copied().all(is_http_token_byte) {
+            return None;
+        }
+        if seen_keys
+            .iter()
+            .any(|seen: &String| seen.eq_ignore_ascii_case(key))
+        {
+            return None;
+        }
+        seen_keys.push(key.to_ascii_lowercase());
+
+        let parsed_value = parse_multipart_header_parameter_value(raw_value.trim())?;
+        if key.eq_ignore_ascii_case("name") {
+            if parsed_value.is_empty() {
+                return None;
+            }
+            name = Some(parsed_value);
+        }
+    }
+
+    name
+}
+
+fn split_multipart_header_parameters(value: &str) -> Option<Vec<&str>> {
+    let mut segments = Vec::new();
+    let mut start = 0usize;
+    let mut in_quotes = false;
+    let mut escaped = false;
+
+    for (index, byte) in value.as_bytes().iter().copied().enumerate() {
+        if in_quotes {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_quotes = false;
+            }
+        } else if byte == b'"' {
+            in_quotes = true;
+        } else if byte == b';' {
+            segments.push(&value[start..index]);
+            start = index + 1;
+        }
+    }
+
+    if in_quotes || escaped {
+        return None;
+    }
+    segments.push(&value[start..]);
+    Some(segments)
+}
+
+fn parse_multipart_header_parameter_value(value: &str) -> Option<String> {
+    if value.is_empty() {
+        return None;
+    }
+    if value.starts_with('"') {
+        if value.len() < 2 || !value.ends_with('"') {
+            return None;
+        }
+        let inner = &value[1..value.len() - 1];
+        let mut parsed = String::with_capacity(inner.len());
+        let mut escaped = false;
+        for character in inner.chars() {
+            if escaped {
+                if character.is_control() {
+                    return None;
+                }
+                parsed.push(character);
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else {
+                if character == '"' || character.is_control() {
+                    return None;
+                }
+                parsed.push(character);
+            }
+        }
+        if escaped {
+            return None;
+        }
+        return Some(parsed);
+    }
+
+    value
+        .as_bytes()
+        .iter()
+        .copied()
+        .all(is_http_token_byte)
+        .then(|| value.to_string())
 }
 
 fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
@@ -1752,10 +2077,13 @@ mod tests {
     use super::{
         build_chatgpt_web_image_request_body, build_codex_openai_image_api_provider_request_body,
         build_openai_image_api_provider_request_body, build_openai_image_provider_request_body,
-        is_openai_image_stream_request, normalize_openai_image_quality,
+        decode_multipart_body_base64_with_limit, find_multipart_boundary,
+        is_openai_image_stream_request, multipart_boundary, normalize_openai_image_quality,
         normalize_openai_image_request, normalize_openai_image_request_with_options,
-        openai_image_operation_from_path, project_codex_openai_image_api_request_body,
-        project_openai_image_api_request_body, OpenAiImageNormalizeOptions, OpenAiImageOperation,
+        openai_image_operation_from_path, parse_multipart_fields,
+        project_codex_openai_image_api_request_body, project_openai_image_api_request_body,
+        OpenAiImageNormalizeOptions, OpenAiImageOperation, MAX_MULTIPART_BOUNDARY_BYTES,
+        MAX_MULTIPART_PARTS, MAX_MULTIPART_PART_HEADER_BYTES,
     };
     use crate::formats::openai::image::spec::{resolve_stream_spec, resolve_sync_spec};
 
@@ -1831,6 +2159,210 @@ mod tests {
             &json!({}),
             Some(&body_base64)
         ));
+    }
+
+    #[test]
+    fn multipart_boundary_requires_rfc_token_and_length_limits() {
+        assert_eq!(
+            multipart_boundary("Multipart/Form-Data; boundary=quoted-token-123").as_deref(),
+            Some("quoted-token-123")
+        );
+        assert_eq!(
+            multipart_boundary("multipart/form-data; boundary=\"quoted-token-123\"").as_deref(),
+            Some("quoted-token-123")
+        );
+
+        for content_type in [
+            "multipart/form-data; boundary=bad boundary",
+            "multipart/form-data; boundary=bad\"quote",
+            "multipart/form-data; boundary=\"unterminated",
+            "multipart/form-data; boundary=first; boundary=second",
+            "multipart/form-data; foo",
+            "multipart/form-data; foo=\"unterminated; boundary=valid",
+            "multipart/form-data; boundary=valid trailing",
+            "application/json; boundary=valid-token",
+        ] {
+            assert!(
+                multipart_boundary(content_type).is_none(),
+                "{content_type:?}"
+            );
+        }
+
+        let oversized = "a".repeat(MAX_MULTIPART_BOUNDARY_BYTES + 1);
+        assert!(
+            multipart_boundary(&format!("multipart/form-data; boundary={oversized}")).is_none()
+        );
+    }
+
+    #[test]
+    fn multipart_boundary_accepts_quoted_unknown_parameter_with_semicolon() {
+        assert_eq!(
+            multipart_boundary("multipart/form-data; note=\"semi;colon\"; boundary=quoted-token")
+                .as_deref(),
+            Some("quoted-token")
+        );
+    }
+
+    #[test]
+    fn multipart_boundary_rejects_escaped_or_duplicate_content_type_parameters() {
+        for content_type in [
+            "multipart/form-data; boundary=\"escaped\\\"token\"",
+            "multipart/form-data; note=one; NOTE=two; boundary=token",
+            "multipart/form-data; note=\"unterminated; boundary=token",
+            "multipart/form-data; note=\"closed\"trailing; boundary=token",
+        ] {
+            assert!(
+                multipart_boundary(content_type).is_none(),
+                "malformed content type must be rejected: {content_type:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn multipart_parser_caps_part_count_and_header_size() {
+        let boundary = "bounded-parts";
+        let mut accepted_body = Vec::new();
+        for index in 0..MAX_MULTIPART_PARTS {
+            accepted_body.extend_from_slice(
+                format!(
+                    "--{boundary}\r\nContent-Disposition: form-data; name=\"field-{index}\"\r\n\r\nvalue\r\n"
+                )
+                .as_bytes(),
+            );
+        }
+        accepted_body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+        assert_eq!(
+            parse_multipart_fields(&accepted_body, boundary).len(),
+            MAX_MULTIPART_PARTS
+        );
+
+        let mut body = Vec::new();
+        for index in 0..(MAX_MULTIPART_PARTS + 1) {
+            body.extend_from_slice(
+                format!(
+                    "--{boundary}\r\nContent-Disposition: form-data; name=\"field-{index}\"\r\n\r\nvalue\r\n"
+                )
+                .as_bytes(),
+            );
+        }
+        body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+        assert!(parse_multipart_fields(&body, boundary).is_empty());
+
+        let mut oversized_header =
+            format!("--{boundary}\r\nContent-Disposition: form-data; name=\"field\"; x=\"")
+                .into_bytes();
+        oversized_header.extend(std::iter::repeat_n(b'x', MAX_MULTIPART_PART_HEADER_BYTES));
+        oversized_header
+            .extend_from_slice(format!("\"\r\n\r\nvalue\r\n--{boundary}--\r\n").as_bytes());
+        assert!(parse_multipart_fields(&oversized_header, boundary).is_empty());
+    }
+
+    #[test]
+    fn multipart_body_base64_decode_enforces_allocation_limit() {
+        let exact = vec![b'x'; 6];
+        let exact_encoded = base64::engine::general_purpose::STANDARD.encode(&exact);
+        assert_eq!(
+            decode_multipart_body_base64_with_limit(&exact_encoded, exact.len()),
+            Some(exact)
+        );
+
+        let oversized = vec![b'x'; 7];
+        let oversized_encoded = base64::engine::general_purpose::STANDARD.encode(oversized);
+        assert_eq!(
+            decode_multipart_body_base64_with_limit(&oversized_encoded, 6),
+            None
+        );
+
+        let same_encoded_bucket = base64::engine::general_purpose::STANDARD.encode([b'x'; 6]);
+        assert_eq!(
+            decode_multipart_body_base64_with_limit(&same_encoded_bucket, 5),
+            None
+        );
+    }
+
+    #[test]
+    fn multipart_parser_preserves_boundary_like_payload_and_fails_closed() {
+        let boundary = "payload-boundary";
+        let body = format!(
+            concat!(
+                "--{boundary}\r\n",
+                "Content-Disposition: form-data; name=\"prompt\"\r\n\r\n",
+                "prefix\r\n--{boundary}X\r\nsuffix--{boundary}\r\n",
+                "--{boundary}--\r\n"
+            ),
+            boundary = boundary,
+        );
+        let fields = parse_multipart_fields(body.as_bytes(), boundary);
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].name, "prompt");
+        assert_eq!(
+            fields[0].data,
+            format!("prefix\r\n--{boundary}X\r\nsuffix--{boundary}").into_bytes()
+        );
+
+        let malformed = format!(
+            concat!(
+                "--{boundary}\r\n",
+                "Content-Disposition: form-data; name=\"first\"\r\n\r\n",
+                "ok\r\n",
+                "--{boundary}\r\n",
+                "Content-Disposition: form-data; name=\"second\"\r\n\r\n",
+                "truncated\r\n--{boundary}X\r\n"
+            ),
+            boundary = boundary,
+        );
+        assert!(parse_multipart_fields(malformed.as_bytes(), boundary).is_empty());
+    }
+
+    #[test]
+    fn multipart_parser_does_not_extract_name_from_filename_and_rejects_duplicates() {
+        let boundary = "header-parameters";
+        let filename_only = format!(
+            concat!(
+                "--{boundary}\r\n",
+                "Content-Disposition: form-data; filename=\"name=\\\"prompt\\\"\"\r\n\r\n",
+                "attacker-value\r\n",
+                "--{boundary}--\r\n"
+            ),
+            boundary = boundary,
+        );
+        assert!(parse_multipart_fields(filename_only.as_bytes(), boundary).is_empty());
+
+        let duplicate_name = format!(
+            concat!(
+                "--{boundary}\r\n",
+                "Content-Disposition: form-data; name=\"prompt\"; name=\"image\"\r\n\r\n",
+                "ambiguous-value\r\n",
+                "--{boundary}--\r\n"
+            ),
+            boundary = boundary,
+        );
+        assert!(parse_multipart_fields(duplicate_name.as_bytes(), boundary).is_empty());
+    }
+
+    #[test]
+    fn multipart_parser_rejects_garbage_after_closing_boundary() {
+        let boundary = "closing-suffix";
+        let body = format!(
+            concat!(
+                "--{boundary}\r\n",
+                "Content-Disposition: form-data; name=\"prompt\"\r\n\r\n",
+                "value\r\n",
+                "--{boundary}--junk"
+            ),
+            boundary = boundary,
+        );
+        assert!(parse_multipart_fields(body.as_bytes(), boundary).is_empty());
+    }
+
+    #[test]
+    fn multipart_scanner_skips_short_prefix_before_later_valid_boundary() {
+        let delimiter = b"--scanner-boundary";
+        let haystack = b"x--scanner-boundary\r\ncontent\r\n--scanner-boundary\r\n";
+        assert_eq!(
+            find_multipart_boundary(haystack, delimiter, false),
+            Some(haystack.len() - delimiter.len() - 2)
+        );
     }
 
     #[test]

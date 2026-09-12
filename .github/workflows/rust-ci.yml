@@ -1,6 +1,7 @@
 name: Rust CI
 
 on:
+  workflow_call:
   push:
     branches:
       - master
@@ -10,18 +11,63 @@ on:
       - "Cargo.lock"
       - "crates/**"
       - "apps/**"
+      - "install.sh"
+      - "deploy.sh"
+      - "update.sh"
+      - "generate_keys.sh"
+      - ".env.example"
+      - "README.md"
+      - "Dockerfile.app"
+      - "docker-compose.yml"
+      - "docker-compose.single-node.yml"
+      - "docker-compose.local.yml"
+      - "docker-compose.release-local.yml"
+      - "tests/compose_database_config_test.py"
+      - "tests/install_*_test.sh"
+      - "tests/deploy_*_test.sh"
+      - "tests/update_*_test.sh"
+      - "tests/release_supply_chain_test.sh"
+      - "tests/tunnel_installer_config_security_test.sh"
+      - ".github/workflows/build-tunnel.yml"
+      - ".github/workflows/deploy-pages.yml"
+      - ".github/workflows/release.yml"
       - ".github/workflows/rust-ci.yml"
+      - ".github/workflows/nightly.yml"
   pull_request:
     paths:
       - "Cargo.toml"
       - "Cargo.lock"
       - "crates/**"
       - "apps/**"
+      - "install.sh"
+      - "deploy.sh"
+      - "update.sh"
+      - "generate_keys.sh"
+      - ".env.example"
+      - "README.md"
+      - "Dockerfile.app"
+      - "docker-compose.yml"
+      - "docker-compose.single-node.yml"
+      - "docker-compose.local.yml"
+      - "docker-compose.release-local.yml"
+      - "tests/compose_database_config_test.py"
+      - "tests/install_*_test.sh"
+      - "tests/deploy_*_test.sh"
+      - "tests/update_*_test.sh"
+      - "tests/release_supply_chain_test.sh"
+      - "tests/tunnel_installer_config_security_test.sh"
+      - ".github/workflows/build-tunnel.yml"
+      - ".github/workflows/deploy-pages.yml"
+      - ".github/workflows/release.yml"
       - ".github/workflows/rust-ci.yml"
+      - ".github/workflows/nightly.yml"
 
 concurrency:
-  group: rust-ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: rust-ci-${{ github.event_name }}-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
+
+permissions:
+  contents: read
 
 env:
   CARGO_INCREMENTAL: 0
@@ -30,14 +76,35 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  shell_security:
+    name: Shell security fixtures
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Run installer and supply-chain fixtures
+        shell: bash
+        run: |
+          python3 tests/compose_database_config_test.py
+          bash tests/deploy_state_safety_test.sh
+          bash tests/install_archive_safety_test.sh
+          bash tests/install_container_runtime_security_test.sh
+          bash tests/install_current_release_link_test.sh
+          bash tests/install_local_bundle_safety_test.sh
+          bash tests/install_privileged_write_safety_test.sh
+          bash tests/install_source_trust_test.sh
+          bash tests/release_supply_chain_test.sh
+          bash tests/update_compose_safety_test.sh
+          bash tests/tunnel_installer_config_security_test.sh
+
   fmt:
     name: Format
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
           toolchain: 1.95.0
           components: rustfmt
@@ -49,22 +116,22 @@ jobs:
     name: Clippy (Gateway)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
           toolchain: 1.95.0
           components: clippy
 
       - name: Rust cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
           shared-key: rust-ci-${{ runner.os }}
           workspaces: . -> target
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
+        uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad # v0.0.9
 
       - name: Clippy
         env:
@@ -83,22 +150,22 @@ jobs:
     name: Clippy (Data)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
           toolchain: 1.95.0
           components: clippy
 
       - name: Rust cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
           shared-key: rust-ci-${{ runner.os }}
           workspaces: . -> target
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
+        uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad # v0.0.9
 
       - name: Clippy
         env:
@@ -117,22 +184,22 @@ jobs:
     name: Clippy (Workspace Rest)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
           toolchain: 1.95.0
           components: clippy
 
       - name: Rust cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
           shared-key: rust-ci-${{ runner.os }}
           workspaces: . -> target
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
+        uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad # v0.0.9
 
       - name: Clippy
         env:
@@ -169,28 +236,31 @@ jobs:
     name: Test (Gateway)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
 
       - name: Show Rust toolchain
         run: rustup show active-toolchain
 
       - name: Rust cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
           shared-key: rust-ci-${{ runner.os }}
           workspaces: . -> target
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
+        uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad # v0.0.9
 
       - name: Setup mold
-        uses: rui314/setup-mold@v1
+        uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1
 
       - name: Install nextest
-        uses: taiki-e/install-action@nextest
+        uses: taiki-e/install-action@d5f9268ff7620505a81ada10ddf18cdd72240185 # nextest
+
+      - name: Expose PostgreSQL test binaries
+        run: pg_config --bindir >> "$GITHUB_PATH"
 
       - name: Test lib
         env:
@@ -219,30 +289,34 @@ jobs:
     name: Test (Data)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
 
       - name: Show Rust toolchain
         run: rustup show active-toolchain
 
       - name: Rust cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
           shared-key: rust-ci-${{ runner.os }}
           workspaces: . -> target
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
+        uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad # v0.0.9
 
       - name: Install nextest
-        uses: taiki-e/install-action@nextest
+        uses: taiki-e/install-action@d5f9268ff7620505a81ada10ddf18cdd72240185 # nextest
+
+      - name: Expose PostgreSQL test binaries
+        run: pg_config --bindir >> "$GITHUB_PATH"
 
       - name: Test
         env:
           RUSTC_WRAPPER: sccache
           SCCACHE_GHA_ENABLED: "true"
+          AETHER_REQUIRE_LOCAL_POSTGRES_TESTS: "true"
         run: cargo nextest run -p aether-data
 
       - name: Show sccache stats
@@ -260,23 +334,21 @@ jobs:
       matrix:
         feature:
           - postgres
-          - mysql
-          - sqlite
           - all-drivers
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
 
       - name: Rust cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
           shared-key: rust-ci-${{ runner.os }}
           workspaces: . -> target
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
+        uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad # v0.0.9
 
       - name: Check selected data driver
         env:
@@ -295,25 +367,25 @@ jobs:
     name: Test (Workspace Rest)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
 
       - name: Show Rust toolchain
         run: rustup show active-toolchain
 
       - name: Rust cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
           shared-key: rust-ci-${{ runner.os }}
           workspaces: . -> target
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
+        uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad # v0.0.9
 
       - name: Install nextest
-        uses: taiki-e/install-action@nextest
+        uses: taiki-e/install-action@d5f9268ff7620505a81ada10ddf18cdd72240185 # nextest
 
       - name: Test
         env:
@@ -336,25 +408,23 @@ jobs:
       matrix:
         package:
           - aether-data-postgres
-          - aether-data-mysql
-          - aether-data-sqlite
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
 
       - name: Rust cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
           shared-key: rust-ci-${{ runner.os }}
           workspaces: . -> target
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
+        uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad # v0.0.9
 
       - name: Install nextest
-        uses: taiki-e/install-action@nextest
+        uses: taiki-e/install-action@d5f9268ff7620505a81ada10ddf18cdd72240185 # nextest
 
       - name: Test adapter
         env:
@@ -373,19 +443,22 @@ jobs:
     name: Test (Integration Scenarios)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
 
       - name: Rust cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
           shared-key: rust-ci-${{ runner.os }}
           workspaces: . -> target
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
+        uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad # v0.0.9
+
+      - name: Expose PostgreSQL test binaries
+        run: pg_config --bindir >> "$GITHUB_PATH"
 
       - name: Test scenario binaries and end-to-end suites
         env:
@@ -424,40 +497,6 @@ jobs:
             exit 1
           fi
 
-  data_db_smoke_sqlite:
-    name: Data DB Smoke (SQLite)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Show Rust toolchain
-        run: rustup show active-toolchain
-
-      - name: Rust cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: rust-ci-${{ runner.os }}
-          workspaces: . -> target
-
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
-
-      - name: Run SQLite data smoke tests
-        env:
-          RUSTC_WRAPPER: sccache
-          SCCACHE_GHA_ENABLED: "true"
-        run: cargo test -p aether-data --all-features sqlite --lib
-
-      - name: Show sccache stats
-        if: always()
-        env:
-          RUSTC_WRAPPER: sccache
-          SCCACHE_GHA_ENABLED: "true"
-        run: sccache --show-stats
-
   data_db_smoke_postgres:
     name: Data DB Smoke (Postgres)
     runs-on: ubuntu-latest
@@ -476,22 +515,22 @@ jobs:
           --health-timeout=5s
           --health-retries=20
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
 
       - name: Show Rust toolchain
         run: rustup show active-toolchain
 
       - name: Rust cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
           shared-key: rust-ci-${{ runner.os }}
           workspaces: . -> target
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
+        uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad # v0.0.9
 
       - name: Add PostgreSQL server binaries to PATH
         run: echo "$(pg_config --bindir)" >> "$GITHUB_PATH"
@@ -509,6 +548,13 @@ jobs:
           SCCACHE_GHA_ENABLED: "true"
           AETHER_TEST_POSTGRES_URL: postgres://aether:aether@127.0.0.1:5432/aether_test
         run: cargo test -p aether-data --all-features postgres_provider_upstream_metadata_migration_preserves_json_when_url_is_set --lib -- --nocapture
+
+      - name: Run Postgres payment callback regression tests
+        env:
+          RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: "true"
+          AETHER_TEST_DATABASE_URL: postgres://aether:aether@127.0.0.1:5432/aether_test
+        run: cargo test -p aether-data-postgres live_payment_callback --lib -- --ignored --nocapture
 
       - name: Run Postgres API key lifecycle tests
         env:
@@ -529,112 +575,6 @@ jobs:
           AETHER_TEST_POSTGRES_URL: postgres://aether:aether@127.0.0.1:5432/aether_test
         run: cargo test -p aether-data --all-features postgres_core_export_reads_migrated_database_rows_when_url_is_set --lib -- --nocapture
 
-      - name: Run SQLite-to-Postgres import smoke test
-        env:
-          RUSTC_WRAPPER: sccache
-          SCCACHE_GHA_ENABLED: "true"
-          AETHER_TEST_POSTGRES_URL: postgres://aether:aether@127.0.0.1:5432/aether_test
-        run: cargo test -p aether-data --all-features sqlite_core_export_reads_migrated_database_rows --lib -- --nocapture
-
-      - name: Show sccache stats
-        if: always()
-        env:
-          RUSTC_WRAPPER: sccache
-          SCCACHE_GHA_ENABLED: "true"
-        run: sccache --show-stats
-
-  data_db_smoke_mysql:
-    name: Data DB Smoke (MySQL)
-    runs-on: ubuntu-latest
-    services:
-      mysql:
-        image: mysql:8.0
-        env:
-          MYSQL_DATABASE: aether_test
-          MYSQL_USER: aether
-          MYSQL_PASSWORD: aether
-          MYSQL_ROOT_PASSWORD: aether_root
-        ports:
-          - 3306:3306
-        options: >-
-          --health-cmd="mysqladmin ping -h 127.0.0.1 -uaether -paether --silent"
-          --health-interval=5s
-          --health-timeout=5s
-          --health-retries=20
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Show Rust toolchain
-        run: rustup show active-toolchain
-
-      - name: Rust cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: rust-ci-${{ runner.os }}
-          workspaces: . -> target
-
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
-
-      - name: Run MySQL migration smoke test
-        env:
-          RUSTC_WRAPPER: sccache
-          SCCACHE_GHA_ENABLED: "true"
-          AETHER_TEST_MYSQL_URL: mysql://aether:aether@127.0.0.1:3306/aether_test
-        run: cargo test -p aether-data --all-features mysql_migrations_create_core_config_tables_when_url_is_set --lib -- --nocapture
-
-      - name: Run MySQL usage write smoke test
-        env:
-          RUSTC_WRAPPER: sccache
-          SCCACHE_GHA_ENABLED: "true"
-          AETHER_TEST_MYSQL_URL: mysql://aether:aether@127.0.0.1:3306/aether_test
-        run: cargo test -p aether-data-mysql mysql_usage_write_repository_upserts_and_flushes_counters_when_url_is_set --lib -- --nocapture
-
-      - name: Run MySQL usage read smoke test
-        env:
-          RUSTC_WRAPPER: sccache
-          SCCACHE_GHA_ENABLED: "true"
-          AETHER_TEST_MYSQL_URL: mysql://aether:aether@127.0.0.1:3306/aether_test
-        run: cargo test -p aether-data-mysql mysql_usage_read_repository_reads_usage_contract_views_when_url_is_set --lib -- --nocapture
-
-      - name: Run MySQL provider catalog smoke test
-        env:
-          RUSTC_WRAPPER: sccache
-          SCCACHE_GHA_ENABLED: "true"
-          AETHER_TEST_MYSQL_URL: mysql://aether:aether@127.0.0.1:3306/aether_test
-        run: cargo test -p aether-data-mysql mysql_provider_catalog_repository_round_trips_when_url_is_set --lib -- --nocapture
-
-      - name: Run MySQL core export smoke test
-        env:
-          RUSTC_WRAPPER: sccache
-          SCCACHE_GHA_ENABLED: "true"
-          AETHER_TEST_MYSQL_URL: mysql://aether:aether@127.0.0.1:3306/aether_test
-        run: cargo test -p aether-data --all-features mysql_core_export_reads_migrated_database_rows_when_url_is_set --lib -- --nocapture
-
-      - name: Run MySQL wallet read smoke test
-        env:
-          RUSTC_WRAPPER: sccache
-          SCCACHE_GHA_ENABLED: "true"
-          AETHER_TEST_MYSQL_URL: mysql://aether:aether@127.0.0.1:3306/aether_test
-        run: cargo test -p aether-data-mysql mysql_wallet_read_repository_reads_wallet_contract_views --lib -- --nocapture
-
-      - name: Run MySQL wallet daily usage aggregation smoke test
-        env:
-          RUSTC_WRAPPER: sccache
-          SCCACHE_GHA_ENABLED: "true"
-          AETHER_TEST_MYSQL_URL: mysql://aether:aether@127.0.0.1:3306/aether_test
-        run: cargo test -p aether-data --all-features mysql_wallet_daily_usage_aggregation_uses_settlement_wallets_when_url_is_set --lib -- --nocapture
-
-      - name: Run MySQL stats aggregation smoke test
-        env:
-          RUSTC_WRAPPER: sccache
-          SCCACHE_GHA_ENABLED: "true"
-          AETHER_TEST_MYSQL_URL: mysql://aether:aether@127.0.0.1:3306/aether_test
-        run: cargo test -p aether-data --all-features mysql_stats_aggregation_runs_after_mysql_migrations_when_url_is_set --lib -- --nocapture
-
       - name: Show sccache stats
         if: always()
         env:
@@ -646,16 +586,12 @@ jobs:
     name: Data DB Smoke
     runs-on: ubuntu-latest
     needs:
-      - data_db_smoke_sqlite
       - data_db_smoke_postgres
-      - data_db_smoke_mysql
     if: ${{ always() }}
     steps:
       - name: Verify database smoke jobs
         run: |
-          if [ "${{ needs.data_db_smoke_sqlite.result }}" != "success" ] || \
-             [ "${{ needs.data_db_smoke_postgres.result }}" != "success" ] || \
-             [ "${{ needs.data_db_smoke_mysql.result }}" != "success" ]; then
+          if [ "${{ needs.data_db_smoke_postgres.result }}" != "success" ]; then
             echo "Data DB smoke failed"
             exit 1
           fi
@@ -668,6 +604,7 @@ jobs:
       - clippy
       - test
       - data_db_smoke
+      - shell_security
     if: ${{ always() }}
     steps:
       - name: Verify required jobs
@@ -675,7 +612,8 @@ jobs:
           if [ "${{ needs.fmt.result }}" != "success" ] || \
              [ "${{ needs.clippy.result }}" != "success" ] || \
              [ "${{ needs.test.result }}" != "success" ] || \
-             [ "${{ needs.data_db_smoke.result }}" != "success" ]; then
+             [ "${{ needs.data_db_smoke.result }}" != "success" ] || \
+             [ "${{ needs.shell_security.result }}" != "success" ]; then
             echo "Rust CI failed"
             exit 1
           fi

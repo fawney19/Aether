@@ -7,18 +7,18 @@ use std::time::{Duration, Instant};
 use aether_contracts::{ExecutionPlan, ExecutionTimeouts, RequestBody};
 use aether_gateway::tunnel_protocol as protocol;
 use aether_testkit::{
-    fetch_prometheus_samples, find_metric_value_u64, init_test_runtime_for, run_http_load_probe,
-    BenchmarkRuntimeSnapshot, ExecutionRuntimeHarness, ExecutionRuntimeHarnessConfig,
-    GatewayHarness, GatewayHarnessConfig, HttpLoadProbeConfig, HttpLoadProbeResponseMode,
-    HttpLoadProbeResult, SpawnedServer, TunnelHarness, TunnelHarnessConfig,
-    GATEWAY_HARNESS_API_KEY,
+    fetch_prometheus_samples, find_metric_value_u64, init_test_runtime_for,
+    insert_tunnel_harness_auth_headers, run_http_load_probe, BenchmarkRuntimeSnapshot,
+    ExecutionRuntimeHarness, ExecutionRuntimeHarnessConfig, GatewayHarness, GatewayHarnessConfig,
+    HttpLoadProbeConfig, HttpLoadProbeResponseMode, HttpLoadProbeResult, SpawnedServer,
+    TunnelHarness, TunnelHarnessConfig, GATEWAY_HARNESS_API_KEY, TUNNEL_HARNESS_NODE_ID,
 };
 use axum::body::{to_bytes, Body, Bytes};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
 use axum::{extract::Request, Json, Router};
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{stream::FuturesUnordered, SinkExt, StreamExt};
 use reqwest::Method;
 use serde::Serialize;
 use serde_json::json;
@@ -83,6 +83,8 @@ struct CapacityCurvePointResult {
     successful_requests: usize,
     rejected_requests: usize,
     failed_requests: usize,
+    status_counts: BTreeMap<u16, usize>,
+    non_success_status_samples: serde_json::Value,
     throughput_rps: u64,
     p50_ms: u64,
     p95_ms: u64,
@@ -112,8 +114,16 @@ struct GateMetricSnapshot {
     rejected_total: u64,
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let _log_shutdown = aether_runtime::LogShutdownGuard::new();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(8 * 1024 * 1024)
+        .build()?;
+    runtime.block_on(run())
+}
+
+async fn run() -> Result<(), Box<dyn std::error::Error>> {
     init_test_runtime_for("capacity-curve-baseline");
     let config = parse_args(std::env::args().skip(1).collect())?;
     let report = run_suite(&config).await?;
@@ -215,11 +225,11 @@ async fn run_gateway_curve(
             .await
             .map_err(std::io::Error::other)?;
         let duration_ms = started_at.elapsed().as_millis() as u64;
-        let metrics = capture_gate_metrics(
-            &format!("{}/_gateway/metrics", gateway.base_url()),
-            gate_name,
-        )
-        .await?;
+        let samples = gateway
+            .metric_samples()
+            .await
+            .map_err(std::io::Error::other)?;
+        let metrics = gate_metrics(&samples, gate_name)?;
         points.push(capacity_point(
             *limit,
             total_requests,
@@ -308,6 +318,7 @@ async fn run_tunnel_curve(
     for limit in &config.points {
         let relay_concurrency = (*limit).saturating_sub(1).max(1);
         let tunnel = TunnelHarness::start(TunnelHarnessConfig {
+            node_id: TUNNEL_HARNESS_NODE_ID.to_string(),
             max_streams: (*limit).max(128),
             ping_interval: Duration::from_secs(15),
             outbound_queue_capacity: 128,
@@ -318,6 +329,21 @@ async fn run_tunnel_curve(
         let peer = connect_protocol_peer(tunnel.base_url(), config.tunnel_hold).await?;
         let total_requests =
             total_requests_for_limit(relay_concurrency, config.requests_per_point_multiplier);
+        let envelope = relay_envelope();
+        let body_offset =
+            4 + u32::from_be_bytes(envelope[..4].try_into().expect("metadata length")) as usize;
+        verify_tunnel_fixture(&tunnel, &envelope, body_offset, config.timeout).await?;
+        let header_sets = (0..total_requests)
+            .map(|_| {
+                let mut headers =
+                    tunnel.relay_headers(&envelope[..body_offset], &envelope[body_offset..]);
+                headers.insert(
+                    "content-type".to_string(),
+                    "application/octet-stream".to_string(),
+                );
+                headers
+            })
+            .collect();
         let probe = HttpLoadProbeConfig {
             url: format!(
                 "{tunnel_base}{TUNNEL_RELAY_PATH_PREFIX}/node-baseline",
@@ -328,7 +354,8 @@ async fn run_tunnel_curve(
                 "content-type".to_string(),
                 "application/octet-stream".to_string(),
             )]),
-            body: Some(relay_envelope()),
+            header_sets,
+            body: Some(envelope),
             total_requests,
             concurrency: relay_concurrency,
             timeout: config.timeout,
@@ -349,7 +376,8 @@ async fn run_tunnel_curve(
             result,
             metrics,
         ));
-        drop(peer);
+        peer.abort();
+        let _ = peer.await;
     }
 
     Ok(CapacityCurveScenarioReport {
@@ -359,6 +387,58 @@ async fn run_tunnel_curve(
         saturation_point: detect_saturation_point(&points, latency_budget_ms),
         points,
     })
+}
+
+async fn verify_tunnel_fixture(
+    tunnel: &TunnelHarness,
+    envelope: &[u8],
+    body_offset: usize,
+    timeout: Duration,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let client = reqwest::Client::builder().timeout(timeout).build()?;
+    let url = format!(
+        "{}{TUNNEL_RELAY_PATH_PREFIX}/{TUNNEL_HARNESS_NODE_ID}",
+        tunnel.base_url()
+    );
+    let unsigned = client.post(&url).body(envelope.to_vec()).send().await?;
+    if unsigned.status() != StatusCode::FORBIDDEN {
+        return Err(std::io::Error::other("unsigned tunnel preflight was not rejected").into());
+    }
+    let mut signed = client.post(&url).body(envelope.to_vec());
+    for (name, value) in tunnel.relay_headers(&envelope[..body_offset], &envelope[body_offset..]) {
+        signed = signed.header(name, value);
+    }
+    let signed = signed.build()?;
+    let mut tampered = signed
+        .try_clone()
+        .expect("buffered relay request should clone");
+    let mut tampered_body = envelope.to_vec();
+    *tampered_body
+        .last_mut()
+        .expect("relay body should be nonempty") ^= 1;
+    *tampered.body_mut() = Some(tampered_body.into());
+    if client.execute(tampered).await?.status() != StatusCode::FORBIDDEN {
+        return Err(std::io::Error::other("tampered tunnel preflight was not rejected").into());
+    }
+    let response = client
+        .execute(
+            signed
+                .try_clone()
+                .expect("buffered relay request should clone"),
+        )
+        .await?;
+    let status = response.status();
+    let body = response.text().await?;
+    if status != StatusCode::OK || body != "capacity-tunnel-stream" {
+        return Err(std::io::Error::other(format!(
+            "signed tunnel preflight failed: {status}: {body}"
+        ))
+        .into());
+    }
+    if client.execute(signed).await?.status() != StatusCode::FORBIDDEN {
+        return Err(std::io::Error::other("replayed tunnel preflight was not rejected").into());
+    }
+    Ok(())
 }
 
 fn capacity_point(
@@ -394,7 +474,10 @@ fn capacity_point(
         duration_ms,
         successful_requests,
         rejected_requests,
-        failed_requests: result.failed_requests,
+        failed_requests: total_requests.saturating_sub(successful_requests + rejected_requests),
+        status_counts: result.status_counts,
+        non_success_status_samples: serde_json::to_value(result.non_success_status_samples)
+            .expect("HTTP status samples should serialize"),
         throughput_rps,
         p50_ms: result.p50_ms,
         p95_ms: result.p95_ms,
@@ -439,27 +522,29 @@ async fn capture_gate_metrics(
     let samples = fetch_prometheus_samples(metrics_url)
         .await
         .map_err(std::io::Error::other)?;
+    gate_metrics(&samples, gate_name)
+}
+
+fn gate_metrics(
+    samples: &[aether_testkit::PrometheusSample],
+    gate_name: &str,
+) -> Result<GateMetricSnapshot, Box<dyn std::error::Error>> {
+    let required = |name| {
+        find_metric_value_u64(samples, name, &[("gate", gate_name)])
+            .or_else(|| {
+                find_metric_value_u64(
+                    samples,
+                    &format!("aether_testkit_{name}"),
+                    &[("gate", gate_name)],
+                )
+            })
+            .ok_or_else(|| std::io::Error::other(format!("missing {name} for gate {gate_name}")))
+    };
     Ok(GateMetricSnapshot {
-        in_flight: find_metric_value_u64(&samples, "concurrency_in_flight", &[("gate", gate_name)])
-            .unwrap_or_default(),
-        available_permits: find_metric_value_u64(
-            &samples,
-            "concurrency_available_permits",
-            &[("gate", gate_name)],
-        )
-        .unwrap_or_default(),
-        high_watermark: find_metric_value_u64(
-            &samples,
-            "concurrency_high_watermark",
-            &[("gate", gate_name)],
-        )
-        .unwrap_or_default(),
-        rejected_total: find_metric_value_u64(
-            &samples,
-            "concurrency_rejected_total",
-            &[("gate", gate_name)],
-        )
-        .unwrap_or_default(),
+        in_flight: required("concurrency_in_flight")?,
+        available_permits: required("concurrency_available_permits")?,
+        high_watermark: required("concurrency_high_watermark")?,
+        rejected_total: required("concurrency_rejected_total")?,
     })
 }
 
@@ -657,9 +742,7 @@ async fn connect_protocol_peer(
     );
     let request = ws_url.into_client_request()?;
     let mut request = request;
-    request
-        .headers_mut()
-        .insert("x-node-id", http::HeaderValue::from_static("node-baseline"));
+    insert_tunnel_harness_auth_headers(request.headers_mut(), TUNNEL_HARNESS_NODE_ID)?;
     request.headers_mut().insert(
         aether_contracts::tunnel::TUNNEL_PROTOCOL_VERSION_HEADER,
         http::HeaderValue::from_static(
@@ -701,25 +784,35 @@ async fn connect_protocol_peer(
     ))
     .await?;
     Ok(tokio::spawn(async move {
-        while let Some(message) = stream.next().await {
-            let Ok(message) = message else {
-                break;
-            };
-            match message {
-                Message::Binary(data)
-                    if handle_binary_frame(&mut sink, data.to_vec(), hold)
-                        .await
-                        .is_err() =>
-                {
-                    break;
+        let mut responses = FuturesUnordered::new();
+        loop {
+            tokio::select! {
+                message = stream.next() => {
+                    match message {
+                        Some(Ok(Message::Binary(data))) => {
+                            match handle_binary_frame(&mut sink, data.to_vec()).await {
+                                Ok(Some(stream_id)) => responses.push(async move {
+                                    tokio::time::sleep(hold).await;
+                                    stream_id
+                                }),
+                                Ok(None) => {},
+                                Err(_) => break,
+                            }
+                        }
+                        Some(Ok(Message::Ping(payload))) => {
+                            if sink.send(Message::Pong(payload)).await.is_err() {
+                                break;
+                            }
+                        }
+                        None | Some(Err(_)) | Some(Ok(Message::Close(_))) => break,
+                        _ => {},
+                    }
                 }
-                Message::Ping(payload)
-                    if sink.send(Message::Pong(payload.clone())).await.is_err() =>
-                {
-                    break;
+                Some(stream_id) = responses.next(), if !responses.is_empty() => {
+                    if send_protocol_response(&mut sink, stream_id).await.is_err() {
+                        break;
+                    }
                 }
-                Message::Close(_) => break,
-                _ => {}
             }
         }
         let _ = sink.close().await;
@@ -729,13 +822,12 @@ async fn connect_protocol_peer(
 async fn handle_binary_frame<S>(
     sink: &mut S,
     data: Vec<u8>,
-    hold: Duration,
-) -> Result<(), tokio_tungstenite::tungstenite::Error>
+) -> Result<Option<u32>, tokio_tungstenite::tungstenite::Error>
 where
     S: SinkExt<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
 {
     let Some(header) = protocol::FrameHeader::parse(&data) else {
-        return Ok(());
+        return Ok(None);
     };
     match header.msg_type {
         protocol::PING => {
@@ -756,48 +848,57 @@ where
                 .await?;
             }
             if header.flags & protocol::FLAG_END_STREAM == 0 {
-                return Ok(());
+                return Ok(None);
             }
-            tokio::time::sleep(hold).await;
-            let response_meta = protocol::ResponseMeta {
-                status: 200,
-                headers: vec![(
-                    "content-type".to_string(),
-                    "text/plain; charset=utf-8".to_string(),
-                )],
-            };
-            let response_meta_json =
-                serde_json::to_vec(&response_meta).expect("response metadata should serialize");
-            sink.send(Message::Binary(
-                protocol::encode_frame(
-                    header.stream_id,
-                    protocol::RESPONSE_HEADERS,
-                    0,
-                    &response_meta_json,
-                )
-                .into(),
-            ))
-            .await?;
-
-            for chunk in [
-                b"capacity-".as_slice(),
-                b"tunnel-".as_slice(),
-                b"stream".as_slice(),
-            ] {
-                sink.send(Message::Binary(
-                    protocol::encode_frame(header.stream_id, protocol::RESPONSE_BODY, 0, chunk)
-                        .into(),
-                ))
-                .await?;
-            }
-
-            sink.send(Message::Binary(
-                protocol::encode_frame(header.stream_id, protocol::STREAM_END, 0, &[]).into(),
-            ))
-            .await?;
+            return Ok(Some(header.stream_id));
         }
         _ => {}
     }
+    Ok(None)
+}
+
+async fn send_protocol_response<S>(
+    sink: &mut S,
+    stream_id: u32,
+) -> Result<(), tokio_tungstenite::tungstenite::Error>
+where
+    S: SinkExt<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+{
+    let response_meta = protocol::ResponseMeta {
+        status: 200,
+        headers: vec![(
+            "content-type".to_string(),
+            "text/plain; charset=utf-8".to_string(),
+        )],
+    };
+    let response_meta_json =
+        serde_json::to_vec(&response_meta).expect("response metadata should serialize");
+    sink.send(Message::Binary(
+        protocol::encode_frame(
+            stream_id,
+            protocol::RESPONSE_HEADERS,
+            0,
+            &response_meta_json,
+        )
+        .into(),
+    ))
+    .await?;
+
+    for chunk in [
+        b"capacity-".as_slice(),
+        b"tunnel-".as_slice(),
+        b"stream".as_slice(),
+    ] {
+        sink.send(Message::Binary(
+            protocol::encode_frame(stream_id, protocol::RESPONSE_BODY, 0, chunk).into(),
+        ))
+        .await?;
+    }
+
+    sink.send(Message::Binary(
+        protocol::encode_frame(stream_id, protocol::STREAM_END, 0, &[]).into(),
+    ))
+    .await?;
     Ok(())
 }
 

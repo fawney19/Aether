@@ -30,7 +30,10 @@ pub use auth::{
     KiroBearerAuth, KiroRequestAuth, KIRO_AUTH_HEADER, PROVIDER_TYPE,
 };
 pub use converter::convert_claude_messages_to_conversation_state;
-pub use credentials::{generate_machine_id, normalize_machine_id, KiroAuthConfig};
+pub use credentials::{
+    generate_machine_id, is_valid_kiro_region, normalize_kiro_region, normalize_machine_id,
+    KiroAuthConfig,
+};
 pub use headers::{
     build_generate_assistant_headers, build_list_available_models_headers, build_mcp_headers,
     AWS_EVENTSTREAM_CONTENT_TYPE, KIRO_EXTERNAL_IDP_TOKEN_TYPE, KIRO_PROFILE_ARN_HEADER,

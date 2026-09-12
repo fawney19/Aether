@@ -58,6 +58,7 @@ async fn admin_monitoring_trace_request_returns_local_payload() {
         .expect("route should be handled locally");
 
     assert_eq!(response.status(), http::StatusCode::OK);
+    assert!(response.headers().contains_key("x-aether-build-version"));
     let body = to_bytes(response.into_body(), usize::MAX)
         .await
         .expect("body should read");
@@ -69,7 +70,7 @@ async fn admin_monitoring_trace_request_returns_local_payload() {
     assert_eq!(payload["candidates"][0]["provider_name"], json!("OpenAI"));
     assert_eq!(
         payload["candidates"][0]["provider_website"],
-        json!("https://openai.com")
+        json!("https://openai.com/")
     );
     assert_eq!(
         payload["candidates"][0]["endpoint_name"],
@@ -93,6 +94,15 @@ async fn admin_monitoring_trace_request_resolves_usage_id_to_header_trace_id() {
             Some(33),
             Some(200),
         ),
+        sample_candidate(
+            "cand-other-attempt",
+            "trace-1",
+            1,
+            RequestCandidateStatus::Failed,
+            Some(100),
+            Some(20),
+            Some(502),
+        ),
     ]));
     let provider_catalog = Arc::new(InMemoryProviderCatalogReadRepository::seed(
         vec![sample_provider()],
@@ -110,6 +120,8 @@ async fn admin_monitoring_trace_request_resolves_usage_id_to_header_trace_id() {
         100,
     );
     usage.id = "usage-row-1".to_string();
+    usage.request_body_state = Some(UsageBodyCaptureState::Reference);
+    usage.response_body_state = Some(UsageBodyCaptureState::Reference);
     usage.candidate_id = Some("cand-used".to_string());
     usage.request_headers = Some(json!({
         "x-trace-id": "trace-1"
@@ -140,6 +152,17 @@ async fn admin_monitoring_trace_request_resolves_usage_id_to_header_trace_id() {
         .expect("body should read");
     let payload: serde_json::Value = serde_json::from_slice(&body).expect("json body should parse");
     assert_eq!(payload["request_id"], json!("trace-1"));
+    assert_eq!(payload["diagnostic_request"]["usage_id"], "usage-row-1");
+    assert_eq!(
+        payload["candidates"][0]["extra_data"]["diagnostic_context"]["usage_id"],
+        "usage-row-1"
+    );
+    assert_eq!(
+        payload["candidates"][0]["extra_data"]["diagnostic_context"]["body_states"]
+            ["response_body"],
+        "reference"
+    );
+    assert!(payload["candidates"][1]["extra_data"]["diagnostic_context"].is_null());
     assert_eq!(payload["candidates"][0]["id"], json!("cand-used"));
     assert_eq!(
         payload["candidates"][0]["extra_data"]["first_byte_time_ms"],
@@ -292,10 +315,10 @@ async fn admin_monitoring_trace_request_falls_back_to_usage_routing_snapshot() {
         payload["candidates"][0]["extra_data"]["execution_path"],
         json!("local_execution_runtime_miss")
     );
-    assert_eq!(
-        payload["candidates"][0]["extra_data"]["failure_diagnostic"]["path"],
-        json!("$.reasoning.summary")
-    );
+    assert!(payload["candidates"][0]["error_message"].is_null());
+    assert!(payload["candidates"][0]["extra_data"]
+        .get("failure_diagnostic")
+        .is_none());
 }
 
 #[tokio::test]
@@ -340,11 +363,9 @@ async fn admin_monitoring_trace_request_returns_oauth_account_label_from_auth_co
         vec![sample_endpoint()],
         vec![oauth_key],
     ));
-    let data_state = GatewayDataState::with_decision_trace_readers_for_tests(
-        request_candidates,
-        provider_catalog,
-    )
-    .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY);
+    let data_state = GatewayDataState::with_request_candidate_reader_for_tests(request_candidates)
+        .attach_provider_catalog_repository_for_tests(provider_catalog)
+        .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY);
     let state = AppState::new()
         .expect("state should build")
         .with_data_state_for_tests(data_state);
@@ -615,7 +636,7 @@ async fn admin_monitoring_trace_request_exposes_request_path_from_usage_audit() 
     usage.candidate_id = Some("cand-used".to_string());
     usage.request_metadata = Some(json!({
         "request_path": "/v1beta/models/gemini-2.5-pro:generateContent",
-        "request_query_string": "alt=sse"
+        "request_query_string": "alt=sse&key=gemini-secret&access_token=oauth-secret"
     }));
     let usage_repository = Arc::new(InMemoryUsageReadRepository::seed(vec![usage]));
     let data_state =
@@ -649,14 +670,19 @@ async fn admin_monitoring_trace_request_exposes_request_path_from_usage_audit() 
         payload["request_path_and_query"],
         json!("/v1beta/models/gemini-2.5-pro:generateContent?alt=sse")
     );
-    assert_eq!(
-        payload["candidates"][0]["extra_data"]["request_path_and_query"],
-        json!("/v1beta/models/gemini-2.5-pro:generateContent?alt=sse")
-    );
+    assert!(payload["candidates"][0]["extra_data"]
+        .get("request_path")
+        .is_none());
+    assert!(payload["candidates"][0]["extra_data"]
+        .get("request_query_string")
+        .is_none());
+    assert!(payload["candidates"][0]["extra_data"]
+        .get("request_path_and_query")
+        .is_none());
 }
 
 #[tokio::test]
-async fn admin_monitoring_trace_request_exposes_failed_candidate_upstream_response_boundary() {
+async fn admin_monitoring_trace_request_exposes_failed_candidate_response_payloads() {
     let mut candidate = sample_candidate(
         "cand-used",
         "request-1",
@@ -739,19 +765,100 @@ async fn admin_monitoring_trace_request_exposes_failed_candidate_upstream_respon
     let extra = &payload["candidates"][0]["extra_data"];
     assert_eq!(extra["upstream_response"]["status_code"], json!(302));
     assert_eq!(
-        extra["upstream_response"]["headers"]["location"],
-        json!("/")
+        extra["upstream_response"]["source"],
+        json!("upstream_response")
     );
+    assert!(extra["upstream_response"].get("headers").is_none());
     assert_eq!(
         extra["upstream_response"]["body"]["error"]["message"],
-        json!("redirect blocked")
+        "redirect blocked"
     );
+    assert!(extra["upstream_response"].get("body_ref").is_none());
     assert!(extra.get("client_response").is_none());
     assert!(extra.get("provider_response").is_none());
 }
 
 #[tokio::test]
-async fn admin_monitoring_trace_request_prefers_ref_backed_usage_response_body() {
+async fn admin_monitoring_trace_request_does_not_replace_attempt_status_with_usage_status() {
+    for (candidate_status, upstream_status, expected_status) in [
+        (Some(400), Some(400), Some(400)),
+        (Some(400), None, Some(400)),
+        (Some(502), Some(200), Some(200)),
+        (None, None, None),
+    ] {
+        let mut candidate = sample_candidate(
+            "cand-used",
+            "request-failover-status",
+            0,
+            RequestCandidateStatus::Failed,
+            Some(101),
+            Some(33),
+            candidate_status,
+        );
+        if let Some(status_code) = upstream_status {
+            candidate.extra_data = Some(json!({
+                "upstream_response": {
+                    "status_code": status_code,
+                    "body": {"error": {"message": "sensitive upstream error"}}
+                }
+            }));
+        }
+        let request_candidates =
+            Arc::new(InMemoryRequestCandidateRepository::seed(vec![candidate]));
+        let mut usage = sample_usage(
+            "request-failover-status",
+            "provider-1",
+            "OpenAI",
+            0,
+            0.0,
+            "failed",
+            Some(503),
+            100,
+        );
+        usage.candidate_id = Some("cand-used".to_string());
+        usage.response_body_state = Some(UsageBodyCaptureState::Reference);
+        let usage_repository = Arc::new(InMemoryUsageReadRepository::seed(vec![usage]));
+        let data_state =
+            crate::data::GatewayDataState::with_request_candidate_and_usage_repository_for_tests(
+                request_candidates,
+                usage_repository,
+            );
+        let state = AppState::new()
+            .expect("state should build")
+            .with_data_state_for_tests(data_state);
+        let context = request_context(
+            http::Method::GET,
+            "/api/admin/monitoring/trace/request-failover-status",
+        );
+
+        let response = local_monitoring_response(&state, &context)
+            .await
+            .expect("handler should not error")
+            .expect("route should be handled locally");
+        assert_eq!(response.status(), http::StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should read");
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("json body should parse");
+        let candidate = &payload["candidates"][0];
+        assert_eq!(candidate["status_code"], json!(candidate_status));
+        assert_eq!(
+            candidate["extra_data"]["upstream_response"]["status_code"],
+            json!(expected_status),
+        );
+        if upstream_status.is_some() {
+            assert_eq!(
+                candidate["extra_data"]["upstream_response"]["body"]["error"]["message"],
+                "sensitive upstream error"
+            );
+        }
+        assert!(candidate["error_message"].is_null());
+    }
+}
+
+#[tokio::test]
+async fn admin_monitoring_trace_request_keeps_candidate_errors_without_hydrating_usage_bodies() {
     let mut candidate = sample_candidate(
         "cand-used",
         "request-ref-body",
@@ -769,8 +876,7 @@ async fn admin_monitoring_trace_request_prefers_ref_backed_usage_response_body()
                 "x-request-id": "stale-request-like-body"
             },
             "body": {
-                "model": "gpt-5.6-sol",
-                "input": [{"role": "user", "content": "request prompt"}]
+                "error": {"message": "candidate-specific upstream failure"}
             }
         }
     }));
@@ -832,30 +938,22 @@ async fn admin_monitoring_trace_request_prefers_ref_backed_usage_response_body()
         .expect("body should read");
     let payload: serde_json::Value = serde_json::from_slice(&body).expect("json body should parse");
     let upstream_response = &payload["candidates"][0]["extra_data"]["upstream_response"];
+    assert_eq!(upstream_response["status_code"], json!(400));
+    assert_eq!(upstream_response["source"], json!("upstream_response"));
+    assert_eq!(upstream_response["body_state"], json!("reference"));
     assert_eq!(
-        upstream_response["headers"],
-        json!({
-            "content-type": "application/json",
-            "x-request-id": "req_usage-cyber-risk-demo"
-        })
+        upstream_response["headers"]["content-type"],
+        "text/event-stream"
     );
     assert_eq!(
-        upstream_response["body"]["error"],
-        json!({
-            "type": "invalid_request",
-            "message": "This content was flagged for possible cybersecurity risk.",
-            "code": 400
-        })
+        upstream_response["body"]["error"]["message"],
+        "candidate-specific upstream failure"
     );
-    assert!(upstream_response["body"].get("input").is_none());
-    assert_eq!(
-        upstream_response["body_ref"],
-        json!("usage://request/request-ref-body/response_body")
-    );
+    assert!(upstream_response.get("body_ref").is_none());
 }
 
 #[tokio::test]
-async fn admin_monitoring_trace_request_decodes_connect_json_response_body_refs() {
+async fn admin_monitoring_trace_request_does_not_expose_inline_connect_json_response_body() {
     let mut candidate = sample_candidate(
         "cand-used",
         "request-connect",
@@ -922,19 +1020,11 @@ async fn admin_monitoring_trace_request_decodes_connect_json_response_body_refs(
     let payload: serde_json::Value = serde_json::from_slice(&body).expect("json body should parse");
     let upstream_response = &payload["candidates"][0]["extra_data"]["upstream_response"];
     assert_eq!(upstream_response["status_code"], json!(429));
-    assert_eq!(
-        upstream_response["body"]["error"]["code"],
-        json!("resource_exhausted")
-    );
-    assert_eq!(
-        upstream_response["body"]["error"]["message"],
-        json!("quota exhausted")
-    );
-    assert_eq!(
-        upstream_response["body_ref"],
-        json!("usage://request/request-connect/response_body")
-    );
+    assert_eq!(upstream_response["source"], json!("upstream_response"));
     assert_eq!(upstream_response["body_state"], json!("inline"));
+    assert!(upstream_response.get("headers").is_none());
+    assert!(upstream_response.get("body").is_none());
+    assert!(upstream_response.get("body_ref").is_none());
 }
 
 #[tokio::test]

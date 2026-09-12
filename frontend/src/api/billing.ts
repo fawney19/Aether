@@ -55,12 +55,14 @@ export interface GatewayTestResponse {
 
 export interface WalletCreditEntitlement {
   type: 'wallet_credit'
+  replacement_group?: string
   amount_usd: number
   balance_bucket?: WalletCreditBucket
 }
 
 export interface DailyQuotaEntitlement {
   type: 'daily_quota'
+  replacement_group?: string
   daily_quota_usd: number
   reset_timezone?: string
   carry_over?: boolean
@@ -69,13 +71,41 @@ export interface DailyQuotaEntitlement {
 
 export interface MembershipGroupEntitlement {
   type: 'membership_group'
+  replacement_group?: string
   grant_user_groups: string[]
+}
+
+export type UsagePolicyMetric = 'request_count' | 'concurrency' | 'actual_cost_usd'
+export type UsagePolicyEnforcement = 'hard_cap'
+
+export type UsagePolicyWindow =
+  | { kind: 'rolling'; seconds: number }
+  | { kind: 'calendar_day'; timezone?: string }
+  | { kind: 'calendar_week'; timezone?: string; week_start?: number }
+  | { kind: 'calendar_month'; timezone?: string }
+  | { kind: 'subscription_period' }
+  | { kind: 'concurrent' }
+
+export interface UsagePolicyRule {
+  metric: UsagePolicyMetric
+  window: UsagePolicyWindow
+  limit: number
+  enforcement?: UsagePolicyEnforcement
+}
+
+export interface UsagePolicyEntitlement {
+  type: 'usage_policy'
+  policy_id?: string
+  name?: string
+  replacement_group?: string
+  rules: UsagePolicyRule[]
 }
 
 export type BillingEntitlement =
   | WalletCreditEntitlement
   | DailyQuotaEntitlement
   | MembershipGroupEntitlement
+  | UsagePolicyEntitlement
 
 export interface BillingPlan {
   id: string

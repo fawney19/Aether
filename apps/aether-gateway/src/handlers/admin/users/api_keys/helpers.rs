@@ -1,9 +1,8 @@
 use crate::handlers::admin::request::AdminAppState;
-use crate::handlers::admin::shared::{
-    attach_admin_audit_response, decrypt_catalog_secret_with_fallbacks,
-};
+use crate::handlers::admin::shared::attach_admin_audit_response;
 use crate::handlers::shared::{
-    api_key_placeholder_display, generate_gateway_api_key_plaintext, masked_gateway_api_key_display,
+    api_key_placeholder_display, generate_gateway_api_key_plaintext,
+    masked_gateway_api_key_display, open_auth_api_key_secret,
 };
 use axum::{body::Body, response::Response};
 use serde_json::json;
@@ -17,16 +16,12 @@ pub(crate) fn format_optional_unix_secs_iso8601(value: Option<u64>) -> Option<St
 
 pub(crate) fn masked_user_api_key_display(
     state: &AdminAppState<'_>,
-    ciphertext: Option<&str>,
+    record: &aether_data::repository::auth::StoredAuthApiKeyExportRecord,
 ) -> String {
-    let Some(ciphertext) = ciphertext.map(str::trim).filter(|value| !value.is_empty()) else {
+    let Ok(projection) = open_auth_api_key_secret(state.app(), record) else {
         return api_key_placeholder_display();
     };
-    let Some(full_key) = decrypt_catalog_secret_with_fallbacks(state.encryption_key(), ciphertext)
-    else {
-        return api_key_placeholder_display();
-    };
-    masked_gateway_api_key_display(Some(full_key.as_str()))
+    masked_gateway_api_key_display(Some(projection.plaintext.as_str()))
 }
 
 pub(super) fn build_admin_user_api_key_detail_payload(
@@ -37,7 +32,7 @@ pub(super) fn build_admin_user_api_key_detail_payload(
     json!({
         "id": record.api_key_id,
         "name": record.name,
-        "key_display": masked_user_api_key_display(state, record.key_encrypted.as_deref()),
+        "key_display": masked_user_api_key_display(state, record),
         "is_active": record.is_active,
         "is_locked": is_locked,
         "total_requests": record.total_requests,

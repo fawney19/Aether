@@ -13,7 +13,7 @@
             class="space-y-4"
             @submit.prevent="updateProfile"
           >
-            <div class="flex items-center justify-between">
+            <div class="flex flex-wrap items-center justify-between gap-3">
               <h3 class="text-lg font-medium text-foreground">
                 基本信息
               </h3>
@@ -82,8 +82,8 @@
         </Card>
 
         <Card class="p-6">
-          <div class="flex items-center justify-between mb-4">
-            <div>
+          <div class="flex flex-col items-start gap-3 mb-4 sm:flex-row sm:justify-between">
+            <div class="min-w-0 flex-1">
               <h3 class="text-lg font-medium text-foreground">
                 敏感信息保护
               </h3>
@@ -93,6 +93,7 @@
             </div>
             <Button
               variant="outline"
+              class="shrink-0"
               :disabled="savingFeatureSettings || !hasFeatureSettingsChanges"
               @click="updateFeatureSettings"
             >
@@ -152,7 +153,7 @@
             class="space-y-4"
             @submit.prevent="changePassword"
           >
-            <div class="flex items-center justify-between">
+            <div class="flex flex-wrap items-center justify-between gap-3">
               <h3 class="text-lg font-medium text-foreground">
                 {{ profile?.has_password ? '修改密码' : '设置密码' }}
               </h3>
@@ -198,7 +199,7 @@
               </p>
             </div>
             <div>
-              <Label for="confirm-password">确认{{ profile?.has_password ? '新' : '' }}密码</Label>
+              <Label for="confirm-password">{{ profile?.has_password ? '确认新密码' : '确认密码' }}</Label>
               <Input
                 id="confirm-password"
                 v-model="passwordForm.confirm_password"
@@ -218,8 +219,8 @@
         </Card>
 
         <Card class="p-6">
-          <div class="flex items-center justify-between mb-4">
-            <div>
+          <div class="flex flex-col items-start gap-3 mb-4 sm:flex-row sm:justify-between">
+            <div class="min-w-0 flex-1">
               <h3 class="text-lg font-medium text-foreground">
                 登录设备
               </h3>
@@ -229,6 +230,7 @@
             </div>
             <Button
               variant="outline"
+              class="shrink-0"
               :disabled="sessionsLoading || otherSessionCount === 0 || sessionActionLoading === 'others'"
               @click="handleRevokeOtherSessions"
             >
@@ -255,7 +257,7 @@
             <div
               v-for="session in userSessions"
               :key="session.id"
-              class="flex items-start justify-between gap-4 rounded-lg border border-border/60 bg-muted/20 p-4"
+              class="flex min-w-0 flex-col items-start gap-3 rounded-lg border border-border/60 bg-muted/20 p-4 sm:flex-row sm:justify-between"
             >
               <div class="min-w-0">
                 <div class="flex items-center gap-2 flex-wrap">
@@ -263,14 +265,15 @@
                     <Input
                       v-model="sessionLabelDraft"
                       size="sm"
-                      class="h-8 w-56"
+                      class="h-8 w-full sm:w-56"
                       maxlength="120"
                       @keyup.enter="saveSessionLabel(session.id)"
                     />
                   </template>
                   <span
                     v-else
-                    class="font-medium text-foreground"
+                    translate="no"
+                    class="break-words font-medium text-foreground"
                   >{{ session.device_label }}</span>
                   <Badge
                     v-if="session.is_current"
@@ -287,7 +290,7 @@
                   <span v-if="session.ip_address"> · IP {{ session.ip_address }}</span>
                 </p>
               </div>
-              <div class="flex items-center gap-2">
+              <div class="flex shrink-0 flex-wrap items-center gap-2">
                 <template v-if="editingSessionId === session.id">
                   <Button
                     size="sm"
@@ -482,7 +485,7 @@
                     <SelectItem value="zh-CN">
                       简体中文
                     </SelectItem>
-                    <SelectItem value="en">
+                    <SelectItem value="en-US">
                       English
                     </SelectItem>
                   </SelectContent>
@@ -654,14 +657,14 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
+import { getI18nLocale, normalizeLocale, useI18n } from '@/i18n'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import { meApi, type Profile } from '@/api/me'
 import { type UserSession, formatSessionMeta } from '@/types/session'
 import { authApi } from '@/api/auth'
 import { oauthApi, type OAuthLinkInfo, type OAuthProviderInfo } from '@/api/oauth'
-import { getClientDeviceId } from '@/utils/deviceId'
 import { getOAuthIcon } from '@/utils/oauth-icons'
 import { useDarkMode, type ThemeMode } from '@/composables/useDarkMode'
 import {
@@ -685,8 +688,8 @@ import SelectItem from '@/components/ui/select-item.vue'
 import Switch from '@/components/ui/switch.vue'
 import { useToast } from '@/composables/useToast'
 import { formatCurrency } from '@/utils/format'
-import { getApiUrl } from '@/utils/url'
 import { log } from '@/utils/logger'
+import { safeExternalHttpsUrl } from '@/utils/navigationSecurity'
 import { getErrorMessage, getErrorStatus } from '@/types/api-error'
 import {
   mergeChatPiiRedactionFeatureSettings,
@@ -699,6 +702,7 @@ const route = useRoute()
 const router = useRouter()
 const { success, error: showError } = useToast()
 const { setThemeMode } = useDarkMode()
+const { locale, setLocale } = useI18n()
 
 const profile = ref<Profile | null>(null)
 const userSessions = ref<UserSession[]>([])
@@ -723,7 +727,7 @@ const preferencesForm = ref({
   avatar_url: '',
   bio: '',
   theme: 'light',
-  language: 'zh-CN',
+  language: locale.value,
   timezone: 'Asia/Shanghai',
   notifications: {
     email: true,
@@ -806,10 +810,17 @@ function handleThemeChange(value: string) {
 }
 
 function handleLanguageChange(value: string) {
-  preferencesForm.value.language = value
+  const nextLocale = normalizeLocale(value)
+  if (!nextLocale) return
+  preferencesForm.value.language = nextLocale
+  setLocale(nextLocale)
   languageSelectOpen.value = false
   updatePreferences()
 }
+
+watch(locale, value => {
+  preferencesForm.value.language = value
+})
 
 onMounted(async () => {
   const profilePromise = loadProfile()
@@ -934,20 +945,22 @@ function handleBind(providerType: string) {
   // 保存返回路径（OAuth callback 会读取）
   sessionStorage.setItem('redirectPath', route.fullPath)
 
-  // 先获取一次性绑定令牌，再在新标签页打开（避免在 URL 中暴露 access_token）
+  // 后端以当前认证会话创建一次性 OAuth state；URL 中不携带任何绑定凭据。
   oauthActionLoading.value = true
-  oauthApi.createBindToken(providerType)
-    .then((bindToken) => {
-      // getApiUrl 可能返回相对路径，需要拼接完整 URL
-      const basePath = getApiUrl(`/api/user/oauth/${providerType}/bind`)
-      const bindUrl = basePath.startsWith('http')
-        ? new URL(basePath)
-        : new URL(basePath, window.location.origin)
-      bindUrl.searchParams.set('bind_token', bindToken)
-      bindUrl.searchParams.set('client_device_id', getClientDeviceId())
+  oauthApi.createBindAuthorization(providerType)
+    .then((authorizeUrl) => {
+      const bindUrl = safeExternalHttpsUrl(authorizeUrl)
+      if (!bindUrl) {
+        throw new Error('OAuth 服务返回了不安全的授权地址')
+      }
 
-      // 新标签页打开 OAuth 流程
-      const newTab = window.open(bindUrl.toString(), '_blank')
+      // Keep a handle for close detection, but sever opener before the tab reaches
+      // the external OAuth provider so it cannot navigate the authenticated page.
+      const newTab = window.open('', '_blank')
+      if (newTab) {
+        newTab.opener = null
+        newTab.location.replace(bindUrl)
+      }
 
       // 监听标签页关闭，刷新绑定状态
       if (newTab) {
@@ -963,7 +976,7 @@ function handleBind(providerType: string) {
       } else {
         // 被浏览器阻止，回退到当前页面跳转
         oauthActionLoading.value = false
-        window.location.href = bindUrl.toString()
+        window.location.href = bindUrl
       }
     })
     .catch((err) => {
@@ -998,7 +1011,7 @@ async function loadPreferences() {
       avatar_url: prefs.avatar_url || '',
       bio: prefs.bio || '',
       theme: localTheme,  // 使用本地主题，而非服务端返回值
-      language: prefs.language || 'zh-CN',
+      language: locale.value,
       timezone: prefs.timezone || 'Asia/Shanghai',
       notifications: {
         email: prefs.notifications?.email ?? true,
@@ -1192,7 +1205,7 @@ function isUnlimitedBilling(): boolean {
 
 function formatDate(dateString?: string): string {
   if (!dateString) return '未知'
-  return new Date(dateString).toLocaleDateString('zh-CN', {
+  return new Date(dateString).toLocaleDateString(getI18nLocale(), {
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',

@@ -215,7 +215,18 @@ export const adminWalletApi = {
       credited_at: string | null
     }
   }> {
-    const response = await apiClient.post(`/api/admin/wallets/${walletId}/recharge`, payload)
+    const response = await apiClient.post<{
+    wallet: AdminWallet
+    payment_order: {
+      id: string
+      order_no: string
+      amount_usd: number
+      payment_method: string
+      status: string
+      created_at: string
+      credited_at: string | null
+    }
+  }>(`/api/admin/wallets/${walletId}/recharge`, payload)
     return response.data
   },
 
@@ -223,7 +234,10 @@ export const adminWalletApi = {
     wallet: AdminWallet
     transaction: WalletTransaction
   }> {
-    const response = await apiClient.post(`/api/admin/wallets/${walletId}/adjust`, payload)
+    const response = await apiClient.post<{
+    wallet: AdminWallet
+    transaction: WalletTransaction
+  }>(`/api/admin/wallets/${walletId}/adjust`, payload)
     return response.data
   },
 
@@ -232,7 +246,11 @@ export const adminWalletApi = {
     refund: RefundRequest
     transaction: WalletTransaction
   }> {
-    const response = await apiClient.post(
+    const response = await apiClient.post<{
+    wallet: AdminWallet
+    refund: RefundRequest
+    transaction: WalletTransaction
+  }>(
       `/api/admin/wallets/${walletId}/refunds/${refundId}/process`,
       {}
     )
@@ -244,7 +262,11 @@ export const adminWalletApi = {
     refund: RefundRequest
     transaction: WalletTransaction | null
   }> {
-    const response = await apiClient.post(
+    const response = await apiClient.post<{
+    wallet: AdminWallet
+    refund: RefundRequest
+    transaction: WalletTransaction | null
+  }>(
       `/api/admin/wallets/${walletId}/refunds/${refundId}/fail`,
       payload
     )
@@ -256,7 +278,7 @@ export const adminWalletApi = {
     refundId: string,
     payload: RefundCompleteRequest
   ): Promise<{ refund: RefundRequest }> {
-    const response = await apiClient.post(
+    const response = await apiClient.post<{ refund: RefundRequest }>(
       `/api/admin/wallets/${walletId}/refunds/${refundId}/complete`,
       payload
     )

@@ -4,12 +4,49 @@
 # 启动:
 #   docker compose -f docker-compose.release-local.yml up -d --build
 #
-# 重置（包含 /opt/aether/current 与历史版本目录）:
+# 重置（删除测试 PostgreSQL 数据、/opt/aether/current 与历史版本目录）:
 #   docker compose -f docker-compose.release-local.yml down -v
 
 name: aether-release-local
 
 services:
+  postgres:
+    # OCI index digest for the official multi-architecture postgres:15.19 image.
+    image: postgres:15.19@sha256:5f72c7b5bd616308ccfd2e74d6be16fb06364e5eecbb815fe9dc6ab9761d2111
+    container_name: aether-release-local-postgres
+    shm_size: ${POSTGRES_SHM_SIZE:-512mb}
+    environment:
+      POSTGRES_DB: aether
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env}
+      TZ: Asia/Shanghai
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    command: >
+      postgres
+      -c idle_in_transaction_session_timeout=30000
+      -c tcp_keepalives_idle=30
+      -c tcp_keepalives_interval=10
+      -c shared_preload_libraries=pg_stat_statements
+      -c pg_stat_statements.track=all
+      -c pg_stat_statements.max=10000
+      -c shared_buffers=${POSTGRES_SHARED_BUFFERS:-1GB}
+      -c effective_cache_size=${POSTGRES_EFFECTIVE_CACHE_SIZE:-3GB}
+      -c work_mem=${POSTGRES_WORK_MEM:-16MB}
+      -c maintenance_work_mem=${POSTGRES_MAINTENANCE_WORK_MEM:-256MB}
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U postgres" ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    logging:
+      driver: local
+      options:
+        max-size: "100m"
+        max-file: "3"
+        compress: "true"
+    restart: unless-stopped
+
   release-local-app:
     build:
       context: .
@@ -23,8 +60,8 @@ services:
       - ${AETHER_ENV_FILE:-.env}
     environment:
       TZ: Asia/Shanghai
-      AETHER_DATABASE_DRIVER: sqlite
-      AETHER_DATABASE_URL: sqlite://./data/aether.db
+      AETHER_DATABASE_DRIVER: postgres
+      AETHER_DATABASE_URL: postgresql://postgres:${DB_PASSWORD:?set DB_PASSWORD in .env}@postgres:5432/aether
       AETHER_RUNTIME_BACKEND: memory
       AETHER_GATEWAY_DEPLOYMENT_TOPOLOGY: single-node
       AETHER_GATEWAY_NODE_ROLE: all
@@ -40,12 +77,15 @@ services:
       AETHER_BASE_DIR: /opt/aether
       AETHER_UPDATE_STRATEGY: self
       AETHER_GATEWAY_AUTO_PREPARE_DATABASE: ${AETHER_GATEWAY_AUTO_PREPARE_DATABASE:-true}
+    depends_on:
+      postgres:
+        condition: service_healthy
     ports:
       - "${AETHER_RELEASE_LOCAL_PORT:-18085}:${AETHER_RELEASE_LOCAL_PORT:-18085}"
     volumes:
-      - ./data-release-local:/app/data
       - aether_release_local_root:/opt/aether
     restart: unless-stopped
 
 volumes:
+  postgres_data:
   aether_release_local_root:

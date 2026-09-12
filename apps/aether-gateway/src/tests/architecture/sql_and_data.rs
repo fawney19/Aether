@@ -56,11 +56,7 @@ fn aether_data_bootstrap_snapshot_is_built_from_schema_sources() {
 
 #[test]
 fn aether_data_backend_pool_modules_do_not_own_maintenance_sql() {
-    for path in [
-        "crates/aether-data/runtime/src/backend/postgres.rs",
-        "crates/aether-data/runtime/src/backend/mysql.rs",
-        "crates/aether-data/runtime/src/backend/sqlite.rs",
-    ] {
+    for path in ["crates/aether-data/runtime/src/backend/postgres.rs"] {
         let source = read_workspace_file(path);
         let production = production_source(&source);
         for forbidden in [
@@ -86,17 +82,9 @@ fn aether_data_backend_pool_modules_do_not_own_maintenance_sql() {
     let maintenance = read_workspace_file("crates/aether-data/runtime/src/backend/maintenance.rs");
     for pattern in [
         "Self::Postgres(postgres) => postgres.run_table_maintenance(table_names).await",
-        "Self::Mysql(mysql) => mysql.run_table_maintenance(table_names).await",
-        "Self::Sqlite(sqlite) => sqlite.run_table_maintenance(table_names).await",
         "Self::Postgres(postgres) => postgres.aggregate_wallet_daily_usage(input).await",
-        "Self::Mysql(mysql) => mysql.aggregate_wallet_daily_usage(input).await",
-        "Self::Sqlite(sqlite) => sqlite.aggregate_wallet_daily_usage(input).await",
         "Self::Postgres(postgres) => postgres.aggregate_stats_hourly(input).await",
-        "Self::Mysql(mysql) => mysql.aggregate_stats_hourly(input).await",
-        "Self::Sqlite(sqlite) => sqlite.aggregate_stats_hourly(input).await",
         "Self::Postgres(postgres) => postgres.aggregate_stats_daily(input).await",
-        "Self::Mysql(mysql) => mysql.aggregate_stats_daily(input).await",
-        "Self::Sqlite(sqlite) => sqlite.aggregate_stats_daily(input).await",
     ] {
         assert!(
             maintenance.contains(pattern),
@@ -108,17 +96,14 @@ fn aether_data_backend_pool_modules_do_not_own_maintenance_sql() {
 #[test]
 fn wallet_maintenance_sql_is_partitioned_by_driver() {
     let facade = read_workspace_file("crates/aether-data/runtime/src/backend/wallet.rs");
-    for module in ["mod postgres;", "mod mysql;", "mod sqlite;"] {
-        assert!(
-            facade.contains(module),
-            "wallet facade should declare {module}"
-        );
-    }
+    let module = "mod postgres;";
+    assert!(
+        facade.contains(module),
+        "wallet facade should declare {module}"
+    );
     for forbidden in [
         "sqlx::",
         "PostgresBackend",
-        "MysqlBackend",
-        "SqliteBackend",
         "SELECT ",
         "INSERT INTO ",
         "DELETE FROM ",
@@ -129,32 +114,24 @@ fn wallet_maintenance_sql_is_partitioned_by_driver() {
         );
     }
 
-    for (driver, backend) in [
-        ("postgres", "PostgresBackend"),
-        ("mysql", "MysqlBackend"),
-        ("sqlite", "SqliteBackend"),
-    ] {
-        let path = format!("crates/aether-data/runtime/src/backend/wallet/{driver}.rs");
-        let source = read_workspace_file(&path);
-        assert!(source.contains(&format!("impl {backend}")));
-        assert!(source.contains("aggregate_wallet_daily_usage"));
-        assert!(source.contains("sqlx::query"));
-    }
+    let (driver, backend) = ("postgres", "PostgresBackend");
+    let path = format!("crates/aether-data/runtime/src/backend/wallet/{driver}.rs");
+    let source = read_workspace_file(&path);
+    assert!(source.contains(&format!("impl {backend}")));
+    assert!(source.contains("aggregate_wallet_daily_usage"));
+    assert!(source.contains("sqlx::query"));
 }
 
 #[test]
 fn table_maintenance_is_partitioned_for_each_driver() {
     let facade = read_workspace_file("crates/aether-data/runtime/src/backend/maintenance.rs");
-    for module in ["mod postgres;", "mod mysql;", "mod sqlite;"] {
-        assert!(
-            facade.contains(module),
-            "maintenance facade should declare {module}"
-        );
-    }
+    let module = "mod postgres;";
+    assert!(
+        facade.contains(module),
+        "maintenance facade should declare {module}"
+    );
     for forbidden in [
         "impl PostgresBackend",
-        "impl MysqlBackend",
-        "impl SqliteBackend",
         "VACUUM ANALYZE",
         "ANALYZE TABLE",
         "PRAGMA optimize",
@@ -171,63 +148,29 @@ fn table_maintenance_is_partitioned_for_each_driver() {
     assert!(postgres.contains("impl PostgresBackend"));
     assert!(postgres.contains("postgres_observability_snapshot"));
     assert!(postgres.contains("VACUUM ANALYZE"));
-
-    let mysql = read_workspace_file("crates/aether-data/runtime/src/backend/maintenance/mysql.rs");
-    assert!(mysql.contains("impl MysqlBackend"));
-    assert!(mysql.contains("ANALYZE TABLE"));
-
-    let sqlite =
-        read_workspace_file("crates/aether-data/runtime/src/backend/maintenance/sqlite.rs");
-    assert!(sqlite.contains("impl SqliteBackend"));
-    assert!(sqlite.contains("PRAGMA optimize"));
 }
 
 #[test]
 fn system_driver_database_operations_are_partitioned() {
     let facade = read_workspace_file("crates/aether-data/runtime/src/backend/system.rs");
-    for module in ["mod postgres;", "mod mysql;", "mod sqlite;"] {
-        assert!(
-            facade.contains(module),
-            "system facade should declare {module}"
-        );
-    }
+    let module = "mod postgres;";
+    assert!(
+        facade.contains(module),
+        "system facade should declare {module}"
+    );
     for forbidden in [
         "impl PostgresBackend",
-        "impl MysqlBackend",
-        "impl SqliteBackend",
         "fn map_postgres_stats_daily_aggregate(",
         "fn map_postgres_stats_user_daily_aggregate(",
-        "fn map_mysql_stats_daily_aggregate(",
-        "fn map_mysql_stats_user_daily_aggregate(",
-        "fn map_sqlite_stats_daily_aggregate(",
-        "fn map_sqlite_stats_user_daily_aggregate(",
         "async fn export_postgres_admin_system_usage_aggregates(",
-        "async fn export_mysql_admin_system_usage_aggregates(",
-        "async fn export_sqlite_admin_system_usage_aggregates(",
         "async fn import_postgres_admin_system_usage_aggregates(",
-        "async fn import_mysql_admin_system_usage_aggregates(",
-        "async fn import_sqlite_admin_system_usage_aggregates(",
         "async fn pg_delete_table(",
         "async fn pg_execute_if_table(",
         "async fn pg_execute_batch_if_table(",
         "async fn pg_table_exists(",
-        "async fn sqlite_delete_table(",
-        "async fn sqlite_execute_if_table(",
-        "async fn sqlite_execute_batch_if_table(",
-        "async fn sqlite_table_exists(",
-        "async fn mysql_delete_table(",
-        "async fn mysql_execute_if_table(",
-        "async fn mysql_execute_batch_if_table(",
-        "async fn mysql_table_exists(",
         "async fn purge_postgres_admin_system_data(",
         "async fn purge_postgres_non_admin_users(",
         "async fn purge_postgres_request_bodies_batch(",
-        "async fn purge_mysql_admin_system_data(",
-        "async fn purge_mysql_non_admin_users(",
-        "async fn purge_mysql_request_bodies_batch(",
-        "async fn purge_sqlite_admin_system_data(",
-        "async fn purge_sqlite_non_admin_users(",
-        "async fn purge_sqlite_request_bodies_batch(",
     ] {
         assert!(
             !facade.contains(forbidden),
@@ -235,14 +178,13 @@ fn system_driver_database_operations_are_partitioned() {
         );
     }
 
-    for driver in ["postgres", "mysql", "sqlite"] {
+    for driver in ["postgres"] {
         let source = read_workspace_file(&format!(
             "crates/aether-data/runtime/src/backend/system/{driver}.rs"
         ));
         let backend = match driver {
             "postgres" => "Postgres",
-            "mysql" => "Mysql",
-            "sqlite" => "Sqlite",
+
             _ => unreachable!(),
         };
         for required in [
@@ -275,38 +217,6 @@ fn system_driver_database_operations_are_partitioned() {
                 );
             }
         }
-        if driver == "sqlite" {
-            for required in [
-                "sqlite_delete_table",
-                "sqlite_execute_if_table",
-                "sqlite_execute_batch_if_table",
-                "sqlite_table_exists",
-                "purge_sqlite_admin_system_data",
-                "purge_sqlite_non_admin_users",
-                "purge_sqlite_request_bodies_batch",
-            ] {
-                assert!(
-                    source.contains(required),
-                    "system/sqlite.rs should own {required}"
-                );
-            }
-        }
-        if driver == "mysql" {
-            for required in [
-                "mysql_delete_table",
-                "mysql_execute_if_table",
-                "mysql_execute_batch_if_table",
-                "mysql_table_exists",
-                "purge_mysql_admin_system_data",
-                "purge_mysql_non_admin_users",
-                "purge_mysql_request_bodies_batch",
-            ] {
-                assert!(
-                    source.contains(required),
-                    "system/mysql.rs should own {required}"
-                );
-            }
-        }
     }
 }
 
@@ -322,8 +232,6 @@ fn audit_repository_database_operations_are_partitioned() {
     for forbidden in [
         "sqlx::",
         "PostgresPool",
-        "MysqlPool",
-        "SqlitePool",
         "impl AuditLogReadRepository",
         "SELECT ",
         "DELETE FROM ",
@@ -347,7 +255,7 @@ fn audit_repository_database_operations_are_partitioned() {
             "aether-data-contracts audit.rs should own {required}"
         );
     }
-    for forbidden in ["sqlx::", "PgPool", "MySqlPool", "SqlitePool"] {
+    for forbidden in ["sqlx::", "PgPool"] {
         assert!(
             !types.contains(forbidden),
             "aether-data-contracts audit.rs should remain driver-independent from {forbidden}"
@@ -367,23 +275,11 @@ fn audit_repository_database_operations_are_partitioned() {
         );
     }
 
-    for (driver, repository, row_mapper) in [
-        (
-            "postgres",
-            "PostgresAuditLogReadRepository",
-            "map_postgres_admin_audit_log_row",
-        ),
-        (
-            "mysql",
-            "MysqlAuditLogReadRepository",
-            "map_mysql_admin_audit_log_row",
-        ),
-        (
-            "sqlite",
-            "SqliteAuditLogReadRepository",
-            "map_sqlite_admin_audit_log_row",
-        ),
-    ] {
+    for (driver, repository, row_mapper) in [(
+        "postgres",
+        "PostgresAuditLogReadRepository",
+        "map_postgres_admin_audit_log_row",
+    )] {
         let source = read_workspace_file(&format!(
             "crates/aether-data/adapters/{driver}/src/audit.rs"
         ));
@@ -411,14 +307,7 @@ fn audit_repository_database_operations_are_partitioned() {
 fn auth_module_repositories_are_owned_by_contracts_and_driver_adapters() {
     let facade =
         read_workspace_file("crates/aether-data/runtime/src/repository/auth_modules/mod.rs");
-    for forbidden in [
-        "mod postgres;",
-        "mod mysql;",
-        "mod sqlite;",
-        "mod types;",
-        "sqlx::",
-        "QueryBuilder",
-    ] {
+    for forbidden in ["mod postgres;", "mod types;", "sqlx::", "QueryBuilder"] {
         assert!(
             !facade.contains(forbidden),
             "auth module facade should not own contracts or driver code via {forbidden}"
@@ -438,33 +327,19 @@ fn auth_module_repositories_are_owned_by_contracts_and_driver_adapters() {
             "aether-data-contracts auth_modules.rs should own {required}"
         );
     }
-    for forbidden in ["sqlx::", "PgPool", "MySqlPool", "SqlitePool"] {
+    for forbidden in ["sqlx::", "PgPool"] {
         assert!(
             !contracts.contains(forbidden),
             "auth module contracts should remain driver-independent from {forbidden}"
         );
     }
 
-    for (feature, adapter, read_repository, write_repository) in [
-        (
-            "postgres",
-            "aether_data_postgres",
-            "SqlxAuthModuleReadRepository",
-            "SqlxAuthModuleRepository",
-        ),
-        (
-            "mysql",
-            "aether_data_mysql",
-            "MysqlAuthModuleReadRepository",
-            "MysqlAuthModuleRepository",
-        ),
-        (
-            "sqlite",
-            "aether_data_sqlite",
-            "SqliteAuthModuleReadRepository",
-            "SqliteAuthModuleRepository",
-        ),
-    ] {
+    for (feature, adapter, read_repository, write_repository) in [(
+        "postgres",
+        "aether_data_postgres",
+        "SqlxAuthModuleReadRepository",
+        "SqlxAuthModuleRepository",
+    )] {
         assert!(
             facade.contains(&format!("#[cfg(feature = \"{feature}\")]")),
             "auth module facade should preserve the {feature} feature boundary"
@@ -509,14 +384,7 @@ fn auth_module_repositories_are_owned_by_contracts_and_driver_adapters() {
 fn announcement_repositories_are_owned_by_contracts_and_driver_adapters() {
     let facade =
         read_workspace_file("crates/aether-data/runtime/src/repository/announcements/mod.rs");
-    for forbidden in [
-        "mod postgres;",
-        "mod mysql;",
-        "mod sqlite;",
-        "mod types;",
-        "sqlx::",
-        "QueryBuilder",
-    ] {
+    for forbidden in ["mod postgres;", "mod types;", "sqlx::", "QueryBuilder"] {
         assert!(
             !facade.contains(forbidden),
             "announcement facade should not own contracts or driver code via {forbidden}"
@@ -538,26 +406,18 @@ fn announcement_repositories_are_owned_by_contracts_and_driver_adapters() {
             "aether-data-contracts announcements.rs should own {required}"
         );
     }
-    for forbidden in ["sqlx::", "PgPool", "MySqlPool", "SqlitePool"] {
+    for forbidden in ["sqlx::", "PgPool"] {
         assert!(
             !contracts.contains(forbidden),
             "announcement contracts should remain driver-independent from {forbidden}"
         );
     }
 
-    for (feature, adapter, repository) in [
-        (
-            "postgres",
-            "aether_data_postgres",
-            "SqlxAnnouncementReadRepository",
-        ),
-        ("mysql", "aether_data_mysql", "MysqlAnnouncementRepository"),
-        (
-            "sqlite",
-            "aether_data_sqlite",
-            "SqliteAnnouncementRepository",
-        ),
-    ] {
+    for (feature, adapter, repository) in [(
+        "postgres",
+        "aether_data_postgres",
+        "SqlxAnnouncementReadRepository",
+    )] {
         assert!(
             facade.contains(&format!("#[cfg(feature = \"{feature}\")]")),
             "announcement facade should preserve the {feature} feature boundary"
@@ -599,14 +459,7 @@ fn announcement_repositories_are_owned_by_contracts_and_driver_adapters() {
 fn oauth_provider_repositories_are_owned_by_contracts_and_driver_adapters() {
     let facade =
         read_workspace_file("crates/aether-data/runtime/src/repository/oauth_providers/mod.rs");
-    for forbidden in [
-        "mod postgres;",
-        "mod mysql;",
-        "mod sqlite;",
-        "mod types;",
-        "sqlx::",
-        "QueryBuilder",
-    ] {
+    for forbidden in ["mod postgres;", "mod types;", "sqlx::", "QueryBuilder"] {
         assert!(
             !facade.contains(forbidden),
             "oauth provider facade should not own contracts or driver code via {forbidden}"
@@ -628,26 +481,18 @@ fn oauth_provider_repositories_are_owned_by_contracts_and_driver_adapters() {
             "aether-data-contracts oauth_providers.rs should own {required}"
         );
     }
-    for forbidden in ["sqlx::", "PgPool", "MySqlPool", "SqlitePool"] {
+    for forbidden in ["sqlx::", "PgPool"] {
         assert!(
             !contracts.contains(forbidden),
             "oauth provider contracts should remain driver-independent from {forbidden}"
         );
     }
 
-    for (feature, adapter, repository) in [
-        (
-            "postgres",
-            "aether_data_postgres",
-            "SqlxOAuthProviderRepository",
-        ),
-        ("mysql", "aether_data_mysql", "MysqlOAuthProviderRepository"),
-        (
-            "sqlite",
-            "aether_data_sqlite",
-            "SqliteOAuthProviderRepository",
-        ),
-    ] {
+    for (feature, adapter, repository) in [(
+        "postgres",
+        "aether_data_postgres",
+        "SqlxOAuthProviderRepository",
+    )] {
         assert!(
             facade.contains(&format!("#[cfg(feature = \"{feature}\")]")),
             "oauth provider facade should preserve the {feature} feature boundary"
@@ -691,14 +536,7 @@ fn oauth_provider_repositories_are_owned_by_contracts_and_driver_adapters() {
 fn management_token_repositories_are_owned_by_contracts_and_driver_adapters() {
     let facade =
         read_workspace_file("crates/aether-data/runtime/src/repository/management_tokens/mod.rs");
-    for forbidden in [
-        "mod postgres;",
-        "mod mysql;",
-        "mod sqlite;",
-        "mod types;",
-        "sqlx::",
-        "QueryBuilder",
-    ] {
+    for forbidden in ["mod postgres;", "mod types;", "sqlx::", "QueryBuilder"] {
         assert!(
             !facade.contains(forbidden),
             "management token facade should not own contracts or driver code via {forbidden}"
@@ -720,30 +558,18 @@ fn management_token_repositories_are_owned_by_contracts_and_driver_adapters() {
             "aether-data-contracts management_tokens.rs should own {required}"
         );
     }
-    for forbidden in ["sqlx::", "PgPool", "MySqlPool", "SqlitePool"] {
+    for forbidden in ["sqlx::", "PgPool"] {
         assert!(
             !contracts.contains(forbidden),
             "management token contracts should remain driver-independent from {forbidden}"
         );
     }
 
-    for (feature, adapter, repository) in [
-        (
-            "postgres",
-            "aether_data_postgres",
-            "SqlxManagementTokenRepository",
-        ),
-        (
-            "mysql",
-            "aether_data_mysql",
-            "MysqlManagementTokenRepository",
-        ),
-        (
-            "sqlite",
-            "aether_data_sqlite",
-            "SqliteManagementTokenRepository",
-        ),
-    ] {
+    for (feature, adapter, repository) in [(
+        "postgres",
+        "aether_data_postgres",
+        "SqlxManagementTokenRepository",
+    )] {
         assert!(
             facade.contains(&format!("#[cfg(feature = \"{feature}\")]")),
             "management token facade should preserve the {feature} feature boundary"
@@ -788,13 +614,7 @@ fn gemini_file_mapping_repositories_are_owned_by_contracts_and_driver_adapters()
     let facade = read_workspace_file(
         "crates/aether-data/runtime/src/repository/gemini_file_mappings/mod.rs",
     );
-    for forbidden in [
-        "sqlx::",
-        "QueryBuilder",
-        "PgPool",
-        "MySqlPool",
-        "SqlitePool",
-    ] {
+    for forbidden in ["sqlx::", "QueryBuilder", "PgPool"] {
         assert!(
             !facade.contains(forbidden),
             "gemini file mapping facade should not own driver code via {forbidden}"
@@ -819,30 +639,18 @@ fn gemini_file_mapping_repositories_are_owned_by_contracts_and_driver_adapters()
             "aether-data-contracts gemini_file_mappings.rs should own {required}"
         );
     }
-    for forbidden in ["sqlx::", "PgPool", "MySqlPool", "SqlitePool"] {
+    for forbidden in ["sqlx::", "PgPool"] {
         assert!(
             !contracts.contains(forbidden),
             "gemini file mapping contracts should remain driver-independent from {forbidden}"
         );
     }
 
-    for (feature, adapter, repository) in [
-        (
-            "postgres",
-            "aether_data_postgres",
-            "SqlxGeminiFileMappingRepository",
-        ),
-        (
-            "mysql",
-            "aether_data_mysql",
-            "MysqlGeminiFileMappingRepository",
-        ),
-        (
-            "sqlite",
-            "aether_data_sqlite",
-            "SqliteGeminiFileMappingRepository",
-        ),
-    ] {
+    for (feature, adapter, repository) in [(
+        "postgres",
+        "aether_data_postgres",
+        "SqlxGeminiFileMappingRepository",
+    )] {
         assert!(
             facade.contains(&format!("pub use {adapter}::{repository};")),
             "gemini file mapping facade should re-export {feature} repository from its adapter"
@@ -881,13 +689,7 @@ fn gemini_file_mapping_repositories_are_owned_by_contracts_and_driver_adapters()
 fn video_task_repositories_are_owned_by_driver_adapters() {
     let facade =
         read_workspace_file("crates/aether-data/runtime/src/repository/video_tasks/mod.rs");
-    for forbidden in [
-        "mod postgres;",
-        "mod mysql;",
-        "mod sqlite;",
-        "sqlx::",
-        "QueryBuilder",
-    ] {
+    for forbidden in ["mod postgres;", "sqlx::", "QueryBuilder"] {
         assert!(
             !facade.contains(forbidden),
             "video task facade should not own driver code via {forbidden}"
@@ -908,23 +710,11 @@ fn video_task_repositories_are_owned_by_driver_adapters() {
         );
     }
 
-    for (feature, adapter, repositories) in [
-        (
-            "postgres",
-            "aether_data_postgres",
-            vec!["SqlxVideoTaskReadRepository", "SqlxVideoTaskRepository"],
-        ),
-        (
-            "mysql",
-            "aether_data_mysql",
-            vec!["MysqlVideoTaskRepository"],
-        ),
-        (
-            "sqlite",
-            "aether_data_sqlite",
-            vec!["SqliteVideoTaskRepository"],
-        ),
-    ] {
+    for (feature, adapter, repositories) in [(
+        "postgres",
+        "aether_data_postgres",
+        vec!["SqlxVideoTaskReadRepository", "SqlxVideoTaskRepository"],
+    )] {
         for repository in repositories {
             assert!(
                 facade.contains(repository) && facade.contains(adapter),
@@ -952,15 +742,7 @@ fn video_task_repositories_are_owned_by_driver_adapters() {
 fn candidate_selection_repositories_are_owned_by_driver_adapters() {
     let facade =
         read_workspace_file("crates/aether-data/runtime/src/repository/candidate_selection/mod.rs");
-    for forbidden in [
-        "mod postgres;",
-        "mod mysql;",
-        "mod sqlite;",
-        "sqlx::",
-        "PgPool",
-        "MySqlPool",
-        "SqlitePool",
-    ] {
+    for forbidden in ["mod postgres;", "sqlx::", "PgPool"] {
         assert!(
             !facade.contains(forbidden),
             "candidate selection facade should not own driver code via {forbidden}"
@@ -982,23 +764,11 @@ fn candidate_selection_repositories_are_owned_by_driver_adapters() {
         );
     }
 
-    for (feature, adapter, repository) in [
-        (
-            "postgres",
-            "aether_data_postgres",
-            "SqlxMinimalCandidateSelectionReadRepository",
-        ),
-        (
-            "mysql",
-            "aether_data_mysql",
-            "MysqlMinimalCandidateSelectionReadRepository",
-        ),
-        (
-            "sqlite",
-            "aether_data_sqlite",
-            "SqliteMinimalCandidateSelectionReadRepository",
-        ),
-    ] {
+    for (feature, adapter, repository) in [(
+        "postgres",
+        "aether_data_postgres",
+        "SqlxMinimalCandidateSelectionReadRepository",
+    )] {
         assert!(facade.contains(adapter) && facade.contains(repository));
         let source = read_workspace_file(&format!(
             "crates/aether-data/adapters/{feature}/src/candidate_selection.rs"
@@ -1026,15 +796,7 @@ fn candidate_selection_repositories_are_owned_by_driver_adapters() {
 #[test]
 fn request_candidate_repositories_are_owned_by_driver_adapters() {
     let facade = read_workspace_file("crates/aether-data/runtime/src/repository/candidates/mod.rs");
-    for forbidden in [
-        "mod postgres;",
-        "mod mysql;",
-        "mod sqlite;",
-        "sqlx::",
-        "PgPool",
-        "MySqlPool",
-        "SqlitePool",
-    ] {
+    for forbidden in ["mod postgres;", "sqlx::", "PgPool"] {
         assert!(
             !facade.contains(forbidden),
             "request candidate facade should not own driver code via {forbidden}"
@@ -1056,23 +818,11 @@ fn request_candidate_repositories_are_owned_by_driver_adapters() {
         );
     }
 
-    for (feature, adapter, repository) in [
-        (
-            "postgres",
-            "aether_data_postgres",
-            "SqlxRequestCandidateReadRepository",
-        ),
-        (
-            "mysql",
-            "aether_data_mysql",
-            "MysqlRequestCandidateRepository",
-        ),
-        (
-            "sqlite",
-            "aether_data_sqlite",
-            "SqliteRequestCandidateRepository",
-        ),
-    ] {
+    for (feature, adapter, repository) in [(
+        "postgres",
+        "aether_data_postgres",
+        "SqlxRequestCandidateReadRepository",
+    )] {
         assert!(facade.contains(adapter) && facade.contains(repository));
         let source = read_workspace_file(&format!(
             "crates/aether-data/adapters/{feature}/src/candidates.rs"
@@ -1101,13 +851,7 @@ fn request_candidate_repositories_are_owned_by_driver_adapters() {
 #[test]
 fn billing_repositories_are_owned_by_driver_adapters() {
     let facade = read_workspace_file("crates/aether-data/runtime/src/repository/billing/mod.rs");
-    for forbidden in [
-        "mod postgres;",
-        "mod mysql;",
-        "mod sqlite;",
-        "sqlx::",
-        "QueryBuilder",
-    ] {
+    for forbidden in ["mod postgres;", "sqlx::", "QueryBuilder"] {
         assert!(
             !facade.contains(forbidden),
             "billing facade should not own driver code via {forbidden}"
@@ -1129,19 +873,11 @@ fn billing_repositories_are_owned_by_driver_adapters() {
         );
     }
 
-    for (feature, adapter, repository) in [
-        (
-            "postgres",
-            "aether_data_postgres",
-            "SqlxBillingReadRepository",
-        ),
-        ("mysql", "aether_data_mysql", "MysqlBillingReadRepository"),
-        (
-            "sqlite",
-            "aether_data_sqlite",
-            "SqliteBillingReadRepository",
-        ),
-    ] {
+    for (feature, adapter, repository) in [(
+        "postgres",
+        "aether_data_postgres",
+        "SqlxBillingReadRepository",
+    )] {
         assert!(facade.contains(adapter) && facade.contains(repository));
         let source = read_workspace_file(&format!(
             "crates/aether-data/adapters/{feature}/src/billing.rs"
@@ -1169,13 +905,7 @@ fn billing_repositories_are_owned_by_driver_adapters() {
 #[test]
 fn settlement_repositories_are_owned_by_contracts_and_driver_adapters() {
     let facade = read_workspace_file("crates/aether-data/runtime/src/repository/settlement/mod.rs");
-    for forbidden in [
-        "mod postgres;",
-        "mod mysql;",
-        "mod sqlite;",
-        "sqlx::",
-        "QueryBuilder",
-    ] {
+    for forbidden in ["mod postgres;", "sqlx::", "QueryBuilder"] {
         assert!(
             !facade.contains(forbidden),
             "settlement facade should not own driver code via {forbidden}"
@@ -1197,15 +927,11 @@ fn settlement_repositories_are_owned_by_contracts_and_driver_adapters() {
         );
     }
 
-    for (feature, adapter, repository) in [
-        (
-            "postgres",
-            "aether_data_postgres",
-            "SqlxSettlementRepository",
-        ),
-        ("mysql", "aether_data_mysql", "MysqlSettlementRepository"),
-        ("sqlite", "aether_data_sqlite", "SqliteSettlementRepository"),
-    ] {
+    for (feature, adapter, repository) in [(
+        "postgres",
+        "aether_data_postgres",
+        "SqlxSettlementRepository",
+    )] {
         assert!(facade.contains(adapter) && facade.contains(repository));
         let source = read_workspace_file(&format!(
             "crates/aether-data/adapters/{feature}/src/settlement.rs"
@@ -1234,14 +960,7 @@ fn settlement_repositories_are_owned_by_contracts_and_driver_adapters() {
 fn proxy_node_repositories_are_owned_by_contracts_and_driver_adapters() {
     let facade =
         read_workspace_file("crates/aether-data/runtime/src/repository/proxy_nodes/mod.rs");
-    for forbidden in [
-        "mod postgres;",
-        "mod mysql;",
-        "mod sqlite;",
-        "mod types;",
-        "sqlx::",
-        "QueryBuilder",
-    ] {
+    for forbidden in ["mod postgres;", "mod types;", "sqlx::", "QueryBuilder"] {
         assert!(
             !facade.contains(forbidden),
             "proxy node facade should not own contracts or driver code via {forbidden}"
@@ -1263,26 +982,18 @@ fn proxy_node_repositories_are_owned_by_contracts_and_driver_adapters() {
             "proxy node contracts should own {required}"
         );
     }
-    for forbidden in ["sqlx::", "PgPool", "MySqlPool", "SqlitePool", "tracing::"] {
+    for forbidden in ["sqlx::", "PgPool", "tracing::"] {
         assert!(
             !contracts.contains(forbidden),
             "proxy node contracts should remain infrastructure-independent from {forbidden}"
         );
     }
 
-    for (feature, adapter, repository) in [
-        (
-            "postgres",
-            "aether_data_postgres",
-            "SqlxProxyNodeRepository",
-        ),
-        ("mysql", "aether_data_mysql", "MysqlProxyNodeReadRepository"),
-        (
-            "sqlite",
-            "aether_data_sqlite",
-            "SqliteProxyNodeReadRepository",
-        ),
-    ] {
+    for (feature, adapter, repository) in [(
+        "postgres",
+        "aether_data_postgres",
+        "SqlxProxyNodeRepository",
+    )] {
         assert!(facade.contains(adapter) && facade.contains(repository));
         let source = read_workspace_file(&format!(
             "crates/aether-data/adapters/{feature}/src/proxy_nodes.rs"
@@ -1318,8 +1029,6 @@ fn global_model_repositories_are_owned_by_contracts_and_driver_adapters() {
         read_workspace_file("crates/aether-data/runtime/src/repository/global_models/mod.rs");
     for forbidden in [
         "mod postgres;",
-        "mod mysql;",
-        "mod sqlite;",
         "sqlx::",
         "QueryBuilder",
         "EMBEDDING_API_FORMATS",
@@ -1356,30 +1065,18 @@ fn global_model_repositories_are_owned_by_contracts_and_driver_adapters() {
             "global model snapshot policy should own {required}"
         );
     }
-    for forbidden in ["sqlx::", "PgPool", "MySqlPool", "SqlitePool", "RwLock"] {
+    for forbidden in ["sqlx::", "PgPool", "RwLock"] {
         assert!(
             !snapshot.contains(forbidden),
             "global model snapshot policy should remain infrastructure-independent from {forbidden}"
         );
     }
 
-    for (feature, adapter, repository) in [
-        (
-            "postgres",
-            "aether_data_postgres",
-            "SqlxGlobalModelReadRepository",
-        ),
-        (
-            "mysql",
-            "aether_data_mysql",
-            "MysqlGlobalModelReadRepository",
-        ),
-        (
-            "sqlite",
-            "aether_data_sqlite",
-            "SqliteGlobalModelReadRepository",
-        ),
-    ] {
+    for (feature, adapter, repository) in [(
+        "postgres",
+        "aether_data_postgres",
+        "SqlxGlobalModelReadRepository",
+    )] {
         assert!(facade.contains(adapter) && facade.contains(repository));
         let source = read_workspace_file(&format!(
             "crates/aether-data/adapters/{feature}/src/global_models.rs"
@@ -1408,14 +1105,7 @@ fn global_model_repositories_are_owned_by_contracts_and_driver_adapters() {
 #[test]
 fn auth_api_key_repositories_are_owned_by_contracts_and_driver_adapters() {
     let facade = read_workspace_file("crates/aether-data/runtime/src/repository/auth/mod.rs");
-    for forbidden in [
-        "mod postgres;",
-        "mod mysql;",
-        "mod sqlite;",
-        "mod types;",
-        "sqlx::",
-        "QueryBuilder",
-    ] {
+    for forbidden in ["mod postgres;", "mod types;", "sqlx::", "QueryBuilder"] {
         assert!(
             !facade.contains(forbidden),
             "auth facade should not own contracts or driver code via {forbidden}"
@@ -1434,30 +1124,18 @@ fn auth_api_key_repositories_are_owned_by_contracts_and_driver_adapters() {
             "auth contracts should own {required}"
         );
     }
-    for forbidden in ["sqlx::", "PgPool", "MySqlPool", "SqlitePool"] {
+    for forbidden in ["sqlx::", "PgPool"] {
         assert!(
             !contracts.contains(forbidden),
             "auth contracts should remain infrastructure-independent from {forbidden}"
         );
     }
 
-    for (feature, adapter, repository) in [
-        (
-            "postgres",
-            "aether_data_postgres",
-            "SqlxAuthApiKeySnapshotReadRepository",
-        ),
-        (
-            "mysql",
-            "aether_data_mysql",
-            "MysqlAuthApiKeyReadRepository",
-        ),
-        (
-            "sqlite",
-            "aether_data_sqlite",
-            "SqliteAuthApiKeyReadRepository",
-        ),
-    ] {
+    for (feature, adapter, repository) in [(
+        "postgres",
+        "aether_data_postgres",
+        "SqlxAuthApiKeySnapshotReadRepository",
+    )] {
         assert!(facade.contains(adapter) && facade.contains(repository));
         let source = read_workspace_file(&format!(
             "crates/aether-data/adapters/{feature}/src/auth.rs"
@@ -1490,14 +1168,7 @@ fn auth_api_key_repositories_are_owned_by_contracts_and_driver_adapters() {
 #[test]
 fn user_repositories_are_owned_by_contracts_and_driver_adapters() {
     let facade = read_workspace_file("crates/aether-data/runtime/src/repository/users/mod.rs");
-    for forbidden in [
-        "mod postgres;",
-        "mod mysql;",
-        "mod sqlite;",
-        "mod types;",
-        "sqlx::",
-        "QueryBuilder",
-    ] {
+    for forbidden in ["mod postgres;", "mod types;", "sqlx::", "QueryBuilder"] {
         assert!(
             !facade.contains(forbidden),
             "users facade should not own contracts or driver code via {forbidden}"
@@ -1516,18 +1187,16 @@ fn user_repositories_are_owned_by_contracts_and_driver_adapters() {
             "user contracts should own {required}"
         );
     }
-    for forbidden in ["sqlx::", "PgPool", "MySqlPool", "SqlitePool"] {
+    for forbidden in ["sqlx::", "PgPool"] {
         assert!(
             !contracts.contains(forbidden),
             "user contracts should remain infrastructure-independent from {forbidden}"
         );
     }
 
-    for (feature, adapter, repository) in [
-        ("postgres", "aether_data_postgres", "SqlxUserReadRepository"),
-        ("mysql", "aether_data_mysql", "MysqlUserReadRepository"),
-        ("sqlite", "aether_data_sqlite", "SqliteUserReadRepository"),
-    ] {
+    for (feature, adapter, repository) in
+        [("postgres", "aether_data_postgres", "SqlxUserReadRepository")]
+    {
         assert!(facade.contains(adapter) && facade.contains(repository));
         let source = read_workspace_file(&format!(
             "crates/aether-data/adapters/{feature}/src/users.rs"
@@ -1560,13 +1229,7 @@ fn user_repositories_are_owned_by_contracts_and_driver_adapters() {
 fn provider_catalog_repositories_are_owned_by_contracts_and_driver_adapters() {
     let facade =
         read_workspace_file("crates/aether-data/runtime/src/repository/provider_catalog/mod.rs");
-    for forbidden in [
-        "mod postgres;",
-        "mod mysql;",
-        "mod sqlite;",
-        "sqlx::",
-        "QueryBuilder",
-    ] {
+    for forbidden in ["mod postgres;", "sqlx::", "QueryBuilder"] {
         assert!(
             !facade.contains(forbidden),
             "provider catalog facade should not own driver code via {forbidden}"
@@ -1600,30 +1263,18 @@ fn provider_catalog_repositories_are_owned_by_contracts_and_driver_adapters() {
             "provider catalog snapshot policy should own {required}"
         );
     }
-    for forbidden in ["sqlx::", "PgPool", "MySqlPool", "SqlitePool", "RwLock"] {
+    for forbidden in ["sqlx::", "PgPool", "RwLock"] {
         assert!(
             !snapshot.contains(forbidden),
             "provider catalog snapshot should remain infrastructure-independent from {forbidden}"
         );
     }
 
-    for (feature, adapter, repository) in [
-        (
-            "postgres",
-            "aether_data_postgres",
-            "SqlxProviderCatalogReadRepository",
-        ),
-        (
-            "mysql",
-            "aether_data_mysql",
-            "MysqlProviderCatalogReadRepository",
-        ),
-        (
-            "sqlite",
-            "aether_data_sqlite",
-            "SqliteProviderCatalogReadRepository",
-        ),
-    ] {
+    for (feature, adapter, repository) in [(
+        "postgres",
+        "aether_data_postgres",
+        "SqlxProviderCatalogReadRepository",
+    )] {
         assert!(facade.contains(adapter) && facade.contains(repository));
         let source = read_workspace_file(&format!(
             "crates/aether-data/adapters/{feature}/src/provider_catalog.rs"
@@ -1652,14 +1303,7 @@ fn provider_catalog_repositories_are_owned_by_contracts_and_driver_adapters() {
 #[test]
 fn wallet_repositories_are_owned_by_contracts_and_driver_adapters() {
     let facade = read_workspace_file("crates/aether-data/runtime/src/repository/wallet/mod.rs");
-    for forbidden in [
-        "mod postgres;",
-        "mod mysql;",
-        "mod sqlite;",
-        "mod types;",
-        "sqlx::",
-        "QueryBuilder",
-    ] {
+    for forbidden in ["mod postgres;", "mod types;", "sqlx::", "QueryBuilder"] {
         assert!(
             !facade.contains(forbidden),
             "wallet facade should not own contracts or driver code via {forbidden}"
@@ -1691,18 +1335,16 @@ fn wallet_repositories_are_owned_by_contracts_and_driver_adapters() {
             "wallet snapshot policy should own {required}"
         );
     }
-    for forbidden in ["sqlx::", "PgPool", "MySqlPool", "SqlitePool", "RwLock"] {
+    for forbidden in ["sqlx::", "PgPool", "RwLock"] {
         assert!(
             !snapshot.contains(forbidden),
             "wallet snapshot should remain infrastructure-independent from {forbidden}"
         );
     }
 
-    for (feature, adapter, repository) in [
-        ("postgres", "aether_data_postgres", "SqlxWalletRepository"),
-        ("mysql", "aether_data_mysql", "MysqlWalletReadRepository"),
-        ("sqlite", "aether_data_sqlite", "SqliteWalletReadRepository"),
-    ] {
+    for (feature, adapter, repository) in
+        [("postgres", "aether_data_postgres", "SqlxWalletRepository")]
+    {
         assert!(facade.contains(adapter) && facade.contains(repository));
         let source = read_workspace_file(&format!(
             "crates/aether-data/adapters/{feature}/src/wallet.rs"
@@ -1737,7 +1379,6 @@ fn usage_repositories_are_owned_by_contracts_and_driver_adapters() {
     let facade = read_workspace_file("crates/aether-data/runtime/src/repository/usage/mod.rs");
     for forbidden in [
         "mod postgres;",
-        "mod sqlite;",
         "sqlx::",
         "QueryBuilder",
         "pub(crate) struct ApiKeyUsageDelta",
@@ -1748,17 +1389,6 @@ fn usage_repositories_are_owned_by_contracts_and_driver_adapters() {
             "usage facade should not own driver or pure policy code via {forbidden}"
         );
     }
-    let mysql_facade =
-        read_workspace_file("crates/aether-data/runtime/src/repository/usage/mysql.rs");
-    assert!(mysql_facade.contains("use aether_data_mysql::"));
-    assert!(mysql_facade.contains("MysqlUsageStorage"));
-    for forbidden in ["sqlx::query", "FROM `usage`", "INSERT INTO `usage`"] {
-        assert!(
-            !mysql_facade.contains(forbidden),
-            "MySQL usage facade should only adapt shared read policy, not own SQL via {forbidden}"
-        );
-    }
-
     let contracts =
         read_workspace_file("crates/aether-data/contracts/src/repository/usage/types.rs");
     for required in [
@@ -1784,7 +1414,7 @@ fn usage_repositories_are_owned_by_contracts_and_driver_adapters() {
             "usage policy should own {required}"
         );
     }
-    for forbidden in ["sqlx::", "PgPool", "MySqlPool", "SqlitePool", "RwLock"] {
+    for forbidden in ["sqlx::", "PgPool", "RwLock"] {
         assert!(
             !policy.contains(forbidden),
             "usage policy should remain infrastructure-independent from {forbidden}"
@@ -1803,36 +1433,10 @@ fn usage_repositories_are_owned_by_contracts_and_driver_adapters() {
             "PostgreSQL usage adapter should own {required}"
         );
     }
-    let mysql = read_workspace_file("crates/aether-data/adapters/mysql/src/usage.rs");
-    for required in [
-        "pub struct MysqlUsageStorage",
-        "pub struct MysqlUsageWriteRepository",
-        "impl UsageWriteRepository for MysqlUsageWriteRepository",
-        "sqlx::",
-    ] {
-        assert!(
-            mysql.contains(required),
-            "MySQL usage adapter should own {required}"
-        );
-    }
-    let sqlite = read_workspace_file("crates/aether-data/adapters/sqlite/src/usage.rs");
-    for required in [
-        "pub struct SqliteUsageReadRepository",
-        "pub struct SqliteUsageWriteRepository",
-        "impl UsageReadRepository for SqliteUsageReadRepository",
-        "impl UsageWriteRepository for SqliteUsageWriteRepository",
-        "sqlx::",
-    ] {
-        assert!(
-            sqlite.contains(required),
-            "SQLite usage adapter should own {required}"
-        );
-    }
 
     for path in [
         "crates/aether-data/runtime/src/repository/usage/postgres/mod.rs",
         "crates/aether-data/runtime/src/repository/usage/postgres/cleanup.rs",
-        "crates/aether-data/runtime/src/repository/usage/sqlite.rs",
     ] {
         assert!(
             !workspace_file_exists(path),
@@ -1853,26 +1457,13 @@ fn usage_repositories_are_owned_by_contracts_and_driver_adapters() {
 #[test]
 fn lifecycle_backfills_are_partitioned_by_driver() {
     let facade = read_workspace_file("crates/aether-data/runtime/src/lifecycle/backfill.rs");
-    for module in [
-        "mod postgres;",
-        "mod mysql;",
-        "mod sqlite;",
-        "mod types;",
-        "mod tests;",
-    ] {
+    for module in ["mod postgres;", "mod types;", "mod tests;"] {
         assert!(
             facade.contains(module),
             "backfill facade should declare {module}"
         );
     }
-    for forbidden in [
-        "sqlx::",
-        "PgPool",
-        "MysqlPool",
-        "SqlitePool",
-        "BACKFILL_MIGRATOR",
-        "CREATE TABLE",
-    ] {
+    for forbidden in ["sqlx::", "PgPool", "BACKFILL_MIGRATOR", "CREATE TABLE"] {
         assert!(
             !facade.contains(forbidden),
             "backfill facade should not own driver operations via {forbidden}"
@@ -1896,47 +1487,12 @@ fn lifecycle_backfills_are_partitioned_by_driver() {
             "backfill/postgres.rs should own {required}"
         );
     }
-
-    for (driver, pool) in [("mysql", "MysqlPool"), ("sqlite", "SqlitePool")] {
-        let source = read_workspace_file(&format!(
-            "crates/aether-data/runtime/src/lifecycle/backfill/{driver}.rs"
-        ));
-        for required in [
-            format!("use crate::driver::{driver}::{pool}"),
-            format!("sqlx::migrate!(\"./backfills/{driver}\")"),
-            "static BACKFILL_MIGRATOR".to_string(),
-            "ENSURE_SCHEMA_BACKFILLS_TABLE_SQL".to_string(),
-            "LIST_APPLIED_BACKFILLS_SQL".to_string(),
-            "INSERT_APPLIED_BACKFILL_SQL".to_string(),
-            "pub async fn run_backfills".to_string(),
-            "pub async fn pending_backfills".to_string(),
-            "ensure_schema_backfills_table".to_string(),
-            "validate_applied_backfills".to_string(),
-        ] {
-            assert!(
-                source.contains(&required),
-                "backfill/{driver}.rs should own {required}"
-            );
-        }
-        for forbidden in ["PgPool", "PgConnection", "crate::driver::postgres"] {
-            assert!(
-                !source.contains(forbidden),
-                "backfill/{driver}.rs should not depend on PostgreSQL via {forbidden}"
-            );
-        }
-    }
 }
 
 #[test]
 fn lifecycle_migrations_are_partitioned_by_driver() {
     let facade = read_workspace_file("crates/aether-data/runtime/src/lifecycle/migrate.rs");
-    for module in [
-        "mod postgres;",
-        "mod mysql;",
-        "mod sqlite;",
-        "mod types;",
-        "mod tests;",
-    ] {
+    for module in ["mod postgres;", "mod types;", "mod tests;"] {
         assert!(
             facade.contains(module),
             "migration facade should declare {module}"
@@ -1961,12 +1517,11 @@ fn lifecycle_migrations_are_partitioned_by_driver() {
         types.contains(required),
         "migrate/types.rs should own {required}"
     );
-    for forbidden in ["PgPool", "MySqlPool", "SqlitePool"] {
-        assert!(
-            !types.contains(forbidden),
-            "migrate/types.rs should remain driver-independent from {forbidden}"
-        );
-    }
+    let forbidden = "PgPool";
+    assert!(
+        !types.contains(forbidden),
+        "migrate/types.rs should remain driver-independent from {forbidden}"
+    );
 
     let postgres =
         read_workspace_file("crates/aether-data/runtime/src/lifecycle/migrate/postgres.rs");
@@ -1996,47 +1551,6 @@ fn lifecycle_migrations_are_partitioned_by_driver() {
         );
     }
 
-    for (driver, pool, adapter_module, adapter_dir) in [
-        (
-            "mysql",
-            "MySqlPool",
-            "aether_data_mysql",
-            "aether-data-mysql",
-        ),
-        (
-            "sqlite",
-            "SqlitePool",
-            "aether_data_sqlite",
-            "aether-data-sqlite",
-        ),
-    ] {
-        let source = read_workspace_file(&format!(
-            "crates/aether-data/runtime/src/lifecycle/migrate/{driver}.rs"
-        ));
-        assert!(
-            source.contains(&format!("pub(super) use {adapter_module}")),
-            "migrate/{driver}.rs should remain an adapter compatibility facade"
-        );
-        assert!(!source.contains("sqlx::migrate!"));
-        let adapter_source = read_workspace_file(&format!(
-            "crates/aether-data/adapters/{driver}/src/migrations.rs"
-        ));
-        assert!(adapter_source.contains("sqlx::migrate!(\"./migrations\")"));
-        assert!(workspace_file_exists(&format!(
-            "crates/aether-data/adapters/{driver}/migrations/20260403000000_baseline.sql"
-        )));
-        for required in [
-            "sqlx::migrate!".to_string(),
-            pool.to_string(),
-            "pub async fn run_migrations".to_string(),
-            "pub async fn pending_migrations".to_string(),
-        ] {
-            assert!(
-                adapter_source.contains(&required),
-                "{adapter_dir}/src/migrations.rs should own {required}"
-            );
-        }
-    }
     assert!(
         !workspace_file_exists("crates/aether-data/runtime/migrations"),
         "driver migration SQL must be owned by adapter crates"
@@ -2047,25 +1561,17 @@ fn lifecycle_migrations_are_partitioned_by_driver() {
 fn routing_profile_repositories_are_owned_by_driver_adapters() {
     let facade =
         read_workspace_file("crates/aether-data/runtime/src/repository/routing_profiles/mod.rs");
-    for forbidden in ["mod postgres;", "mod mysql;", "mod sqlite;", "sqlx::"] {
+    for forbidden in ["mod postgres;", "sqlx::"] {
         assert!(
             !facade.contains(forbidden),
             "routing profile facade should not own driver implementation via {forbidden}"
         );
     }
-    for (feature, adapter, repository) in [
-        (
-            "postgres",
-            "aether_data_postgres",
-            "PostgresRoutingGroupRepository",
-        ),
-        ("mysql", "aether_data_mysql", "MysqlRoutingGroupRepository"),
-        (
-            "sqlite",
-            "aether_data_sqlite",
-            "SqliteRoutingGroupRepository",
-        ),
-    ] {
+    for (feature, adapter, repository) in [(
+        "postgres",
+        "aether_data_postgres",
+        "PostgresRoutingGroupRepository",
+    )] {
         assert!(
             facade.contains(&format!("#[cfg(feature = \"{feature}\")]")),
             "routing profile facade should preserve the {feature} feature boundary"
@@ -2096,31 +1602,17 @@ fn routing_profile_repositories_are_owned_by_driver_adapters() {
 #[test]
 fn provider_quota_repositories_are_owned_by_driver_adapters() {
     let facade = read_workspace_file("crates/aether-data/runtime/src/repository/quota/mod.rs");
-    for forbidden in [
-        "mod postgres;",
-        "mod mysql;",
-        "mod sqlite;",
-        "sqlx::",
-        "SelectQuery",
-    ] {
+    for forbidden in ["mod postgres;", "sqlx::", "SelectQuery"] {
         assert!(
             !facade.contains(forbidden),
             "provider quota facade should not own driver implementation via {forbidden}"
         );
     }
-    for (feature, adapter, repository) in [
-        (
-            "postgres",
-            "aether_data_postgres",
-            "SqlxProviderQuotaRepository",
-        ),
-        ("mysql", "aether_data_mysql", "MysqlProviderQuotaRepository"),
-        (
-            "sqlite",
-            "aether_data_sqlite",
-            "SqliteProviderQuotaRepository",
-        ),
-    ] {
+    for (feature, adapter, repository) in [(
+        "postgres",
+        "aether_data_postgres",
+        "SqlxProviderQuotaRepository",
+    )] {
         assert!(
             facade.contains(&format!("#[cfg(feature = \"{feature}\")]")),
             "provider quota facade should preserve the {feature} feature boundary"
@@ -2152,35 +1644,17 @@ fn provider_quota_repositories_are_owned_by_driver_adapters() {
 fn pool_score_repositories_are_owned_by_driver_adapters() {
     let facade =
         read_workspace_file("crates/aether-data/runtime/src/repository/pool_scores/mod.rs");
-    for forbidden in [
-        "mod postgres;",
-        "mod mysql;",
-        "mod sqlite;",
-        "sqlx::",
-        "QueryBuilder",
-    ] {
+    for forbidden in ["mod postgres;", "sqlx::", "QueryBuilder"] {
         assert!(
             !facade.contains(forbidden),
             "pool score facade should not own driver implementation via {forbidden}"
         );
     }
-    for (feature, adapter, repository) in [
-        (
-            "postgres",
-            "aether_data_postgres",
-            "PostgresPoolMemberScoreRepository",
-        ),
-        (
-            "mysql",
-            "aether_data_mysql",
-            "MysqlPoolMemberScoreRepository",
-        ),
-        (
-            "sqlite",
-            "aether_data_sqlite",
-            "SqlitePoolMemberScoreRepository",
-        ),
-    ] {
+    for (feature, adapter, repository) in [(
+        "postgres",
+        "aether_data_postgres",
+        "PostgresPoolMemberScoreRepository",
+    )] {
         assert!(
             facade.contains(&format!("#[cfg(feature = \"{feature}\")]")),
             "pool score facade should preserve the {feature} feature boundary"
@@ -2212,35 +1686,17 @@ fn pool_score_repositories_are_owned_by_driver_adapters() {
 fn background_task_repositories_are_owned_by_driver_adapters() {
     let facade =
         read_workspace_file("crates/aether-data/runtime/src/repository/background_tasks/mod.rs");
-    for forbidden in [
-        "mod postgres;",
-        "mod mysql;",
-        "mod sqlite;",
-        "sqlx::",
-        "QueryBuilder",
-    ] {
+    for forbidden in ["mod postgres;", "sqlx::", "QueryBuilder"] {
         assert!(
             !facade.contains(forbidden),
             "background task facade should not own driver implementation via {forbidden}"
         );
     }
-    for (feature, adapter, repository) in [
-        (
-            "postgres",
-            "aether_data_postgres",
-            "SqlxBackgroundTaskRepository",
-        ),
-        (
-            "mysql",
-            "aether_data_mysql",
-            "MysqlBackgroundTaskRepository",
-        ),
-        (
-            "sqlite",
-            "aether_data_sqlite",
-            "SqliteBackgroundTaskRepository",
-        ),
-    ] {
+    for (feature, adapter, repository) in [(
+        "postgres",
+        "aether_data_postgres",
+        "SqlxBackgroundTaskRepository",
+    )] {
         assert!(
             facade.contains(&format!("#[cfg(feature = \"{feature}\")]")),
             "background task facade should preserve the {feature} feature boundary"
@@ -2272,7 +1728,7 @@ fn background_task_repositories_are_owned_by_driver_adapters() {
 #[test]
 fn lifecycle_driver_export_operations_are_partitioned() {
     let facade = read_workspace_file("crates/aether-data/runtime/src/lifecycle/export.rs");
-    for required in ["mod postgres;", "mod mysql;", "mod sqlite;", "mod tests;"] {
+    for required in ["mod postgres;", "mod tests;"] {
         assert!(
             facade.contains(required),
             "export facade should declare {required}"
@@ -2280,11 +1736,7 @@ fn lifecycle_driver_export_operations_are_partitioned() {
     }
     assert!(!facade.contains("mod tests {"));
 
-    for (driver, implementation_marker) in [
-        ("postgres", "fn normalize_postgres_import_payload("),
-        ("mysql", "fn mysql_row_payload("),
-        ("sqlite", "fn sqlite_row_payload("),
-    ] {
+    for (driver, implementation_marker) in [("postgres", "fn normalize_postgres_import_payload(")] {
         for required in [
             format!("pub use {driver}::"),
             format!("export_{driver}_core_jsonl"),
@@ -2330,9 +1782,7 @@ fn lifecycle_driver_export_operations_are_partitioned() {
 
     let tests = read_workspace_file("crates/aether-data/runtime/src/lifecycle/export/tests.rs");
     assert!(tests.contains("jsonl_round_trips_manifest_and_domain_rows"));
-    assert!(tests.contains("postgres_import_payload_normalizes_sqlite_values_for_target_columns"));
-    assert!(tests.contains("sqlite_core_export_reads_migrated_database_rows"));
-    assert!(tests.contains("mysql_core_export_reads_migrated_database_rows_when_url_is_set"));
+    assert!(tests.contains("postgres_import_payload_normalizes_imported_values_for_target_columns"));
 }
 
 #[test]
@@ -2375,12 +1825,7 @@ fn testkit_does_not_copy_aether_business_schema_sql() {
 #[test]
 fn gateway_main_keeps_database_export_import_driver_selection_in_data_layer() {
     let main_rs = read_workspace_file("apps/aether-gateway/src/main.rs");
-    for forbidden in [
-        "PostgresPoolFactory",
-        "MysqlPoolFactory",
-        "SqlitePoolFactory",
-        "to_postgres_config()",
-    ] {
+    for forbidden in ["PostgresPoolFactory", "to_postgres_config()"] {
         assert!(
             !main_rs.contains(forbidden),
             "main.rs should delegate database export/import driver selection to aether-data instead of {forbidden}"
@@ -2455,16 +1900,11 @@ fn gateway_system_config_types_are_owned_by_aether_data() {
     }
     let data_backends =
         read_workspace_file("crates/aether-data/runtime/src/backend/maintenance.rs");
-    for pattern in [
-        "postgres.list_system_config_entries().await",
-        "mysql.list_system_config_entries().await",
-        "sqlite.list_system_config_entries().await",
-    ] {
-        assert!(
-            data_backends.contains(pattern),
-            "aether-data backends should own driver-specific system config dispatch {pattern}"
-        );
-    }
+    let pattern = "postgres.list_system_config_entries().await";
+    assert!(
+        data_backends.contains(pattern),
+        "aether-data backends should own driver-specific system config dispatch {pattern}"
+    );
     for pattern in [
         "|(key, value, description, updated_at_unix_secs)|",
         "Ok((0, 0, 0, 0))",

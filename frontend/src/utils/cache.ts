@@ -160,21 +160,16 @@ export async function cachedRequest<T>(
 
   // 缓存未命中，执行请求并登记为 in-flight
   const version = cache.version(key)
-  // Keep this mutable declaration: a synchronously throwing fetcher can reach `finally`
-  // before the Promise assignment completes, so a self-referencing `const` would hit TDZ.
-  let request: Promise<T>
-  // eslint-disable-next-line prefer-const
-  request = (async () => {
-    try {
-      const data = await fetcher()
+  const request = new Promise<T>((resolve) => resolve(fetcher()))
+    .then((data) => {
       if (ttl !== 0 && cache.isCurrentVersion(key, version)) {
         cache.set(key, data, ttl)
       }
       return data
-    } finally {
+    })
+    .finally(() => {
       cache.deleteInFlight(key, request)
-    }
-  })()
+    })
 
   cache.setInFlight(key, request)
   return request

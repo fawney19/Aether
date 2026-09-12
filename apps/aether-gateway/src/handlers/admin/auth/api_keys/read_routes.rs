@@ -4,9 +4,12 @@ use super::shared::{
     build_admin_api_keys_bad_request_response, build_admin_api_keys_data_unavailable_response,
     build_admin_api_keys_not_found_response,
 };
-use super::{decrypt_catalog_secret_with_fallbacks, query_param_bool, query_param_optional_bool};
+use super::{query_param_bool, query_param_optional_bool};
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
-use crate::handlers::admin::shared::attach_admin_audit_response;
+use crate::handlers::admin::shared::{
+    attach_admin_audit_response, mark_sensitive_admin_response_no_store,
+};
+use crate::handlers::shared::decrypt_or_migrate_auth_api_key_secret;
 use crate::GatewayError;
 use axum::{
     body::Body,
@@ -132,20 +135,24 @@ pub(super) async fn build_admin_api_key_detail_response(
                 "该密钥没有存储完整密钥信息",
             ));
         };
-        let Some(key) = decrypt_catalog_secret_with_fallbacks(state.encryption_key(), ciphertext)
-        else {
-            return Ok((
-                http::StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "detail": "解密密钥失败" })),
-            )
-                .into_response());
+        let key = match decrypt_or_migrate_auth_api_key_secret(state.app(), &record).await {
+            Ok(value) => value,
+            Err(_) => {
+                return Ok((
+                    http::StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "detail": "解密或校验密钥失败" })),
+                )
+                    .into_response())
+            }
         };
-        return Ok(attach_admin_audit_response(
-            Json(json!({ "key": key })).into_response(),
-            "admin_standalone_api_key_revealed",
-            "reveal_standalone_api_key",
-            "api_key",
-            &api_key_id,
+        return Ok(mark_sensitive_admin_response_no_store(
+            attach_admin_audit_response(
+                Json(json!({ "key": key })).into_response(),
+                "admin_standalone_api_key_revealed",
+                "reveal_standalone_api_key",
+                "api_key",
+                &api_key_id,
+            ),
         ));
     }
 

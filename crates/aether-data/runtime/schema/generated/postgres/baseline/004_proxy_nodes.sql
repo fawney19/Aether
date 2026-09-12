@@ -3,6 +3,7 @@
 
 CREATE TABLE IF NOT EXISTS public.proxy_nodes (
     id character varying(64) NOT NULL,
+    tunnel_generation character varying(64) NOT NULL,
     name character varying(255) NOT NULL,
     ip character varying(512) NOT NULL,
     port integer NOT NULL,
@@ -17,7 +18,7 @@ CREATE TABLE IF NOT EXISTS public.proxy_nodes (
     is_manual boolean DEFAULT false NOT NULL,
     proxy_url character varying(500),
     proxy_username character varying(255),
-    proxy_password character varying(500),
+    proxy_password text,
     created_at bigint NOT NULL,
     updated_at bigint NOT NULL,
     remote_config jsonb,
@@ -34,6 +35,7 @@ CREATE TABLE IF NOT EXISTS public.proxy_nodes (
 );
 
 ALTER TABLE ONLY public.proxy_nodes ADD CONSTRAINT proxy_nodes_pkey PRIMARY KEY (id);
+ALTER TABLE ONLY public.proxy_nodes ADD CONSTRAINT uq_proxy_node_ip_port UNIQUE (ip, port);
 
 CREATE TABLE IF NOT EXISTS public.proxy_node_events (
     id bigserial NOT NULL,

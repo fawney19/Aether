@@ -1,0 +1,9 @@
+src/**
+.gitignore
+tsconfig.json
+**/*.map
+node_modules/@types/**
+node_modules/typescript/**
+node_modules/.package-lock.json
+*.tsbuildinfo
+*.vsix

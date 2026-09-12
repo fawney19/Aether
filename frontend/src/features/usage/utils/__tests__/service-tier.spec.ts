@@ -9,7 +9,7 @@ import {
 
 describe('service tier facts', () => {
   it('uses the final provider request tier for display and billing', () => {
-    const source = {
+    const source: Record<string, unknown> = {
       service_tier: 'priority',
       actual_service_tier: 'default',
       settlement: {
@@ -29,7 +29,7 @@ describe('service tier facts', () => {
   })
 
   it('does not infer a tier from the provider response or settlement snapshot', () => {
-    const source = {
+    const source: Record<string, unknown> = {
       actual_service_tier: 'flex',
       settlement: {
         settlement_snapshot: {

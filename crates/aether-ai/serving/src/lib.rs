@@ -54,7 +54,7 @@ pub use aether_pool_core::{
 };
 pub use attempt_loop::{
     run_ai_attempt_loop, AiAttemptExecutionOutcome, AiAttemptLoopOutcome, AiAttemptLoopPort,
-    AiAttemptRetryScope, AiExecutionAttempt,
+    AiAttemptRetryScope, AiExecutionAttempt, STICKY_KEY_ATTEMPTS_REPORT_FIELD,
 };
 pub use attempt_plan::{
     build_ai_execution_decision_from_plan, build_ai_execution_plan_from_decision,

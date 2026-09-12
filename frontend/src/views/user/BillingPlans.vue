@@ -2,7 +2,7 @@
   <PageContainer>
     <PageHeader
       title="套餐中心"
-      description="购买每日额度或会员权益"
+      description="购买额度、会员或使用限制套餐"
     />
 
     <div class="mt-6 space-y-6">
@@ -42,8 +42,8 @@
               </div>
               <div class="mt-3 flex flex-wrap gap-1.5">
                 <Badge
-                  v-for="label in entitlementLabels(item.entitlements)"
-                  :key="label"
+                  v-for="(label, index) in entitlementLabels(item.entitlements)"
+                  :key="`${label}-${index}`"
                   variant="outline"
                 >
                   {{ label }}
@@ -93,8 +93,8 @@
 
               <div class="mt-5 flex flex-wrap gap-1.5">
                 <Badge
-                  v-for="label in entitlementLabels(plan.entitlements)"
-                  :key="label"
+                  v-for="(label, index) in entitlementLabels(plan.entitlements)"
+                  :key="`${label}-${index}`"
                   variant="outline"
                 >
                   {{ label }}
@@ -215,9 +215,16 @@ import {
 import { EmptyState, LoadingState, StripePaymentDialog } from '@/components/common'
 import { CardSection, PageContainer, PageHeader } from '@/components/layout'
 import { useToast } from '@/composables/useToast'
-import { useI18n } from '@/i18n'
+import { getI18nLocale, useI18n } from '@/i18n'
 import { parseApiError } from '@/utils/errorParser'
+import {
+  entitlementReplacementGroups,
+  entitlementsWillReplaceExisting,
+  isPlanEntitlementReplacementCandidate,
+  usagePolicyEntitlementLabels,
+} from '@/utils/billingEntitlements'
 import { log } from '@/utils/logger'
+import { safePaymentTargetUrl } from '@/utils/paymentUrl'
 import {
   getPaymentInstructionString,
   getStripePaymentInstructions,
@@ -256,6 +263,12 @@ const selectedCheckoutOption = computed(() => {
   return checkoutOptions.value.find(option => option.key === selectedChannel.value)
     || checkoutOptions.value[0]
 })
+
+const replacementCandidateEntitlements = computed(() =>
+  entitlements.value.filter((item) =>
+    isPlanEntitlementReplacementCandidate(item)
+  )
+)
 
 const activeEntitlements = computed(() =>
   entitlements.value.filter((item) =>
@@ -332,7 +345,7 @@ async function loadRechargeOptions() {
 
 async function checkoutPlan(plan: BillingPlan) {
   if (hasMatchingActivePlan(plan)) {
-    const confirmed = window.confirm(legacyT('购买成功后，同类旧套餐会自动失效。确定继续购买吗？'))
+    const confirmed = window.confirm(legacyT('购买成功后，冲突的旧套餐及其组合权益会整体失效。确定继续购买吗？'))
     if (!confirmed) return
   }
   const option = selectedCheckoutOption.value
@@ -381,20 +394,30 @@ function submitPaymentInstructions(instructions: Record<string, unknown> | null 
   }
   const paymentUrl = getPaymentInstructionString(instructions, 'payment_url')
   if (!paymentUrl) return
-  const paymentParams = instructions.payment_params
-  if (paymentParams && typeof paymentParams === 'object' && !Array.isArray(paymentParams)) {
-    submitPaymentForm(paymentUrl, paymentParams as Record<string, unknown>)
+  const safePaymentUrl = safePaymentTargetUrl(paymentUrl)
+  if (!safePaymentUrl) {
+    showError('支付网关返回了不安全的支付地址')
     return
   }
-  const opened = window.open(paymentUrl, '_blank', 'noopener,noreferrer')
+  const paymentParams = instructions.payment_params
+  if (paymentParams && typeof paymentParams === 'object' && !Array.isArray(paymentParams)) {
+    submitPaymentForm(safePaymentUrl, paymentParams as Record<string, unknown>)
+    return
+  }
+  const opened = window.open(safePaymentUrl, '_blank', 'noopener,noreferrer')
   if (!opened) {
-    window.location.href = paymentUrl
+    window.location.href = safePaymentUrl
   }
 }
 
 function submitPaymentForm(url: string, params: Record<string, unknown>) {
+  const safeUrl = safePaymentTargetUrl(url)
+  if (!safeUrl) {
+    showError('支付网关返回了不安全的支付地址')
+    return
+  }
   const form = document.createElement('form')
-  form.action = url
+  form.action = safeUrl
   form.method = 'POST'
   if (!isSafariBrowser()) {
     form.target = '_blank'
@@ -430,12 +453,8 @@ function planTitle(planId: string): string {
 }
 
 function hasMatchingActivePlan(plan: BillingPlan): boolean {
-  const replacesDailyQuota = hasDailyQuotaEntitlement(plan.entitlements)
-  const replacesMembership = hasMembershipEntitlement(plan.entitlements)
-  if (!replacesDailyQuota && !replacesMembership) return false
-  return activeEntitlements.value.some((item) =>
-    (replacesDailyQuota && hasDailyQuotaEntitlement(item.entitlements))
-    || (replacesMembership && hasMembershipEntitlement(item.entitlements))
+  return replacementCandidateEntitlements.value.some((item) =>
+    entitlementsWillReplaceExisting(plan.entitlements, item.entitlements)
   )
 }
 
@@ -443,13 +462,13 @@ function replacementNotice(plan: BillingPlan): string {
   const labels = replacementClassLabels(plan.entitlements)
   if (labels.length === 0) return ''
   if (hasMatchingActivePlan(plan)) {
-    return `你已有有效${labels.join('和')}，购买成功后旧同类套餐会自动失效。`
+    return '你已有与本套餐冲突的有效套餐，购买成功后旧套餐会整包失效。'
   }
-  return `若已有有效${labels.join('和')}，购买成功后旧同类套餐会自动失效。`
+  return `若已有冲突的有效${labels.join('和')}，购买成功后旧套餐会整体失效。`
 }
 
 function entitlementLabels(items: BillingEntitlement[]): string[] {
-  return (items || []).map((item) => {
+  return (items || []).flatMap((item) => {
     if (item.type === 'wallet_credit') {
       return `附赠余额 $${Number(item.amount_usd || 0).toFixed(2)}`
     }
@@ -459,13 +478,18 @@ function entitlementLabels(items: BillingEntitlement[]): string[] {
     if (item.type === 'membership_group') {
       return `会员组 ${item.grant_user_groups.join(', ')}`
     }
-    return item.type
+    if (item.type === 'usage_policy') {
+      return usagePolicyEntitlementLabels(item)
+    }
+    return []
   })
 }
 
 function hasPackageEntitlement(items: BillingEntitlement[] | undefined): boolean {
   return (items || []).some((item) =>
-    item.type === 'daily_quota' || item.type === 'membership_group'
+    item.type === 'daily_quota'
+    || item.type === 'membership_group'
+    || item.type === 'usage_policy'
   )
 }
 
@@ -481,6 +505,7 @@ function replacementClassLabels(items: BillingEntitlement[] | undefined): string
   const labels: string[] = []
   if (hasDailyQuotaEntitlement(items)) labels.push('每日额度套餐')
   if (hasMembershipEntitlement(items)) labels.push('会员权益包')
+  labels.push(...entitlementReplacementGroups(items).map(group => `互斥组「${group}」`))
   return labels
 }
 
@@ -489,13 +514,13 @@ function formatDuration(unit: BillingDurationUnit, value: number): string {
     day: '天',
     month: '个月',
     year: '年',
-    custom: '自定义周期',
+    custom: '天',
   }
-  return unit === 'custom' ? `${value} ${labels[unit]}` : `${value}${labels[unit]}`
+  return `${value}${labels[unit]}`
 }
 
 function formatDate(value: string | null | undefined): string {
   if (!value) return '-'
-  return new Date(value).toLocaleDateString('zh-CN')
+  return new Date(value).toLocaleDateString(getI18nLocale())
 }
 </script>

@@ -65,13 +65,13 @@ fn codex_agent_identity_import_auth_configs(
         .iter()
         .enumerate()
         .map(|(index, entry)| {
-            if let Some(error) = entry.parse_error.as_deref() {
-                return Err(format!("第 {} 个条目无效: {error}", index + 1));
+            if entry.parse_error.is_some() {
+                return Err(format!("第 {} 个条目无效", index + 1));
             }
             match codex_agent_identity_auth_config_from_import(entry) {
                 Ok(Some(auth_config)) => Ok(auth_config),
                 Ok(None) => Err(format!("第 {} 个条目不是 Agent Identity", index + 1)),
-                Err(error) => Err(format!("第 {} 个条目无效: {error}", index + 1)),
+                Err(_) => Err(format!("第 {} 个条目无效", index + 1)),
             }
         })
         .collect()
@@ -135,11 +135,10 @@ async fn acquire_provider_agent_identity_import_locks(
                     "其中一个 Agent Identity 正在导入或创建，请稍后重试",
                 ));
             }
-            Err(error) => {
+            Err(_) => {
                 tracing::warn!(
                     provider_id = %provider_id,
                     lock_key = %lock_key,
-                    error = ?error,
                     "gateway Agent Identity import lock unavailable"
                 );
                 release_provider_agent_identity_import_locks(state, leases).await;
@@ -164,9 +163,8 @@ async fn release_provider_agent_identity_import_locks(
                 lock_key = %lease.key,
                 "gateway Agent Identity import lock was not owned during release"
             ),
-            Err(error) => tracing::warn!(
+            Err(_) => tracing::warn!(
                 lock_key = %lease.key,
-                error = ?error,
                 "gateway Agent Identity import lock release failed"
             ),
         }
@@ -329,10 +327,10 @@ async fn handle_admin_provider_oauth_start_import_task(
     let agent_identity_auth_configs = if agent_identity_only {
         match codex_agent_identity_import_auth_configs(&payload.credentials) {
             Ok(auth_configs) => Some(auth_configs),
-            Err(detail) => {
+            Err(_) => {
                 return Ok(build_internal_control_error_response(
                     http::StatusCode::BAD_REQUEST,
-                    format!("该接口仅接受有效的 Agent Identity JSON: {detail}"),
+                    "该接口仅接受有效的 Agent Identity JSON",
                 ));
             }
         }
@@ -652,13 +650,12 @@ async fn handle_admin_provider_oauth_start_import_task(
                 )
                 .await;
             }
-            Err(err) => {
+            Err(_) => {
                 let finished_at = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .ok()
                     .map(|duration| duration.as_secs())
                     .unwrap_or(started_at);
-                let error_message = format!("{err:?}");
                 let failed_state = build_admin_provider_oauth_batch_task_state(
                     &task_id_for_worker,
                     &provider_id_for_worker,
@@ -672,7 +669,7 @@ async fn handle_admin_provider_oauth_start_import_task(
                     0,
                     0,
                     Some("导入任务执行失败"),
-                    Some(error_message.as_str()),
+                    Some("provider_oauth_batch_import_failed"),
                     Vec::new(),
                     created_at,
                     Some(started_at),
@@ -688,7 +685,7 @@ async fn handle_admin_provider_oauth_start_import_task(
                     Some(100),
                     Some("provider oauth batch import failed".to_string()),
                     None,
-                    Some(error_message.clone()),
+                    Some("provider_oauth_batch_import_failed".to_string()),
                     None,
                     Some(finished_at),
                 )
@@ -698,13 +695,15 @@ async fn handle_admin_provider_oauth_start_import_task(
                     &task_id_for_worker,
                     "failed",
                     "provider oauth batch import failed",
-                    Some(json!({ "error": error_message.clone() })),
+                    Some(json!({
+                        "error_code": "provider_oauth_batch_import_failed"
+                    })),
                 )
                 .await;
                 tracing::warn!(
                     task_id = %task_id_for_worker,
                     provider_id = %provider_id_for_worker,
-                    error = %error_message,
+                    error_category = "provider_oauth_batch_import_failed",
                     "provider oauth batch import task failed"
                 );
             }

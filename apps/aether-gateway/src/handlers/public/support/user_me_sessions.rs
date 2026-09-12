@@ -12,6 +12,7 @@ use super::{
     format_users_me_required_session_datetime_iso8601, resolve_authenticated_local_user, AppState,
     GatewayPublicRequestContext,
 };
+use crate::handlers::public::support::mark_sensitive_response_no_store;
 use crate::GatewayUserSessionView;
 
 #[derive(Debug, Deserialize)]
@@ -79,13 +80,15 @@ pub(super) async fn handle_users_me_sessions_get(
         }
     };
 
-    Json(
-        sessions
-            .into_iter()
-            .map(|session| build_users_me_session_payload(session, &auth.session_id))
-            .collect::<Vec<_>>(),
+    mark_sensitive_response_no_store(
+        Json(
+            sessions
+                .into_iter()
+                .map(|session| build_users_me_session_payload(session, &auth.session_id))
+                .collect::<Vec<_>>(),
+        )
+        .into_response(),
     )
-    .into_response()
 }
 
 pub(super) async fn handle_users_me_delete_other_sessions(

@@ -9,6 +9,7 @@ pub(super) struct WalletTestRefundRecord {
 #[derive(Debug, Clone)]
 pub(crate) struct WalletTestRechargeRecord {
     pub(crate) user_id: String,
+    pub(crate) order_no: String,
     pub(crate) payload: serde_json::Value,
 }
 
@@ -81,8 +82,13 @@ pub(super) fn wallet_test_reserved_refund_amount(wallet_id: &str) -> f64 {
                     Some("pending_approval" | "approved")
                 )
         })
-        .map(|entry| entry.payload["amount_usd"].as_f64().unwrap_or_default())
-        .sum::<f64>()
+        .filter_map(|entry| entry.payload["amount_usd"].as_f64())
+        .filter(|amount| amount.is_finite() && *amount > 0.0)
+        .try_fold(0.0_f64, |total, amount| {
+            let next = total + amount;
+            next.is_finite().then_some(next)
+        })
+        .unwrap_or(f64::INFINITY)
 }
 
 pub(super) fn record_wallet_test_refund(
@@ -140,9 +146,36 @@ pub(super) fn wallet_test_recharge_order_by_id(
         .map(|entry| entry.payload.clone())
 }
 
-pub(super) fn record_wallet_test_recharge(user_id: String, payload: serde_json::Value) {
+pub(super) fn wallet_test_recharge_order_by_order_no(
+    user_id: &str,
+    order_no: &str,
+) -> Option<serde_json::Value> {
     wallet_test_recharge_store()
         .lock()
         .expect("wallet test recharge store should lock")
-        .push(WalletTestRechargeRecord { user_id, payload });
+        .iter()
+        .find(|entry| entry.user_id == user_id && entry.order_no == order_no)
+        .map(|entry| entry.payload.clone())
+}
+
+pub(super) fn record_wallet_test_recharge(
+    user_id: String,
+    order_no: String,
+    payload: serde_json::Value,
+) {
+    let mut store = wallet_test_recharge_store()
+        .lock()
+        .expect("wallet test recharge store should lock");
+    if let Some(existing) = store
+        .iter_mut()
+        .find(|entry| entry.user_id == user_id && entry.order_no == order_no)
+    {
+        existing.payload = payload;
+        return;
+    }
+    store.push(WalletTestRechargeRecord {
+        user_id,
+        order_no,
+        payload,
+    });
 }

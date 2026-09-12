@@ -1,28 +1,16 @@
 use crate::handlers::admin::request::AdminAppState;
+use crate::handlers::shared::{masked_secret_display, open_auth_api_key_secret};
 use crate::provider_key_auth::{
     provider_key_auth_config_is_agent_identity, provider_key_auth_config_uses_header_authorization,
 };
-use aether_crypto::decrypt_python_fernet_ciphertext;
-#[cfg(test)]
-use aether_crypto::DEVELOPMENT_ENCRYPTION_KEY;
 use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey;
 
 pub(super) fn admin_monitoring_masked_user_api_key_prefix(
     state: &AdminAppState<'_>,
-    ciphertext: Option<&str>,
+    record: &aether_data::repository::auth::StoredAuthApiKeyExportRecord,
 ) -> Option<String> {
-    let Some(ciphertext) = ciphertext.map(str::trim).filter(|value| !value.is_empty()) else {
-        return None;
-    };
-    let full_key = admin_monitoring_try_decrypt_secret(state, ciphertext)?;
-    let prefix_len = full_key.len().min(10);
-    let prefix = &full_key[..prefix_len];
-    let suffix = if full_key.len() >= 4 {
-        &full_key[full_key.len().saturating_sub(4)..]
-    } else {
-        ""
-    };
-    Some(format!("{prefix}...{suffix}"))
+    let projection = open_auth_api_key_secret(state.app(), record).ok()?;
+    Some(masked_secret_display(&projection.plaintext, 10, 4, "..."))
 }
 
 pub(super) fn admin_monitoring_masked_provider_key_prefix(
@@ -43,57 +31,14 @@ pub(super) fn admin_monitoring_masked_provider_key_prefix(
             }
         }
         _ => {
-            let full_key = key
-                .encrypted_api_key
-                .as_deref()
-                .and_then(|ciphertext| admin_monitoring_try_decrypt_secret(state, ciphertext))?;
-            if full_key.len() <= 12 {
-                Some(format!("{full_key}***"))
-            } else {
-                Some(format!(
-                    "{}***{}",
-                    &full_key[..8],
-                    &full_key[full_key.len().saturating_sub(4)..]
-                ))
-            }
+            let full_key = state
+                .app()
+                .decrypt_provider_catalog_key_api_key(key)
+                .ok()
+                .flatten()?;
+            Some(masked_secret_display(&full_key, 8, 4, "***"))
         }
     }
-}
-
-fn admin_monitoring_try_decrypt_secret(
-    state: &AdminAppState<'_>,
-    ciphertext: &str,
-) -> Option<String> {
-    let ciphertext = ciphertext.trim();
-    if ciphertext.is_empty() {
-        return None;
-    }
-    let encryption_key = state.encryption_key().map(str::trim).unwrap_or("");
-    if !encryption_key.is_empty() {
-        if let Ok(value) = decrypt_python_fernet_ciphertext(encryption_key, ciphertext) {
-            return Some(value);
-        }
-    }
-    for env_key in ["AETHER_GATEWAY_DATA_ENCRYPTION_KEY", "ENCRYPTION_KEY"] {
-        let Ok(candidate) = std::env::var(env_key) else {
-            continue;
-        };
-        let candidate = candidate.trim();
-        if candidate.is_empty() || candidate == encryption_key {
-            continue;
-        }
-        if let Ok(value) = decrypt_python_fernet_ciphertext(candidate, ciphertext) {
-            return Some(value);
-        }
-    }
-    #[cfg(test)]
-    if encryption_key != DEVELOPMENT_ENCRYPTION_KEY {
-        if let Ok(value) = decrypt_python_fernet_ciphertext(DEVELOPMENT_ENCRYPTION_KEY, ciphertext)
-        {
-            return Some(value);
-        }
-    }
-    None
 }
 
 pub(super) fn admin_monitoring_cache_affinity_sort_value(value: Option<&serde_json::Value>) -> f64 {
@@ -122,11 +67,14 @@ pub(super) fn admin_monitoring_cache_affinity_sort_value(value: Option<&serde_js
 
 #[cfg(test)]
 mod tests {
-    use super::admin_monitoring_masked_provider_key_prefix;
+    use super::{
+        admin_monitoring_masked_provider_key_prefix, admin_monitoring_masked_user_api_key_prefix,
+    };
     use crate::handlers::admin::request::AdminAppState;
     use crate::AppState;
     use aether_crypto::{encrypt_python_fernet_plaintext, DEVELOPMENT_ENCRYPTION_KEY};
     use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey;
+    use sha2::{Digest, Sha256};
 
     #[test]
     fn monitoring_labels_agent_identity_instead_of_oauth_token() {
@@ -166,5 +114,42 @@ mod tests {
             admin_monitoring_masked_provider_key_prefix(&state, &key, "codex").as_deref(),
             Some("[Agent Identity]")
         );
+    }
+
+    #[test]
+    fn monitoring_never_exposes_complete_short_credentials() {
+        let app = AppState::new().expect("gateway should build");
+        let state = AdminAppState::new(&app);
+        let plaintext = "short-key";
+        let ciphertext = encrypt_python_fernet_plaintext(DEVELOPMENT_ENCRYPTION_KEY, plaintext)
+            .expect("secret should encrypt");
+        let mut hasher = Sha256::new();
+        hasher.update(plaintext.as_bytes());
+        let record = aether_data::repository::auth::StoredAuthApiKeyExportRecord::new(
+            "owner-1".to_string(),
+            "key-1".to_string(),
+            format!("{:x}", hasher.finalize()),
+            Some(ciphertext),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            true,
+            None,
+            false,
+            0,
+            0,
+            0.0,
+            false,
+        )
+        .expect("API-key record should build");
+
+        let masked = admin_monitoring_masked_user_api_key_prefix(&state, &record)
+            .expect("secret should decrypt");
+        assert_ne!(masked, plaintext);
+        assert!(!masked.contains(plaintext));
     }
 }

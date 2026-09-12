@@ -1,22 +1,19 @@
 use std::collections::BTreeMap;
 
+use aether_crypto::{rsa_pkcs1_sha256_sign, RsaPkcs1Sha256Error};
 use async_trait::async_trait;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
-use rsa::pkcs1::DecodeRsaPrivateKey;
-use rsa::pkcs1v15::SigningKey;
-use rsa::pkcs8::DecodePrivateKey;
-use rsa::signature::{SignatureEncoding, Signer};
-use rsa::RsaPrivateKey;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use url::form_urlencoded;
+use url::{form_urlencoded, Url};
 
 use super::super::oauth_refresh::{
     CachedOAuthEntry, LocalOAuthHttpExecutor, LocalOAuthHttpRequest, LocalOAuthRefreshAdapter,
     LocalOAuthRefreshError, LocalResolvedOAuthRequestAuth,
 };
 use super::super::snapshot::GatewayProviderTransportSnapshot;
+use super::context::is_valid_vertex_region;
 
 pub const VERTEX_API_KEY_QUERY_PARAM: &str = "key";
 pub const VERTEX_SERVICE_ACCOUNT_AUTH_HEADER: &str = "authorization";
@@ -25,13 +22,23 @@ pub const GOOGLE_OAUTH_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const GOOGLE_CLOUD_PLATFORM_SCOPE: &str = "https://www.googleapis.com/auth/cloud-platform";
 const SERVICE_ACCOUNT_REFRESH_SKEW_SECS: u64 = 120;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct VertexApiKeyQueryAuth {
     pub name: &'static str,
     pub value: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+impl std::fmt::Debug for VertexApiKeyQueryAuth {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("VertexApiKeyQueryAuth")
+            .field("name", &self.name)
+            .field("value", &"[REDACTED]")
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
 pub struct VertexServiceAccountAuthConfig {
     pub client_email: String,
     pub private_key: String,
@@ -39,6 +46,20 @@ pub struct VertexServiceAccountAuthConfig {
     pub token_uri: String,
     pub region: Option<String>,
     pub model_regions: BTreeMap<String, String>,
+}
+
+impl std::fmt::Debug for VertexServiceAccountAuthConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("VertexServiceAccountAuthConfig")
+            .field("client_email", &self.client_email)
+            .field("private_key", &"[REDACTED]")
+            .field("project_id", &self.project_id)
+            .field("token_uri", &"[REDACTED]")
+            .field("region", &self.region)
+            .field("model_regions", &self.model_regions)
+            .finish()
+    }
 }
 
 pub fn resolve_local_vertex_api_key_query_auth(
@@ -101,9 +122,8 @@ fn parse_vertex_service_account_auth_config_value(
     let client_email = json_string(value.get("client_email"))?;
     let private_key = json_string(value.get("private_key"))?;
     let project_id = json_string(value.get("project_id"))?;
-    let token_uri =
-        json_string(value.get("token_uri")).unwrap_or_else(|| GOOGLE_OAUTH_TOKEN_URL.to_string());
-    let region = json_string(value.get("region"));
+    let token_uri = resolve_vertex_service_account_token_uri(value.get("token_uri"))?;
+    let region = json_string(value.get("region")).filter(|value| is_valid_vertex_region(value));
     let model_regions = value
         .get("model_regions")
         .and_then(Value::as_object)
@@ -113,7 +133,7 @@ fn parse_vertex_service_account_auth_config_value(
                 .filter_map(|(model, region)| {
                     let model = model.trim();
                     let region = region.as_str()?.trim();
-                    (!model.is_empty() && !region.is_empty())
+                    (!model.is_empty() && is_valid_vertex_region(region))
                         .then(|| (model.to_string(), region.to_string()))
                 })
                 .collect::<BTreeMap<_, _>>()
@@ -128,6 +148,31 @@ fn parse_vertex_service_account_auth_config_value(
         region,
         model_regions,
     })
+}
+
+fn resolve_vertex_service_account_token_uri(value: Option<&Value>) -> Option<String> {
+    let Some(value) = value else {
+        return Some(GOOGLE_OAUTH_TOKEN_URL.to_string());
+    };
+    let raw = value.as_str()?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let parsed = Url::parse(raw).ok()?;
+    if parsed.scheme() != "https"
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || !parsed
+            .host_str()
+            .is_some_and(|host| host.eq_ignore_ascii_case("oauth2.googleapis.com"))
+        || parsed.port().is_some()
+        || parsed.path() != "/token"
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return None;
+    }
+    Some(GOOGLE_OAUTH_TOKEN_URL.to_string())
 }
 
 fn json_string(value: Option<&Value>) -> Option<String> {
@@ -352,29 +397,17 @@ pub fn build_vertex_service_account_assertion(
         })?,
     );
     let message = format!("{header}.{payload}");
-    let private_key = decode_vertex_service_account_private_key(auth_config.private_key.as_str())?;
-    let signing_key = SigningKey::<Sha256>::new(private_key);
-    let signature = signing_key.sign(message.as_bytes());
-    Ok(format!(
-        "{message}.{}",
-        URL_SAFE_NO_PAD.encode(signature.to_bytes())
-    ))
-}
-
-fn decode_vertex_service_account_private_key(
-    private_key_pem: &str,
-) -> Result<RsaPrivateKey, LocalOAuthRefreshError> {
-    match RsaPrivateKey::from_pkcs8_pem(private_key_pem) {
-        Ok(private_key) => Ok(private_key),
-        Err(pkcs8_err) => RsaPrivateKey::from_pkcs1_pem(private_key_pem).map_err(|pkcs1_err| {
-            LocalOAuthRefreshError::InvalidResponse {
-                provider_type: VERTEX_SERVICE_ACCOUNT_PROVIDER_TYPE,
-                message: format!(
-                    "vertex service account private_key parse failed: pkcs8: {pkcs8_err}; pkcs1: {pkcs1_err}"
-                ),
+    let signature = rsa_pkcs1_sha256_sign(auth_config.private_key.as_bytes(), message.as_bytes())
+        .map_err(|error| LocalOAuthRefreshError::InvalidResponse {
+        provider_type: VERTEX_SERVICE_ACCOUNT_PROVIDER_TYPE,
+        message: match error {
+            RsaPkcs1Sha256Error::InvalidPrivateKey => {
+                "vertex service account private_key parse failed".to_string()
             }
-        }),
-    }
+            _ => "vertex service account signing failed".to_string(),
+        },
+    })?;
+    Ok(format!("{message}.{}", URL_SAFE_NO_PAD.encode(signature)))
 }
 
 fn service_account_token_expires_soon(expires_at_unix_secs: Option<u64>) -> bool {
@@ -387,7 +420,7 @@ fn service_account_token_expires_soon(expires_at_unix_secs: Option<u64>) -> bool
 }
 
 fn body_excerpt(value: &str) -> String {
-    value.chars().take(500).collect()
+    aether_oauth::core::redacted_oauth_error_body_excerpt(value)
 }
 
 #[cfg(test)]
@@ -399,18 +432,45 @@ mod tests {
         GatewayProviderTransportEndpoint, GatewayProviderTransportKey,
         GatewayProviderTransportProvider, GatewayProviderTransportSnapshot,
     };
-    use rsa::pkcs1::{EncodeRsaPrivateKey, LineEnding};
-    use rsa::rand_core::OsRng;
-    use rsa::RsaPrivateKey;
+    use aws_lc_rs::encoding::{AsDer, Pkcs8V1Der};
+    use aws_lc_rs::rsa::{KeyPair as AwsRsaKeyPair, KeySize};
+    use aws_lc_rs::signature::{KeyPair as _, UnparsedPublicKey, RSA_PKCS1_2048_8192_SHA256};
+    use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
+    use base64::Engine as _;
+    use serde_json::{json, Value};
 
     use super::{
-        decode_vertex_service_account_private_key, parse_vertex_service_account_auth_config,
+        build_vertex_service_account_assertion, parse_vertex_service_account_auth_config,
         resolve_local_vertex_api_key_query_auth,
         supports_local_vertex_service_account_auth_resolution,
-        vertex_service_account_credential_fingerprint, VertexServiceAccountRefreshAdapter,
+        vertex_service_account_credential_fingerprint, VertexApiKeyQueryAuth,
+        VertexServiceAccountAuthConfig, VertexServiceAccountRefreshAdapter, GOOGLE_OAUTH_TOKEN_URL,
         VERTEX_API_KEY_QUERY_PARAM, VERTEX_SERVICE_ACCOUNT_AUTH_HEADER,
         VERTEX_SERVICE_ACCOUNT_PROVIDER_TYPE,
     };
+
+    #[test]
+    fn vertex_auth_debug_output_redacts_api_keys_and_private_keys() {
+        let query_auth = VertexApiKeyQueryAuth {
+            name: VERTEX_API_KEY_QUERY_PARAM,
+            value: "vertex-api-key-canary".to_string(),
+        };
+        let service_account = VertexServiceAccountAuthConfig {
+            client_email: "service@example.invalid".to_string(),
+            private_key: "vertex-private-key-canary".to_string(),
+            project_id: "project-1".to_string(),
+            token_uri: GOOGLE_OAUTH_TOKEN_URL.to_string(),
+            region: None,
+            model_regions: std::collections::BTreeMap::new(),
+        };
+
+        let query_debug = format!("{query_auth:?}");
+        assert!(!query_debug.contains("vertex-api-key-canary"));
+        assert!(query_debug.contains("[REDACTED]"));
+        let service_account_debug = format!("{service_account:?}");
+        assert!(!service_account_debug.contains("vertex-private-key-canary"));
+        assert!(service_account_debug.contains("[REDACTED]"));
+    }
 
     fn sample_transport() -> GatewayProviderTransportSnapshot {
         GatewayProviderTransportSnapshot {
@@ -467,6 +527,32 @@ mod tests {
                 decrypted_auth_config: None,
             },
         }
+    }
+
+    fn read_der_tlv<'a>(input: &mut &'a [u8], expected_tag: u8) -> &'a [u8] {
+        assert_eq!(input.first().copied(), Some(expected_tag));
+        let length_byte = input[1];
+        let (header_len, value_len) = if length_byte & 0x80 == 0 {
+            (2, usize::from(length_byte))
+        } else {
+            let length_bytes = usize::from(length_byte & 0x7f);
+            let value_len = input[2..2 + length_bytes]
+                .iter()
+                .fold(0usize, |value, byte| (value << 8) | usize::from(*byte));
+            (2 + length_bytes, value_len)
+        };
+        let end = header_len + value_len;
+        let value = &input[header_len..end];
+        *input = &input[end..];
+        value
+    }
+
+    fn pkcs1_private_key_from_pkcs8(pkcs8: &[u8]) -> Vec<u8> {
+        let mut input = pkcs8;
+        let mut sequence = read_der_tlv(&mut input, 0x30);
+        let _version = read_der_tlv(&mut sequence, 0x02);
+        let _algorithm = read_der_tlv(&mut sequence, 0x30);
+        read_der_tlv(&mut sequence, 0x04).to_vec()
     }
 
     fn sample_service_account_transport(private_key: &str) -> GatewayProviderTransportSnapshot {
@@ -570,6 +656,7 @@ mod tests {
 
         assert_eq!(config.client_email, "svc@example.iam.gserviceaccount.com");
         assert_eq!(config.project_id, "demo-project");
+        assert_eq!(config.token_uri, GOOGLE_OAUTH_TOKEN_URL);
         assert_eq!(config.region.as_deref(), Some("global"));
         assert_eq!(
             config
@@ -578,6 +665,69 @@ mod tests {
                 .map(String::as_str),
             Some("us-central1")
         );
+    }
+
+    #[test]
+    fn service_account_regions_reject_url_syntax() {
+        let raw = r#"{
+            "client_email":"svc@example.iam.gserviceaccount.com",
+            "private_key":"TEST-PRIVATE-KEY",
+            "project_id":"demo-project",
+            "region":"attacker.example/",
+            "model_regions":{
+                "gemini-2.0-flash":"attacker.example/",
+                "gemini-2.5-pro":"us-central1"
+            }
+        }"#;
+        let config = parse_vertex_service_account_auth_config(Some(raw))
+            .expect("service account config should parse");
+        assert!(config.region.is_none());
+        assert!(!config.model_regions.contains_key("gemini-2.0-flash"));
+        assert_eq!(
+            config
+                .model_regions
+                .get("gemini-2.5-pro")
+                .map(String::as_str),
+            Some("us-central1")
+        );
+    }
+
+    #[test]
+    fn service_account_token_uri_is_limited_to_google_oauth_endpoint() {
+        let config_with_token_uri = |token_uri: Value| {
+            serde_json::json!({
+                "client_email": "svc@example.iam.gserviceaccount.com",
+                "private_key": "TEST-PRIVATE-KEY",
+                "project_id": "demo-project",
+                "token_uri": token_uri,
+            })
+            .to_string()
+        };
+
+        let official = parse_vertex_service_account_auth_config(Some(&config_with_token_uri(
+            Value::String(GOOGLE_OAUTH_TOKEN_URL.to_string()),
+        )))
+        .expect("official Google OAuth token URI should be accepted");
+        assert_eq!(official.token_uri, GOOGLE_OAUTH_TOKEN_URL);
+
+        for token_uri in [
+            Value::String("http://oauth2.googleapis.com/token".to_string()),
+            Value::String("https://127.0.0.1/token".to_string()),
+            Value::String("https://oauth2.googleapis.com.evil.example/token".to_string()),
+            Value::String("https://user@oauth2.googleapis.com/token".to_string()),
+            Value::String("https://oauth2.googleapis.com:8443/token".to_string()),
+            Value::String("https://oauth2.googleapis.com/token/../metadata".to_string()),
+            Value::String("https://oauth2.googleapis.com/token?target=metadata".to_string()),
+            Value::String("https://oauth2.googleapis.com/token#fragment".to_string()),
+            Value::String(String::new()),
+            Value::Null,
+        ] {
+            let raw = config_with_token_uri(token_uri.clone());
+            assert!(
+                parse_vertex_service_account_auth_config(Some(&raw)).is_none(),
+                "token URI should be rejected: {token_uri}"
+            );
+        }
     }
 
     #[test]
@@ -600,14 +750,35 @@ mod tests {
     }
 
     #[test]
-    fn decodes_pkcs1_service_account_private_key() {
-        let mut rng = OsRng;
-        let private_key = RsaPrivateKey::new(&mut rng, 1024)
-            .expect("test RSA private key should generate")
-            .to_pkcs1_pem(LineEnding::LF)
-            .expect("test RSA private key should encode as PKCS#1 PEM");
-
-        decode_vertex_service_account_private_key(private_key.as_str())
-            .expect("PKCS#1 private key should decode");
+    fn signs_with_2048_bit_pkcs1_service_account_private_key() {
+        let key_pair = AwsRsaKeyPair::generate(KeySize::Rsa2048)
+            .expect("2048-bit test RSA private key should generate");
+        let pkcs8 = AsDer::<Pkcs8V1Der<'static>>::as_der(&key_pair)
+            .expect("test RSA private key should encode as PKCS#8");
+        let pkcs1 = pkcs1_private_key_from_pkcs8(pkcs8.as_ref());
+        let private_key = format!(
+            "-----BEGIN RSA PRIVATE KEY-----\n{}\n-----END RSA PRIVATE KEY-----",
+            STANDARD.encode(pkcs1)
+        );
+        let auth_config = parse_vertex_service_account_auth_config(Some(
+            &json!({
+                "client_email": "svc@example.iam.gserviceaccount.com",
+                "private_key": private_key,
+                "project_id": "demo-project"
+            })
+            .to_string(),
+        ))
+        .expect("service account config should parse");
+        let assertion = build_vertex_service_account_assertion(&auth_config, 1_700_000_000)
+            .expect("PKCS#1 private key should sign");
+        let parts = assertion.split('.').collect::<Vec<_>>();
+        assert_eq!(parts.len(), 3);
+        let message = format!("{}.{}", parts[0], parts[1]);
+        let signature = URL_SAFE_NO_PAD
+            .decode(parts[2])
+            .expect("JWT signature should decode");
+        UnparsedPublicKey::new(&RSA_PKCS1_2048_8192_SHA256, key_pair.public_key().as_ref())
+            .verify(message.as_bytes(), &signature)
+            .expect("AWS-LC signature should verify");
     }
 }

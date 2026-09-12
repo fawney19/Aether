@@ -21,7 +21,7 @@
           :class="index > 0 ? 'pt-1' : ''"
         >
           <span class="text-[10px] font-medium text-muted-foreground/50 font-mono tabular-nums">{{ String(index + 1).padStart(2, '0') }}</span>
-          <span class="text-[10px] font-semibold text-muted-foreground/70 uppercase tracking-[0.1em]">{{ group.title }}</span>
+          <span class="min-w-0 break-words text-[10px] font-semibold leading-4 text-muted-foreground/70 uppercase tracking-normal">{{ group.title }}</span>
         </div>
 
         <!-- Links -->
@@ -37,7 +37,7 @@
               <TooltipTrigger as-child>
                 <RouterLink
                   :to="item.href"
-                  class="group relative flex items-center rounded-lg"
+                  class="group relative flex min-w-0 items-center gap-2 rounded-lg"
                   :class="[
                     collapsed
                       ? 'h-9 justify-center px-0 transition-colors duration-150'
@@ -62,7 +62,7 @@
                     />
                     <span
                       v-if="!collapsed"
-                      class="truncate text-[13px] tracking-tight"
+                      class="min-w-0 break-words text-[13px] leading-5 tracking-normal"
                     >{{ item.name }}</span>
                   </div>
 

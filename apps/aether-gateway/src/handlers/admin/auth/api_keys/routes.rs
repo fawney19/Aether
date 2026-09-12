@@ -13,6 +13,7 @@ pub(super) async fn maybe_build_local_admin_api_keys_routes_response(
     state: &AdminAppState<'_>,
     request_context: &AdminRequestContext<'_>,
     request_headers: &http::HeaderMap,
+    remote_addr: &std::net::SocketAddr,
     request_body: Option<&axum::body::Bytes>,
 ) -> Result<Option<Response<Body>>, GatewayError> {
     let Some(decision) = request_context.decision() else {
@@ -68,6 +69,7 @@ pub(super) async fn maybe_build_local_admin_api_keys_routes_response(
                     state,
                     request_context,
                     request_headers,
+                    remote_addr,
                     request_body,
                 )
                 .await?,

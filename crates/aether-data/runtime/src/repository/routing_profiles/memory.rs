@@ -59,7 +59,14 @@ impl RoutingGroupReadRepository for InMemoryRoutingGroupRepository {
             .values()
             .cloned()
             .collect::<Vec<_>>();
-        groups.sort_by(|left, right| left.name.cmp(&right.name).then(left.id.cmp(&right.id)));
+        groups.sort_by(|left, right| {
+            right
+                .enabled
+                .cmp(&left.enabled)
+                .then(left.sort_order.cmp(&right.sort_order))
+                .then(left.name.cmp(&right.name))
+                .then(left.id.cmp(&right.id))
+        });
         Ok(groups)
     }
 
@@ -273,6 +280,7 @@ mod tests {
                 description: None,
                 enabled: true,
                 is_system_default: true,
+                sort_order: 0,
                 config_json: json!({}),
                 version: 1,
                 created_at: 1,
@@ -317,6 +325,49 @@ mod tests {
                 .unwrap()
                 .len(),
             1
+        );
+    }
+
+    #[tokio::test]
+    async fn lists_enabled_groups_first_and_respects_sort_order() {
+        let repository = InMemoryRoutingGroupRepository::default();
+        for (id, enabled, sort_order) in [
+            ("disabled-first", false, 0),
+            ("enabled-second", true, 20),
+            ("enabled-first", true, 10),
+        ] {
+            repository
+                .create_routing_group(CreateRoutingGroupRecord {
+                    id: id.to_string(),
+                    name: id.to_string(),
+                    description: None,
+                    enabled,
+                    is_system_default: false,
+                    sort_order,
+                    config_json: json!({}),
+                    version: 1,
+                    created_at: 1,
+                    updated_at: 1,
+                    published_at: None,
+                })
+                .await
+                .expect("group should store");
+        }
+
+        let ids = repository
+            .list_routing_groups()
+            .await
+            .expect("groups should list")
+            .into_iter()
+            .map(|group| group.id)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            vec![
+                "enabled-first".to_string(),
+                "enabled-second".to_string(),
+                "disabled-first".to_string(),
+            ]
         );
     }
 
@@ -414,6 +465,7 @@ mod tests {
             description: None,
             enabled: true,
             is_system_default,
+            sort_order: 0,
             config_json: json!({}),
             version: 1,
             created_at: 1,

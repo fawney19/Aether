@@ -31,7 +31,7 @@ pub(super) async fn handle_admin_provider_ops_read(
     let payload = if route_kind == "get_provider_status" {
         build_admin_provider_ops_status_payload(provider_id, provider)
     } else {
-        build_admin_provider_ops_config_payload(state, provider_id, provider, &endpoints)
+        build_admin_provider_ops_config_payload(state, provider_id, provider, &endpoints).await?
     };
 
     let response = Json(payload).into_response();

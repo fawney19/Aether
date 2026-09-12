@@ -503,6 +503,7 @@ const isLoading = ref(false)
 const loadingText = ref(t('auth.register.submit'))
 const isSendingCode = ref(false)
 const emailVerified = ref(false)
+const emailVerificationToken = ref('')
 const verificationError = ref(false)
 const codeSentAt = ref<number | null>(null)
 const cooldownSeconds = ref(0)
@@ -643,10 +644,10 @@ const canSubmit = computed(() => {
 
 // 查询并恢复验证状态
 const checkAndRestoreVerificationStatus = async (email: string) => {
-  if (!email || !props.requireEmailVerification) return
+  if (!email || !props.requireEmailVerification || !emailVerificationToken.value) return
 
   try {
-    const status = await authApi.getVerificationStatus(email)
+    const status = await authApi.getVerificationStatus(email, emailVerificationToken.value)
 
     // 注意：不恢复 is_verified 状态
     // 刷新页面后需要重新发送验证码并验证，防止验证码被他人使用
@@ -675,6 +676,7 @@ watch(
     // 邮箱变化时重置验证状态
     if (newEmail !== oldEmail) {
       emailVerified.value = false
+      emailVerificationToken.value = ''
       verificationError.value = false
       codeSentAt.value = null
       cooldownSeconds.value = 0
@@ -751,6 +753,7 @@ const resetForm = () => {
     verificationCode: ''
   }
   emailVerified.value = false
+  emailVerificationToken.value = ''
   verificationError.value = false
   isSendingCode.value = false
   codeSentAt.value = null
@@ -795,6 +798,7 @@ const handleSendCode = async () => {
     )
 
     if (response.success) {
+      emailVerificationToken.value = response.verification_token
       resetTurnstile()
       codeSentAt.value = Date.now()
       if (response.expire_minutes) {
@@ -834,7 +838,16 @@ const handleCodeComplete = async (code: string) => {
   verificationError.value = false
 
   try {
-    const response = await authApi.verifyEmail(formData.value.email, code)
+    if (!emailVerificationToken.value) {
+      verificationError.value = true
+      showError(t('auth.register.codeRetry'), t('auth.register.verifyFailed'))
+      return
+    }
+    const response = await authApi.verifyEmail(
+      formData.value.email,
+      code,
+      emailVerificationToken.value
+    )
 
     if (response.success) {
       emailVerified.value = true
@@ -898,6 +911,9 @@ const handleSubmit = async () => {
     // 只有当邮箱有值时才添加
     if (formData.value.email && formData.value.email.trim()) {
       registerData.email = formData.value.email
+    }
+    if (props.requireEmailVerification && emailVerificationToken.value) {
+      registerData.email_verification_token = emailVerificationToken.value
     }
     if (turnstileRequired.value && currentTurnstileAction.value === 'register') {
       registerData.turnstile_token = turnstileToken.value

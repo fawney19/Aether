@@ -56,21 +56,13 @@ fn admin_provider_oauth_kiro_refresh_error(
         "social refresh"
     };
     match error {
-        OAuthError::HttpStatus {
-            status_code,
-            body_excerpt,
-        } => {
-            let detail = body_excerpt.trim();
-            if detail.is_empty() {
-                format!("{prefix} 失败: HTTP {status_code}")
-            } else {
-                format!("{prefix} 失败: {detail}")
-            }
+        OAuthError::HttpStatus { status_code, .. } => {
+            format!("{prefix} 失败: HTTP {status_code}")
         }
-        OAuthError::Transport(message) => format!("{prefix} 请求失败: {message}"),
-        OAuthError::InvalidRequest(message) => format!("{prefix} 参数无效: {message}"),
-        OAuthError::InvalidResponse(message) => format!("{prefix} 返回无效响应: {message}"),
-        error => format!("{prefix} 失败: {error}"),
+        OAuthError::InvalidRequest(_) => format!("{prefix} 参数无效"),
+        OAuthError::InvalidResponse(_) => format!("{prefix} 返回无效响应"),
+        OAuthError::Transport(_) => format!("{prefix} 请求失败"),
+        _ => format!("{prefix} 失败"),
     }
 }
 
@@ -210,4 +202,41 @@ pub(super) async fn fetch_admin_provider_oauth_kiro_email(
     let metadata =
         aether_admin::provider::quota::parse_kiro_usage_response(&payload, current_unix_secs())?;
     json_non_empty_string(metadata.get("email"))
+}
+
+#[cfg(test)]
+mod refresh_error_tests {
+    use super::admin_provider_oauth_kiro_refresh_error;
+    use crate::handlers::admin::request::AdminKiroAuthConfig;
+    use aether_oauth::core::OAuthError;
+
+    #[test]
+    fn kiro_refresh_error_does_not_reflect_upstream_body() {
+        let auth_config = AdminKiroAuthConfig {
+            auth_method: None,
+            refresh_token: None,
+            expires_at: None,
+            profile_arn: None,
+            region: None,
+            auth_region: None,
+            api_region: None,
+            client_id: None,
+            client_secret: None,
+            machine_id: None,
+            kiro_version: None,
+            system_version: None,
+            node_version: None,
+            access_token: None,
+        };
+        let detail = admin_provider_oauth_kiro_refresh_error(
+            &auth_config,
+            OAuthError::HttpStatus {
+                status_code: 502,
+                body_excerpt: "authorization=Bearer upstream-secret".to_string(),
+            },
+        );
+
+        assert_eq!(detail, "social refresh 失败: HTTP 502");
+        assert!(!detail.contains("upstream-secret"));
+    }
 }

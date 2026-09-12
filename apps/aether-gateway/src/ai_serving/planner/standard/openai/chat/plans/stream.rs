@@ -1,3 +1,4 @@
+use aether_routing_core::RoutingExecutionPolicy;
 use async_trait::async_trait;
 use std::collections::VecDeque;
 use tracing::warn;
@@ -119,6 +120,13 @@ pub(crate) async fn build_local_openai_chat_stream_attempt_source<'a>(
 
 #[async_trait]
 impl LocalExecutionAttemptSource<AiStreamAttempt> for LocalOpenAiChatStreamAttemptSource<'_> {
+    fn routing_execution_policy(&self) -> Option<RoutingExecutionPolicy> {
+        self.input
+            .routing_policy
+            .as_ref()
+            .map(|policy| policy.execution_policy.clone())
+    }
+
     async fn next_execution_attempt(&mut self) -> Result<Option<AiStreamAttempt>, GatewayError> {
         let select_started_at = std::time::Instant::now();
         let selected = self.next_execution_attempt_with_target_select().await?;

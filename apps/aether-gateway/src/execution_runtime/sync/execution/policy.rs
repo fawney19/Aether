@@ -1,15 +1,35 @@
+use aether_contracts::ResponseBody;
+use serde_json::Value;
 use std::collections::BTreeMap;
 
-use aether_contracts::ResponseBody;
-use base64::Engine as _;
-
+use crate::execution_runtime::transport::{
+    decode_base64_body_with_limit,
+    serialize_json_body_with_limit as serialize_transport_json_body_with_limit,
+};
 use crate::GatewayError;
 
 type DecodedBody = (Vec<u8>, Option<serde_json::Value>, Option<String>);
 
+fn serialize_json_body_with_limit(body: &Value, limit: usize) -> Result<Vec<u8>, GatewayError> {
+    serialize_transport_json_body_with_limit(body, limit)
+        .map_err(|error| GatewayError::Internal(error.to_string()))
+}
+
 pub(super) fn decode_execution_result_body(
     body: Option<ResponseBody>,
     headers: &mut BTreeMap<String, String>,
+) -> Result<DecodedBody, GatewayError> {
+    decode_execution_result_body_with_limit(
+        body,
+        headers,
+        crate::headers::max_internal_buffered_body_bytes(),
+    )
+}
+
+pub(super) fn decode_execution_result_body_with_limit(
+    body: Option<ResponseBody>,
+    headers: &mut BTreeMap<String, String>,
+    body_limit: usize,
 ) -> Result<DecodedBody, GatewayError> {
     let Some(body) = body else {
         return Ok((Vec::new(), None, None));
@@ -18,10 +38,8 @@ pub(super) fn decode_execution_result_body(
         json_body,
         body_bytes_b64,
     } = body;
-
     if let Some(body_bytes_b64) = body_bytes_b64 {
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(&body_bytes_b64)
+        let bytes = decode_base64_body_with_limit(&body_bytes_b64, body_limit)
             .map_err(|err| GatewayError::Internal(err.to_string()))?;
         return Ok((bytes, json_body, Some(body_bytes_b64)));
     }
@@ -32,8 +50,7 @@ pub(super) fn decode_execution_result_body(
         headers
             .entry("content-type".to_string())
             .or_insert_with(|| "application/json".to_string());
-        let bytes = serde_json::to_vec(&json_body)
-            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        let bytes = serialize_json_body_with_limit(&json_body, body_limit)?;
         headers.insert("content-length".to_string(), bytes.len().to_string());
         return Ok((bytes, Some(json_body), None));
     }
@@ -117,5 +134,35 @@ mod tests {
             headers.get("content-length").map(String::as_str),
             Some(raw_len.as_str())
         );
+    }
+
+    #[test]
+    fn scoped_decode_limit_can_cover_a_bounded_synthetic_envelope() {
+        let raw = vec![b'x'; 65 * 1024];
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&raw);
+        let mut headers = BTreeMap::new();
+
+        let (decoded, json, retained) = super::decode_execution_result_body_with_limit(
+            Some(ResponseBody {
+                json_body: None,
+                body_bytes_b64: Some(encoded.clone()),
+            }),
+            &mut headers,
+            raw.len(),
+        )
+        .expect("body at the scoped limit should decode");
+        assert_eq!(decoded, raw);
+        assert_eq!(json, None);
+        assert_eq!(retained.as_deref(), Some(encoded.as_str()));
+
+        assert!(super::decode_execution_result_body_with_limit(
+            Some(ResponseBody {
+                json_body: None,
+                body_bytes_b64: Some(encoded),
+            }),
+            &mut headers,
+            raw.len() - 1,
+        )
+        .is_err());
     }
 }

@@ -1,4 +1,5 @@
 use std::fmt;
+use std::io::{self, Read, Write};
 use std::net::SocketAddr;
 use std::path::Path;
 use std::str::FromStr;
@@ -78,6 +79,12 @@ const TUNNEL_STALE_TIMEOUT_MS_ENV: &str = "AETHER_TUNNEL_STALE_TIMEOUT_MS";
 const TUNNEL_PROFILE_ENV: &str = "AETHER_TUNNEL_PROFILE";
 const TUNNEL_STREAM_INITIAL_WINDOW_BYTES_ENV: &str = "AETHER_TUNNEL_STREAM_INITIAL_WINDOW_BYTES";
 const TUNNEL_DRAIN_DEADLINE_MS_ENV: &str = "AETHER_TUNNEL_DRAIN_DEADLINE_MS";
+
+// The configuration contains only scalar settings and a bounded list of
+// server entries. Refuse an unexpectedly large local file before TOML parsing
+// so a replaced or corrupted config cannot force an unbounded allocation at
+// service startup.
+const MAX_CONFIG_FILE_BYTES: u64 = 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TunnelPoolSizing {
@@ -193,12 +200,43 @@ pub fn effective_tunnel_security(
     TunnelSecurity::Off
 }
 
+pub(crate) fn validate_aether_url(value: &str) -> anyhow::Result<()> {
+    let value = value.trim();
+    let parsed = url::Url::parse(value)
+        .map_err(|_| anyhow::anyhow!("aether_url must be an absolute HTTP(S) URL"))?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        anyhow::bail!("aether_url must be an absolute HTTP(S) URL");
+    }
+    if !aether_http::is_https_or_loopback_http_url(&parsed) {
+        anyhow::bail!(
+            "aether_url must use HTTPS; HTTP is allowed only for a literal loopback host"
+        );
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        anyhow::bail!("aether_url must not contain embedded credentials");
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        anyhow::bail!("aether_url must not contain a query string or fragment");
+    }
+    Ok(())
+}
+
+pub(crate) fn aether_url_for_log(value: &str) -> String {
+    let Ok(parsed) = url::Url::parse(value.trim()) else {
+        return "<invalid-aether-url>".to_string();
+    };
+    if !matches!(parsed.scheme(), "http" | "https" | "ws" | "wss") || parsed.host_str().is_none() {
+        return "<invalid-aether-url>".to_string();
+    }
+    parsed.origin().ascii_serialization()
+}
+
 /// Aether tunnel agent.
 ///
 /// Deployed on overseas VPS to relay API traffic for Aether instances
 /// behind the GFW. Connects to Aether via WebSocket tunnel, registers
 /// with Aether, and relays upstream requests.
-#[derive(Parser, Debug, Clone)]
+#[derive(Parser, Clone)]
 #[command(version, about)]
 pub struct Config {
     /// Aether server URL (e.g. https://aether.example.com)
@@ -250,11 +288,12 @@ pub struct Config {
     )]
     pub allowed_ports: Vec<u16>,
 
-    /// Allow private/reserved upstream IP targets. Enabled by default.
+    /// Allow private/reserved upstream IP targets. Disabled by default; enable
+    /// explicitly only for deployments that require access to private services.
     #[arg(
         long,
         env = "AETHER_TUNNEL_ALLOW_PRIVATE_TARGETS",
-        default_value_t = true
+        default_value_t = false
     )]
     pub allow_private_targets: bool,
 
@@ -440,6 +479,14 @@ pub struct Config {
     /// Supported schemes: http, socks5, socks5h.
     #[arg(long, env = "AETHER_TUNNEL_UPSTREAM_PROXY_URL")]
     pub upstream_proxy_url: Option<String>,
+
+    #[arg(
+        long,
+        env = "AETHER_TUNNEL_UPSTREAM_PROXY_REMOTE_DNS",
+        default_value_t = false,
+        help = "Trust an HTTP or SOCKS5h upstream proxy to resolve hostnames and enforce destination IP access controls"
+    )]
+    pub upstream_proxy_remote_dns: bool,
 
     /// Accepted only so older launch commands and environments keep working.
     /// Redirect request bodies are always replayed without a cumulative size limit.
@@ -644,10 +691,31 @@ pub struct Config {
     pub tunnel_scale_down_grace_secs: u64,
 }
 
+impl std::fmt::Debug for Config {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Config")
+            .field("aether_url", &aether_url_for_log(&self.aether_url))
+            .field("management_token", &"<redacted>")
+            .field("node_name", &self.node_name)
+            .field("node_region", &self.node_region)
+            .field("tunnel_security", &self.tunnel_security)
+            .field(
+                "tunnel_encryption_key",
+                &self.tunnel_encryption_key.as_ref().map(|_| "<redacted>"),
+            )
+            .finish_non_exhaustive()
+    }
+}
+
 impl Config {
     /// Validate configuration values are within sane ranges.
     /// Called after parsing to catch misconfigurations early.
     pub fn validate(&self) -> anyhow::Result<()> {
+        validate_aether_url(&self.aether_url)?;
+        if self.management_token.trim().is_empty() {
+            anyhow::bail!("management_token must not be empty");
+        }
         if self.heartbeat_interval == 0 {
             anyhow::bail!("heartbeat_interval must be > 0");
         }
@@ -698,8 +766,18 @@ impl Config {
         if matches!(self.tunnel_connections_max, Some(0)) {
             anyhow::bail!("tunnel_connections_max must be > 0");
         }
+        if matches!(self.tunnel_max_streams, Some(0)) {
+            anyhow::bail!("tunnel_max_streams must be > 0");
+        }
         if self.tunnel_stream_initial_window_bytes == 0 {
             anyhow::bail!("tunnel_stream_initial_window_bytes must be > 0");
+        }
+        if u64::from(self.tunnel_stream_initial_window_bytes)
+            > aether_contracts::tunnel::MAX_TUNNEL_DECOMPRESSED_PAYLOAD_BYTES as u64
+        {
+            anyhow::bail!(
+                "tunnel_stream_initial_window_bytes exceeds the maximum tunnel payload size"
+            );
         }
         if self.tunnel_drain_deadline_ms == 0 {
             anyhow::bail!("tunnel_drain_deadline_ms must be > 0");
@@ -749,6 +827,16 @@ impl Config {
         if let Some(proxy_url) = normalized_proxy_url(&self.upstream_proxy_url) {
             crate::egress_proxy::UpstreamProxyConfig::parse(proxy_url)
                 .map_err(|err| anyhow::anyhow!("upstream_proxy_url invalid: {err}"))?;
+        }
+        if self.upstream_proxy_remote_dns {
+            let proxy_url = normalized_proxy_url(&self.upstream_proxy_url).ok_or_else(|| {
+                anyhow::anyhow!("upstream_proxy_remote_dns requires upstream_proxy_url")
+            })?;
+            let proxy = crate::egress_proxy::UpstreamProxyConfig::parse(proxy_url)
+                .map_err(anyhow::Error::msg)?;
+            if !proxy.supports_remote_target_dns() {
+                anyhow::bail!("upstream_proxy_remote_dns requires an http:// or socks5h:// proxy");
+            }
         }
         if matches!(self.max_in_flight_streams, Some(0)) {
             anyhow::bail!("max_in_flight_streams must be > 0");
@@ -906,7 +994,7 @@ impl Config {
 }
 
 /// Per-server connection config (used in multi-server TOML `[[servers]]`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServerEntry {
     pub aether_url: String,
@@ -921,13 +1009,39 @@ pub struct ServerEntry {
     pub tunnel_encryption_key: Option<String>,
 }
 
+impl std::fmt::Debug for ServerEntry {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ServerEntry")
+            .field("aether_url", &aether_url_for_log(&self.aether_url))
+            .field("management_token", &"<redacted>")
+            .field("node_name", &self.node_name)
+            .field("tunnel_security", &self.tunnel_security)
+            .field(
+                "tunnel_encryption_key",
+                &self.tunnel_encryption_key.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
+}
+
+impl ServerEntry {
+    pub(crate) fn validate(&self) -> anyhow::Result<()> {
+        validate_aether_url(&self.aether_url)?;
+        if self.management_token.trim().is_empty() {
+            anyhow::bail!("management_token must not be empty");
+        }
+        Ok(())
+    }
+}
+
 // ---------------------------------------------------------------------------
 // TOML config file support
 // ---------------------------------------------------------------------------
 
 /// Serializable config for TOML file persistence.
 /// All fields are optional -- only populated values are written.
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigFile {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -991,6 +1105,8 @@ pub struct ConfigFile {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub upstream_proxy_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub upstream_proxy_remote_dns: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub emit_proxy_timing_header: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub log_level: Option<String>,
@@ -1048,17 +1164,46 @@ pub struct ConfigFile {
     pub servers: Vec<ServerEntry>,
 }
 
+impl std::fmt::Debug for ConfigFile {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ConfigFile")
+            .field("node_name", &self.node_name)
+            .field("node_region", &self.node_region)
+            .field("server_count", &self.servers.len())
+            .finish_non_exhaustive()
+    }
+}
+
 impl ConfigFile {
     /// Load from a TOML file.
     pub fn load(path: &Path) -> anyhow::Result<Self> {
-        let content = std::fs::read_to_string(path)?;
+        let mut file = std::fs::File::open(path)?;
+        let advertised_len = file.metadata()?.len();
+        if advertised_len > MAX_CONFIG_FILE_BYTES {
+            anyhow::bail!(
+                "tunnel config exceeds the {} byte limit",
+                MAX_CONFIG_FILE_BYTES
+            );
+        }
+
+        let mut content = String::with_capacity(advertised_len as usize);
+        Read::by_ref(&mut file)
+            .take(MAX_CONFIG_FILE_BYTES.saturating_add(1))
+            .read_to_string(&mut content)?;
+        if content.len() as u64 > MAX_CONFIG_FILE_BYTES {
+            anyhow::bail!(
+                "tunnel config exceeds the {} byte limit",
+                MAX_CONFIG_FILE_BYTES
+            );
+        }
         parse_config_file_content(&content)
     }
 
     /// Save to a TOML file.
     pub fn save(&self, path: &Path) -> anyhow::Result<()> {
         let content = toml::to_string_pretty(self)?;
-        std::fs::write(path, content)?;
+        write_private_config_atomically(path, content.as_bytes())?;
         Ok(())
     }
 
@@ -1182,6 +1327,10 @@ impl ConfigFile {
         );
         set!("AETHER_TUNNEL_UPSTREAM_PROXY_URL", self.upstream_proxy_url);
         set!(
+            "AETHER_TUNNEL_UPSTREAM_PROXY_REMOTE_DNS",
+            self.upstream_proxy_remote_dns
+        );
+        set!(
             "AETHER_TUNNEL_EMIT_PROXY_TIMING_HEADER",
             self.emit_proxy_timing_header
         );
@@ -1265,6 +1414,155 @@ impl ConfigFile {
                 std::env::set_var("AETHER_TUNNEL_ALLOWED_PORTS", s);
             }
         }
+    }
+}
+
+fn write_private_config_atomically(path: &Path, content: &[u8]) -> io::Result<()> {
+    reject_config_symlink(path)?;
+
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let file_name = path.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "configuration path must name a file",
+        )
+    })?;
+    if !parent.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "configuration parent directory does not exist",
+        ));
+    }
+
+    let mut temp_path = None;
+    let mut temp_file = None;
+    for _ in 0..16 {
+        let candidate = parent.join(format!(
+            ".{}.tmp-{}",
+            file_name.to_string_lossy(),
+            uuid::Uuid::new_v4()
+        ));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        match options.open(&candidate) {
+            Ok(file) => {
+                temp_path = Some(candidate);
+                temp_file = Some(file);
+                break;
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    let temp_path = temp_path.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "could not allocate a unique configuration temporary file",
+        )
+    })?;
+    let mut temp_file = temp_file.expect("temporary path and file are created together");
+
+    let replace_result = (|| -> io::Result<()> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            temp_file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
+        temp_file.write_all(content)?;
+        temp_file.sync_all()?;
+        drop(temp_file);
+
+        // Do not silently replace a credential-bearing symlink. The second
+        // check also covers a target created while the temporary file was written.
+        reject_config_symlink(path)?;
+        replace_config_file(&temp_path, path)?;
+
+        #[cfg(unix)]
+        std::fs::File::open(parent)?.sync_all()?;
+        Ok(())
+    })();
+
+    if replace_result.is_err() {
+        let _ = std::fs::remove_file(&temp_path);
+    }
+    replace_result
+}
+
+fn reject_config_symlink(path: &Path) -> io::Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if config_metadata_is_link_like(&metadata) => Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "refusing to save configuration through a symbolic link or reparse point",
+        )),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+fn config_metadata_is_link_like(metadata: &std::fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt as _;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+        metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    }
+    #[cfg(not(windows))]
+    {
+        metadata.file_type().is_symlink()
+    }
+}
+
+#[cfg(not(windows))]
+fn replace_config_file(temp_path: &Path, path: &Path) -> io::Result<()> {
+    std::fs::rename(temp_path, path)
+}
+
+#[cfg(windows)]
+fn replace_config_file(temp_path: &Path, path: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt as _;
+
+    const MOVEFILE_REPLACE_EXISTING: u32 = 0x0000_0001;
+    const MOVEFILE_WRITE_THROUGH: u32 = 0x0000_0008;
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn MoveFileExW(
+            existing_file_name: *const u16,
+            new_file_name: *const u16,
+            flags: u32,
+        ) -> i32;
+    }
+
+    let existing_file_name = temp_path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let new_file_name = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let replaced = unsafe {
+        MoveFileExW(
+            existing_file_name.as_ptr(),
+            new_file_name.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if replaced == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
     }
 }
 
@@ -1397,11 +1695,220 @@ mod tests {
     use crate::hardware::HardwareInfo;
 
     #[test]
+    fn proxy_remote_dns_requires_explicit_trust_and_a_remote_dns_proxy() {
+        let mut config = Config::parse_from([
+            "aether-tunnel",
+            "--aether-url",
+            "https://example.com",
+            "--management-token",
+            "ae_test",
+            "--node-name",
+            "tunnel-test",
+        ]);
+        assert!(!config.upstream_proxy_remote_dns);
+        let argument = Config::command()
+            .get_arguments()
+            .find(|argument| argument.get_id() == "upstream_proxy_remote_dns")
+            .unwrap()
+            .clone();
+        assert_eq!(
+            argument.get_env().unwrap(),
+            "AETHER_TUNNEL_UPSTREAM_PROXY_REMOTE_DNS"
+        );
+
+        config.upstream_proxy_remote_dns = true;
+        for proxy in [None, Some(" "), Some("socks5://127.0.0.1:1080")] {
+            config.upstream_proxy_url = proxy.map(str::to_string);
+            assert!(config
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("upstream_proxy_remote_dns"));
+        }
+        for proxy in ["http://127.0.0.1:8080", "socks5h://127.0.0.1:1080"] {
+            config.upstream_proxy_url = Some(proxy.to_string());
+            config
+                .validate()
+                .expect("explicit remote DNS configuration should validate");
+        }
+    }
+
+    #[test]
+    fn config_file_round_trips_proxy_remote_dns() {
+        let config = parse_config_file_content(
+            "upstream_proxy_url = \"socks5h://127.0.0.1:1080\"\nupstream_proxy_remote_dns = true",
+        )
+        .unwrap();
+        assert_eq!(config.upstream_proxy_remote_dns, Some(true));
+        let round_trip: ConfigFile = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
+        assert_eq!(round_trip.upstream_proxy_remote_dns, Some(true));
+        assert_eq!(ConfigFile::default().upstream_proxy_remote_dns, None);
+    }
+
+    fn config_save_test_dir(label: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "aether-tunnel-config-{label}-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir(&path).expect("config save test directory should be created");
+        path
+    }
+
+    fn secret_bearing_config_file(secret: &str) -> ConfigFile {
+        ConfigFile {
+            node_name: Some("secure-save-test".to_string()),
+            servers: vec![ServerEntry {
+                aether_url: "https://example.com".to_string(),
+                management_token: secret.to_string(),
+                node_name: None,
+                tunnel_security: None,
+                tunnel_encryption_key: None,
+            }],
+            ..ConfigFile::default()
+        }
+    }
+
+    #[test]
+    fn config_file_save_replaces_an_existing_config() {
+        let directory = config_save_test_dir("replace-existing");
+        let path = directory.join("tunnel.toml");
+
+        secret_bearing_config_file("first-management-secret")
+            .save(&path)
+            .expect("initial config save should succeed");
+        secret_bearing_config_file("second-management-secret")
+            .save(&path)
+            .expect("replacement config save should succeed");
+
+        let saved = std::fs::read_to_string(&path).expect("replacement config should be readable");
+        assert!(saved.contains("second-management-secret"));
+        assert!(!saved.contains("first-management-secret"));
+        assert_eq!(
+            std::fs::read_dir(&directory)
+                .expect("test directory should be readable")
+                .count(),
+            1,
+            "replacement save must not leave a temporary file"
+        );
+
+        std::fs::remove_dir_all(directory).expect("config save test directory should be removed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_file_save_atomically_replaces_with_owner_only_permissions() {
+        use std::io::Read as _;
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = config_save_test_dir("atomic-private");
+        let path = directory.join("tunnel.toml");
+        std::fs::write(&path, "old configuration")
+            .expect("existing config fixture should be written");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+            .expect("existing config fixture should be world-readable");
+        let mut old_handle =
+            std::fs::File::open(&path).expect("existing config handle should open");
+
+        secret_bearing_config_file("management-secret")
+            .save(&path)
+            .expect("config save should succeed");
+
+        let mode = std::fs::metadata(&path)
+            .expect("saved config metadata should exist")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+        let saved = std::fs::read_to_string(&path).expect("saved config should be readable");
+        assert!(saved.contains("management-secret"));
+
+        let mut old = String::new();
+        old_handle
+            .read_to_string(&mut old)
+            .expect("old inode should remain readable through its open handle");
+        assert_eq!(old, "old configuration");
+        assert_eq!(
+            std::fs::read_dir(&directory)
+                .expect("test directory should be readable")
+                .count(),
+            1,
+            "successful save must not leave a temporary file"
+        );
+
+        std::fs::remove_dir_all(directory).expect("config save test directory should be removed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_file_save_rejects_symbolic_link_targets() {
+        use std::os::unix::fs::symlink;
+
+        let directory = config_save_test_dir("symlink");
+        let target = directory.join("target.toml");
+        let path = directory.join("tunnel.toml");
+        std::fs::write(&target, "target sentinel")
+            .expect("symlink target fixture should be written");
+        symlink(&target, &path).expect("config symlink fixture should be created");
+
+        let error = secret_bearing_config_file("management-secret")
+            .save(&path)
+            .expect_err("saving through a symlink must fail");
+
+        assert!(error.to_string().contains("symbolic link"));
+        assert_eq!(
+            std::fs::read_to_string(&target).expect("symlink target should remain readable"),
+            "target sentinel"
+        );
+        assert!(std::fs::symlink_metadata(&path)
+            .expect("config symlink should still exist")
+            .file_type()
+            .is_symlink());
+
+        std::fs::remove_dir_all(directory).expect("config save test directory should be removed");
+    }
+
+    #[test]
+    fn config_file_save_cleans_temporary_file_when_replace_fails() {
+        let directory = config_save_test_dir("cleanup");
+        let path = directory.join("destination-is-a-directory");
+        std::fs::create_dir(&path).expect("destination directory fixture should be created");
+
+        secret_bearing_config_file("management-secret")
+            .save(&path)
+            .expect_err("replacing a directory with a config file must fail");
+
+        let entries = std::fs::read_dir(&directory)
+            .expect("test directory should be readable")
+            .map(|entry| {
+                entry
+                    .expect("test directory entry should be readable")
+                    .path()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(entries, vec![path]);
+
+        std::fs::remove_dir_all(directory).expect("config save test directory should be removed");
+    }
+
+    #[test]
     fn config_file_load_ignores_removed_redirect_replay_budget() {
         let config = parse_config_file_content("redirect_replay_budget_bytes = \"1K\"")
             .expect("removed replay budget should not break existing config files");
         let serialized = toml::to_string(&config).expect("config should serialize");
         assert!(!serialized.contains("redirect_replay_budget_bytes"));
+    }
+
+    #[test]
+    fn config_file_load_rejects_oversized_files_before_parsing() {
+        let directory = config_save_test_dir("oversized-load");
+        let path = directory.join("tunnel.toml");
+        std::fs::write(&path, vec![b'a'; MAX_CONFIG_FILE_BYTES as usize + 1])
+            .expect("oversized config fixture should be written");
+
+        let error = ConfigFile::load(&path).expect_err("oversized config must be rejected");
+        assert!(error.to_string().contains("exceeds"));
+
+        std::fs::remove_dir_all(directory).expect("config test directory should be removed");
     }
 
     #[test]
@@ -1464,7 +1971,7 @@ tunnel_ipv6_only = false
         let cfg: ConfigFile = toml::from_str(
             r#"
 [[servers]]
-aether_url = "http://aether.example.com"
+aether_url = "http://127.0.0.1:8084"
 management_token = "ae_test"
 node_name = "jp-proxy-01"
 tunnel_security = "non_tls_required"
@@ -1664,7 +2171,7 @@ node_name = "tunnel-test"
     }
 
     #[test]
-    fn cli_defaults_private_targets_to_enabled() {
+    fn cli_defaults_private_targets_to_disabled() {
         let config = Config::parse_from([
             "aether-tunnel",
             "--aether-url",
@@ -1673,6 +2180,21 @@ node_name = "tunnel-test"
             "ae_test",
             "--node-name",
             "tunnel-test",
+        ]);
+        assert!(!config.allow_private_targets);
+    }
+
+    #[test]
+    fn cli_allows_explicit_private_targets() {
+        let config = Config::parse_from([
+            "aether-tunnel",
+            "--aether-url",
+            "https://example.com",
+            "--management-token",
+            "ae_test",
+            "--node-name",
+            "tunnel-test",
+            "--allow-private-targets",
         ]);
         assert!(config.allow_private_targets);
     }
@@ -1714,11 +2236,133 @@ node_name = "tunnel-test"
     }
 
     #[test]
+    fn aether_url_validation_rejects_embedded_secrets_and_non_http_schemes() {
+        for value in [
+            "https://alice:password@example.com",
+            "https://example.com?token=secret",
+            "https://example.com#secret-fragment",
+            "http://example.com",
+            "http://10.0.0.1:8084",
+            "http://[::ffff:127.0.0.1]:8084",
+            "file:///etc/passwd",
+            "not-a-url",
+        ] {
+            assert!(
+                validate_aether_url(value).is_err(),
+                "URL should be rejected: {value}"
+            );
+        }
+        validate_aether_url("https://example.com/base/path")
+            .expect("ordinary HTTPS URL should validate");
+        validate_aether_url("http://127.0.0.1:8084/base/path")
+            .expect("literal loopback HTTP should validate");
+        validate_aether_url("http://[::1]:8084/base/path")
+            .expect("literal IPv6 loopback HTTP should validate");
+    }
+
+    #[test]
+    fn aether_url_log_projection_removes_credentials_query_and_fragment() {
+        let projected = aether_url_for_log(
+            "https://alice:password@example.com/base?token=query-secret#secret-fragment",
+        );
+
+        assert_eq!(projected, "https://example.com");
+        for secret in ["alice", "password", "query-secret", "secret-fragment"] {
+            assert!(!projected.contains(secret));
+        }
+        assert_eq!(aether_url_for_log("not-a-url"), "<invalid-aether-url>");
+    }
+
+    #[test]
+    fn config_and_server_entries_require_management_tokens() {
+        let config = Config::parse_from([
+            "aether-tunnel",
+            "--aether-url",
+            "https://example.com",
+            "--management-token",
+            " ",
+            "--node-name",
+            "tunnel-test",
+        ]);
+        assert!(config.validate().is_err());
+
+        let entry = ServerEntry {
+            aether_url: "https://example.com".to_string(),
+            management_token: " ".to_string(),
+            node_name: None,
+            tunnel_security: None,
+            tunnel_encryption_key: None,
+        };
+        assert!(entry.validate().is_err());
+    }
+
+    #[test]
+    fn secret_bearing_config_debug_output_is_redacted() {
+        let config = Config::parse_from([
+            "aether-tunnel",
+            "--aether-url",
+            "https://alice:password@example.com/base?token=query-secret",
+            "--management-token",
+            "management-secret",
+            "--node-name",
+            "tunnel-test",
+            "--tunnel-encryption-key",
+            "psk-secret",
+        ]);
+        let config_debug = format!("{config:?}");
+        for secret in [
+            "alice",
+            "password",
+            "query-secret",
+            "management-secret",
+            "psk-secret",
+        ] {
+            assert!(!config_debug.contains(secret));
+        }
+
+        let entry = ServerEntry {
+            aether_url:
+                "https://alice:password@example.com/base?token=query-secret#fragment-secret"
+                    .to_string(),
+            management_token: "management-secret".to_string(),
+            node_name: Some("edge-1".to_string()),
+            tunnel_security: Some(TunnelSecurity::NonTlsRequired),
+            tunnel_encryption_key: Some("psk-secret".to_string()),
+        };
+        let entry_debug = format!("{entry:?}");
+        for secret in [
+            "alice",
+            "password",
+            "query-secret",
+            "fragment-secret",
+            "management-secret",
+            "psk-secret",
+        ] {
+            assert!(!entry_debug.contains(secret));
+        }
+
+        let file = ConfigFile {
+            upstream_proxy_url: Some("http://proxy-user:proxy-secret@proxy.example".to_string()),
+            servers: vec![entry],
+            ..ConfigFile::default()
+        };
+        let file_debug = format!("{file:?}");
+        for secret in [
+            "proxy-user",
+            "proxy-secret",
+            "management-secret",
+            "psk-secret",
+        ] {
+            assert!(!file_debug.contains(secret));
+        }
+    }
+
+    #[test]
     fn validate_requires_encryption_key_for_non_tls_security() {
         let config = Config::parse_from([
             "aether-tunnel",
             "--aether-url",
-            "http://example.com",
+            "http://127.0.0.1:8084",
             "--management-token",
             "ae_test",
             "--node-name",
@@ -1735,7 +2379,7 @@ node_name = "tunnel-test"
         let with_key = Config::parse_from([
             "aether-tunnel",
             "--aether-url",
-            "http://example.com",
+            "http://127.0.0.1:8084",
             "--management-token",
             "ae_test",
             "--node-name",
@@ -1755,7 +2399,7 @@ node_name = "tunnel-test"
         let config = Config::parse_from([
             "aether-tunnel",
             "--aether-url",
-            "http://example.com",
+            "http://127.0.0.1:8084",
             "--management-token",
             "ae_test",
             "--node-name",
@@ -1791,7 +2435,7 @@ node_name = "tunnel-test"
         let config = Config::parse_from([
             "aether-tunnel",
             "--aether-url",
-            "http://example.com",
+            "http://127.0.0.1:8084",
             "--management-token",
             "ae_test",
             "--node-name",
@@ -1911,6 +2555,26 @@ node_name = "tunnel-test"
             .validate()
             .expect_err("conflicting TOML-injected tunnel family flags should fail validation");
         assert!(error.to_string().contains("tunnel_ipv4_only"));
+    }
+
+    #[test]
+    fn validate_rejects_zero_tunnel_max_streams() {
+        let config = Config::parse_from([
+            "aether-tunnel",
+            "--aether-url",
+            "https://example.com",
+            "--management-token",
+            "ae_test",
+            "--node-name",
+            "tunnel-test",
+            "--tunnel-max-streams",
+            "0",
+        ]);
+
+        let error = config
+            .validate()
+            .expect_err("zero tunnel stream capacity must be rejected");
+        assert!(error.to_string().contains("tunnel_max_streams"));
     }
 
     #[test]

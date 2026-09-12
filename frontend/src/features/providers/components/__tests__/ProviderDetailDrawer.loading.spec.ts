@@ -42,6 +42,11 @@ describe('ProviderDetailDrawer loading priorities', () => {
     expect(source).not.toContain(':loading="loadingProviderEndpoints || loadingProviderKeys || loadingProviderModels || loadingProviderMappingPreview"')
   })
 
+  it('shows the provider-wide key total in the paginated footer', () => {
+    expect(source).toContain("{{ legacyT('共') }} {{ providerKeysTotal }}")
+    expect(source).not.toContain("{{ legacyT('共') }} {{ allKeys.length }}")
+  })
+
   it('does not mount closed child dialogs or blur the page behind the drawer', () => {
     expect(source).toContain('class="absolute inset-0 bg-black/30"')
     expect(source).not.toContain('backdrop-blur-sm')

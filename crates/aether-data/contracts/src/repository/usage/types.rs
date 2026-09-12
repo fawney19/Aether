@@ -11,6 +11,7 @@ pub const ROUTING_CANDIDATE_SKIP_REASON_METADATA_KEY: &str = "routing_candidate_
 pub const ROUTING_FAILURE_DIAGNOSTIC_METADATA_KEY: &str = "routing_failure_diagnostic";
 pub const WEBSOCKET_MODE_METADATA_KEY: &str = "websocket_mode";
 pub const WEBSOCKET_TRANSPORT_METADATA_KEY: &str = "websocket_transport";
+pub const PLAN_USAGE_RESERVATION_DEFERRED_METADATA_KEY: &str = "plan_usage_reservation_deferred";
 /// Whether token/cost usage is authoritative for this audit row.
 ///
 /// The field is absent for legacy and normally-metered requests. An explicit
@@ -53,11 +54,11 @@ pub fn extract_provider_reasoning_effort_from_body(value: Option<&Value>) -> Opt
 }
 
 fn normalize_provider_reasoning_effort(value: &str) -> Option<String> {
-    let normalized = value.trim().to_ascii_lowercase();
-    if normalized.is_empty() || normalized.len() > 64 {
+    let value = value.trim();
+    if value.is_empty() || value.len() > 64 {
         return None;
     }
-    Some(normalized)
+    Some(value.to_ascii_lowercase())
 }
 
 pub fn extract_provider_service_tier_from_body(value: Option<&Value>) -> Option<String> {
@@ -111,11 +112,11 @@ pub fn extract_provider_actual_service_tier_from_response(value: Option<&Value>)
 }
 
 pub fn normalize_provider_service_tier(value: &str) -> Option<String> {
-    let normalized = value.trim().to_ascii_lowercase();
-    if normalized.is_empty() || normalized.len() > 64 {
+    let value = value.trim();
+    if value.is_empty() || value.len() > 64 {
         return None;
     }
-    Some(normalized)
+    Some(value.to_ascii_lowercase())
 }
 
 /// Resolves a provider processing tier exclusively from the final upstream request.
@@ -386,7 +387,7 @@ impl StoredRequestUsageAudit {
         total_cost_usd: f64,
         actual_total_cost_usd: f64,
         status_code: Option<i32>,
-        error_message: Option<String>,
+        _error_message: Option<String>,
         error_category: Option<String>,
         response_time_ms: Option<i32>,
         first_byte_time_ms: Option<i32>,
@@ -421,14 +422,14 @@ impl StoredRequestUsageAudit {
                 "usage.billing_status is empty".to_string(),
             ));
         }
-        if !total_cost_usd.is_finite() {
+        if !total_cost_usd.is_finite() || total_cost_usd < 0.0 {
             return Err(crate::DataLayerError::UnexpectedValue(
-                "usage.total_cost_usd is not finite".to_string(),
+                "usage.total_cost_usd must be finite and non-negative".to_string(),
             ));
         }
-        if !actual_total_cost_usd.is_finite() {
+        if !actual_total_cost_usd.is_finite() || actual_total_cost_usd < 0.0 {
             return Err(crate::DataLayerError::UnexpectedValue(
-                "usage.actual_total_cost_usd is not finite".to_string(),
+                "usage.actual_total_cost_usd must be finite and non-negative".to_string(),
             ));
         }
 
@@ -468,8 +469,8 @@ impl StoredRequestUsageAudit {
             total_cost_usd,
             actual_total_cost_usd,
             status_code: parse_u16(status_code, "usage.status_code")?,
-            error_message,
-            error_category,
+            error_message: None,
+            error_category: super::policy::sanitize_usage_error_category(error_category),
             response_time_ms: parse_optional_u64(response_time_ms, "usage.response_time_ms")?,
             first_byte_time_ms: parse_optional_u64(first_byte_time_ms, "usage.first_byte_time_ms")?,
             status,
@@ -1721,6 +1722,22 @@ pub fn parse_usage_body_ref(body_ref: &str) -> Option<(String, UsageBodyField)> 
     ))
 }
 
+pub fn canonical_usage_body_ref_for(
+    body_ref: &str,
+    expected_request_id: &str,
+    expected_field: UsageBodyField,
+) -> Option<String> {
+    parse_usage_body_ref(body_ref)
+        .filter(|(request_id, field)| request_id == expected_request_id && *field == expected_field)
+        .map(|(request_id, field)| usage_body_ref(&request_id, field))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StoredUsageBodyPayload {
+    Gzip(Vec<u8>),
+    Json(Vec<u8>),
+}
+
 #[async_trait]
 pub trait UsageReadRepository: Send + Sync {
     async fn find_by_id(
@@ -1749,6 +1766,20 @@ pub trait UsageReadRepository: Send + Sync {
         &self,
         body_ref: &str,
     ) -> Result<Option<Value>, crate::DataLayerError>;
+
+    async fn read_body_payload(
+        &self,
+        body_ref: &str,
+    ) -> Result<Option<StoredUsageBodyPayload>, crate::DataLayerError> {
+        self.resolve_body_ref(body_ref)
+            .await?
+            .map(|value| {
+                serde_json::to_vec(&value)
+                    .map(StoredUsageBodyPayload::Json)
+                    .map_err(|error| crate::DataLayerError::UnexpectedValue(error.to_string()))
+            })
+            .transpose()
+    }
 
     async fn list_usage_audits(
         &self,
@@ -1949,7 +1980,7 @@ pub trait UsageReadRepository: Send + Sync {
 /// Request/response headers and bodies here are capture inputs that the repository persists into
 /// the dedicated HTTP audit/body stores. Deprecated mirror columns on `public.usage` remain in the
 /// schema for compatibility only and are not the intended long-term destination for new writes.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct UpsertUsageRecord {
     pub request_id: String,
     pub user_id: Option<String>,
@@ -2024,6 +2055,142 @@ pub struct UpsertUsageRecord {
     pub finalized_at_unix_secs: Option<u64>,
     pub created_at_unix_ms: Option<u64>,
     pub updated_at_unix_secs: u64,
+    #[doc(hidden)]
+    #[serde(skip)]
+    pub capture_retention: super::UsageCaptureRetention,
+}
+
+impl Clone for UpsertUsageRecord {
+    fn clone(&self) -> Self {
+        let (capture_retention, retain_bodies) = self.capture_retention.clone_for_bodies(|| {
+            [
+                &self.request_body,
+                &self.provider_request_body,
+                &self.response_body,
+                &self.client_response_body,
+            ]
+            .into_iter()
+            .flatten()
+            .fold(0usize, |bytes, body| {
+                bytes
+                    .saturating_add(std::mem::size_of::<Value>())
+                    .saturating_add(super::usage_json_heap_estimate(body))
+            })
+        });
+        let mut cloned = Self {
+            request_id: self.request_id.clone(),
+            user_id: self.user_id.clone(),
+            api_key_id: self.api_key_id.clone(),
+            username: self.username.clone(),
+            api_key_name: self.api_key_name.clone(),
+            provider_name: self.provider_name.clone(),
+            model: self.model.clone(),
+            target_model: self.target_model.clone(),
+            provider_id: self.provider_id.clone(),
+            provider_endpoint_id: self.provider_endpoint_id.clone(),
+            provider_api_key_id: self.provider_api_key_id.clone(),
+            request_type: self.request_type.clone(),
+            api_format: self.api_format.clone(),
+            api_family: self.api_family.clone(),
+            endpoint_kind: self.endpoint_kind.clone(),
+            endpoint_api_format: self.endpoint_api_format.clone(),
+            provider_api_family: self.provider_api_family.clone(),
+            provider_endpoint_kind: self.provider_endpoint_kind.clone(),
+            has_format_conversion: self.has_format_conversion,
+            is_stream: self.is_stream,
+            input_tokens: self.input_tokens,
+            output_tokens: self.output_tokens,
+            total_tokens: self.total_tokens,
+            cache_creation_input_tokens: self.cache_creation_input_tokens,
+            cache_creation_ephemeral_5m_input_tokens: self.cache_creation_ephemeral_5m_input_tokens,
+            cache_creation_ephemeral_1h_input_tokens: self.cache_creation_ephemeral_1h_input_tokens,
+            cache_read_input_tokens: self.cache_read_input_tokens,
+            cache_creation_cost_usd: self.cache_creation_cost_usd,
+            cache_read_cost_usd: self.cache_read_cost_usd,
+            output_price_per_1m: self.output_price_per_1m,
+            total_cost_usd: self.total_cost_usd,
+            actual_total_cost_usd: self.actual_total_cost_usd,
+            status_code: self.status_code,
+            error_message: self.error_message.clone(),
+            error_category: self.error_category.clone(),
+            response_time_ms: self.response_time_ms,
+            first_byte_time_ms: self.first_byte_time_ms,
+            status: self.status.clone(),
+            billing_status: self.billing_status.clone(),
+            request_headers: self.request_headers.clone(),
+            request_body: retain_bodies.then(|| self.request_body.clone()).flatten(),
+            request_body_ref: self.request_body_ref.clone(),
+            request_body_state: self.request_body_state,
+            provider_request_headers: self.provider_request_headers.clone(),
+            provider_request_body: retain_bodies
+                .then(|| self.provider_request_body.clone())
+                .flatten(),
+            provider_request_body_ref: self.provider_request_body_ref.clone(),
+            provider_request_body_state: self.provider_request_body_state,
+            response_headers: self.response_headers.clone(),
+            response_body: retain_bodies.then(|| self.response_body.clone()).flatten(),
+            response_body_ref: self.response_body_ref.clone(),
+            response_body_state: self.response_body_state,
+            client_response_headers: self.client_response_headers.clone(),
+            client_response_body: retain_bodies
+                .then(|| self.client_response_body.clone())
+                .flatten(),
+            client_response_body_ref: self.client_response_body_ref.clone(),
+            client_response_body_state: self.client_response_body_state,
+            candidate_id: self.candidate_id.clone(),
+            candidate_index: self.candidate_index,
+            key_name: self.key_name.clone(),
+            planner_kind: self.planner_kind.clone(),
+            route_family: self.route_family.clone(),
+            route_kind: self.route_kind.clone(),
+            execution_path: self.execution_path.clone(),
+            local_execution_runtime_miss_reason: self.local_execution_runtime_miss_reason.clone(),
+            request_metadata: self.request_metadata.clone(),
+            finalized_at_unix_secs: self.finalized_at_unix_secs,
+            created_at_unix_ms: self.created_at_unix_ms,
+            updated_at_unix_secs: self.updated_at_unix_secs,
+            capture_retention,
+        };
+        if !retain_bodies {
+            for (present, key, state) in [
+                (
+                    self.request_body.is_some(),
+                    "request",
+                    &mut cloned.request_body_state,
+                ),
+                (
+                    self.provider_request_body.is_some(),
+                    "provider_request",
+                    &mut cloned.provider_request_body_state,
+                ),
+                (
+                    self.response_body.is_some(),
+                    "response",
+                    &mut cloned.response_body_state,
+                ),
+                (
+                    self.client_response_body.is_some(),
+                    "client_response",
+                    &mut cloned.client_response_body_state,
+                ),
+            ] {
+                if present
+                    && !matches!(
+                        state,
+                        Some(
+                            UsageBodyCaptureState::None
+                                | UsageBodyCaptureState::Disabled
+                                | UsageBodyCaptureState::Unavailable
+                        )
+                    )
+                {
+                    *state = Some(UsageBodyCaptureState::Truncated);
+                    super::mark_usage_capture_memory_omitted(&mut cloned.request_metadata, key);
+                }
+            }
+        }
+        cloned
+    }
 }
 
 impl UpsertUsageRecord {
@@ -2043,48 +2210,58 @@ impl UpsertUsageRecord {
                 "usage upsert model cannot be empty".to_string(),
             ));
         }
-        if self.status.trim().is_empty() {
-            return Err(crate::DataLayerError::InvalidInput(
-                "usage upsert status cannot be empty".to_string(),
-            ));
+        if !matches!(
+            self.status.as_str(),
+            "pending" | "streaming" | "completed" | "failed" | "cancelled"
+        ) {
+            return Err(crate::DataLayerError::InvalidInput(format!(
+                "invalid usage upsert status: {}",
+                self.status
+            )));
         }
-        if self.billing_status.trim().is_empty() {
-            return Err(crate::DataLayerError::InvalidInput(
-                "usage upsert billing_status cannot be empty".to_string(),
-            ));
+        if !matches!(
+            self.billing_status.as_str(),
+            "pending" | "settled" | "void" | "insufficient_quota"
+        ) {
+            return Err(crate::DataLayerError::InvalidInput(format!(
+                "invalid usage upsert billing_status: {}",
+                self.billing_status
+            )));
         }
         if let Some(value) = self.total_cost_usd {
-            if !value.is_finite() {
+            if !value.is_finite() || value < 0.0 {
                 return Err(crate::DataLayerError::InvalidInput(
-                    "usage upsert total_cost_usd must be finite".to_string(),
+                    "usage upsert total_cost_usd must be finite and non-negative".to_string(),
                 ));
             }
         }
         if let Some(value) = self.cache_creation_cost_usd {
-            if !value.is_finite() {
+            if !value.is_finite() || value < 0.0 {
                 return Err(crate::DataLayerError::InvalidInput(
-                    "usage upsert cache_creation_cost_usd must be finite".to_string(),
+                    "usage upsert cache_creation_cost_usd must be finite and non-negative"
+                        .to_string(),
                 ));
             }
         }
         if let Some(value) = self.cache_read_cost_usd {
-            if !value.is_finite() {
+            if !value.is_finite() || value < 0.0 {
                 return Err(crate::DataLayerError::InvalidInput(
-                    "usage upsert cache_read_cost_usd must be finite".to_string(),
+                    "usage upsert cache_read_cost_usd must be finite and non-negative".to_string(),
                 ));
             }
         }
         if let Some(value) = self.output_price_per_1m {
-            if !value.is_finite() {
+            if !value.is_finite() || value < 0.0 {
                 return Err(crate::DataLayerError::InvalidInput(
-                    "usage upsert output_price_per_1m must be finite".to_string(),
+                    "usage upsert output_price_per_1m must be finite and non-negative".to_string(),
                 ));
             }
         }
         if let Some(value) = self.actual_total_cost_usd {
-            if !value.is_finite() {
+            if !value.is_finite() || value < 0.0 {
                 return Err(crate::DataLayerError::InvalidInput(
-                    "usage upsert actual_total_cost_usd must be finite".to_string(),
+                    "usage upsert actual_total_cost_usd must be finite and non-negative"
+                        .to_string(),
                 ));
             }
         }
@@ -2271,9 +2448,14 @@ pub struct UsageCounterPendingHealthSnapshot {
     pub pending_by_kind: std::collections::BTreeMap<String, u64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ProxyNodeCounterDelta {
     pub node_id: String,
+    /// Incarnation fence captured when the request plan selected this node.
+    /// Counter writes must never silently rebind to a different incarnation
+    /// that reused the same node id.
+    #[serde(default)]
+    pub expected_tunnel_generation: Option<String>,
     pub total_requests_delta: i64,
     pub failed_requests_delta: i64,
     pub dns_failures_delta: i64,
@@ -2332,6 +2514,8 @@ pub struct UsageCleanupSummary {
     pub header_cleaned: usize,
     pub keys_cleaned: usize,
     pub records_deleted: usize,
+    pub cost_reservations_deleted: usize,
+    pub request_admissions_deleted: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -2452,14 +2636,59 @@ fn parse_timestamp(value: i64, field_name: &str) -> Result<u64, crate::DataLayer
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_provider_actual_service_tier_from_response,
-        extract_provider_service_tier_from_body, resolve_provider_cache_ttl_minutes,
+        canonical_usage_body_ref_for, extract_provider_actual_service_tier_from_response,
+        extract_provider_service_tier_from_body, normalize_provider_reasoning_effort,
+        normalize_provider_service_tier, resolve_provider_cache_ttl_minutes, usage_body_ref,
         StoredRequestUsageAudit, UpsertUsageRecord, UsageBodyCaptureState, UsageBodyCaptureStorage,
         UsageBodyField, UsageProviderPerformanceQuery, REALTIME_SESSION_METADATA_KEY,
         USAGE_AVAILABLE_METADATA_KEY, USAGE_PRICING_AVAILABLE_METADATA_KEY,
         WEBSOCKET_MODE_METADATA_KEY, WEBSOCKET_TRANSPORT_METADATA_KEY,
     };
     use serde_json::{json, Value};
+
+    #[test]
+    fn provider_fact_normalization_preserves_trimmed_byte_limit() {
+        for normalize in [
+            normalize_provider_reasoning_effort as fn(&str) -> Option<String>,
+            normalize_provider_service_tier,
+        ] {
+            assert_eq!(normalize(" \t\r\n"), None);
+            assert_eq!(normalize("  HIGH\n"), Some("high".to_string()));
+            assert_eq!(normalize(&"A".repeat(64)), Some("a".repeat(64)));
+            assert_eq!(
+                normalize(&format!(" \t{}\n", "A".repeat(64))),
+                Some("a".repeat(64))
+            );
+            assert_eq!(normalize(&"A".repeat(65)), None);
+        }
+    }
+
+    #[test]
+    fn provider_fact_normalization_preserves_non_ascii_case_and_byte_count() {
+        for normalize in [
+            normalize_provider_reasoning_effort as fn(&str) -> Option<String>,
+            normalize_provider_service_tier,
+        ] {
+            let accepted = format!("{}A", "\u{00c9}".repeat(31));
+            assert_eq!(
+                normalize(&accepted),
+                Some(format!("{}a", "\u{00c9}".repeat(31)))
+            );
+            assert_eq!(
+                normalize(&"\u{00c9}".repeat(32)),
+                Some("\u{00c9}".repeat(32))
+            );
+            assert_eq!(normalize(&format!("{}A", "\u{00c9}".repeat(32))), None);
+            assert_eq!(normalize("\u{2003}FAST\u{2003}"), Some("fast".to_string()));
+        }
+    }
+
+    #[test]
+    fn provider_fact_normalization_rejects_large_input_before_copying() {
+        let oversized = "A".repeat(4 * 1024 * 1024);
+        assert_eq!(normalize_provider_reasoning_effort(&oversized), None);
+        assert_eq!(normalize_provider_service_tier(&oversized), None);
+    }
 
     fn sample_usage() -> StoredRequestUsageAudit {
         StoredRequestUsageAudit::new(
@@ -2501,6 +2730,38 @@ mod tests {
             Some(102),
         )
         .expect("usage should build")
+    }
+
+    #[test]
+    fn canonical_body_ref_requires_matching_request_and_field() {
+        assert_eq!(
+            canonical_usage_body_ref_for(
+                "  usage://request/req-1/request_body  ",
+                "req-1",
+                UsageBodyField::RequestBody,
+            ),
+            Some(usage_body_ref("req-1", UsageBodyField::RequestBody))
+        );
+        assert_eq!(
+            canonical_usage_body_ref_for(
+                "usage://request/req-2/request_body",
+                "req-1",
+                UsageBodyField::RequestBody,
+            ),
+            None
+        );
+        assert_eq!(
+            canonical_usage_body_ref_for(
+                "usage://request/req-1/response_body",
+                "req-1",
+                UsageBodyField::RequestBody,
+            ),
+            None
+        );
+        assert_eq!(
+            canonical_usage_body_ref_for("blob://opaque", "req-1", UsageBodyField::RequestBody),
+            None
+        );
     }
 
     #[test]
@@ -2618,7 +2879,8 @@ mod tests {
 
     #[test]
     fn rejects_invalid_upsert_payload() {
-        let record = UpsertUsageRecord {
+        let mut record = UpsertUsageRecord {
+            capture_retention: Default::default(),
             request_id: "".to_string(),
             user_id: None,
             api_key_id: None,
@@ -2688,6 +2950,42 @@ mod tests {
             updated_at_unix_secs: 101,
         };
 
+        assert!(record.validate().is_err());
+
+        record.request_id = "req-1".to_string();
+        assert!(record.validate().is_ok());
+
+        for invalid_status in ["", " completed ", "success", "COMPLETED"] {
+            record.status = invalid_status.to_string();
+            assert!(
+                record.validate().is_err(),
+                "accepted status {invalid_status:?}"
+            );
+        }
+
+        record.status = "completed".to_string();
+        for invalid_billing_status in ["", " settled ", "paid", "SETTLED"] {
+            record.billing_status = invalid_billing_status.to_string();
+            assert!(
+                record.validate().is_err(),
+                "accepted billing status {invalid_billing_status:?}"
+            );
+        }
+
+        record.billing_status = "pending".to_string();
+        record.total_cost_usd = Some(-0.01);
+        assert!(record.validate().is_err());
+        record.total_cost_usd = None;
+        record.actual_total_cost_usd = Some(-0.01);
+        assert!(record.validate().is_err());
+        record.actual_total_cost_usd = None;
+        record.cache_creation_cost_usd = Some(-0.01);
+        assert!(record.validate().is_err());
+        record.cache_creation_cost_usd = None;
+        record.cache_read_cost_usd = Some(-0.01);
+        assert!(record.validate().is_err());
+        record.cache_read_cost_usd = None;
+        record.output_price_per_1m = Some(-0.01);
         assert!(record.validate().is_err());
     }
 

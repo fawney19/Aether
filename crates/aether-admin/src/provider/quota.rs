@@ -10,6 +10,7 @@ const OAUTH_REFRESH_FAILED_PREFIX: &str = "[REFRESH_FAILED] ";
 const OAUTH_EXPIRED_PREFIX: &str = "[OAUTH_EXPIRED] ";
 const OAUTH_REQUEST_FAILED_PREFIX: &str = "[REQUEST_FAILED] ";
 const CODEX_SPARK_LIMIT_NAME: &str = "GPT-5.3-Codex-Spark";
+const CODEX_ADDITIONAL_QUOTA_WINDOWS_KEY: &str = "additional_quota_windows";
 const CODEX_ACTIVE_LIMIT_HEADER: &str = "x-codex-active-limit";
 const CODEX_HEADER_PREFIX: &str = "x-codex-";
 const CODEX_LIMIT_NAME_HEADER_SUFFIX: &str = "-limit-name";
@@ -281,8 +282,126 @@ pub fn parse_antigravity_usage_response(
         "is_forbidden": false,
         "forbidden_reason": serde_json::Value::Null,
         "forbidden_at": serde_json::Value::Null,
-        "models": quota_by_model,
+        "quota_by_model": quota_by_model,
     }))
+}
+
+pub fn parse_antigravity_quota_summary_response(
+    value: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    let groups = value.get("groups")?.as_array()?;
+    let mut parsed_groups = Vec::new();
+
+    for (group_index, group) in groups.iter().enumerate() {
+        let Some(group) = group.as_object() else {
+            continue;
+        };
+        let group_id = coerce_json_string(
+            group
+                .get("groupId")
+                .or_else(|| group.get("group_id"))
+                .or_else(|| group.get("id")),
+        );
+        let display_name = coerce_json_string(
+            group
+                .get("displayName")
+                .or_else(|| group.get("display_name")),
+        )
+        .unwrap_or_else(|| format!("Quota group {}", group_index + 1));
+        let description = coerce_json_string(group.get("description"));
+        let mut parsed_buckets = Vec::new();
+
+        for (bucket_index, bucket) in group
+            .get("buckets")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .enumerate()
+        {
+            let Some(bucket) = bucket.as_object() else {
+                continue;
+            };
+            let bucket_id = coerce_json_string(
+                bucket
+                    .get("bucketId")
+                    .or_else(|| bucket.get("bucket_id"))
+                    .or_else(|| bucket.get("id")),
+            )
+            .unwrap_or_else(|| format!("bucket-{}", bucket_index + 1));
+            let window = coerce_json_string(bucket.get("window"));
+            let remaining_fraction = bucket
+                .get("remainingFraction")
+                .or_else(|| bucket.get("remaining_fraction"))
+                .and_then(coerce_json_f64)
+                .map(|value| value.clamp(0.0, 1.0));
+            let reset_time = bucket
+                .get("resetTime")
+                .or_else(|| bucket.get("reset_time"))
+                .cloned()
+                .filter(|value| !value.is_null());
+            let bucket_display_name = coerce_json_string(
+                bucket
+                    .get("displayName")
+                    .or_else(|| bucket.get("display_name")),
+            );
+            let bucket_description = coerce_json_string(bucket.get("description"));
+
+            if window.is_none()
+                && remaining_fraction.is_none()
+                && reset_time.is_none()
+                && bucket_display_name.is_none()
+                && bucket_description.is_none()
+            {
+                continue;
+            }
+
+            let mut parsed_bucket = serde_json::Map::new();
+            parsed_bucket.insert("bucket_id".to_string(), json!(bucket_id));
+            if let Some(window) = window {
+                parsed_bucket.insert("window".to_string(), json!(window));
+            }
+            if let Some(remaining_fraction) = remaining_fraction {
+                parsed_bucket.insert("remaining_fraction".to_string(), json!(remaining_fraction));
+                parsed_bucket.insert(
+                    "used_percent".to_string(),
+                    json!((1.0 - remaining_fraction) * 100.0),
+                );
+                parsed_bucket.insert(
+                    "is_exhausted".to_string(),
+                    json!(remaining_fraction <= 1e-6),
+                );
+            }
+            if let Some(reset_time) = reset_time {
+                parsed_bucket.insert("reset_time".to_string(), reset_time);
+            }
+            if let Some(display_name) = bucket_display_name {
+                parsed_bucket.insert("display_name".to_string(), json!(display_name));
+            }
+            if let Some(description) = bucket_description {
+                parsed_bucket.insert("description".to_string(), json!(description));
+            }
+            parsed_buckets.push(serde_json::Value::Object(parsed_bucket));
+        }
+
+        if parsed_buckets.is_empty() {
+            continue;
+        }
+        let mut parsed_group = serde_json::Map::new();
+        if let Some(group_id) = group_id {
+            parsed_group.insert("group_id".to_string(), json!(group_id));
+        }
+        parsed_group.insert("display_name".to_string(), json!(display_name));
+        if let Some(description) = description {
+            parsed_group.insert("description".to_string(), json!(description));
+        }
+        parsed_group.insert(
+            "buckets".to_string(),
+            serde_json::Value::Array(parsed_buckets),
+        );
+        parsed_groups.push(serde_json::Value::Object(parsed_group));
+    }
+
+    (!parsed_groups.is_empty()).then_some(serde_json::Value::Array(parsed_groups))
 }
 
 pub fn parse_gemini_cli_retrieve_user_quota_response(
@@ -1768,6 +1887,46 @@ fn codex_quota_is_account_status_key(key: &str) -> bool {
     matches!(key, "allowed" | "limit_reached")
 }
 
+fn codex_quota_merge_reset_credits(
+    current_object: &serde_json::Map<String, serde_json::Value>,
+    incoming: &serde_json::Value,
+) -> serde_json::Value {
+    let Some(incoming_object) = incoming.as_object() else {
+        return incoming.clone();
+    };
+    let mut merged = current_object
+        .get("reset_credits")
+        .and_then(serde_json::Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let failed_detail = incoming_object
+        .get("detail_status")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|status| status.trim().eq_ignore_ascii_case("failed"));
+    if !failed_detail {
+        return incoming.clone();
+    }
+
+    for (key, value) in incoming_object {
+        // A failed readonly-detail request contributes diagnostics, not an
+        // authoritative empty list. Keep the last known items and count so a
+        // transient 429 cannot make reset credits disappear from the UI.
+        if failed_detail
+            && key == "credits"
+            && value.as_array().is_some_and(|credits| credits.is_empty())
+            && merged
+                .get("credits")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|credits| !credits.is_empty())
+        {
+            continue;
+        }
+        merged.insert(key.clone(), value.clone());
+    }
+
+    serde_json::Value::Object(merged)
+}
+
 /// Merge a parsed Codex quota observation into the stored flat metadata.
 ///
 /// Positive `window_minutes` values identify windows independently of the
@@ -1842,7 +2001,12 @@ pub fn merge_codex_quota_metadata_snapshot(
             {
                 continue;
             }
-            merged.insert(key.clone(), value.clone());
+            let value = if key == "reset_credits" {
+                codex_quota_merge_reset_credits(&current_object, value)
+            } else {
+                value.clone()
+            };
+            merged.insert(key.clone(), value);
         }
         if let Some(incoming_order) = context.request_order().filter(|incoming| {
             codex_quota_request_order_is_newer(*incoming, stored_metadata_watermark)
@@ -2022,6 +2186,119 @@ fn codex_find_spark_rate_limit(
         .and_then(serde_json::Value::as_object)
 }
 
+/// Preserve every additional Codex rate-limit bucket in a model-addressable
+/// representation.  The upstream can add independent limits over time; do
+/// not discard them merely because they are not one of the legacy flat
+/// primary/secondary slots.
+fn codex_additional_quota_windows(
+    root: &serde_json::Map<String, serde_json::Value>,
+) -> Vec<serde_json::Value> {
+    let mut windows = Vec::new();
+    let Some(items) = root
+        .get("additional_rate_limits")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return windows;
+    };
+
+    for (index, item) in items.iter().enumerate() {
+        let Some(item_object) = item.as_object() else {
+            continue;
+        };
+        if item_object
+            .get("limit_name")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|name| name.trim() == CODEX_SPARK_LIMIT_NAME)
+        {
+            continue;
+        }
+        let Some(limit_name) = ["limit_name", "metered_feature", "name", "id"]
+            .iter()
+            .find_map(|key| item_object.get(*key).and_then(serde_json::Value::as_str))
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        let model_identity = item_object
+            .get("model")
+            .or_else(|| item_object.get("model_name"))
+            .or_else(|| item_object.get("model_id"))
+            .cloned()
+            .unwrap_or_else(|| json!(limit_name));
+        let model_identities = item_object
+            .get("models")
+            .or_else(|| item_object.get("model_ids"))
+            .cloned();
+        let Some(rate_limit) = item_object
+            .get("rate_limit")
+            .and_then(serde_json::Value::as_object)
+        else {
+            continue;
+        };
+
+        for (slot, slot_name) in [
+            ("primary_window", "primary"),
+            ("secondary_window", "secondary"),
+        ] {
+            let Some(source) = rate_limit.get(slot).and_then(serde_json::Value::as_object) else {
+                continue;
+            };
+            let used_percent = source.get("used_percent").and_then(coerce_json_f64);
+            let reset_after_seconds = source
+                .get("reset_after_seconds")
+                .or_else(|| source.get("reset_seconds"))
+                .and_then(coerce_json_u64);
+            let reset_at = source.get("reset_at").and_then(coerce_json_u64);
+            let window_minutes = source
+                .get("limit_window_seconds")
+                .or_else(|| source.get("window_seconds"))
+                .and_then(coerce_json_u64)
+                .map(|seconds| seconds.saturating_add(59) / 60)
+                .filter(|minutes| *minutes > 0);
+            if used_percent.is_none()
+                && reset_after_seconds.is_none()
+                && reset_at.is_none()
+                && window_minutes.is_none()
+            {
+                continue;
+            }
+
+            let used_ratio = used_percent.map(|value| (value / 100.0).clamp(0.0, 1.0));
+            let mut window = serde_json::Map::new();
+            window.insert(
+                "code".to_string(),
+                json!(format!("additional_{index}_{slot_name}")),
+            );
+            window.insert("label".to_string(), json!(limit_name));
+            window.insert("scope".to_string(), json!("model"));
+            // The upstream limit name is the only stable identity available
+            // for an additional bucket.  Keeping it in both fields allows
+            // exact model matching and generic family matching downstream.
+            window.insert("model".to_string(), model_identity.clone());
+            if let Some(model_identities) = model_identities.clone() {
+                window.insert("models".to_string(), model_identities);
+            }
+            window.insert("quota_group".to_string(), json!(limit_name));
+            window.insert("limit_name".to_string(), json!(limit_name));
+            window.insert("used_ratio".to_string(), json!(used_ratio));
+            window.insert(
+                "remaining_ratio".to_string(),
+                json!(used_ratio.map(|value| (1.0 - value).max(0.0))),
+            );
+            window.insert(
+                "is_exhausted".to_string(),
+                json!(used_ratio.is_some_and(|value| value >= 1.0 - 1e-6)),
+            );
+            window.insert("reset_at".to_string(), json!(reset_at));
+            window.insert("reset_seconds".to_string(), json!(reset_after_seconds));
+            window.insert("window_minutes".to_string(), json!(window_minutes));
+            windows.push(serde_json::Value::Object(window));
+        }
+    }
+    windows
+}
+
 fn codex_reset_credits_container(
     root: &serde_json::Map<String, serde_json::Value>,
 ) -> Option<&serde_json::Map<String, serde_json::Value>> {
@@ -2127,6 +2404,14 @@ pub fn parse_codex_wham_usage_response(
             codex_write_window(&mut result, secondary_window, "spark_secondary");
         }
     }
+
+    // Keep all additional limits, including future ones with names unknown to
+    // this version of the gateway, so scheduling can select their bucket by
+    // metadata rather than by a hard-coded model name.
+    result.insert(
+        CODEX_ADDITIONAL_QUOTA_WINDOWS_KEY.to_string(),
+        serde_json::Value::Array(codex_additional_quota_windows(root)),
+    );
 
     if let Some(credits) = root.get("credits").and_then(serde_json::Value::as_object) {
         if let Some(value) = credits.get("has_credits").and_then(coerce_json_bool) {
@@ -3056,54 +3341,24 @@ pub fn codex_structured_invalid_reason(status_code: u16, upstream_message: Optio
         return format!("{OAUTH_ACCOUNT_BLOCK_PREFIX}工作区已停用 (deactivated_workspace)");
     }
     if codex_looks_like_account_deactivated(Some(message)) {
-        let detail = if message.is_empty() {
-            "OpenAI 账号已停用"
-        } else {
-            message
-        };
-        return format!("{OAUTH_ACCOUNT_BLOCK_PREFIX}{detail}");
+        return format!("{OAUTH_ACCOUNT_BLOCK_PREFIX}OpenAI 账号已停用");
     }
     if codex_looks_like_token_invalidated(Some(message)) {
-        let detail = if message.is_empty() {
-            "Codex Token 已失效"
-        } else {
-            message
-        };
-        return format!("{OAUTH_EXPIRED_PREFIX}{detail}");
+        return format!("{OAUTH_EXPIRED_PREFIX}Codex Token 已失效");
     }
     if codex_looks_like_token_expired(Some(message)) {
-        let detail = if message.is_empty() {
-            "Codex Token 已过期"
-        } else {
-            message
-        };
-        return format!("{OAUTH_EXPIRED_PREFIX}{detail}");
+        return format!("{OAUTH_EXPIRED_PREFIX}Codex Token 已过期");
     }
     if status_code == 401 {
-        let detail = if message.is_empty() {
-            "Codex Token 已过期 (401)"
-        } else {
-            message
-        };
-        return format!("{OAUTH_EXPIRED_PREFIX}{detail}");
+        return format!("{OAUTH_EXPIRED_PREFIX}Codex Token 已过期 (401)");
     }
     if status_code == 403 {
-        let detail = if message.is_empty() {
-            "Codex 账户访问受限 (403)"
-        } else {
-            message
-        };
-        return format!("{OAUTH_ACCOUNT_BLOCK_PREFIX}{detail}");
+        return format!("{OAUTH_ACCOUNT_BLOCK_PREFIX}Codex 账户访问受限 (403)");
     }
     if status_code == 402 {
-        let detail = if message.is_empty() {
-            "Codex 账户需要付款 (402)"
-        } else {
-            message
-        };
-        return format!("{OAUTH_ACCOUNT_BLOCK_PREFIX}{detail}");
+        return format!("{OAUTH_ACCOUNT_BLOCK_PREFIX}Codex 账户需要付款 (402)");
     }
-    message.to_string()
+    format!("Codex 请求失败 ({status_code})")
 }
 
 pub fn codex_runtime_invalid_reason(
@@ -3127,11 +3382,8 @@ pub fn codex_runtime_invalid_reason(
 }
 
 fn codex_generic_forbidden_runtime_invalid_reason(upstream_message: Option<&str>) -> String {
-    let detail = upstream_message
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|message| format!("Codex Token 已失效 (403): {message}"))
-        .unwrap_or_else(|| "Codex Token 已失效 (403)".to_string());
+    let _ = upstream_message;
+    let detail = "Codex Token 已失效 (403)";
     format!("{OAUTH_EXPIRED_PREFIX}{detail}")
 }
 
@@ -3139,11 +3391,8 @@ pub fn codex_soft_request_failure_reason(
     status_code: u16,
     upstream_message: Option<&str>,
 ) -> String {
-    let detail = upstream_message
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| format!("Codex 请求失败 ({status_code})"));
+    let _ = upstream_message;
+    let detail = format!("Codex 请求失败 ({status_code})");
     format!("{OAUTH_REQUEST_FAILED_PREFIX}{detail}")
 }
 
@@ -3456,33 +3705,21 @@ pub fn parse_windsurf_user_status_response(
             result.insert(target.to_string(), json!(found));
         }
     }
-    for (target, aliases) in [
+    for (status_field, reason_field, fixed_reason) in [
+        ("banned", "ban_reason", "Windsurf account is suspended"),
         (
-            "ban_reason",
-            &[
-                "banReason",
-                "ban_reason",
-                "blockedReason",
-                "blocked_reason",
-                "reason",
-                "message",
-            ][..],
-        ),
-        (
+            "quarantined",
             "quarantine_reason",
-            &["quarantineReason", "quarantine_reason", "reason", "message"][..],
+            "Windsurf account is quarantined",
         ),
         (
+            "is_forbidden",
             "forbidden_reason",
-            &["forbiddenReason", "forbidden_reason", "reason", "message"][..],
+            "Windsurf account access is restricted",
         ),
     ] {
-        if let Some(found) = status_sources.iter().find_map(|source| {
-            aliases
-                .iter()
-                .find_map(|alias| coerce_json_string(source.get(*alias)))
-        }) {
-            result.insert(target.to_string(), json!(found));
+        if result.get(status_field).and_then(coerce_json_bool) == Some(true) {
+            result.insert(reason_field.to_string(), json!(fixed_reason));
         }
     }
 
@@ -3668,20 +3905,19 @@ fn normalize_chatgpt_web_numeric_reset(value: f64, observed_at: u64) -> Option<u
 }
 
 fn chatgpt_web_blocked_features(value: &serde_json::Value) -> Vec<String> {
-    value
+    let image_blocked = value
         .get("blocked_features")
         .or_else(|| value.get("blockedFeatures"))
         .and_then(serde_json::Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(serde_json::Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(ToOwned::to_owned)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default()
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .any(chatgpt_web_is_image_quota_feature);
+    if image_blocked {
+        vec!["image_generation".to_string()]
+    } else {
+        Vec::new()
+    }
 }
 
 pub fn parse_chatgpt_web_conversation_init_response(
@@ -3731,11 +3967,9 @@ pub fn parse_chatgpt_web_conversation_init_response(
             json!(plan_type.to_ascii_lowercase()),
         );
     }
-    result.insert("blocked_features".to_string(), json!(blocked_features));
-    result.insert(
-        "limits_progress".to_string(),
-        serde_json::Value::Array(limits_progress),
-    );
+    if !blocked_features.is_empty() {
+        result.insert("blocked_features".to_string(), json!(blocked_features));
+    }
 
     if image_blocked {
         result.insert("image_quota_blocked".to_string(), json!(true));
@@ -3808,13 +4042,6 @@ pub fn parse_chatgpt_web_conversation_init_response(
         if let Some(reset_at) = reset_at {
             result.insert("image_quota_reset_at".to_string(), json!(reset_at));
         }
-        if let Some(reset_after) = coerce_json_string(
-            image_limit
-                .get("reset_after")
-                .or_else(|| image_limit.get("resetAfter")),
-        ) {
-            result.insert("image_quota_reset_after".to_string(), json!(reset_after));
-        }
     } else if image_blocked {
         result.insert("image_quota_remaining".to_string(), json!(0.0));
     }
@@ -3829,11 +4056,11 @@ mod tests {
         codex_rate_limit_metadata_exhausted, codex_runtime_invalid_reason,
         codex_websocket_response_has_usage_limit_error, codex_websocket_usage_limit_reset_at,
         extract_execution_error_detail, merge_codex_quota_metadata_snapshot,
-        normalize_codex_reset_credit_consume_outcome, parse_antigravity_usage_response,
-        parse_chatgpt_web_conversation_init_response, parse_codex_backend_me_response,
-        parse_codex_usage_headers, parse_codex_websocket_rate_limits_response,
-        parse_codex_wham_reset_credits_detail_response, parse_codex_wham_usage_response,
-        parse_gemini_cli_retrieve_user_quota_response,
+        normalize_codex_reset_credit_consume_outcome, parse_antigravity_quota_summary_response,
+        parse_antigravity_usage_response, parse_chatgpt_web_conversation_init_response,
+        parse_codex_backend_me_response, parse_codex_usage_headers,
+        parse_codex_websocket_rate_limits_response, parse_codex_wham_reset_credits_detail_response,
+        parse_codex_wham_usage_response, parse_gemini_cli_retrieve_user_quota_response,
         parse_gemini_cli_v1internal_credits_response, parse_windsurf_model_configs_response,
         parse_windsurf_rate_limit_response, parse_windsurf_user_status_response,
         provider_auto_remove_quota_exhausted_keys, quota_refresh_success_invalid_state,
@@ -4535,6 +4762,60 @@ mod tests {
 
         assert_eq!(outcome.metadata["primary_used_percent"], json!(100.0));
         assert_eq!(outcome.metadata["primary_reset_at"], json!(20_000u64));
+    }
+
+    #[test]
+    fn codex_quota_failed_reset_credit_detail_preserves_last_known_count_and_items() {
+        let current = json!({
+            "reset_credits": {
+                "available_count": 2,
+                "updated_at": 100u64,
+                "detail_source": "wham_readonly",
+                "detail_status": "available",
+                "credits": [{
+                    "id": "credit-1",
+                    "display_key": "credit",
+                    "status": "available",
+                    "expires_at": 20_000u64
+                }]
+            },
+            "updated_at": 100u64
+        });
+        let incoming = json!({
+            "reset_credits": {
+                "updated_at": 110u64,
+                "detail_source": "wham_readonly",
+                "detail_status": "failed",
+                "detail_error": "HTTP 429",
+                "credits": []
+            }
+        });
+
+        let outcome = merge_codex_quota(
+            Some(&current),
+            &incoming,
+            110,
+            110_000,
+            CodexQuotaWindowCoverage::Patch,
+        );
+
+        assert!(outcome.changed);
+        assert_eq!(
+            outcome.metadata["reset_credits"]["available_count"],
+            json!(2u64)
+        );
+        assert_eq!(
+            outcome.metadata["reset_credits"]["credits"][0]["id"],
+            json!("credit-1")
+        );
+        assert_eq!(
+            outcome.metadata["reset_credits"]["detail_status"],
+            json!("failed")
+        );
+        assert_eq!(
+            outcome.metadata["reset_credits"]["detail_error"],
+            json!("HTTP 429")
+        );
     }
 
     #[test]
@@ -5556,7 +5837,7 @@ mod tests {
     fn codex_runtime_invalid_reason_marks_401_as_expired() {
         assert_eq!(
             codex_runtime_invalid_reason(401, Some("session expired")),
-            Some(format!("{OAUTH_EXPIRED_PREFIX}session expired"))
+            Some(format!("{OAUTH_EXPIRED_PREFIX}Codex Token 已过期"))
         );
     }
 
@@ -5564,9 +5845,7 @@ mod tests {
     fn codex_runtime_invalid_reason_marks_account_deactivated_403() {
         assert_eq!(
             codex_runtime_invalid_reason(403, Some("account has been deactivated")),
-            Some(format!(
-                "{OAUTH_ACCOUNT_BLOCK_PREFIX}account has been deactivated"
-            ))
+            Some(format!("{OAUTH_ACCOUNT_BLOCK_PREFIX}OpenAI 账号已停用"))
         );
     }
 
@@ -5574,18 +5853,14 @@ mod tests {
     fn codex_runtime_invalid_reason_marks_inactive_pat_owner_403_as_token_invalid() {
         assert_eq!(
             codex_runtime_invalid_reason(403, Some("Personal access token owner is inactive.")),
-            Some(format!(
-                "{OAUTH_EXPIRED_PREFIX}Personal access token owner is inactive."
-            ))
+            Some(format!("{OAUTH_EXPIRED_PREFIX}Codex Token 已失效"))
         );
         assert_eq!(
             codex_runtime_invalid_reason(
                 403,
                 Some("biscuit_baker_service_auth_credential_error_status")
             ),
-            Some(format!(
-                "{OAUTH_EXPIRED_PREFIX}biscuit_baker_service_auth_credential_error_status"
-            ))
+            Some(format!("{OAUTH_EXPIRED_PREFIX}Codex Token 已失效"))
         );
     }
 
@@ -5593,9 +5868,7 @@ mod tests {
     fn codex_runtime_invalid_reason_marks_deleted_agent_runtime_as_invalid() {
         assert_eq!(
             codex_runtime_invalid_reason(403, Some("Agent runtime has been deleted.")),
-            Some(format!(
-                "{OAUTH_EXPIRED_PREFIX}Agent runtime has been deleted."
-            ))
+            Some(format!("{OAUTH_EXPIRED_PREFIX}Codex Token 已失效"))
         );
     }
 
@@ -5603,7 +5876,9 @@ mod tests {
     fn codex_runtime_invalid_reason_marks_402_as_account_blocked() {
         assert_eq!(
             codex_runtime_invalid_reason(402, Some("payment required")),
-            Some(format!("{OAUTH_ACCOUNT_BLOCK_PREFIX}payment required"))
+            Some(format!(
+                "{OAUTH_ACCOUNT_BLOCK_PREFIX}Codex 账户需要付款 (402)"
+            ))
         );
     }
 
@@ -5611,10 +5886,24 @@ mod tests {
     fn codex_runtime_invalid_reason_marks_generic_403_as_token_invalid() {
         assert_eq!(
             codex_runtime_invalid_reason(403, Some("forbidden")),
-            Some(format!(
-                "{OAUTH_EXPIRED_PREFIX}Codex Token 已失效 (403): forbidden"
-            ))
+            Some(format!("{OAUTH_EXPIRED_PREFIX}Codex Token 已失效 (403)"))
         );
+    }
+
+    #[test]
+    fn codex_invalid_reason_does_not_persist_upstream_credentials() {
+        let reason = codex_runtime_invalid_reason(
+            401,
+            Some("authorization=Bearer upstream-secret https://user:pass@example.test?q=secret"),
+        )
+        .expect("401 should produce a reason");
+
+        assert_eq!(
+            reason,
+            format!("{OAUTH_EXPIRED_PREFIX}Codex Token 已过期 (401)")
+        );
+        assert!(!reason.contains("upstream-secret"));
+        assert!(!reason.contains("user:pass"));
     }
 
     #[test]
@@ -6249,6 +6538,43 @@ mod tests {
             parsed.get("spark_secondary_window_minutes"),
             Some(&json!(10_080u64))
         );
+        let additional = parsed
+            .get("additional_quota_windows")
+            .and_then(serde_json::Value::as_array)
+            .expect("all additional quota windows should be preserved");
+        assert!(
+            additional.is_empty(),
+            "the Spark windows are already normalized into the dedicated spark fields"
+        );
+    }
+
+    #[test]
+    fn parses_unknown_additional_quota_buckets_without_model_specific_code() {
+        let parsed = parse_codex_wham_usage_response(
+            &json!({
+                "rate_limit": {
+                    "primary_window": {"used_percent": 100.0},
+                    "secondary_window": {"used_percent": 0.0}
+                },
+                "additional_rate_limits": [{
+                    "limit_name": "Future-Model-Limit",
+                    "rate_limit": {
+                        "primary_window": {
+                            "used_percent": 100.0,
+                            "limit_window_seconds": 3600
+                        }
+                    }
+                }]
+            }),
+            1_700_000_000,
+        )
+        .expect("quota response should parse");
+        let additional = parsed["additional_quota_windows"]
+            .as_array()
+            .expect("additional windows should be an array");
+        assert_eq!(additional.len(), 1);
+        assert_eq!(additional[0]["model"], json!("Future-Model-Limit"));
+        assert_eq!(additional[0]["is_exhausted"], json!(true));
     }
 
     #[test]
@@ -6749,14 +7075,50 @@ mod tests {
         .expect("antigravity quota should parse");
 
         assert_eq!(
-            parsed["models"]["RateLimitResetCredit_05cbb6eeeb9c81918e011d8300f9ebfb"]
+            parsed["quota_by_model"]["RateLimitResetCredit_05cbb6eeeb9c81918e011d8300f9ebfb"]
                 ["display_name"],
             json!("Key-1")
         );
         assert_eq!(
-            parsed["models"]["gemini-3-pro-preview"]["display_name"],
+            parsed["quota_by_model"]["RateLimitResetCredit_05cbb6eeeb9c81918e011d8300f9ebfb"]
+                ["reset_time"],
+            json!("2030-01-01T00:00:00Z")
+        );
+        assert_eq!(
+            parsed["quota_by_model"]["gemini-3-pro-preview"]["display_name"],
             json!("Gemini 3 Pro Preview")
         );
+    }
+
+    #[test]
+    fn parses_antigravity_grouped_weekly_and_five_hour_quota() {
+        let groups = parse_antigravity_quota_summary_response(&json!({
+            "groups": [{
+                "displayName": "Claude and GPT models",
+                "description": "Shared quota",
+                "buckets": [{
+                    "bucketId": "3p-5h",
+                    "window": "5h",
+                    "remainingFraction": 0.25,
+                    "resetTime": "2026-05-05T05:00:00Z",
+                    "displayName": "5 hour"
+                }, {
+                    "bucketId": "3p-weekly",
+                    "window": "weekly",
+                    "remainingFraction": 0.8,
+                    "resetTime": "2026-05-11T00:00:00Z"
+                }]
+            }]
+        }))
+        .expect("grouped Antigravity quota should parse");
+
+        assert_eq!(groups[0]["display_name"], json!("Claude and GPT models"));
+        assert_eq!(groups[0]["description"], json!("Shared quota"));
+        assert_eq!(groups[0]["buckets"][0]["bucket_id"], json!("3p-5h"));
+        assert_eq!(groups[0]["buckets"][0]["window"], json!("5h"));
+        assert_eq!(groups[0]["buckets"][0]["remaining_fraction"], json!(0.25));
+        assert_eq!(groups[0]["buckets"][0]["used_percent"], json!(75.0));
+        assert_eq!(groups[0]["buckets"][1]["bucket_id"], json!("3p-weekly"));
     }
 
     #[test]
@@ -6919,9 +7281,34 @@ mod tests {
         assert_eq!(parsed.get("quarantined"), Some(&json!(true)));
         assert_eq!(
             parsed.get("quarantine_reason"),
-            Some(&json!("quota review"))
+            Some(&json!("Windsurf account is quarantined"))
         );
         assert_eq!(parsed.get("updated_at"), Some(&json!(1_770_000_000u64)));
+    }
+
+    #[test]
+    fn windsurf_status_parser_never_persists_upstream_reason_or_message() {
+        let parsed = parse_windsurf_user_status_response(
+            &json!({
+                "userStatus": {
+                    "isBanned": true,
+                    "reason": "Authorization: Bearer upstream-secret",
+                    "message": "https://user:password@internal.test?q=secret",
+                    "planStatus": {"dailyQuotaRemainingPercent": 10}
+                }
+            }),
+            1_770_000_000,
+        )
+        .expect("windsurf status should parse");
+
+        assert_eq!(
+            parsed.get("ban_reason"),
+            Some(&json!("Windsurf account is suspended"))
+        );
+        let serialized = parsed.to_string();
+        assert!(!serialized.contains("upstream-secret"));
+        assert!(!serialized.contains("user:password"));
+        assert!(!serialized.contains("q=secret"));
     }
 
     #[test]
@@ -7012,7 +7399,11 @@ mod tests {
     fn parses_chatgpt_web_blocked_image_feature_as_zero_remaining() {
         let parsed = parse_chatgpt_web_conversation_init_response(
             &json!({
-                "blocked_features": ["image_generation"],
+                "blocked_features": [
+                    "image_generation",
+                    "Authorization: Bearer upstream-secret",
+                    "https://user:password@internal.test?q=secret"
+                ],
                 "limits_progress": []
             }),
             1_778_067_246,
@@ -7021,5 +7412,43 @@ mod tests {
 
         assert_eq!(parsed.get("image_quota_blocked"), Some(&json!(true)));
         assert_eq!(parsed.get("image_quota_remaining"), Some(&json!(0.0)));
+        assert_eq!(
+            parsed.get("blocked_features"),
+            Some(&json!(["image_generation"]))
+        );
+        assert!(parsed.get("limits_progress").is_none());
+        assert!(!parsed.to_string().contains("upstream-secret"));
+    }
+
+    #[test]
+    fn chatgpt_web_parser_projects_image_limit_scalars_only() {
+        let parsed = parse_chatgpt_web_conversation_init_response(
+            &json!({
+                "limits_progress": [{
+                    "feature_name": "image_gen",
+                    "remaining": 8,
+                    "total": 12,
+                    "reset_after": "60",
+                    "message": "Authorization: Bearer upstream-secret",
+                    "nested": {
+                        "url": "https://user:password@internal.test?q=secret"
+                    }
+                }]
+            }),
+            1_778_067_246,
+        )
+        .expect("image quota should parse");
+
+        assert_eq!(parsed.get("image_quota_remaining"), Some(&json!(8.0)));
+        assert_eq!(parsed.get("image_quota_total"), Some(&json!(12.0)));
+        assert_eq!(
+            parsed.get("image_quota_reset_at"),
+            Some(&json!(1_778_067_306u64))
+        );
+        assert!(parsed.get("limits_progress").is_none());
+        assert!(parsed.get("image_quota_reset_after").is_none());
+        let serialized = parsed.to_string();
+        assert!(!serialized.contains("upstream-secret"));
+        assert!(!serialized.contains("user:password"));
     }
 }

@@ -1,13 +1,19 @@
 use std::collections::BTreeMap;
 
 use axum::{body::Body, http, response::Response};
+use hmac::{Hmac, Mac};
 use md5::{Digest, Md5};
 use serde_json::json;
+use sha2::Sha256;
 use tracing::warn;
 
 use super::{payment_shared::payment_callback_payload_hash, AppState, GatewayPublicRequestContext};
 
-#[derive(Debug, Clone)]
+const MAX_EPAY_ORDER_NO_BYTES: usize = 64;
+const MAX_EPAY_GATEWAY_ORDER_ID_BYTES: usize = 123;
+const MAX_EPAY_CHANNEL_BYTES: usize = 64;
+
+#[derive(Clone)]
 pub(crate) struct EpayMerchantConfig {
     pub(crate) endpoint_url: String,
     pub(crate) callback_base_url: Option<String>,
@@ -17,6 +23,25 @@ pub(crate) struct EpayMerchantConfig {
     pub(crate) usd_exchange_rate: f64,
     pub(crate) min_recharge_usd: f64,
     pub(crate) channels: serde_json::Value,
+}
+
+impl std::fmt::Debug for EpayMerchantConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("EpayMerchantConfig")
+            .field("endpoint_url", &"[REDACTED]")
+            .field(
+                "callback_base_url",
+                &self.callback_base_url.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("merchant_id", &self.merchant_id)
+            .field("merchant_key", &"[REDACTED]")
+            .field("pay_currency", &self.pay_currency)
+            .field("usd_exchange_rate", &self.usd_exchange_rate)
+            .field("min_recharge_usd", &self.min_recharge_usd)
+            .field("channels", &"[REDACTED]")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -121,82 +146,45 @@ pub(crate) fn epay_signature_valid(params: &BTreeMap<String, String>, merchant_k
     let Some(sign) = params.get("sign") else {
         return false;
     };
-    epay_sign(params, merchant_key).eq_ignore_ascii_case(sign.trim())
+    let expected = epay_sign(params, merchant_key);
+    let provided = sign.trim().to_ascii_lowercase();
+    let mut expected_mac = Hmac::<Sha256>::new_from_slice(b"aether-epay-signature-compare")
+        .expect("static epay comparison key should be valid");
+    expected_mac.update(expected.as_bytes());
+    let expected_tag = expected_mac.finalize().into_bytes();
+    let mut provided_mac = Hmac::<Sha256>::new_from_slice(b"aether-epay-signature-compare")
+        .expect("static epay comparison key should be valid");
+    provided_mac.update(provided.as_bytes());
+    provided_mac.verify_slice(&expected_tag).is_ok()
 }
 
-fn epay_submit_url(endpoint_url: &str) -> String {
-    let trimmed = endpoint_url.trim();
-    if trimmed.is_empty() {
-        return trimmed.to_string();
-    }
-    let Ok(mut url) = url::Url::parse(trimmed) else {
-        return trimmed.trim_end_matches('/').to_string();
-    };
+fn epay_submit_url(endpoint_url: &str) -> Result<String, String> {
+    let normalized =
+        crate::handlers::shared::normalize_payment_https_url(endpoint_url, "endpoint_url")?;
+    let mut url = url::Url::parse(&normalized)
+        .map_err(|_| "endpoint_url must be an absolute HTTPS URL".to_string())?;
     let path = url.path();
     if path.is_empty() || path == "/" {
         url.set_path("submit.php");
     }
-    url.to_string()
+    Ok(url.to_string())
 }
 
-fn normalize_epay_base_url(value: &str) -> Option<String> {
-    let trimmed = value.trim().trim_end_matches('/');
-    let parsed = url::Url::parse(trimmed).ok()?;
-    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
-        return None;
-    }
-    Some(trimmed.to_string())
-}
-
-fn forwarded_header_first(value: String) -> Option<String> {
-    value
-        .split(',')
-        .next()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
-}
-
-pub(crate) fn epay_callback_base_url(
-    configured: Option<&str>,
-    headers: &http::HeaderMap,
-    request_context: &GatewayPublicRequestContext,
-) -> Option<String> {
-    if let Some(value) = configured.and_then(normalize_epay_base_url) {
-        return Some(value);
+pub(crate) fn epay_callback_base_url(configured: Option<&str>) -> Option<String> {
+    if let Some(configured) = configured {
+        return crate::handlers::shared::normalize_payment_callback_base_url(configured).ok();
     }
 
-    if let Some(value) = std::env::var("AETHER_PUBLIC_BASE_URL")
+    std::env::var("AETHER_PUBLIC_BASE_URL")
         .ok()
         .or_else(|| std::env::var("PUBLIC_BASE_URL").ok())
-        .and_then(|value| normalize_epay_base_url(&value))
-    {
-        return Some(value);
-    }
-
-    let host = crate::headers::header_value_str(headers, crate::constants::FORWARDED_HOST_HEADER)
-        .and_then(forwarded_header_first)
-        .or_else(|| request_context.host_header.clone())
-        .map(|value| value.trim().trim_end_matches('/').to_string())
-        .filter(|value| {
-            !value.is_empty()
-                && !value.contains('/')
-                && !value.contains('\\')
-                && !value.contains('@')
-                && !value.contains(char::is_whitespace)
-        })?;
-    let proto = crate::headers::header_value_str(headers, crate::constants::FORWARDED_PROTO_HEADER)
-        .and_then(forwarded_header_first)
-        .map(|value| value.trim().trim_end_matches(':').to_ascii_lowercase())
-        .filter(|value| value == "http" || value == "https")
-        .unwrap_or_else(|| "http".to_string());
-    normalize_epay_base_url(&format!("{proto}://{host}"))
+        .and_then(|value| crate::handlers::shared::normalize_payment_callback_base_url(&value).ok())
 }
 
 pub(crate) fn build_epay_checkout_url(
     config: &EpayMerchantConfig,
     input: &EpayCheckoutInput,
-) -> serde_json::Value {
+) -> Result<serde_json::Value, String> {
     let money = format!("{:.2}", input.pay_amount);
     let mut params = BTreeMap::new();
     params.insert("pid".to_string(), config.merchant_id.clone());
@@ -210,12 +198,12 @@ pub(crate) fn build_epay_checkout_url(
     let sign = epay_sign(&params, &config.merchant_key);
     params.insert("sign".to_string(), sign);
 
-    let payment_url = epay_submit_url(&config.endpoint_url);
+    let payment_url = epay_submit_url(&config.endpoint_url)?;
     let payment_params = params
         .iter()
         .map(|(key, value)| (key.clone(), serde_json::Value::String(value.clone())))
         .collect::<serde_json::Map<_, _>>();
-    json!({
+    Ok(json!({
         "gateway": "epay",
         "display_name": "易支付",
         "gateway_order_id": input.order_no,
@@ -226,7 +214,7 @@ pub(crate) fn build_epay_checkout_url(
         "pay_amount": input.pay_amount,
         "pay_currency": config.pay_currency,
         "payment_channel": input.channel,
-    })
+    }))
 }
 
 pub(crate) fn parse_epay_params(
@@ -243,34 +231,131 @@ pub(crate) fn parse_epay_params(
         .collect()
 }
 
+fn epay_callback_projection(
+    _params: &BTreeMap<String, String>,
+    order_no: &str,
+    gateway_order_id: Option<&str>,
+    pay_amount: f64,
+    pay_currency: &str,
+    payment_channel: Option<&str>,
+) -> serde_json::Value {
+    json!({
+        "gateway": "epay",
+        "event_id": gateway_order_id,
+        "gateway_order_id": gateway_order_id,
+        "order_no": order_no,
+        "amount": pay_amount,
+        "currency": pay_currency,
+        "payment_channel": payment_channel,
+        "status": "success",
+        "signature_valid": true,
+    })
+}
+
+fn bounded_epay_callback_value(value: Option<&String>, max_bytes: usize) -> Option<String> {
+    let value = value?.trim();
+    (!value.is_empty()
+        && value.len() <= max_bytes
+        && !value.bytes().any(|byte| byte.is_ascii_control()))
+    .then(|| value.to_string())
+}
+
 pub(crate) async fn load_epay_config(state: &AppState) -> Result<EpayMerchantConfig, String> {
     let Some(record) = state
         .find_payment_gateway_config("epay")
         .await
-        .map_err(|err| format!("epay config lookup failed: {err:?}"))?
+        .map_err(|_| "epay config lookup failed".to_string())?
     else {
         return Err("epay is not configured".to_string());
     };
     if !record.enabled {
         return Err("epay is disabled".to_string());
     }
+    let pay_currency = crate::handlers::shared::normalize_payment_currency(
+        &record.pay_currency,
+        "epay pay_currency",
+    )
+    .map_err(|_| "epay pay_currency is invalid".to_string())?;
+    let usd_exchange_rate = crate::handlers::shared::effective_payment_exchange_rate(
+        &pay_currency,
+        record.usd_exchange_rate,
+    )
+    .map_err(|_| "epay usd_exchange_rate is invalid".to_string())?;
+    if !record.min_recharge_usd.is_finite() || record.min_recharge_usd < 0.0 {
+        return Err("epay min_recharge_usd is invalid".to_string());
+    }
+    let endpoint_url =
+        crate::handlers::shared::normalize_payment_https_url(&record.endpoint_url, "endpoint_url")?;
+    let callback_base_url = record
+        .callback_base_url
+        .as_deref()
+        .map(crate::handlers::shared::normalize_payment_callback_base_url)
+        .transpose()?;
     let Some(encrypted_key) = record.merchant_key_encrypted.as_deref() else {
         return Err("epay merchant key is missing".to_string());
     };
-    let Some(merchant_key) = crate::handlers::shared::decrypt_catalog_secret_with_fallbacks(
-        state.encryption_key(),
-        encrypted_key,
-    ) else {
-        return Err("epay merchant key decrypt failed".to_string());
+    let binding = crate::handlers::shared::PaymentGatewaySecretBinding::from_record(&record)
+        .map_err(|_| "epay merchant key binding is invalid".to_string())?;
+    let merchant_key =
+        crate::handlers::shared::open_payment_gateway_secret(state, &binding, encrypted_key)
+            .map_err(|_| "epay merchant key decrypt failed".to_string())?
+            .plaintext;
+    Ok(EpayMerchantConfig {
+        endpoint_url,
+        callback_base_url,
+        merchant_id: record.merchant_id,
+        merchant_key,
+        pay_currency,
+        usd_exchange_rate,
+        min_recharge_usd: record.min_recharge_usd,
+        channels: record.channels_json,
+    })
+}
+
+/// Callback authentication must continue to work for an order created before
+/// an administrator disabled EPay or changed checkout pricing. Only the
+/// merchant identity and signing secret are needed to authenticate a notify;
+/// settlement values are resolved from the stored payment order below.
+pub(crate) async fn load_epay_callback_config(
+    state: &AppState,
+) -> Result<EpayMerchantConfig, String> {
+    let Some(record) = state
+        .find_payment_gateway_config("epay")
+        .await
+        .map_err(|_| "epay config lookup failed".to_string())?
+    else {
+        return Err("epay is not configured".to_string());
     };
+    let Some(encrypted_key) = record.merchant_key_encrypted.as_deref() else {
+        return Err("epay merchant key is missing".to_string());
+    };
+    let binding = crate::handlers::shared::PaymentGatewaySecretBinding::from_record(&record)
+        .map_err(|_| "epay merchant key binding is invalid".to_string())?;
+    let merchant_key =
+        crate::handlers::shared::open_payment_gateway_secret(state, &binding, encrypted_key)
+            .map_err(|_| "epay merchant key decrypt failed".to_string())?
+            .plaintext;
+    // EPay notifications do not carry a currency or exchange-rate field. Use
+    // conservative finite fallbacks only when the order lookup below cannot
+    // provide the values; an unknown order is rejected by the repository.
+    let pay_currency = crate::handlers::shared::normalize_payment_currency(
+        &record.pay_currency,
+        "epay pay_currency",
+    )
+    .unwrap_or_else(|_| "CNY".to_string());
+    let usd_exchange_rate = crate::handlers::shared::effective_payment_exchange_rate(
+        &pay_currency,
+        record.usd_exchange_rate,
+    )
+    .unwrap_or(1.0);
     Ok(EpayMerchantConfig {
         endpoint_url: record.endpoint_url,
         callback_base_url: record.callback_base_url,
         merchant_id: record.merchant_id,
         merchant_key,
-        pay_currency: record.pay_currency,
-        usd_exchange_rate: record.usd_exchange_rate,
-        min_recharge_usd: record.min_recharge_usd,
+        pay_currency,
+        usd_exchange_rate,
+        min_recharge_usd: 0.0,
         channels: record.channels_json,
     })
 }
@@ -326,7 +411,7 @@ pub(super) async fn handle_epay_notify(
     request_context: &GatewayPublicRequestContext,
     request_body: Option<&axum::body::Bytes>,
 ) -> Response<Body> {
-    let config = match load_epay_config(state).await {
+    let config = match load_epay_callback_config(state).await {
         Ok(value) => value,
         Err(_) => return epay_plain(http::StatusCode::OK, "fail"),
     };
@@ -337,50 +422,83 @@ pub(super) async fn handle_epay_notify(
     if !epay_signature_valid(&params, &config.merchant_key) {
         return epay_plain(http::StatusCode::OK, "fail");
     }
+    if params.get("pid").map(String::as_str) != Some(config.merchant_id.as_str()) {
+        return epay_plain(http::StatusCode::OK, "fail");
+    }
     if params.get("trade_status").map(String::as_str) != Some("TRADE_SUCCESS") {
         return epay_plain(http::StatusCode::OK, "fail");
     }
-    let Some(order_no) = params.get("out_trade_no").cloned() else {
+    let Some(order_no) =
+        bounded_epay_callback_value(params.get("out_trade_no"), MAX_EPAY_ORDER_NO_BYTES)
+    else {
         return epay_plain(http::StatusCode::OK, "fail");
     };
     let Some(pay_amount) = params
         .get("money")
         .and_then(|value| value.parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value > 0.0)
     else {
         return epay_plain(http::StatusCode::OK, "fail");
     };
-    let channel = params
-        .get("type")
-        .map(|value| value.trim().to_ascii_lowercase())
-        .filter(|value| !value.is_empty());
-    let payload = serde_json::to_value(&params).unwrap_or_else(|_| json!({}));
-    let payload_hash = match payment_callback_payload_hash(&payload) {
+    let Some(channel) = bounded_epay_callback_value(params.get("type"), MAX_EPAY_CHANNEL_BYTES)
+        .map(|value| value.to_ascii_lowercase())
+    else {
+        return epay_plain(http::StatusCode::OK, "fail");
+    };
+    // Do not require the channel to remain enabled after checkout creation.
+    // The repository binds this signed value to the channel stored on the
+    // order, so removing a channel only blocks new checkouts and cannot strand
+    // an already-paid order.
+    let Some(gateway_order_id) =
+        bounded_epay_callback_value(params.get("trade_no"), MAX_EPAY_GATEWAY_ORDER_ID_BYTES)
+    else {
+        return epay_plain(http::StatusCode::OK, "fail");
+    };
+    let raw_payload = serde_json::to_value(&params).unwrap_or_else(|_| json!({}));
+    let payload_hash = match payment_callback_payload_hash(&raw_payload) {
         Ok(value) => value,
         Err(_) => return epay_plain(http::StatusCode::OK, "fail"),
     };
-    let callback_key = params
-        .get("trade_no")
-        .cloned()
-        .unwrap_or_else(|| format!("epay:{order_no}:{payload_hash}"));
-    let amount_usd = if config.usd_exchange_rate > 0.0 {
-        pay_amount / config.usd_exchange_rate
-    } else {
-        pay_amount
+    let callback_key = format!("epay:{gateway_order_id}");
+    let order = match crate::handlers::shared::find_payment_callback_order(state, &order_no).await {
+        Ok(value) => value,
+        Err(_) => return epay_plain(http::StatusCode::OK, "fail"),
     };
+    let (amount_usd, exchange_rate) =
+        match crate::handlers::shared::payment_callback_settlement_values(
+            order.as_ref(),
+            pay_amount,
+            Some(config.usd_exchange_rate),
+        ) {
+            Ok(value) => value,
+            Err(_) => return epay_plain(http::StatusCode::OK, "fail"),
+        };
+    let pay_currency = order
+        .as_ref()
+        .and_then(|order| order.pay_currency.clone())
+        .unwrap_or_else(|| config.pay_currency.clone());
+    let payload = epay_callback_projection(
+        &params,
+        &order_no,
+        Some(&gateway_order_id),
+        pay_amount,
+        &pay_currency,
+        Some(&channel),
+    );
 
     let outcome = state
         .process_payment_callback(
             aether_data::repository::wallet::ProcessPaymentCallbackInput {
                 payment_method: "epay".to_string(),
                 payment_provider: Some("epay".to_string()),
-                payment_channel: channel,
+                payment_channel: Some(channel),
                 callback_key,
                 order_no: Some(order_no),
-                gateway_order_id: params.get("trade_no").cloned(),
+                gateway_order_id: Some(gateway_order_id),
                 amount_usd,
                 pay_amount: Some(pay_amount),
-                pay_currency: Some(config.pay_currency),
-                exchange_rate: Some(config.usd_exchange_rate),
+                pay_currency: Some(pay_currency),
+                exchange_rate,
                 payload_hash,
                 payload,
                 signature_valid: true,
@@ -388,21 +506,18 @@ pub(super) async fn handle_epay_notify(
         )
         .await;
 
+    if let Ok(Some(callback_outcome)) = &outcome {
+        if !super::reconcile_payment_callback_referral_rewards(state, callback_outcome, "epay")
+            .await
+        {
+            return epay_plain(http::StatusCode::OK, "fail");
+        }
+    }
+
     match outcome {
         Ok(Some(aether_data::repository::wallet::ProcessPaymentCallbackOutcome::Applied {
-            order,
-            order_id,
             ..
-        })) => {
-            if let Err(err) = state.apply_referral_rewards_for_paid_order(&order).await {
-                warn!(
-                    error = ?err,
-                    order_id = %order_id,
-                    "failed to apply referral rewards for epay callback"
-                );
-            }
-            epay_plain(http::StatusCode::OK, "success")
-        }
+        })) => epay_plain(http::StatusCode::OK, "success"),
         Ok(Some(
             aether_data::repository::wallet::ProcessPaymentCallbackOutcome::AlreadyCredited {
                 ..
@@ -426,7 +541,7 @@ pub(super) async fn handle_epay_return(
         request_context.request_query_string.as_deref(),
         request_body,
     );
-    let signature_valid = load_epay_config(state)
+    let signature_valid = load_epay_callback_config(state)
         .await
         .ok()
         .is_some_and(|config| epay_signature_valid(&params, &config.merchant_key));
@@ -436,8 +551,9 @@ pub(super) async fn handle_epay_return(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_epay_checkout_url, configured_epay_channels, epay_sign, epay_signature_valid,
-        resolve_epay_channel, EpayCheckoutInput, EpayMerchantConfig,
+        build_epay_checkout_url, configured_epay_channels, epay_callback_base_url,
+        epay_callback_projection, epay_sign, epay_signature_valid, resolve_epay_channel,
+        EpayCheckoutInput, EpayMerchantConfig,
     };
     use chrono::Utc;
     use serde_json::json;
@@ -455,6 +571,26 @@ mod tests {
         params.insert("sign".to_string(), sign.clone());
         assert!(epay_signature_valid(&params, "secret"));
         assert!(!epay_signature_valid(&params, "wrong"));
+    }
+
+    #[test]
+    fn epay_config_debug_output_redacts_merchant_credentials() {
+        let mut config = test_epay_config(json!({"private": "epay-channel-canary"}));
+        config.endpoint_url = "https://pay.example/?token=epay-endpoint-canary".to_string();
+        config.callback_base_url =
+            Some("https://callback.example/epay-callback-canary".to_string());
+        config.merchant_key = "epay-merchant-key-canary".to_string();
+
+        let debug = format!("{config:?}");
+        assert!(debug.contains("[REDACTED]"));
+        for secret in [
+            "epay-channel-canary",
+            "epay-endpoint-canary",
+            "epay-callback-canary",
+            "epay-merchant-key-canary",
+        ] {
+            assert!(!debug.contains(secret), "debug output leaked {secret}");
+        }
     }
 
     #[test]
@@ -509,7 +645,8 @@ mod tests {
                 notify_url: "https://aether.example.com/api/payment/epay/notify".to_string(),
                 return_url: "https://aether.example.com/api/payment/epay/return".to_string(),
             },
-        );
+        )
+        .expect("valid HTTPS endpoint should build checkout");
 
         assert_eq!(
             checkout["payment_url"],
@@ -536,11 +673,87 @@ mod tests {
                 notify_url: "https://aether.example.com/api/payment/epay/notify".to_string(),
                 return_url: "https://aether.example.com/api/payment/epay/return".to_string(),
             },
-        );
+        )
+        .expect("valid HTTPS endpoint should build checkout");
         assert_eq!(
             checkout["payment_url"],
             "https://pay.example.com/submit.php"
         );
+    }
+
+    #[test]
+    fn epay_checkout_rejects_executable_or_insecure_endpoint_urls() {
+        for endpoint_url in [
+            "javascript:alert(document.domain)",
+            "data:text/html,attack",
+            "http://pay.example.com/submit.php",
+            "/submit.php",
+        ] {
+            let mut config = test_epay_config(json!([]));
+            config.endpoint_url = endpoint_url.to_string();
+            let result = build_epay_checkout_url(
+                &config,
+                &EpayCheckoutInput {
+                    order_no: "po_unsafe".to_string(),
+                    channel: "alipay".to_string(),
+                    subject: "wallet recharge".to_string(),
+                    pay_amount: 1.0,
+                    notify_url: "https://aether.example/api/payment/epay/notify".to_string(),
+                    return_url: "https://aether.example/api/payment/epay/return".to_string(),
+                },
+            );
+            assert!(
+                result.is_err(),
+                "unsafe endpoint should fail: {endpoint_url}"
+            );
+        }
+    }
+
+    #[test]
+    fn epay_callback_base_requires_explicit_https_configuration() {
+        assert_eq!(
+            epay_callback_base_url(Some("https://aether.example/")),
+            Some("https://aether.example".to_string())
+        );
+        assert_eq!(epay_callback_base_url(Some("http://aether.example")), None);
+        assert_eq!(
+            epay_callback_base_url(Some("https://user:secret@aether.example")),
+            None
+        );
+    }
+
+    #[test]
+    fn epay_callback_projection_does_not_persist_signature_or_payer_fields() {
+        let params = BTreeMap::from([
+            ("trade_no".to_string(), "gateway-1".to_string()),
+            ("sign".to_string(), "replayable-signature".to_string()),
+            ("buyer_email".to_string(), "payer@example.com".to_string()),
+            ("name".to_string(), "private subject".to_string()),
+        ]);
+
+        let projection = epay_callback_projection(
+            &params,
+            "po_1",
+            Some("gateway-1"),
+            72.0,
+            "CNY",
+            Some("alipay"),
+        );
+        assert_eq!(projection["event_id"], "gateway-1");
+        assert_eq!(projection["gateway_order_id"], "gateway-1");
+        assert_eq!(projection["order_no"], "po_1");
+        assert_eq!(projection["payment_channel"], "alipay");
+        assert!(projection.get("sign").is_none());
+
+        let encoded = projection.to_string();
+        for forbidden in [
+            "replayable-signature",
+            "buyer_email",
+            "payer@example.com",
+            "private subject",
+        ] {
+            assert!(!encoded.contains(forbidden), "persisted {forbidden}");
+        }
     }
 
     fn test_epay_config(channels: serde_json::Value) -> EpayMerchantConfig {

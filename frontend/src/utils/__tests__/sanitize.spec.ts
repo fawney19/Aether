@@ -36,6 +36,18 @@ describe('sanitize utils', () => {
       const result = sanitizeHtml(input)
       expect(result).toContain('href')
       expect(result).toContain('https://example.com')
+      expect(result).toContain('referrerpolicy="no-referrer"')
+    })
+
+    it('should isolate links that open a new browsing context', () => {
+      const result = sanitizeHtml('<a href="https://example.com" target="_blank">Link</a>')
+      expect(result).toContain('target="_blank"')
+      expect(result).toContain('rel="noopener noreferrer"')
+    })
+
+    it('should remove attacker-controlled named browsing contexts', () => {
+      const result = sanitizeHtml('<a href="https://example.com" target="admin-window">Link</a>')
+      expect(result).not.toContain('target=')
     })
 
     it('should allow code blocks', () => {
@@ -84,6 +96,8 @@ describe('sanitize utils', () => {
       expect(result).toContain('<img')
       expect(result).toContain('src')
       expect(result).toContain('alt')
+      expect(result).toContain('referrerpolicy="no-referrer"')
+      expect(result).toContain('loading="lazy"')
     })
 
     it('should remove malicious image sources', () => {

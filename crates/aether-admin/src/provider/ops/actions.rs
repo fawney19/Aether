@@ -53,11 +53,7 @@ pub fn parse_sub2api_balance_payload(
         return Err("响应格式无效".to_string());
     };
     if me_payload.get("code").and_then(Value::as_i64).unwrap_or(-1) != 0 {
-        return Err(me_payload
-            .get("message")
-            .and_then(Value::as_str)
-            .unwrap_or("查询用户信息失败")
-            .to_string());
+        return Err("查询用户信息失败".to_string());
     }
     let Some(me_data) = me_payload.get("data").and_then(Value::as_object) else {
         return Err("响应格式无效".to_string());
@@ -126,11 +122,12 @@ pub fn attach_balance_checkin_outcome(
             .entry("extra".to_string())
             .or_insert_with(|| Value::Object(Map::new()));
         if let Some(extra) = extra.as_object_mut() {
+            let message = stable_checkin_outcome_message(outcome);
             if outcome.cookie_expired {
                 extra.insert("cookie_expired".to_string(), Value::Bool(true));
                 extra.insert(
                     "cookie_expired_message".to_string(),
-                    Value::String(outcome.message.clone()),
+                    Value::String(message.to_string()),
                 );
             } else {
                 extra.insert(
@@ -139,7 +136,7 @@ pub fn attach_balance_checkin_outcome(
                 );
                 extra.insert(
                     "checkin_message".to_string(),
-                    Value::String(outcome.message.clone()),
+                    Value::String(message.to_string()),
                 );
             }
         }
@@ -148,6 +145,17 @@ pub fn attach_balance_checkin_outcome(
         if let Some(object) = action_payload.as_object_mut() {
             object.insert("status".to_string(), json!("auth_expired"));
         }
+    }
+}
+
+fn stable_checkin_outcome_message(outcome: &ProviderOpsCheckinOutcome) -> &'static str {
+    if outcome.cookie_expired {
+        return "Cookie 已失效";
+    }
+    match outcome.success {
+        Some(true) => "签到成功",
+        Some(false) => "签到失败",
+        None => "今日已签到",
     }
 }
 
@@ -177,11 +185,7 @@ fn parse_new_api_balance_payload(
     {
         response_json.get("data")
     } else if response_json.get("success").and_then(Value::as_bool) == Some(false) {
-        return Err(response_json
-            .get("message")
-            .and_then(Value::as_str)
-            .unwrap_or("业务状态码表示失败")
-            .to_string());
+        return Err("业务状态码表示失败".to_string());
     } else {
         Some(response_json)
     };
@@ -265,11 +269,7 @@ fn parse_cubence_balance_payload(
     {
         response_json.get("data")
     } else if response_json.get("success").and_then(Value::as_bool) == Some(false) {
-        return Err(response_json
-            .get("message")
-            .and_then(Value::as_str)
-            .unwrap_or("查询余额失败")
-            .to_string());
+        return Err("查询余额失败".to_string());
     } else {
         Some(response_json)
     };
@@ -693,5 +693,48 @@ mod tests {
 
         assert_eq!(payload["status"], json!("auth_expired"));
         assert_eq!(payload["data"]["extra"]["cookie_expired"], json!(true));
+    }
+
+    #[test]
+    fn attach_balance_checkin_outcome_does_not_copy_upstream_message() {
+        let mut payload = json!({
+            "status": "success",
+            "data": { "extra": {} }
+        });
+        attach_balance_checkin_outcome(
+            &mut payload,
+            &ProviderOpsCheckinOutcome {
+                success: Some(true),
+                message: "authorization=Bearer upstream-secret".to_string(),
+                cookie_expired: false,
+            },
+        );
+
+        assert_eq!(
+            payload["data"]["extra"]["checkin_message"],
+            json!("签到成功")
+        );
+        assert!(!payload.to_string().contains("upstream-secret"));
+    }
+
+    #[test]
+    fn balance_parsers_do_not_return_upstream_error_messages() {
+        let config = json!({}).as_object().cloned().expect("config");
+        let secret = "authorization=Bearer upstream-secret";
+
+        let generic_error = parse_query_balance_payload(
+            "generic_api",
+            &config,
+            &json!({"success": false, "message": secret}),
+        )
+        .expect_err("generic API failure should be rejected");
+        let sub2api_error =
+            parse_sub2api_balance_payload(&config, &json!({"code": 401, "message": secret}), None)
+                .expect_err("Sub2API failure should be rejected");
+
+        assert_eq!(generic_error, "业务状态码表示失败");
+        assert_eq!(sub2api_error, "查询用户信息失败");
+        assert!(!generic_error.contains("upstream-secret"));
+        assert!(!sub2api_error.contains("upstream-secret"));
     }
 }

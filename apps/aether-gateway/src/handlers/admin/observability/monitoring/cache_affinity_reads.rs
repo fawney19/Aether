@@ -141,9 +141,8 @@ pub(super) async fn build_admin_monitoring_cache_affinities_response(
         let key = affinity.key_id.as_ref().and_then(|id| key_by_id.get(id));
 
         let user_api_key_name = user_api_key.and_then(|item| item.name.clone());
-        let user_api_key_prefix = user_api_key.and_then(|item| {
-            admin_monitoring_masked_user_api_key_prefix(state, item.key_encrypted.as_deref())
-        });
+        let user_api_key_prefix =
+            user_api_key.and_then(|item| admin_monitoring_masked_user_api_key_prefix(state, item));
         let provider_name = provider.map(|item| item.name.clone());
         let endpoint_url = endpoint
             .map(|item| item.base_url.clone())

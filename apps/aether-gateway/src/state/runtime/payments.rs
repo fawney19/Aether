@@ -142,7 +142,7 @@ impl AppState {
             }
             if order
                 .expires_at_unix_secs
-                .is_some_and(|value| value < chrono::Utc::now().timestamp().max(0) as u64)
+                .is_some_and(|value| value <= chrono::Utc::now().timestamp().max(0) as u64)
             {
                 return Ok(AdminWalletMutationOutcome::Invalid(
                     "payment order expired".to_string(),

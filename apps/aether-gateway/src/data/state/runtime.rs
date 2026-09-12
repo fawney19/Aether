@@ -7,33 +7,39 @@ use super::{
     AdminWalletRefundRequestListQuery, AnnouncementListQuery, AuditLogListQuery,
     BackgroundTaskListQuery, BackgroundTaskSummary, BillingModelContextCacheKey,
     BillingModelContextCacheState, BillingModelContextInflightState, BillingPlanRecord,
-    BillingPlanWriteInput, CompleteAdminWalletRefundInput, CreateAdminRedeemCodeBatchInput,
+    BillingPlanWriteInput, CompareAndSwapPaymentOrderStripeClientSecretInput,
+    CompleteAdminWalletRefundInput, CreateAdminRedeemCodeBatchInput,
     CreateAdminRedeemCodeBatchResult, CreateAnnouncementRecord, CreateManualWalletRechargeInput,
     CreatePlanPurchaseOrderInput, CreatePlanPurchaseOrderOutcome, CreateWalletRechargeOrderInput,
     CreateWalletRechargeOrderOutcome, CreateWalletRefundRequestInput,
     CreateWalletRefundRequestOutcome, CreditAdminPaymentOrderInput, DataLayerError,
     DatabaseMaintenanceSummary, DecisionTrace, DeleteAdminRedeemCodeBatchInput,
     DisableAdminRedeemCodeBatchInput, DisableAdminRedeemCodeInput, FailAdminWalletRefundInput,
-    GatewayDataState, GatewayProviderTransportSnapshot, LocalVideoTaskReadResponse,
-    PaymentGatewayConfigRecord, PaymentGatewayConfigWriteInput, ProcessAdminWalletRefundInput,
-    ProcessPaymentCallbackInput, ProcessPaymentCallbackOutcome, RedeemWalletCodeInput,
-    RedeemWalletCodeOutcome, RequestAuditBundle, RequestCandidateTrace, StoredAdminAuditLogPage,
-    StoredAdminPaymentCallbackPage, StoredAdminPaymentOrder, StoredAdminPaymentOrderPage,
-    StoredAdminRedeemCodeBatch, StoredAdminRedeemCodeBatchPage, StoredAdminRedeemCodePage,
-    StoredAdminWalletLedgerPage, StoredAdminWalletListPage, StoredAdminWalletRefund,
-    StoredAdminWalletRefundPage, StoredAdminWalletRefundRequestPage, StoredAdminWalletTransaction,
+    FailWalletRechargeCheckoutInput, GatewayDataState, GatewayProviderTransportSnapshot,
+    LocalVideoTaskReadResponse, PaymentGatewayConfigCasWriteInput, PaymentGatewayConfigRecord,
+    PaymentGatewayConfigWriteInput, PaymentGatewaySecretCasUpdate, ProcessAdminWalletRefundInput,
+    ProcessPaymentCallbackInput, ProcessPaymentCallbackOutcome, ReclaimWalletRechargeCheckoutInput,
+    ReconcileUsagePolicyCostInput, RedeemWalletCodeInput, RedeemWalletCodeOutcome,
+    ReleaseUsagePolicyRequestAdmissionInput, RequestAuditBundle, RequestCandidateTrace,
+    ReserveUsagePolicyCostInput, ReserveUsagePolicyCostOutcome, ReserveUsagePolicyRequestInput,
+    ReserveUsagePolicyRequestOutcome, StoredAdminAuditLogPage, StoredAdminPaymentCallbackPage,
+    StoredAdminPaymentOrder, StoredAdminPaymentOrderPage, StoredAdminRedeemCodeBatch,
+    StoredAdminRedeemCodeBatchPage, StoredAdminRedeemCodePage, StoredAdminWalletLedgerPage,
+    StoredAdminWalletListPage, StoredAdminWalletRefund, StoredAdminWalletRefundPage,
+    StoredAdminWalletRefundRequestPage, StoredAdminWalletTransaction,
     StoredAdminWalletTransactionPage, StoredAnnouncement, StoredAnnouncementPage,
     StoredBackgroundTaskEvent, StoredBackgroundTaskRun, StoredBackgroundTaskRunPage,
     StoredBillingModelContext, StoredProviderQuotaSnapshot, StoredProviderUsageSummary,
-    StoredRequestUsageAudit, StoredSuspiciousActivity, StoredUsageSettlement,
-    StoredUserAuditLogPage, StoredUserAuthRecord, StoredUserExportRow, StoredUserSummary,
-    StoredVideoTask, StoredWalletDailyUsageLedger, StoredWalletDailyUsageLedgerPage,
-    StoredWalletSnapshot, UpdateAnnouncementRecord, UpsertBackgroundTaskEvent,
-    UpsertBackgroundTaskRun, UpsertUsageRecord, UpsertVideoTask, UsageSettlementInput,
-    UserDailyQuotaAvailabilityRecord, UserPlanEntitlementRecord, VideoTaskLookupKey,
-    VideoTaskModelCount, VideoTaskQueryFilter, VideoTaskStatusCount,
-    WalletDailyUsageAggregationInput, WalletDailyUsageAggregationResult, WalletLookupKey,
-    WalletMutationOutcome,
+    StoredRequestUsageAudit, StoredSuspiciousActivity, StoredUsagePolicyCostReservation,
+    StoredUsagePolicyRequestAdmission, StoredUsageSettlement, StoredUserAuditLogPage,
+    StoredUserAuthRecord, StoredUserExportRow, StoredUserSummary, StoredVideoTask,
+    StoredWalletDailyUsageLedger, StoredWalletDailyUsageLedgerPage, StoredWalletSnapshot,
+    UpdateAdminWalletRefundGatewayInput, UpdateAnnouncementRecord,
+    UpdateWalletRechargeCheckoutInput, UpsertBackgroundTaskEvent, UpsertBackgroundTaskRun,
+    UpsertUsageRecord, UpsertVideoTask, UsageSettlementInput, UserDailyQuotaAvailabilityRecord,
+    UserPlanEntitlementRecord, VideoTaskLookupKey, VideoTaskModelCount, VideoTaskQueryFilter,
+    VideoTaskStatusCount, WalletDailyUsageAggregationInput, WalletDailyUsageAggregationResult,
+    WalletLookupKey, WalletMutationOutcome,
 };
 use aether_data_contracts::repository::usage::{
     PendingUsageCleanupSummary, ProviderApiKeyWindowUsageRequest,
@@ -43,7 +49,9 @@ use aether_data_contracts::repository::usage::{
     UsageDailyHeatmapQuery,
 };
 use aether_runtime_state::RuntimeQueueStore;
-use aether_video_tasks_core::read_data_backed_video_task_response;
+use aether_video_tasks_core::{
+    read_data_backed_video_task_response, read_data_backed_video_task_response_for_user,
+};
 use std::time::{Duration, Instant};
 use tokio::time::timeout;
 
@@ -558,6 +566,17 @@ impl GatewayDataState {
         }
     }
 
+    pub(crate) async fn find_video_task_for_user(
+        &self,
+        key: VideoTaskLookupKey<'_>,
+        user_id: &str,
+    ) -> Result<Option<StoredVideoTask>, DataLayerError> {
+        match &self.video_task_reader {
+            Some(repository) => repository.find_for_user(key, user_id).await,
+            None => Ok(None),
+        }
+    }
+
     pub(crate) async fn list_video_task_page(
         &self,
         filter: &VideoTaskQueryFilter,
@@ -894,6 +913,21 @@ impl GatewayDataState {
         }
     }
 
+    pub(crate) async fn find_wallet_recharge_order_by_order_no(
+        &self,
+        user_id: &str,
+        order_no: &str,
+    ) -> Result<Option<StoredAdminPaymentOrder>, DataLayerError> {
+        match &self.wallet_reader {
+            Some(repository) => {
+                repository
+                    .find_wallet_recharge_order_by_order_no(user_id, order_no)
+                    .await
+            }
+            None => Ok(None),
+        }
+    }
+
     pub(crate) async fn find_pending_plan_purchase_order_by_user_id(
         &self,
         user_id: &str,
@@ -905,6 +939,16 @@ impl GatewayDataState {
                     .find_pending_plan_purchase_order_by_user_id(user_id, product_id)
                     .await
             }
+            None => Ok(None),
+        }
+    }
+
+    pub(crate) async fn find_payment_order_by_order_no(
+        &self,
+        order_no: &str,
+    ) -> Result<Option<StoredAdminPaymentOrder>, DataLayerError> {
+        match &self.wallet_reader {
+            Some(repository) => repository.find_payment_order_by_order_no(order_no).await,
             None => Ok(None),
         }
     }
@@ -928,6 +972,58 @@ impl GatewayDataState {
         match &self.wallet_writer {
             Some(repository) => repository
                 .create_wallet_recharge_order(input)
+                .await
+                .map(Some),
+            None => Ok(None),
+        }
+    }
+
+    pub(crate) async fn update_wallet_recharge_checkout(
+        &self,
+        input: UpdateWalletRechargeCheckoutInput,
+    ) -> Result<Option<WalletMutationOutcome<StoredAdminPaymentOrder>>, DataLayerError> {
+        match &self.wallet_writer {
+            Some(repository) => repository
+                .update_wallet_recharge_checkout(input)
+                .await
+                .map(Some),
+            None => Ok(None),
+        }
+    }
+
+    pub(crate) async fn compare_and_swap_payment_order_stripe_client_secret(
+        &self,
+        input: CompareAndSwapPaymentOrderStripeClientSecretInput,
+    ) -> Result<Option<bool>, DataLayerError> {
+        match &self.wallet_writer {
+            Some(repository) => repository
+                .compare_and_swap_payment_order_stripe_client_secret(input)
+                .await
+                .map(Some),
+            None => Ok(None),
+        }
+    }
+
+    pub(crate) async fn fail_wallet_recharge_checkout(
+        &self,
+        input: FailWalletRechargeCheckoutInput,
+    ) -> Result<Option<WalletMutationOutcome<StoredAdminPaymentOrder>>, DataLayerError> {
+        match &self.wallet_writer {
+            Some(repository) => repository
+                .fail_wallet_recharge_checkout(input)
+                .await
+                .map(Some),
+            None => Ok(None),
+        }
+    }
+
+    pub(crate) async fn reclaim_wallet_recharge_checkout(
+        &self,
+        input: ReclaimWalletRechargeCheckoutInput,
+    ) -> Result<Option<WalletMutationOutcome<StoredAdminPaymentOrder>>, DataLayerError> {
+        match &self.wallet_writer {
+            Some(repository) => repository
+                .reclaim_wallet_recharge_checkout(input)
                 .await
                 .map(Some),
             None => Ok(None),
@@ -1003,6 +1099,19 @@ impl GatewayDataState {
         match &self.wallet_writer {
             Some(repository) => repository
                 .process_admin_wallet_refund(input)
+                .await
+                .map(Some),
+            None => Ok(None),
+        }
+    }
+
+    pub(crate) async fn update_admin_wallet_refund_gateway(
+        &self,
+        input: UpdateAdminWalletRefundGatewayInput,
+    ) -> Result<Option<WalletMutationOutcome<StoredAdminWalletRefund>>, DataLayerError> {
+        match &self.wallet_writer {
+            Some(repository) => repository
+                .update_admin_wallet_refund_gateway(input)
                 .await
                 .map(Some),
             None => Ok(None),
@@ -1148,6 +1257,83 @@ impl GatewayDataState {
         match &self.settlement_writer {
             Some(repository) => repository.settle_usage(input).await,
             None => Ok(None),
+        }
+    }
+
+    pub(crate) async fn reserve_usage_policy_cost(
+        &self,
+        input: ReserveUsagePolicyCostInput,
+    ) -> Result<Option<ReserveUsagePolicyCostOutcome>, DataLayerError> {
+        match &self.settlement_writer {
+            Some(repository) => repository.reserve_usage_policy_cost(input).await.map(Some),
+            None => Ok(None),
+        }
+    }
+
+    pub(crate) async fn reserve_usage_policy_request(
+        &self,
+        input: ReserveUsagePolicyRequestInput,
+    ) -> Result<Option<ReserveUsagePolicyRequestOutcome>, DataLayerError> {
+        match &self.settlement_writer {
+            Some(repository) => repository
+                .reserve_usage_policy_request(input)
+                .await
+                .map(Some),
+            None => Ok(None),
+        }
+    }
+
+    pub(crate) async fn release_usage_policy_request_admission(
+        &self,
+        input: ReleaseUsagePolicyRequestAdmissionInput,
+    ) -> Result<Option<StoredUsagePolicyRequestAdmission>, DataLayerError> {
+        match &self.settlement_writer {
+            Some(repository) => {
+                repository
+                    .release_usage_policy_request_admission(input)
+                    .await
+            }
+            None => Ok(None),
+        }
+    }
+
+    pub(crate) async fn cleanup_usage_policy_request_admissions(
+        &self,
+        now_unix_secs: u64,
+        batch_size: usize,
+    ) -> Result<usize, DataLayerError> {
+        match &self.settlement_writer {
+            Some(repository) => {
+                repository
+                    .cleanup_usage_policy_request_admissions(now_unix_secs, batch_size)
+                    .await
+            }
+            None => Ok(0),
+        }
+    }
+
+    pub(crate) async fn reconcile_usage_policy_cost(
+        &self,
+        input: ReconcileUsagePolicyCostInput,
+    ) -> Result<Option<StoredUsagePolicyCostReservation>, DataLayerError> {
+        match &self.settlement_writer {
+            Some(repository) => repository.reconcile_usage_policy_cost(input).await,
+            None => Ok(None),
+        }
+    }
+
+    pub(crate) async fn cleanup_usage_policy_cost_reservations(
+        &self,
+        now_unix_secs: u64,
+        batch_size: usize,
+    ) -> Result<usize, DataLayerError> {
+        match &self.settlement_writer {
+            Some(repository) => {
+                repository
+                    .cleanup_usage_policy_cost_reservations(now_unix_secs, batch_size)
+                    .await
+            }
+            None => Ok(0),
         }
     }
 
@@ -1403,6 +1589,19 @@ impl GatewayDataState {
     ) -> Result<Option<serde_json::Value>, DataLayerError> {
         match &self.usage_reader {
             Some(repository) => repository.resolve_body_ref(body_ref).await,
+            None => Ok(None),
+        }
+    }
+
+    pub(crate) async fn read_request_usage_body_payload(
+        &self,
+        body_ref: &str,
+    ) -> Result<
+        Option<aether_data_contracts::repository::usage::StoredUsageBodyPayload>,
+        DataLayerError,
+    > {
+        match &self.usage_reader {
+            Some(repository) => repository.read_body_payload(body_ref).await,
             None => Ok(None),
         }
     }
@@ -2496,6 +2695,48 @@ impl GatewayDataState {
         }
     }
 
+    pub(crate) async fn find_payment_gateway_config_strong(
+        &self,
+        provider: &str,
+    ) -> Result<Option<PaymentGatewayConfigRecord>, DataLayerError> {
+        match &self.billing_reader {
+            Some(repository) => {
+                repository
+                    .find_payment_gateway_config_strong(provider)
+                    .await
+            }
+            None => Ok(None),
+        }
+    }
+
+    pub(crate) async fn compare_and_swap_payment_gateway_secret(
+        &self,
+        update: &PaymentGatewaySecretCasUpdate,
+    ) -> Result<bool, DataLayerError> {
+        match &self.billing_reader {
+            Some(repository) => {
+                repository
+                    .compare_and_swap_payment_gateway_secret(update)
+                    .await
+            }
+            None => Ok(false),
+        }
+    }
+
+    pub(crate) async fn compare_and_swap_payment_gateway_config(
+        &self,
+        input: &PaymentGatewayConfigCasWriteInput,
+    ) -> Result<AdminBillingMutationOutcome<PaymentGatewayConfigRecord>, DataLayerError> {
+        match &self.billing_reader {
+            Some(repository) => {
+                repository
+                    .compare_and_swap_payment_gateway_config(input)
+                    .await
+            }
+            None => Ok(AdminBillingMutationOutcome::Unavailable),
+        }
+    }
+
     pub(crate) async fn upsert_payment_gateway_config(
         &self,
         input: &PaymentGatewayConfigWriteInput,
@@ -2578,6 +2819,21 @@ impl GatewayDataState {
         }
     }
 
+    pub(crate) async fn revoke_user_plan_entitlement(
+        &self,
+        user_id: &str,
+        entitlement_id: &str,
+    ) -> Result<AdminBillingMutationOutcome<()>, DataLayerError> {
+        match &self.billing_reader {
+            Some(repository) => {
+                repository
+                    .revoke_user_plan_entitlement(user_id, entitlement_id)
+                    .await
+            }
+            None => Ok(AdminBillingMutationOutcome::Unavailable),
+        }
+    }
+
     pub(crate) async fn find_user_daily_quota_availability(
         &self,
         user_id: &str,
@@ -2650,6 +2906,16 @@ impl GatewayDataState {
         request_path: &str,
     ) -> Result<Option<LocalVideoTaskReadResponse>, DataLayerError> {
         read_data_backed_video_task_response(self, route_family, request_path).await
+    }
+
+    pub(crate) async fn read_video_task_response_for_user(
+        &self,
+        route_family: Option<&str>,
+        request_path: &str,
+        user_id: &str,
+    ) -> Result<Option<LocalVideoTaskReadResponse>, DataLayerError> {
+        read_data_backed_video_task_response_for_user(self, route_family, request_path, user_id)
+            .await
     }
 
     pub(crate) async fn find_background_task_run(

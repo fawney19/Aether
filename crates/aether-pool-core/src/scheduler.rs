@@ -18,6 +18,8 @@ pub struct PoolSchedulingPreset {
 pub struct PoolSchedulingConfig {
     pub scheduling_presets: Vec<PoolSchedulingPreset>,
     pub lru_enabled: bool,
+    /// Retained for configuration/API compatibility. Active quota exhaustion is
+    /// always an admission block; reset-aware adapters decide when it clears.
     pub skip_exhausted_accounts: bool,
     pub cost_limit_per_key_tokens: Option<u64>,
 }
@@ -225,9 +227,14 @@ fn schedule_pool_group<Candidate>(
             continue;
         }
 
-        if item.key_context.quota_hard_blocked
-            || (pool_config.skip_exhausted_accounts && item.key_context.quota_exhausted)
-        {
+        // A quota snapshot is an account-level admission signal, not merely a
+        // ranking hint. Continuing to schedule a member whose quota is known to
+        // be exhausted causes a request-wide retry storm (the upstream returns
+        // 429 for every attempt). `quota_hard_blocked` remains available for
+        // providers that can distinguish an explicit permanent block, but every
+        // active exhaustion must be removed from the request's candidate set;
+        // reset-aware provider adapters clear the signal once capacity returns.
+        if item.key_context.quota_hard_blocked || item.key_context.quota_exhausted {
             skipped.push(PoolSkippedCandidate {
                 candidate: item.candidate,
                 skip_reason: POOL_ACCOUNT_EXHAUSTED_SKIP_REASON,
@@ -913,6 +920,29 @@ mod tests {
         hard_blocked.key_context.quota_hard_blocked = true;
 
         let outcome = run_pool_scheduler(vec![ready, hard_blocked], &BTreeMap::new(), "seed");
+
+        assert_eq!(
+            outcome
+                .candidates
+                .iter()
+                .map(|item| item.candidate.as_str())
+                .collect::<Vec<_>>(),
+            vec!["key-ready"]
+        );
+        assert_eq!(
+            outcome.skipped_candidates[0].skip_reason,
+            POOL_ACCOUNT_EXHAUSTED_SKIP_REASON
+        );
+    }
+
+    #[test]
+    fn pool_scheduler_skips_exhausted_accounts_even_when_legacy_flag_is_false() {
+        let ready = sample_candidate("provider-pool", "endpoint-1", "key-ready", 10, true);
+        let mut exhausted =
+            sample_candidate("provider-pool", "endpoint-1", "key-exhausted", 10, true);
+        exhausted.key_context.quota_exhausted = true;
+
+        let outcome = run_pool_scheduler(vec![ready, exhausted], &BTreeMap::new(), "seed");
 
         assert_eq!(
             outcome

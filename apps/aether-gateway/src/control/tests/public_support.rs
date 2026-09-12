@@ -441,6 +441,26 @@ fn classifies_users_me_routes_as_public_support_route() {
             "available_models",
         ),
         (
+            http::Method::GET,
+            "/api/users/me/vscodex/devices",
+            "vscodex_devices_list",
+        ),
+        (
+            http::Method::POST,
+            "/api/users/me/vscodex/pairings",
+            "vscodex_pairing_create",
+        ),
+        (
+            http::Method::DELETE,
+            "/api/users/me/vscodex/devices/device-1",
+            "vscodex_device_delete",
+        ),
+        (
+            http::Method::POST,
+            "/api/users/me/vscodex/ws-tickets",
+            "vscodex_ws_ticket_create",
+        ),
+        (
             http::Method::PUT,
             "/api/users/me/model-capabilities",
             "model_capabilities_update",
@@ -494,6 +514,49 @@ fn classifies_users_me_routes_as_public_support_route() {
         );
         assert!(!decision.is_execution_runtime_candidate());
     }
+}
+
+#[test]
+fn vscodex_post_routes_buffer_request_body() {
+    let headers = headers(&[]);
+    for path in [
+        "/api/vscodex/pair",
+        "/api/users/me/vscodex/pairings",
+        "/api/users/me/vscodex/ws-tickets",
+    ] {
+        let uri: Uri = path.parse().expect("uri should parse");
+        let decision = classify_control_route(&http::Method::POST, &uri, &headers)
+            .expect("route should classify");
+        let context = GatewayPublicRequestContext::from_request_parts(
+            "trace-vscodex",
+            &http::Method::POST,
+            &uri,
+            &headers,
+            Some(decision),
+        );
+
+        assert!(
+            local_proxy_route_requires_buffered_body(&context),
+            "{path} should buffer its JSON body"
+        );
+    }
+}
+
+#[test]
+fn classifies_public_vscodex_pairing_exchange() {
+    let headers = headers(&[]);
+    let uri: Uri = "/api/vscodex/pair".parse().expect("uri should parse");
+    let decision =
+        classify_control_route(&http::Method::POST, &uri, &headers).expect("route should classify");
+
+    assert_eq!(decision.route_class.as_deref(), Some("public_support"));
+    assert_eq!(decision.route_family.as_deref(), Some("vscodex"));
+    assert_eq!(decision.route_kind.as_deref(), Some("pairing_exchange"));
+    assert_eq!(
+        decision.auth_endpoint_signature.as_deref(),
+        Some("public:vscodex")
+    );
+    assert!(!decision.is_execution_runtime_candidate());
 }
 
 #[test]
@@ -882,6 +945,34 @@ fn classifies_auth_routes_as_public_support_route() {
         );
         assert!(!decision.is_execution_runtime_candidate());
     }
+}
+
+#[test]
+fn does_not_classify_state_changing_auth_routes_for_get() {
+    for path in [
+        "/api/auth/login",
+        "/api/auth/refresh",
+        "/api/auth/register",
+        "/api/auth/logout",
+        "/api/auth/send-verification-code",
+        "/api/auth/verify-email",
+        "/api/auth/verification-status",
+    ] {
+        let headers = headers(&[]);
+        let uri: Uri = path.parse().expect("uri should parse");
+        assert!(
+            classify_control_route(&http::Method::GET, &uri, &headers).is_none(),
+            "state-changing auth route {path} must not accept GET"
+        );
+    }
+
+    let headers = headers(&[]);
+    let uri: Uri = "/api/auth/me".parse().expect("uri should parse");
+    assert_eq!(
+        classify_control_route(&http::Method::GET, &uri, &headers)
+            .and_then(|decision| decision.route_kind),
+        Some("me".to_string())
+    );
 }
 
 #[test]

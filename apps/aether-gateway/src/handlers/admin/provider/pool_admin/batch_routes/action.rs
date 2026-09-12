@@ -11,6 +11,15 @@ use axum::{
     response::Response,
 };
 
+const MAX_ADMIN_POOL_BATCH_ITEMS: usize = 100;
+
+pub(super) fn validate_admin_pool_batch_item_count(item_count: usize) -> Result<(), String> {
+    if item_count > MAX_ADMIN_POOL_BATCH_ITEMS {
+        return Err(format!("key_ids 最多 {MAX_ADMIN_POOL_BATCH_ITEMS} 个"));
+    }
+    Ok(())
+}
+
 pub(super) async fn build_admin_pool_batch_action_response(
     state: &AdminAppState<'_>,
     request_context: &AdminRequestContext<'_>,
@@ -54,8 +63,25 @@ pub(super) async fn build_admin_pool_batch_action_response(
             ));
         }
     };
+    if let Err(detail) = validate_admin_pool_batch_item_count(payload.key_ids.len()) {
+        return Ok(build_admin_pool_error_response(
+            http::StatusCode::BAD_REQUEST,
+            detail,
+        ));
+    }
 
     state
         .build_admin_pool_batch_action_response(&provider_id, payload)
         .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{validate_admin_pool_batch_item_count, MAX_ADMIN_POOL_BATCH_ITEMS};
+
+    #[test]
+    fn admin_pool_batch_item_count_has_an_inclusive_boundary() {
+        assert!(validate_admin_pool_batch_item_count(MAX_ADMIN_POOL_BATCH_ITEMS).is_ok());
+        assert!(validate_admin_pool_batch_item_count(MAX_ADMIN_POOL_BATCH_ITEMS + 1).is_err());
+    }
 }

@@ -832,6 +832,12 @@ name = "target_id"
 type = "text"
 
 [[table.usage_counter_deltas.columns]]
+name = "target_tunnel_generation"
+type = "text"
+length = 64
+nullable = true
+
+[[table.usage_counter_deltas.columns]]
 name = "request_count_delta"
 type = "int64"
 default = 0
@@ -1147,3 +1153,142 @@ columns = ["settlement_snapshot_schema_version"]
 [[table.usage_settlement_snapshots.indexes]]
 name = "ix_usage_settlement_snapshots_pricing_source"
 columns = ["billing_pricing_source"]
+
+[table.usage_cost_reservations]
+domain = "usage"
+order = 21
+primary_key = ["reservation_token"]
+
+[[table.usage_cost_reservations.columns]]
+name = "request_id"
+type = "text"
+length = 128
+
+[[table.usage_cost_reservations.columns]]
+name = "subject_id"
+type = "text"
+length = 128
+
+[[table.usage_cost_reservations.columns]]
+name = "reservation_token"
+type = "text"
+length = 128
+
+[[table.usage_cost_reservations.columns]]
+name = "admitted_at"
+type = "timestamp"
+
+[[table.usage_cost_reservations.columns]]
+name = "reserved_cost_units"
+type = "int64"
+
+[[table.usage_cost_reservations.columns]]
+name = "actual_cost_units"
+type = "int64"
+nullable = true
+
+[[table.usage_cost_reservations.columns]]
+name = "state"
+type = "text"
+length = 20
+
+[[table.usage_cost_reservations.columns]]
+name = "reservation_expires_at"
+type = "timestamp"
+
+[[table.usage_cost_reservations.columns]]
+name = "retain_until"
+type = "timestamp"
+
+[[table.usage_cost_reservations.columns]]
+name = "finalized_at"
+type = "timestamp"
+nullable = true
+
+[[table.usage_cost_reservations.columns]]
+name = "created_at"
+type = "timestamp"
+
+[[table.usage_cost_reservations.columns]]
+name = "updated_at"
+type = "timestamp"
+
+[[table.usage_cost_reservations.indexes]]
+name = "usage_cost_reservations_request_id_idx"
+columns = ["request_id"]
+
+[[table.usage_cost_reservations.indexes]]
+name = "usage_cost_reservations_subject_admitted_at_idx"
+columns = ["subject_id", "admitted_at"]
+
+[[table.usage_cost_reservations.indexes]]
+name = "usage_cost_reservations_reservation_expires_at_idx"
+columns = ["reservation_expires_at"]
+
+[[table.usage_cost_reservations.indexes]]
+name = "usage_cost_reservations_retain_until_token_idx"
+columns = ["retain_until", "reservation_token"]
+
+[[table.usage_cost_reservations.foreign_keys]]
+name = "usage_cost_reservations_subject_id_fkey"
+columns = ["subject_id"]
+references_table = "users"
+references_columns = ["id"]
+on_delete = "cascade"
+
+[table.usage_request_admissions]
+domain = "usage"
+order = 22
+primary_key = ["event_token"]
+
+[[table.usage_request_admissions.columns]]
+name = "request_id"
+type = "text"
+length = 128
+
+[[table.usage_request_admissions.columns]]
+name = "subject_id"
+type = "text"
+length = 128
+
+[[table.usage_request_admissions.columns]]
+name = "event_token"
+type = "text"
+length = 128
+
+[[table.usage_request_admissions.columns]]
+name = "admitted_at"
+type = "timestamp"
+
+[[table.usage_request_admissions.columns]]
+name = "retain_until"
+type = "timestamp"
+
+[[table.usage_request_admissions.columns]]
+name = "state"
+type = "text"
+length = 20
+
+[[table.usage_request_admissions.columns]]
+name = "released_at"
+type = "timestamp"
+nullable = true
+
+[[table.usage_request_admissions.columns]]
+name = "created_at"
+type = "timestamp"
+
+[[table.usage_request_admissions.indexes]]
+name = "usage_request_admissions_subject_admitted_at_idx"
+columns = ["subject_id", "admitted_at"]
+
+[[table.usage_request_admissions.indexes]]
+name = "usage_request_admissions_retain_until_token_idx"
+columns = ["retain_until", "event_token"]
+
+[[table.usage_request_admissions.foreign_keys]]
+name = "usage_request_admissions_subject_id_fkey"
+columns = ["subject_id"]
+references_table = "users"
+references_columns = ["id"]
+on_delete = "cascade"

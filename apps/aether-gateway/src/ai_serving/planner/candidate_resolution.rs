@@ -23,7 +23,9 @@ use crate::ai_serving::{
 use crate::orchestration::LocalExecutionCandidateMetadata;
 use crate::stage_metrics::observe_gateway_stage_ms;
 
-use super::candidate_ranking::rank_eligible_local_execution_candidates;
+use super::candidate_ranking::{
+    rank_eligible_local_execution_candidates, scheduler_ordering_config_for_routing_policy,
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct EligibleLocalExecutionCandidate {
@@ -390,8 +392,17 @@ async fn resolve_and_rank_local_execution_candidates_with_pool_expansion(
                 "candidate_resolution_core",
                 started_at.elapsed().as_millis() as u64,
             );
+            let sticky_key_attempts = if outcome.eligible_candidates.is_empty() {
+                None
+            } else {
+                Some(
+                    scheduler_ordering_config_for_routing_policy(routing_policy)
+                        .sticky_key_attempts,
+                )
+            };
             for candidate in &mut outcome.eligible_candidates {
                 candidate.orchestration.scheduler_affinity_epoch = Some(scheduler_affinity_epoch);
+                candidate.orchestration.sticky_key_attempts = sticky_key_attempts;
             }
             (outcome.eligible_candidates, outcome.skipped_candidates)
         }

@@ -5,18 +5,17 @@ use self::parse::parse_kiro_usage_response;
 use self::plan::execute_kiro_quota_plan;
 use super::shared::{
     build_quota_snapshot_payload, extract_execution_error_message,
-    oauth_refresh_auto_removed_result, persist_provider_quota_refresh_state,
+    oauth_refresh_auto_removed_result, persist_credential_fenced_provider_quota_refresh_state,
     persist_quota_oauth_refresh_failure_state, provider_auto_remove_quota_exhausted_keys,
     quota_refresh_success_invalid_state, ProviderQuotaExecutionOutcome,
 };
 use crate::handlers::admin::request::{AdminAppState, AdminLocalOAuthRefreshError};
 use crate::GatewayError;
+use aether_admin::provider::redaction::admin_provider_metadata_bucket_safe_json;
 use aether_contracts::ProxySnapshot;
 use aether_data_contracts::repository::provider_catalog::{
     StoredProviderCatalogEndpoint, StoredProviderCatalogKey, StoredProviderCatalogProvider,
 };
-use aether_provider_transport::kiro::build_kiro_request_auth_from_config;
-use aether_provider_transport::{CachedOAuthEntry, LocalResolvedOAuthRequestAuth};
 use serde_json::json;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -54,20 +53,6 @@ fn kiro_quota_error_is_account_banned(detail: Option<&str>) -> bool {
     .any(|keyword| normalized.contains(keyword))
 }
 
-fn kiro_auth_from_refreshed_entry(
-    entry: &CachedOAuthEntry,
-) -> Option<LocalResolvedOAuthRequestAuth> {
-    if !entry.provider_type.trim().eq_ignore_ascii_case("kiro") {
-        return None;
-    }
-    let auth_config = entry
-        .metadata
-        .as_ref()
-        .and_then(aether_provider_transport::kiro::KiroAuthConfig::from_json_value)?;
-    let auth = build_kiro_request_auth_from_config(auth_config, None)?;
-    Some(LocalResolvedOAuthRequestAuth::Kiro(auth))
-}
-
 fn kiro_quota_refresh_failure_status(err: &AdminLocalOAuthRefreshError) -> Option<u16> {
     match err {
         AdminLocalOAuthRefreshError::HttpStatus { status_code, .. } => Some(*status_code),
@@ -77,12 +62,13 @@ fn kiro_quota_refresh_failure_status(err: &AdminLocalOAuthRefreshError) -> Optio
 
 fn kiro_quota_refresh_failure_message(err: &AdminLocalOAuthRefreshError) -> String {
     match err {
-        AdminLocalOAuthRefreshError::HttpStatus {
-            status_code,
-            body_excerpt,
-            ..
-        } => format!("Kiro Token 刷新失败 ({status_code}): {body_excerpt}"),
-        _ => format!("Kiro Token 刷新失败: {err}"),
+        AdminLocalOAuthRefreshError::HttpStatus { status_code, .. } => {
+            format!("Kiro Token 刷新失败: HTTP {status_code}")
+        }
+        AdminLocalOAuthRefreshError::InvalidResponse { .. } => {
+            "Kiro Token 刷新失败: 无效响应".to_string()
+        }
+        _ => "Kiro Token 刷新失败: 网络错误".to_string(),
     }
 }
 
@@ -118,36 +104,8 @@ pub(crate) async fn refresh_kiro_provider_quota_locally(
             }
         };
 
-        let auth = match state.force_local_oauth_refresh_entry(&transport).await {
-            Ok(Some(entry)) => match kiro_auth_from_refreshed_entry(&entry) {
-                Some(LocalResolvedOAuthRequestAuth::Kiro(auth)) => auth,
-                _ => {
-                    failed_count += 1;
-                    results.push(json!({
-                        "key_id": key.id,
-                        "key_name": key.name,
-                        "status": "error",
-                        "message": "Kiro Token 刷新成功但认证信息解析失败",
-                    }));
-                    continue;
-                }
-            },
-            Ok(None) => match state
-                .resolve_local_oauth_kiro_request_auth(&transport)
-                .await?
-            {
-                Some(auth) => auth,
-                None => {
-                    failed_count += 1;
-                    results.push(json!({
-                        "key_id": key.id,
-                        "key_name": key.name,
-                        "status": "error",
-                        "message": "缺少 Kiro 认证配置 (auth_config)",
-                    }));
-                    continue;
-                }
-            },
+        match state.force_local_oauth_refresh_entry(&transport).await {
+            Ok(_) => {}
             Err(err) => {
                 if persist_quota_oauth_refresh_failure_state(state, &transport, &err).await?
                     || super::shared::quota_key_auto_removed(state, &key.id).await?
@@ -171,19 +129,60 @@ pub(crate) async fn refresh_kiro_provider_quota_locally(
                 results.push(serde_json::Value::Object(payload));
                 continue;
             }
+        }
+
+        let Some(transport) = state
+            .read_provider_transport_snapshot_uncached(&provider.id, &endpoint.id, &key.id)
+            .await?
+        else {
+            failed_count += 1;
+            results.push(json!({
+                "key_id": key.id,
+                "key_name": key.name,
+                "status": "error",
+                "message": "Kiro Token 刷新后凭据快照不可用",
+            }));
+            continue;
+        };
+        let Some(auth) = state
+            .resolve_local_oauth_kiro_request_auth(&transport)
+            .await?
+        else {
+            failed_count += 1;
+            results.push(json!({
+                "key_id": key.id,
+                "key_name": key.name,
+                "status": "error",
+                "message": "缺少 Kiro 认证配置 (auth_config)",
+            }));
+            continue;
+        };
+        let Some(credential_fence) = state
+            .app()
+            .capture_provider_transport_credential_fence(&transport)
+            .await?
+        else {
+            failed_count += 1;
+            results.push(json!({
+                "key_id": key.id,
+                "key_name": key.name,
+                "status": "error",
+                "message": "Kiro 凭据在请求前已变化",
+            }));
+            continue;
         };
 
         let result =
             match execute_kiro_quota_plan(state, &transport, &auth, proxy_override.as_ref()).await?
             {
                 ProviderQuotaExecutionOutcome::Response(result) => result,
-                ProviderQuotaExecutionOutcome::Failure(detail) => {
+                ProviderQuotaExecutionOutcome::Failure(_) => {
                     failed_count += 1;
                     results.push(json!({
                         "key_id": key.id,
                         "key_name": key.name,
                         "status": "error",
-                        "message": format!("getUsageLimits 请求执行失败: {detail}"),
+                        "message": "getUsageLimits 请求执行失败",
                         "status_code": 502,
                     }));
                     continue;
@@ -230,11 +229,12 @@ pub(crate) async fn refresh_kiro_provider_quota_locally(
                         .or_insert_with(|| json!("kiro"));
                     let auth_config_json =
                         serde_json::Value::Object(auth_config_object).to_string();
-                    if let Some(auth_config_json) =
-                        state.encrypt_catalog_secret_with_fallbacks(auth_config_json.as_str())
-                    {
-                        encrypted_auth_config = Some(auth_config_json);
-                    }
+                    encrypted_auth_config =
+                        Some(state.app().seal_provider_catalog_key_auth_config(
+                            &transport.provider.id,
+                            &transport.key.id,
+                            auth_config_json.as_str(),
+                        )?);
                     status = "success".to_string();
                 } else {
                     status = "no_metadata".to_string();
@@ -246,25 +246,14 @@ pub(crate) async fn refresh_kiro_provider_quota_locally(
             }
         } else {
             let err_msg = extract_execution_error_message(&result);
-            message = Some(match err_msg.as_deref() {
-                Some(detail) if !detail.is_empty() => {
-                    format!(
-                        "getUsageLimits 返回状态码 {}: {}",
-                        result.status_code, detail
-                    )
-                }
-                _ => format!("getUsageLimits 返回状态码 {}", result.status_code),
-            });
+            message = Some(format!("getUsageLimits 返回状态码 {}", result.status_code));
             match result.status_code {
                 401 => {
                     oauth_invalid_at_unix_secs = Some(now_unix_secs);
                     oauth_invalid_reason = Some("Kiro Token 无效或已过期".to_string());
                 }
                 403 | 423 => {
-                    let reason = err_msg
-                        .clone()
-                        .filter(|value| !value.trim().is_empty())
-                        .unwrap_or_else(|| format!("HTTP {}", result.status_code));
+                    let reason = format!("HTTP {}", result.status_code);
                     if kiro_quota_error_is_token_invalid(err_msg.as_deref()) {
                         oauth_invalid_at_unix_secs = Some(now_unix_secs);
                         oauth_invalid_reason = Some("Kiro Token 无效或已过期".to_string());
@@ -286,13 +275,14 @@ pub(crate) async fn refresh_kiro_provider_quota_locally(
             }
         }
 
-        if !persist_provider_quota_refresh_state(
+        if !persist_credential_fenced_provider_quota_refresh_state(
             state,
             &key.id,
             metadata_update.as_ref(),
             oauth_invalid_at_unix_secs,
             oauth_invalid_reason,
             encrypted_auth_config,
+            &credential_fence,
         )
         .await?
         {
@@ -336,12 +326,11 @@ pub(crate) async fn refresh_kiro_provider_quota_locally(
         if let Some(message) = message {
             payload.insert("message".to_string(), json!(message));
         }
-        if let Some(metadata) = metadata_update
-            .as_ref()
-            .and_then(|value| value.get("kiro"))
-            .cloned()
-        {
-            payload.insert("metadata".to_string(), metadata);
+        if let Some(metadata) = metadata_update.as_ref().and_then(|value| value.get("kiro")) {
+            payload.insert(
+                "metadata".to_string(),
+                admin_provider_metadata_bucket_safe_json("kiro", Some(metadata)),
+            );
         }
         if let Some(quota_snapshot) = build_quota_snapshot_payload(
             "kiro",
@@ -369,7 +358,11 @@ pub(crate) async fn refresh_kiro_provider_quota_locally(
 
 #[cfg(test)]
 mod tests {
-    use super::{kiro_quota_error_is_account_banned, kiro_quota_error_is_token_invalid};
+    use super::{
+        kiro_quota_error_is_account_banned, kiro_quota_error_is_token_invalid,
+        kiro_quota_refresh_failure_message,
+    };
+    use crate::handlers::admin::request::AdminLocalOAuthRefreshError;
 
     #[test]
     fn bearer_token_invalid_is_not_classified_as_banned() {
@@ -393,5 +386,21 @@ mod tests {
 
         assert!(!kiro_quota_error_is_token_invalid(detail));
         assert!(kiro_quota_error_is_account_banned(detail));
+    }
+
+    #[test]
+    fn quota_refresh_failure_does_not_reflect_upstream_body() {
+        let message =
+            kiro_quota_refresh_failure_message(&AdminLocalOAuthRefreshError::HttpStatus {
+                provider_type: "kiro",
+                status_code: 502,
+                body_excerpt:
+                    "authorization=Bearer upstream-secret https://user:pass@example.test?q=secret"
+                        .to_string(),
+            });
+
+        assert_eq!(message, "Kiro Token 刷新失败: HTTP 502");
+        assert!(!message.contains("upstream-secret"));
+        assert!(!message.contains("user:pass"));
     }
 }

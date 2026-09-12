@@ -8,7 +8,6 @@ use aether_data_contracts::repository::usage::{
     WEBSOCKET_MODE_METADATA_KEY, WEBSOCKET_TRANSPORT_METADATA_KEY,
 };
 use aether_data_contracts::DataLayerError;
-use base64::Engine as _;
 use serde_json::{json, Map, Value};
 
 use crate::body_capture::{
@@ -24,11 +23,11 @@ use crate::request_metadata::{
     sanitize_usage_request_metadata_ref,
 };
 use crate::{
-    map_usage_from_response, stream_capture_terminal_state, GatewayStreamReportRequest,
-    GatewaySyncReportRequest, StandardizedUsage, StreamCapturedTerminalState, UsageEvent,
-    UsageEventData, UsageEventType, STREAM_MISSING_TERMINAL_EVENT_CATEGORY,
-    STREAM_MISSING_TERMINAL_EVENT_MESSAGE, STREAM_TERMINAL_ERROR_CATEGORY,
-    STREAM_TERMINAL_ERROR_MESSAGE,
+    decode_internal_report_body_base64, map_usage_from_response, stream_capture_terminal_state,
+    GatewayStreamReportRequest, GatewaySyncReportRequest, StandardizedUsage,
+    StreamCapturedTerminalState, UsageEvent, UsageEventData, UsageEventType,
+    STREAM_MISSING_TERMINAL_EVENT_CATEGORY, STREAM_MISSING_TERMINAL_EVENT_MESSAGE,
+    STREAM_TERMINAL_ERROR_CATEGORY, STREAM_TERMINAL_ERROR_MESSAGE,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,6 +71,20 @@ struct RuntimeRequestCaptureSeed {
     provider_request: Option<Value>,
     provider_request_body_ref: Option<String>,
     body_states: UsageBodyStatesSeed,
+    request_has_inline_body: bool,
+    provider_request_has_inline_body: bool,
+}
+
+/// Whether a seed keeps the request bodies it describes, or only describes them.
+///
+/// A holder that has to outlive the request itself pays for every byte it keeps,
+/// and a request body can be megabytes. [`RequestBodyCapture::Describe`] computes
+/// every capture state, reference and derived fact from the real plan and report
+/// context, and leaves out only the body values themselves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RequestBodyCapture {
+    Keep,
+    Describe,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -568,6 +581,7 @@ fn build_lifecycle_usage_event_from_record(
             execution_path: record.execution_path,
             local_execution_runtime_miss_reason: record.local_execution_runtime_miss_reason,
             request_metadata: record.request_metadata,
+            capture_retention: record.capture_retention,
             ..UsageEventData::default()
         },
     }
@@ -804,7 +818,8 @@ pub fn build_terminal_usage_context_seed(
     report_context: Option<&Value>,
 ) -> TerminalUsageContextSeed {
     let context = report_context.and_then(Value::as_object);
-    let request_capture = build_runtime_request_capture_seed(plan, context);
+    let request_capture =
+        build_runtime_request_capture_seed(plan, context, RequestBodyCapture::Keep);
     let client_contract = context_string(context, "client_contract")
         .or_else(|| context_string(context, "client_api_format"))
         .or_else(|| non_empty_str(Some(plan.client_api_format.as_str())))
@@ -851,12 +866,12 @@ pub fn build_terminal_usage_context_seed(
         request_type,
         is_stream: plan.stream,
         routing: build_runtime_routing_seed(plan, context),
-        request_headers: mask_sensitive_headers_in_json_value(context_value(
+        request_headers: validate_usage_headers_in_json_value(context_value(
             context,
             "original_headers",
         )),
         request_body: request_capture.request_body,
-        provider_request_headers: mask_sensitive_headers_in_json_value(
+        provider_request_headers: validate_usage_headers_in_json_value(
             context_usage_value(context, "provider_request_headers")
                 .or_else(|| headers_to_json(&plan.headers)),
         ),
@@ -1520,6 +1535,7 @@ fn build_lifecycle_usage_record_owned(
     };
 
     Ok(UpsertUsageRecord {
+        capture_retention: Default::default(),
         request_id,
         user_id,
         api_key_id,
@@ -1617,6 +1633,7 @@ fn build_lifecycle_usage_record_impl(
     };
 
     Ok(UpsertUsageRecord {
+        capture_retention: Default::default(),
         request_id: seed.request_id.clone(),
         user_id: seed.user_id.clone(),
         api_key_id: seed.api_key_id.clone(),
@@ -1691,16 +1708,34 @@ pub fn build_usage_event_data_seed(
     plan: &ExecutionPlan,
     report_context: Option<&Value>,
 ) -> UsageEventData {
-    build_usage_event_data_seed_with_detail(plan, report_context)
+    build_usage_event_data_seed_with_detail(plan, report_context, RequestBodyCapture::Keep)
+}
+
+/// Builds the same seed as [`build_usage_event_data_seed`] without keeping the
+/// request bodies.
+///
+/// This is for a caller that has to hold a seed for the whole life of an attempt
+/// so it can still write a terminal row if the attempt is dropped: a request body
+/// can be megabytes, and holding one per in-flight attempt is far more expensive
+/// than the row it would eventually capture. Every capture state, body reference
+/// and derived request fact is still computed from the real plan and report
+/// context, so the resulting terminal write preserves the capture an earlier
+/// non-terminal write recorded rather than clearing it.
+pub fn build_usage_event_data_seed_describing_request_bodies(
+    plan: &ExecutionPlan,
+    report_context: Option<&Value>,
+) -> UsageEventData {
+    build_usage_event_data_seed_with_detail(plan, report_context, RequestBodyCapture::Describe)
 }
 
 fn build_usage_event_data_seed_with_detail(
     plan: &ExecutionPlan,
     report_context: Option<&Value>,
+    capture: RequestBodyCapture,
 ) -> UsageEventData {
     let context = report_context.and_then(Value::as_object);
     let routing = build_runtime_routing_seed(plan, context);
-    let request_capture = build_runtime_request_capture_seed(plan, context);
+    let request_capture = build_runtime_request_capture_seed(plan, context, capture);
     let api_format = context_string(context, "client_api_format")
         .or_else(|| non_empty_str(Some(plan.client_api_format.as_str())));
     let endpoint_api_format = context_string(context, "provider_api_format")
@@ -1714,7 +1749,10 @@ fn build_usage_event_data_seed_with_detail(
     let request_type = Some(infer_request_type_from_contracts(
         api_format.as_deref(),
         endpoint_api_format.as_deref(),
-        request_capture.provider_request.as_ref(),
+        request_capture
+            .provider_request
+            .as_ref()
+            .or_else(|| provider_request_body_ref_for_inference(plan, context)),
     ));
     let api_family = api_format
         .as_deref()
@@ -1737,9 +1775,9 @@ fn build_usage_event_data_seed_with_detail(
         build_runtime_request_metadata_seed_from_parts(
             plan,
             context,
-            request_capture.request_body.is_some(),
+            request_capture.request_has_inline_body,
             request_capture.request_body_ref.as_deref(),
-            request_capture.provider_request.is_some(),
+            request_capture.provider_request_has_inline_body,
             request_capture.provider_request_body_ref.as_deref(),
             plan.body.body_bytes_b64.as_deref(),
         ),
@@ -1999,17 +2037,29 @@ fn plan_has_inline_json_body_for_usage(plan: &ExecutionPlan) -> bool {
 fn build_runtime_request_capture_seed(
     plan: &ExecutionPlan,
     context: Option<&Map<String, Value>>,
+    capture: RequestBodyCapture,
 ) -> RuntimeRequestCaptureSeed {
-    let request_body = context_body_value(context, "original_request_body");
+    // Presence, not the value, is what every capture state and derived fact is
+    // built from, so both capture modes agree on all of them.
+    let request_has_inline_body = context_has_inline_body(context, "original_request_body");
+    let provider_request_has_inline_body =
+        context_has_inline_body(context, "provider_request_body")
+            || plan_has_inline_json_body_for_usage(plan);
+    let (request_body, provider_request) = match capture {
+        RequestBodyCapture::Keep => (
+            context_body_value(context, "original_request_body"),
+            context_body_value(context, "provider_request_body")
+                .or_else(|| plan_json_body_capture_for_usage(plan)),
+        ),
+        RequestBodyCapture::Describe => (None, None),
+    };
     let request_body_ref = context_string(context, "request_body_ref");
-    let provider_request = context_body_value(context, "provider_request_body")
-        .or_else(|| plan_json_body_capture_for_usage(plan));
     let provider_request_body_ref = context_string(context, "provider_request_body_ref")
         .or_else(|| non_empty_str(plan.body.body_ref.as_deref()));
     let body_states = build_runtime_body_states_seed_from_parts(
-        request_body.is_some(),
+        request_has_inline_body,
         request_body_ref.as_deref(),
-        provider_request.is_some(),
+        provider_request_has_inline_body,
         provider_request_body_ref.as_deref(),
         plan.body.body_bytes_b64.is_some(),
     );
@@ -2020,7 +2070,24 @@ fn build_runtime_request_capture_seed(
         provider_request,
         provider_request_body_ref,
         body_states,
+        request_has_inline_body,
+        provider_request_has_inline_body,
     }
+}
+
+/// Borrows the provider request body that request-type inference reads, without
+/// cloning it.
+fn provider_request_body_ref_for_inference<'a>(
+    plan: &'a ExecutionPlan,
+    context: Option<&'a Map<String, Value>>,
+) -> Option<&'a Value> {
+    context_value_ref(context, "provider_request_body")
+        .filter(|value| !value.is_null())
+        .or_else(|| {
+            plan_has_inline_json_body_for_usage(plan)
+                .then_some(plan.body.json_body.as_ref())
+                .flatten()
+        })
 }
 
 fn build_runtime_request_metadata_seed(
@@ -2128,6 +2195,12 @@ fn build_runtime_request_metadata_seed_from_parts(
         metadata.insert(
             WEBSOCKET_TRANSPORT_METADATA_KEY.to_string(),
             Value::String(websocket_transport),
+        );
+    }
+    if let Some(reservation_token) = context_string(context, "plan_usage_reservation_token") {
+        metadata.insert(
+            "plan_usage_reservation_token".to_string(),
+            Value::String(reservation_token),
         );
     }
     if let Some(usage_available) = context_bool(context, USAGE_AVAILABLE_METADATA_KEY) {
@@ -2416,12 +2489,8 @@ fn sanitize_usage_event_capture_fields(mut data: UsageEventData) -> UsageEventDa
     data
 }
 
-fn sanitize_usage_event_capture_fields_trusted(mut data: UsageEventData) -> UsageEventData {
-    data.request_headers = capture_usage_header_capture(data.request_headers);
-    data.provider_request_headers = capture_usage_header_capture(data.provider_request_headers);
-    data.response_headers = capture_usage_header_capture(data.response_headers);
-    data.client_response_headers = capture_usage_header_capture(data.client_response_headers);
-    data
+fn sanitize_usage_event_capture_fields_trusted(data: UsageEventData) -> UsageEventData {
+    sanitize_usage_event_capture_fields(data)
 }
 
 fn sanitize_usage_event_data(mut data: UsageEventData) -> UsageEventData {
@@ -2430,12 +2499,8 @@ fn sanitize_usage_event_data(mut data: UsageEventData) -> UsageEventData {
     data
 }
 
-fn capture_usage_header_capture(value: Option<Value>) -> Option<Value> {
-    value.map(capture_usage_storage_value)
-}
-
 fn sanitize_usage_header_capture(value: Option<Value>) -> Option<Value> {
-    mask_sensitive_headers_in_json_value(value).map(capture_usage_storage_value)
+    validate_usage_headers_in_json_value(value).map(capture_usage_storage_value)
 }
 
 fn trim_owned_non_empty_string(value: String) -> Option<String> {
@@ -2658,78 +2723,20 @@ fn headers_to_json(headers: &BTreeMap<String, String>) -> Option<Value> {
         return None;
     }
     Some(Value::Object(Map::from_iter(headers.iter().map(
-        |(key, value)| (key.clone(), Value::String(mask_header_value(key, value))),
+        |(key, value)| (key.clone(), Value::String(value.clone())),
     ))))
 }
 
-/// 默认敏感请求头清单。与
-/// `apps/aether-gateway/src/handlers/admin/system/shared/configs.rs` 中
-/// `sensitive_headers` 系统配置默认值保持一致。
-const DEFAULT_SENSITIVE_HEADERS: &[&str] = &[
-    "authorization",
-    "x-api-key",
-    "api-key",
-    "x-goog-api-key",
-    "cookie",
-    "set-cookie",
-    "proxy-authorization",
-];
+const REDACTED_USAGE_VALUE: &str = "[redacted]";
 
-/// 判断 header 名是否属于敏感字段（大小写不敏感）。
-fn is_sensitive_header(name: &str) -> bool {
-    let trimmed = name.trim();
-    DEFAULT_SENSITIVE_HEADERS
-        .iter()
-        .any(|candidate| trimmed.eq_ignore_ascii_case(candidate))
+fn mask_sensitive_header_value(_value: &str) -> String {
+    REDACTED_USAGE_VALUE.to_string()
 }
 
-/// 对单个 header value 进行脱敏：保留前 4 + 后 4 字符，中间替换为 `****`。
-/// 长度小于等于 8 时整体替换为 `****`。
-fn mask_header_value(name: &str, value: &str) -> String {
-    if !is_sensitive_header(name) {
-        return value.to_string();
-    }
-    mask_sensitive_header_value(value)
-}
-
-fn mask_sensitive_header_value(value: &str) -> String {
-    if value.len() <= 8 {
-        return "****".to_string();
-    }
-    let prefix: String = value.chars().take(4).collect();
-    let suffix: String = value
-        .chars()
-        .rev()
-        .take(4)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect();
-    format!("{prefix}****{suffix}")
-}
-
-/// 对 JSON 形式的 headers 做就地脱敏。仅当 value 是 Object 时才会处理；
-/// 其它形式的值保持不变。
-fn mask_sensitive_headers_in_json_value(value: Option<Value>) -> Option<Value> {
-    let mut value = value?;
-    let Value::Object(map) = &mut value else {
-        return Some(value);
-    };
-    for (key, val) in map.iter_mut() {
-        if !is_sensitive_header(key) {
-            continue;
-        }
-        match val {
-            Value::String(text) => {
-                *text = mask_sensitive_header_value(text);
-            }
-            Value::Null => {}
-            other => {
-                *other = Value::String(mask_sensitive_header_value(&other.to_string()));
-            }
-        }
-    }
-    Some(value)
+/// Non-object values cannot be established as a valid header map and are
+/// discarded instead of being persisted verbatim.
+fn validate_usage_headers_in_json_value(value: Option<Value>) -> Option<Value> {
+    aether_data_contracts::repository::usage::sanitize_usage_headers_for_persistence(value)
 }
 
 fn mask_sensitive_body_fields(mut value: Value) -> Value {
@@ -2941,9 +2948,7 @@ fn extract_generic_error_message_from_json(value: &Value) -> Option<String> {
 
 fn decode_body_for_storage(body_base64: Option<&str>) -> Option<Value> {
     let body_base64 = body_base64?;
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(body_base64)
-        .ok()?;
+    let bytes = decode_internal_report_body_base64(body_base64).ok()?;
     if let Some(error_body) =
         aether_ai_formats::api::extract_provider_private_stream_error_body(None, &bytes)
     {
@@ -3493,12 +3498,13 @@ mod tests {
         build_streaming_usage_event_from_owned_seed, build_streaming_usage_record,
         build_sync_terminal_usage_event, build_sync_terminal_usage_payload_seed,
         build_sync_terminal_usage_seed, build_terminal_usage_context_seed,
-        build_terminal_usage_event_from_seed, build_usage_event_data_seed, decode_body_for_storage,
+        build_terminal_usage_event_from_seed, build_usage_event_data_seed,
+        build_usage_event_data_seed_describing_request_bodies, decode_body_for_storage,
         extract_token_counts_from_json, extract_token_counts_from_value, headers_to_json,
-        mask_header_value, mask_sensitive_body_fields, mask_sensitive_headers_in_json_value,
-        parse_sse_body_for_storage, resolve_error_message, trim_owned_non_empty_string,
-        LifecycleUsageSeed, TerminalUsageSeed, UsageBodyRefsSeed, UsageBodyStatesSeed,
-        UsageRoutingSeed, UsageTerminalState, MAX_USAGE_CAPTURE_BYTES, MAX_USAGE_CAPTURE_DEPTH,
+        mask_sensitive_body_fields, parse_sse_body_for_storage, resolve_error_message,
+        trim_owned_non_empty_string, validate_usage_headers_in_json_value, LifecycleUsageSeed,
+        TerminalUsageSeed, UsageBodyRefsSeed, UsageBodyStatesSeed, UsageRoutingSeed,
+        UsageTerminalState, MAX_USAGE_CAPTURE_BYTES, MAX_USAGE_CAPTURE_DEPTH,
     };
     use crate::{
         build_upsert_usage_record_from_event, GatewayStreamReportRequest, GatewaySyncReportRequest,
@@ -3934,7 +3940,8 @@ mod tests {
             .expect("pending usage should keep request metadata");
         assert_eq!(metadata.get("api_key_is_standalone"), Some(&json!(true)));
         assert_eq!(metadata.get("client_ip"), Some(&json!("203.0.113.8")));
-        assert_eq!(metadata.get("user_agent"), Some(&json!("Claude-Code/1.0")));
+        assert_eq!(metadata.get("client_family"), Some(&json!("claude_code")));
+        assert!(metadata.get("user_agent").is_none());
         let body_size = metadata
             .get("body_size")
             .and_then(Value::as_object)
@@ -5644,14 +5651,14 @@ mod tests {
         assert_eq!(
             event.data.response_headers,
             Some(json!({
-                "authorization": "Bear****oken",
+                "authorization": "Bearer very-secret-token",
                 "content-type": "application/json"
             }))
         );
         assert_eq!(
             event.data.client_response_headers,
             Some(json!({
-                "authorization": "Bear****oken",
+                "authorization": "Bearer very-secret-token",
                 "content-type": "application/json"
             }))
         );
@@ -6544,7 +6551,7 @@ mod tests {
     }
 
     #[test]
-    fn manual_terminal_seed_event_builder_sanitizes_headers_and_metadata_but_preserves_bodies() {
+    fn manual_terminal_seed_event_builder_sanitizes_metadata_but_preserves_headers_and_bodies() {
         let event = build_terminal_usage_event_from_seed(TerminalUsageSeed {
             terminal_state: UsageTerminalState::Completed,
             client_contract: "openai:chat".to_string(),
@@ -6615,26 +6622,26 @@ mod tests {
         assert_eq!(
             event.data.request_headers,
             Some(json!({
-                "authorization": "Bear****oken",
+                "authorization": "Bearer very-secret-token",
                 "accept": "application/json"
             }))
         );
         assert_eq!(
             event.data.provider_request_headers,
             Some(json!({
-                "x-api-key": "sk-p****cret"
+                "x-api-key": "sk-proj-super-secret"
             }))
         );
         assert_eq!(
             event.data.response_headers,
             Some(json!({
-                "set-cookie": "sess****okie"
+                "set-cookie": "session=extremely-secret-cookie"
             }))
         );
         assert_eq!(
             event.data.client_response_headers,
             Some(json!({
-                "authorization": "Bear****cret"
+                "authorization": "Bearer client-secret"
             }))
         );
         assert_eq!(
@@ -6661,14 +6668,7 @@ mod tests {
                 .request_metadata
                 .as_ref()
                 .and_then(|value| value.get("billing_snapshot")),
-            Some(&json!({
-                "truncated": true,
-                "reason": "usage_request_metadata_limits_exceeded",
-                "max_depth": 32,
-                "max_nodes": 4_000,
-                "max_bytes": 16 * 1024,
-                "value_kind": "object"
-            }))
+            None
         );
     }
 
@@ -6714,23 +6714,11 @@ mod tests {
         .expect("pending record should build");
 
         assert_eq!(record.candidate_id.as_deref(), Some("cand-1"));
-        assert_eq!(
-            record.request_metadata,
-            Some(json!({
-                "billing_snapshot": {
-                    "truncated": true,
-                    "reason": "usage_request_metadata_limits_exceeded",
-                    "max_depth": 32,
-                    "max_nodes": 4_000,
-                    "max_bytes": 16 * 1024,
-                    "value_kind": "object"
-                }
-            }))
-        );
+        assert_eq!(record.request_metadata, None);
     }
 
     #[test]
-    fn usage_event_data_seed_masks_headers_before_outcome_paths_use_it() {
+    fn usage_event_data_seed_preserves_headers_before_outcome_paths_use_it() {
         let plan = ExecutionPlan {
             request_id: "req-seed-sanitize-1".to_string(),
             candidate_id: Some("cand-seed-sanitize-1".to_string()),
@@ -6769,7 +6757,7 @@ mod tests {
         assert_eq!(
             data.request_headers,
             Some(json!({
-                "authorization": "Bear****cret",
+                "authorization": "Bearer outcome-secret",
                 "accept": "application/json"
             }))
         );
@@ -6826,10 +6814,7 @@ mod tests {
             metadata.get("end_to_end_first_byte_time_ms"),
             Some(&json!(10_120))
         );
-        assert_eq!(
-            metadata.get("db_timings_ms"),
-            Some(&json!({"query_count": 2}))
-        );
+        assert_eq!(metadata.get("db_timings_ms"), None);
         assert_eq!(
             metadata.get("trace_id"),
             Some(&json!("trace-seed-metadata-1"))
@@ -6843,31 +6828,115 @@ mod tests {
     }
 
     #[test]
-    fn masks_known_sensitive_header_values() {
-        let token = "Bearer eyJhbGciOiJSUzI1NiJ9.payload-here.signature-tail";
-        let masked = mask_header_value("authorization", token);
-        assert!(masked.starts_with("Bear"));
-        assert!(masked.ends_with("tail"));
-        assert!(masked.contains("****"));
-        assert!(!masked.contains("payload-here"));
+    fn describing_request_bodies_matches_the_capturing_seed_apart_from_the_bodies() {
+        let plan = ExecutionPlan {
+            request_id: "req-seed-describe-1".to_string(),
+            candidate_id: Some("cand-seed-describe-1".to_string()),
+            provider_name: Some("OpenAI".to_string()),
+            provider_id: "provider-1".to_string(),
+            endpoint_id: "endpoint-1".to_string(),
+            key_id: "key-1".to_string(),
+            method: "POST".to_string(),
+            url: "https://example.com/v1/chat/completions".to_string(),
+            headers: BTreeMap::new(),
+            content_type: Some("application/json".to_string()),
+            content_encoding: None,
+            body: RequestBody::from_json(json!({
+                "model": "gpt-5",
+                "service_tier": "priority",
+                "reasoning": {"effort": "high"}
+            })),
+            stream: false,
+            client_api_format: "openai:chat".to_string(),
+            provider_api_format: "openai:chat".to_string(),
+            model_name: Some("gpt-5".to_string()),
+            proxy: None,
+            transport_profile: None,
+            timeouts: None,
+        };
+        let report_context = json!({
+            "client_api_format": "openai:chat",
+            "provider_api_format": "openai:chat",
+            "original_request_body": {"model": "gpt-5", "messages": []},
+            "original_headers": {"accept": "application/json"}
+        });
 
-        // 大小写不敏感
+        let captured = build_usage_event_data_seed(&plan, Some(&report_context));
+        let described =
+            build_usage_event_data_seed_describing_request_bodies(&plan, Some(&report_context));
+
+        // Only the two heavy values differ.
+        assert!(captured.request_body.is_some());
+        assert!(captured.provider_request_body.is_some());
+        assert_eq!(described.request_body, None);
+        assert_eq!(described.provider_request_body, None);
+
+        // Everything a terminal write reads to decide what to do with the stored
+        // capture is identical, so the described seed preserves it rather than
+        // clearing it.
         assert_eq!(
-            mask_header_value("Authorization", "12345678"),
-            "****",
-            "短值整体替换为 ****",
+            described.request_body_state,
+            Some(UsageBodyCaptureState::Inline)
         );
-        assert_eq!(mask_header_value("X-Api-Key", "abcdefghij"), "abcd****ghij",);
-
-        // 非敏感头保持原样
         assert_eq!(
-            mask_header_value("user-agent", "codex-tui/0.1"),
-            "codex-tui/0.1",
+            described.provider_request_body_state,
+            Some(UsageBodyCaptureState::Inline)
+        );
+        assert_eq!(described.request_body_state, captured.request_body_state);
+        assert_eq!(
+            described.provider_request_body_state,
+            captured.provider_request_body_state
+        );
+        assert_eq!(described.request_body_ref, captured.request_body_ref);
+        assert_eq!(
+            described.provider_request_body_ref,
+            captured.provider_request_body_ref
+        );
+        assert_eq!(described.request_type, captured.request_type);
+        assert_eq!(described.request_metadata, captured.request_metadata);
+        assert_eq!(
+            described.provider_request_headers,
+            captured.provider_request_headers
+        );
+        assert_eq!(described.request_headers, captured.request_headers);
+    }
+
+    #[test]
+    fn describing_request_bodies_keeps_the_unavailable_marker_for_raw_bodies() {
+        let mut plan = ExecutionPlan {
+            request_id: "req-seed-describe-2".to_string(),
+            candidate_id: None,
+            provider_name: Some("OpenAI".to_string()),
+            provider_id: "provider-1".to_string(),
+            endpoint_id: "endpoint-1".to_string(),
+            key_id: "key-1".to_string(),
+            method: "POST".to_string(),
+            url: "https://example.com/v1/chat/completions".to_string(),
+            headers: BTreeMap::new(),
+            content_type: Some("application/json".to_string()),
+            content_encoding: None,
+            body: RequestBody::from_json(json!({"model": "gpt-5"})),
+            stream: false,
+            client_api_format: "openai:chat".to_string(),
+            provider_api_format: "openai:chat".to_string(),
+            model_name: Some("gpt-5".to_string()),
+            proxy: None,
+            transport_profile: None,
+            timeouts: None,
+        };
+        plan.body.json_body = None;
+        plan.body.body_bytes_b64 = Some("eyJtb2RlbCI6ICJncHQtNSJ9".to_string());
+
+        let described = build_usage_event_data_seed_describing_request_bodies(&plan, None);
+
+        assert_eq!(
+            described.provider_request_body_state,
+            Some(UsageBodyCaptureState::Unavailable)
         );
     }
 
     #[test]
-    fn headers_to_json_masks_sensitive_headers_at_source() {
+    fn headers_to_json_preserves_original_headers_at_source() {
         let mut headers = BTreeMap::new();
         headers.insert(
             "authorization".to_string(),
@@ -6886,17 +6955,13 @@ mod tests {
             .get("authorization")
             .and_then(|v| v.as_str())
             .expect("authorization should be string");
-        assert!(auth.starts_with("Bear"));
-        assert!(auth.contains("****"));
-        assert!(!auth.contains("eyJhbGciOiJSUzI1NiJ9"));
+        assert_eq!(auth, "Bearer eyJhbGciOiJSUzI1NiJ9.body.signature");
 
         let api_key = object
             .get("x-api-key")
             .and_then(|v| v.as_str())
             .expect("x-api-key should be string");
-        assert!(api_key.starts_with("sk-p"));
-        assert!(api_key.contains("****"));
-        assert!(!api_key.contains("1234567890"));
+        assert_eq!(api_key, "sk-proj-1234567890abcdef");
 
         assert_eq!(
             object.get("user-agent").and_then(|v| v.as_str()),
@@ -6910,29 +6975,27 @@ mod tests {
     }
 
     #[test]
-    fn mask_sensitive_headers_in_json_value_handles_object_form() {
+    fn validate_usage_headers_in_json_value_handles_object_form() {
         let value = json!({
             "Authorization": "Bearer eyJhbGciOiJSUzI1NiJ9.body.signature",
             "Cookie": "session=verylongcookievalue1234",
             "Accept": "application/json",
         });
-        let masked =
-            mask_sensitive_headers_in_json_value(Some(value)).expect("masked value should exist");
-        let object = masked.as_object().expect("expected object");
+        let captured =
+            validate_usage_headers_in_json_value(Some(value)).expect("captured value should exist");
+        let object = captured.as_object().expect("expected object");
 
         let auth = object
             .get("Authorization")
             .and_then(|v| v.as_str())
             .expect("Authorization should be string");
-        assert!(auth.contains("****"));
-        assert!(!auth.contains("eyJhbGciOiJSUzI1NiJ9"));
+        assert_eq!(auth, "Bearer eyJhbGciOiJSUzI1NiJ9.body.signature");
 
         let cookie = object
             .get("Cookie")
             .and_then(|v| v.as_str())
             .expect("Cookie should be string");
-        assert!(cookie.contains("****"));
-        assert!(!cookie.contains("verylongcookievalue"));
+        assert_eq!(cookie, "session=verylongcookievalue1234");
 
         assert_eq!(
             object.get("Accept").and_then(|v| v.as_str()),
@@ -6941,12 +7004,12 @@ mod tests {
     }
 
     #[test]
-    fn mask_sensitive_headers_passthrough_for_non_object() {
+    fn validate_usage_headers_discards_non_object() {
         // None 输入返回 None
-        assert!(mask_sensitive_headers_in_json_value(None).is_none());
-        // 非 object 输入原样返回
-        let masked = mask_sensitive_headers_in_json_value(Some(json!("not an object")));
-        assert_eq!(masked, Some(json!("not an object")));
+        assert!(validate_usage_headers_in_json_value(None).is_none());
+        // 非 object 不是可验证的 header map，直接丢弃。
+        let masked = validate_usage_headers_in_json_value(Some(json!("not an object")));
+        assert_eq!(masked, None);
     }
 
     #[test]

@@ -2,9 +2,15 @@ use std::collections::{HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use aether_contracts::tunnel_security::TUNNEL_SECURITY_NON_TLS_REQUIRED;
+use aether_crypto::DEVELOPMENT_ENCRYPTION_KEY;
 use aether_data::repository::proxy_nodes::{
     bucket_start_unix_secs, InMemoryProxyNodeRepository, ProxyNodeHeartbeatMutation,
     ProxyNodeMetricsStep, ProxyNodeReadRepository, ProxyNodeWriteRepository, StoredProxyNode,
+};
+use aether_data::repository::settlement::{
+    InMemorySettlementRepository, ReserveUsagePolicyCostInput, ReserveUsagePolicyRequestInput,
+    SettlementWriteRepository, UsagePolicyCostWindow, UsagePolicyRequestWindow,
 };
 use aether_runtime::bounded_queue;
 use axum::extract::ws::Message;
@@ -18,7 +24,8 @@ use super::{
     cleanup_proxy_node_metrics_once, cleanup_stale_proxy_nodes_once, inspect_proxy_upgrade_rollout,
     next_daily_run_after, next_db_maintenance_run_after, next_stats_aggregation_run_after,
     next_stats_hourly_aggregation_run_after, pending_cleanup_batch_size,
-    pending_cleanup_timeout_minutes, plan_pending_cleanup_batch, provider_checkin_schedule,
+    pending_cleanup_timeout_minutes, perform_automatic_usage_cleanup_once,
+    perform_manual_usage_cleanup_once, plan_pending_cleanup_batch, provider_checkin_schedule,
     proxy_node_metrics_cleanup_settings, record_proxy_upgrade_traffic_success,
     run_db_maintenance_with, run_proxy_upgrade_rollout_once, spawn_account_self_check_worker,
     spawn_audit_cleanup_worker, spawn_db_maintenance_worker,
@@ -167,6 +174,29 @@ fn sample_connected_proxy_node(
     )
 }
 
+const ACTIVE_PROBE_TUNNEL_TEST_PSK: &str = "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=";
+const ACTIVE_PROBE_TUNNEL_TEST_GENERATION: &str = "active-probe-test-generation-1";
+
+fn active_probe_tunnel_metadata(version: &str) -> serde_json::Value {
+    json!({
+        "version": version,
+        "tunnel_security": {
+            "mode": TUNNEL_SECURITY_NON_TLS_REQUIRED,
+            "encryption_key": ACTIVE_PROBE_TUNNEL_TEST_PSK,
+        }
+    })
+}
+
+async fn recv_tunnel_test_frame(
+    proxy_rx: &mut aether_runtime::BoundedQueueReceiver<Message>,
+    description: &str,
+) -> Message {
+    tokio::time::timeout(Duration::from_secs(5), proxy_rx.recv())
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for {description}"))
+        .unwrap_or_else(|| panic!("proxy channel closed before {description}"))
+}
+
 #[tokio::test]
 async fn stale_proxy_node_cleanup_marks_timed_out_tunnel_offline() {
     let repository = Arc::new(InMemoryProxyNodeRepository::seed(vec![
@@ -230,6 +260,7 @@ async fn proxy_upgrade_rollout_advances_next_wave_after_version_health_confirmat
     repository
         .apply_heartbeat(&ProxyNodeHeartbeatMutation {
             node_id: "node-alpha".to_string(),
+            expected_tunnel_generation: None,
             heartbeat_interval: None,
             active_connections: Some(2),
             total_requests_delta: Some(1),
@@ -267,6 +298,7 @@ async fn proxy_upgrade_rollout_advances_next_wave_after_version_health_confirmat
     repository
         .apply_heartbeat(&ProxyNodeHeartbeatMutation {
             node_id: "node-zeta".to_string(),
+            expected_tunnel_generation: None,
             heartbeat_interval: None,
             active_connections: Some(2),
             total_requests_delta: Some(1),
@@ -378,6 +410,7 @@ async fn proxy_upgrade_rollout_blocks_next_wave_after_post_upgrade_transport_err
     repository
         .apply_heartbeat(&ProxyNodeHeartbeatMutation {
             node_id: "node-alpha".to_string(),
+            expected_tunnel_generation: None,
             heartbeat_interval: None,
             active_connections: Some(2),
             total_requests_delta: Some(1),
@@ -406,6 +439,7 @@ async fn proxy_upgrade_rollout_blocks_next_wave_after_post_upgrade_transport_err
     repository
         .apply_heartbeat(&ProxyNodeHeartbeatMutation {
             node_id: "node-alpha".to_string(),
+            expected_tunnel_generation: None,
             heartbeat_interval: None,
             active_connections: Some(2),
             total_requests_delta: Some(1),
@@ -436,9 +470,10 @@ async fn proxy_upgrade_rollout_blocks_next_wave_after_post_upgrade_transport_err
 
 #[tokio::test]
 async fn proxy_upgrade_rollout_active_probe_advances_next_wave_after_version_confirmation() {
-    let mut alpha = sample_connected_proxy_node("node-alpha", 30, 1_800_000_000);
+    let mut alpha = sample_connected_proxy_node("node-alpha", 30, 1_800_000_000)
+        .with_tunnel_generation(ACTIVE_PROBE_TUNNEL_TEST_GENERATION.to_string());
     alpha.name = "alpha".to_string();
-    alpha.proxy_metadata = Some(json!({"version": "1.0.0"}));
+    alpha.proxy_metadata = Some(active_probe_tunnel_metadata("1.0.0"));
     alpha.remote_config = None;
     alpha.config_version = 0;
 
@@ -450,7 +485,8 @@ async fn proxy_upgrade_rollout_active_probe_advances_next_wave_after_version_con
 
     let repository = Arc::new(InMemoryProxyNodeRepository::seed(vec![zeta, alpha]));
     let data = GatewayDataState::with_proxy_node_repository_for_tests(Arc::clone(&repository))
-        .with_system_config_values_for_tests(Vec::<(String, serde_json::Value)>::new());
+        .with_system_config_values_for_tests(Vec::<(String, serde_json::Value)>::new())
+        .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY);
     let state = AppState::new()
         .expect("gateway state should build")
         .with_data_state_for_tests(data.clone());
@@ -472,6 +508,7 @@ async fn proxy_upgrade_rollout_active_probe_advances_next_wave_after_version_con
     repository
         .apply_heartbeat(&ProxyNodeHeartbeatMutation {
             node_id: "node-alpha".to_string(),
+            expected_tunnel_generation: None,
             heartbeat_interval: None,
             active_connections: Some(2),
             total_requests_delta: Some(1),
@@ -479,7 +516,7 @@ async fn proxy_upgrade_rollout_active_probe_advances_next_wave_after_version_con
             failed_requests_delta: Some(0),
             dns_failures_delta: Some(0),
             stream_errors_delta: Some(0),
-            proxy_metadata: Some(json!({"version": "2.0.0"})),
+            proxy_metadata: Some(active_probe_tunnel_metadata("2.0.0")),
             proxy_version: Some("2.0.0".to_string()),
         })
         .await
@@ -488,9 +525,8 @@ async fn proxy_upgrade_rollout_active_probe_advances_next_wave_after_version_con
     let tunnel_state = state.tunnel.app_state();
     let (proxy_tx, mut proxy_rx) = bounded_queue(8);
     let (proxy_close_tx, _) = watch::channel(false);
-    tunnel_state
-        .hub
-        .register_proxy(Arc::new(crate::tunnel::TunnelProxyConn::new(
+    tunnel_state.hub.register_proxy(Arc::new(
+        crate::tunnel::TunnelProxyConn::new(
             700,
             "node-alpha".to_string(),
             "Node Alpha".to_string(),
@@ -498,14 +534,18 @@ async fn proxy_upgrade_rollout_active_probe_advances_next_wave_after_version_con
             proxy_close_tx,
             16,
             2,
-        )));
+        )
+        .with_tunnel_generation(ACTIVE_PROBE_TUNNEL_TEST_GENERATION.to_string())
+        .with_authenticated_key(ACTIVE_PROBE_TUNNEL_TEST_PSK.to_string()),
+    ));
 
     let responder_hub = tunnel_state.hub.clone();
     let responder = tokio::spawn(async move {
-        let request_headers = match proxy_rx.recv().await.expect("headers frame should arrive") {
-            Message::Binary(data) => data,
-            other => panic!("unexpected message: {other:?}"),
-        };
+        let request_headers =
+            match recv_tunnel_test_frame(&mut proxy_rx, "probe headers frame").await {
+                Message::Binary(data) => data,
+                other => panic!("unexpected message: {other:?}"),
+            };
         let request_header = crate::tunnel::tunnel_protocol::FrameHeader::parse(&request_headers)
             .expect("probe request headers should parse");
         assert_eq!(
@@ -513,7 +553,7 @@ async fn proxy_upgrade_rollout_active_probe_advances_next_wave_after_version_con
             crate::tunnel::tunnel_protocol::REQUEST_HEADERS
         );
 
-        let request_body = match proxy_rx.recv().await.expect("body frame should arrive") {
+        let request_body = match recv_tunnel_test_frame(&mut proxy_rx, "probe body frame").await {
             Message::Binary(data) => data,
             other => panic!("unexpected message: {other:?}"),
         };
@@ -592,6 +632,106 @@ async fn spawn_usage_cleanup_worker_skips_when_usage_writer_unavailable() {
         .expect("gateway state should build")
         .with_data_state_for_tests(GatewayDataState::disabled());
     assert!(spawn_usage_cleanup_worker(state).is_none());
+}
+
+#[tokio::test]
+async fn spawn_usage_cleanup_worker_starts_for_settlement_writer_only() {
+    let state = AppState::new()
+        .expect("gateway state should build")
+        .with_data_state_for_tests(
+            GatewayDataState::disabled().with_settlement_writer_for_tests(Arc::new(
+                InMemorySettlementRepository::default(),
+            )),
+        );
+    let handle = spawn_usage_cleanup_worker(state)
+        .expect("settlement ledger cleanup should have a worker without a usage writer");
+    handle.abort();
+}
+
+#[tokio::test]
+async fn automatic_usage_cleanup_collects_ledgers_when_usage_cleanup_is_disabled() {
+    let repository = Arc::new(InMemorySettlementRepository::default());
+    repository
+        .reserve_usage_policy_request(ReserveUsagePolicyRequestInput {
+            request_id: "expired-request".to_string(),
+            subject_id: "user-1".to_string(),
+            event_token: "expired-event".to_string(),
+            admitted_at_unix_secs: 1,
+            retain_until_unix_secs: 2,
+            windows: vec![UsagePolicyRequestWindow {
+                starts_at_unix_secs: 0,
+                ends_at_unix_secs: 2,
+                limit_requests: 10,
+            }],
+        })
+        .await
+        .expect("request admission should be seeded");
+    repository
+        .reserve_usage_policy_cost(ReserveUsagePolicyCostInput {
+            request_id: "expired-cost".to_string(),
+            subject_id: "user-1".to_string(),
+            reservation_token: "expired-reservation".to_string(),
+            admitted_at_unix_secs: 1,
+            reserved_cost_units: 1,
+            reservation_expires_at_unix_secs: 2,
+            retain_until_unix_secs: 2,
+            windows: vec![UsagePolicyCostWindow {
+                window_id: "expired-window".to_string(),
+                starts_at_unix_secs: 0,
+                ends_at_unix_secs: 2,
+                limit_cost_units: 10,
+            }],
+        })
+        .await
+        .expect("cost reservation should be seeded");
+    let data = GatewayDataState::disabled()
+        .with_settlement_writer_for_tests(repository)
+        .with_system_config_values_for_tests([
+            ("enable_auto_cleanup".to_string(), json!(false)),
+            ("cleanup_batch_size".to_string(), json!(1)),
+        ]);
+
+    let summary = perform_automatic_usage_cleanup_once(&data)
+        .await
+        .expect("automatic ledger cleanup should succeed");
+
+    assert_eq!(summary.cost_reservations_deleted, 1);
+    assert_eq!(summary.request_admissions_deleted, 1);
+}
+
+#[tokio::test]
+async fn manual_usage_cleanup_does_not_collect_policy_ledgers() {
+    let repository = Arc::new(InMemorySettlementRepository::default());
+    repository
+        .reserve_usage_policy_request(ReserveUsagePolicyRequestInput {
+            request_id: "manual-request".to_string(),
+            subject_id: "user-1".to_string(),
+            event_token: "manual-event".to_string(),
+            admitted_at_unix_secs: 1,
+            retain_until_unix_secs: 2,
+            windows: vec![UsagePolicyRequestWindow {
+                starts_at_unix_secs: 0,
+                ends_at_unix_secs: 2,
+                limit_requests: 10,
+            }],
+        })
+        .await
+        .expect("request admission should be seeded");
+    let data = GatewayDataState::disabled().with_settlement_writer_for_tests(repository.clone());
+
+    let summary =
+        perform_manual_usage_cleanup_once(&data, super::ManualUsageCleanupOptions::policy())
+            .await
+            .expect("manual usage cleanup should succeed");
+
+    assert_eq!(summary.request_admissions_deleted, 0);
+    assert_eq!(
+        repository
+            .cleanup_usage_policy_request_admissions(u64::MAX, 10)
+            .await
+            .expect("direct cleanup should find the retained admission"),
+        1
+    );
 }
 
 #[tokio::test]
@@ -851,6 +991,7 @@ async fn proxy_node_metrics_cleanup_deletes_expired_buckets_in_batches() {
         repository
             .apply_heartbeat(&ProxyNodeHeartbeatMutation {
                 node_id: node_id.to_string(),
+                expected_tunnel_generation: None,
                 heartbeat_interval: Some(30),
                 active_connections: Some(i32::try_from(idx + 1).unwrap()),
                 total_requests_delta: None,
@@ -915,6 +1056,7 @@ async fn proxy_node_metrics_cleanup_respects_auto_cleanup_toggle() {
     repository
         .apply_heartbeat(&ProxyNodeHeartbeatMutation {
             node_id: "node-metrics-disabled".to_string(),
+            expected_tunnel_generation: None,
             heartbeat_interval: Some(30),
             active_connections: Some(1),
             total_requests_delta: None,
@@ -998,19 +1140,40 @@ fn usage_cleanup_window_with_override_is_always_non_aggressive() {
     let override_duration = chrono::Duration::days(180);
     let clamped = usage_cleanup_window_with_override(now_utc, settings, Some(override_duration));
 
-    assert_eq!(clamped.detail_cutoff, policy.detail_cutoff);
-    assert_eq!(clamped.compressed_cutoff, policy.compressed_cutoff);
-    assert_eq!(clamped.header_cutoff, policy.header_cutoff);
-    assert_eq!(clamped.log_cutoff, now_utc - override_duration);
-    assert!(clamped.log_cutoff > policy.log_cutoff);
+    assert_eq!(clamped.detail_cutoff, now_utc - override_duration);
+    assert_eq!(clamped.compressed_cutoff, now_utc - override_duration);
+    assert_eq!(clamped.header_cutoff, now_utc - override_duration);
+    assert_eq!(clamped.log_cutoff, policy.log_cutoff);
+    assert!(clamped.log_cutoff <= policy.log_cutoff);
 
     let far_override = chrono::Duration::days(5);
     let far = usage_cleanup_window_with_override(now_utc, settings, Some(far_override));
-    assert_eq!(far.detail_cutoff, now_utc - far_override);
-    assert_eq!(far.compressed_cutoff, now_utc - far_override);
-    assert_eq!(far.header_cutoff, now_utc - far_override);
-    assert_eq!(far.log_cutoff, now_utc - far_override);
-    assert!(far.log_cutoff > policy.log_cutoff);
+    assert_eq!(far, policy);
+
+    for days in [0, 5, 30, 180, 400] {
+        let cutoff = now_utc - chrono::Duration::days(days);
+        let window = usage_cleanup_window_with_override(
+            now_utc,
+            settings,
+            Some(chrono::Duration::days(days)),
+        );
+        for (actual, configured) in [
+            (window.detail_cutoff, policy.detail_cutoff),
+            (window.compressed_cutoff, policy.compressed_cutoff),
+            (window.header_cutoff, policy.header_cutoff),
+            (window.log_cutoff, policy.log_cutoff),
+        ] {
+            assert!(actual <= configured);
+            assert!(actual <= cutoff);
+            for age in [1, 7, 15, 30, 90, 180, 365, 401] {
+                let created_at = now_utc - chrono::Duration::days(age);
+                if created_at < actual {
+                    assert!(created_at < configured);
+                    assert!(created_at < cutoff);
+                }
+            }
+        }
+    }
 
     let passthrough = usage_cleanup_window_with_override(now_utc, settings, None);
     assert_eq!(passthrough, policy);

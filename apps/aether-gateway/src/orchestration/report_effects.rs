@@ -6,11 +6,10 @@ use aether_admin::provider::quota as admin_provider_quota_pure;
 use aether_data_contracts::repository::provider_catalog::ProviderCatalogKeyRuntimeMetadataUpdate;
 use aether_provider_pool::grok_quota_window_key_for_model;
 use aether_usage_runtime::{
-    extract_gemini_file_mapping_entries, gemini_file_mapping_cache_key, normalize_gemini_file_name,
-    report_request_id, GatewayStreamReportRequest, GatewaySyncReportRequest,
-    GEMINI_FILE_MAPPING_TTL_SECONDS,
+    decode_internal_report_body_base64, extract_gemini_file_mapping_entries,
+    gemini_file_mapping_cache_key, normalize_gemini_file_name, report_request_id,
+    GatewayStreamReportRequest, GatewaySyncReportRequest, GEMINI_FILE_MAPPING_TTL_SECONDS,
 };
-use base64::Engine as _;
 use regex::Regex;
 use serde_json::{json, Value};
 use tracing::warn;
@@ -241,9 +240,7 @@ fn gemini_cli_credits_from_stream_payload(
     now_unix_secs: u64,
 ) -> Option<Value> {
     let body_base64 = payload.provider_body_base64.as_deref()?;
-    let body = base64::engine::general_purpose::STANDARD
-        .decode(body_base64)
-        .ok()?;
+    let body = decode_internal_report_body_base64(body_base64).ok()?;
     let text = std::str::from_utf8(&body).ok()?;
     let mut latest = None::<Value>;
     for raw_line in text.lines() {
@@ -272,9 +269,7 @@ fn codex_websocket_quota_from_stream_payload(
     now_unix_secs: u64,
 ) -> Option<Value> {
     let body_base64 = payload.provider_body_base64.as_deref()?;
-    let body = base64::engine::general_purpose::STANDARD
-        .decode(body_base64)
-        .ok()?;
+    let body = decode_internal_report_body_base64(body_base64).ok()?;
     let text = std::str::from_utf8(&body).ok()?;
     let mut latest = None::<Value>;
     for raw_line in text.lines() {
@@ -742,8 +737,30 @@ async fn apply_local_gemini_file_mapping_report_effect(
             let Some(file_name) = file_name else {
                 return;
             };
+            let user_id = payload
+                .report_context
+                .as_ref()
+                .and_then(|context| context.get("user_id"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            let key_id = payload
+                .report_context
+                .as_ref()
+                .and_then(|context| context.get("key_id"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            let Some(user_id) = user_id else {
+                return;
+            };
+            let Some(key_id) = key_id else {
+                return;
+            };
 
-            if let Err(err) = delete_local_gemini_file_mapping(state, file_name.as_str()).await {
+            if let Err(err) =
+                delete_local_gemini_file_mapping(state, file_name.as_str(), key_id, user_id).await
+            {
                 warn!(
                     event_name = "gemini_file_mapping_delete_failed",
                     log_type = "ops",
@@ -772,8 +789,8 @@ pub(crate) async fn store_local_gemini_file_mapping(
     };
     let expires_at_unix_secs = current_unix_secs().saturating_add(GEMINI_FILE_MAPPING_TTL_SECONDS);
 
-    let _stored = state
-        .upsert_gemini_file_mapping(
+    let stored = state
+        .upsert_gemini_file_mapping_if_owner_matches(
             aether_data::repository::gemini_file_mappings::UpsertGeminiFileMappingRecord {
                 id: Uuid::new_v4().to_string(),
                 file_name: file_name.clone(),
@@ -786,6 +803,17 @@ pub(crate) async fn store_local_gemini_file_mapping(
             },
         )
         .await?;
+    if stored.is_none() {
+        warn!(
+            event_name = "gemini_file_mapping_atomic_owner_mismatch",
+            log_type = "security",
+            file_name = %file_name,
+            requested_key_id = %key_id,
+            requested_user_id = user_id.unwrap_or_default(),
+            "gateway refused to reassign a Gemini file mapping during the atomic write"
+        );
+        return Ok(());
+    }
     state
         .cache_set_string_with_ttl(
             gemini_file_mapping_cache_key(file_name.as_str()).as_str(),
@@ -799,14 +827,26 @@ pub(crate) async fn store_local_gemini_file_mapping(
 async fn delete_local_gemini_file_mapping(
     state: &AppState,
     file_name: &str,
+    key_id: &str,
+    user_id: &str,
 ) -> Result<(), GatewayError> {
     let Some(file_name) = normalize_gemini_file_name(file_name) else {
         return Ok(());
     };
-
-    let _deleted = state
-        .delete_gemini_file_mapping_by_file_name(file_name.as_str())
+    let deleted = state
+        .delete_gemini_file_mapping_by_file_name_for_owner(file_name.as_str(), key_id, user_id)
         .await?;
+    if !deleted {
+        warn!(
+            event_name = "gemini_file_mapping_atomic_delete_owner_mismatch",
+            log_type = "security",
+            file_name = %file_name,
+            requested_key_id = %key_id,
+            requested_user_id = %user_id,
+            "gateway refused to delete a Gemini file mapping after its owner changed"
+        );
+        return Ok(());
+    }
     state
         .cache_delete_key(gemini_file_mapping_cache_key(file_name.as_str()).as_str())
         .await?;

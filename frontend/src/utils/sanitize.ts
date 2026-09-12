@@ -1,5 +1,30 @@
 import DOMPurify from 'dompurify'
 
+DOMPurify.addHook('afterSanitizeAttributes', (node) => {
+  const tagName = node.tagName?.toLowerCase()
+
+  if (tagName === 'a') {
+    const target = node.getAttribute('target')
+    if (target && target !== '_blank') {
+      node.removeAttribute('target')
+    }
+    if (target === '_blank') {
+      node.setAttribute('rel', 'noopener noreferrer')
+    }
+
+    const href = node.getAttribute('href') || ''
+    if (/^(?:https?:)?\/\//i.test(href)) {
+      node.setAttribute('referrerpolicy', 'no-referrer')
+    }
+  }
+
+  if (tagName === 'img') {
+    node.setAttribute('referrerpolicy', 'no-referrer')
+    node.setAttribute('loading', 'lazy')
+    node.setAttribute('decoding', 'async')
+  }
+})
+
 /**
  * 配置 DOMPurify 允许的标签和属性
  */
@@ -16,7 +41,7 @@ const DOMPURIFY_CONFIG = {
   // 允许的属性
   ALLOWED_ATTR: [
     'href', 'title', 'target', 'rel',
-    'class', 'id'
+    'class', 'id', 'referrerpolicy'
   ],
   // 允许的URI协议
   // eslint-disable-next-line no-useless-escape
@@ -56,7 +81,7 @@ export function sanitizeMarkdown(dirty: string): string {
     ],
     ALLOWED_ATTR: [
       ...DOMPURIFY_CONFIG.ALLOWED_ATTR,
-      'src', 'alt', 'width', 'height' // 图片属性
+      'src', 'alt', 'width', 'height', 'loading', 'decoding' // 图片属性
     ]
   }
 

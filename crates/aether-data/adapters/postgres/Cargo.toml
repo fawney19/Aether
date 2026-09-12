@@ -18,8 +18,6 @@ futures-util.workspace = true
 sqlx = { workspace = true, features = ["postgres", "runtime-tokio-rustls", "chrono", "migrate", "macros"] }
 serde_json.workspace = true
 sha2.workspace = true
+tokio.workspace = true
 tracing.workspace = true
 uuid.workspace = true
-
-[dev-dependencies]
-tokio.workspace = true

@@ -3,12 +3,13 @@ use aether_data_contracts::repository::video_tasks::{
 };
 use axum::response::IntoResponse;
 use axum::Json;
-use serde_json::{json, Map, Value};
+use serde_json::json;
 
+use crate::state::VideoTaskRouteAccess;
 use crate::{AppState, GatewayError};
 
 use super::super::finalize_video_task_if_terminal;
-use super::super::read_video_task_detail;
+use super::super::{read_video_task_detail, read_video_task_detail_for_user};
 use super::current_unix_secs;
 
 #[derive(Debug)]
@@ -29,7 +30,31 @@ pub(crate) async fn cancel_video_task_record(
     state: &AppState,
     task_id: &str,
 ) -> Result<StoredVideoTask, CancelVideoTaskError> {
-    let Some(task) = read_video_task_detail(state, task_id).await? else {
+    cancel_video_task_record_inner(state, task_id, None).await
+}
+
+pub(crate) async fn cancel_video_task_record_for_user(
+    state: &AppState,
+    task_id: &str,
+    user_id: &str,
+) -> Result<StoredVideoTask, CancelVideoTaskError> {
+    let user_id = user_id.trim();
+    if user_id.is_empty() {
+        return Err(CancelVideoTaskError::NotFound);
+    }
+    cancel_video_task_record_inner(state, task_id, Some(user_id)).await
+}
+
+async fn cancel_video_task_record_inner(
+    state: &AppState,
+    task_id: &str,
+    expected_user_id: Option<&str>,
+) -> Result<StoredVideoTask, CancelVideoTaskError> {
+    let task = match expected_user_id {
+        Some(user_id) => read_video_task_detail_for_user(state, task_id, user_id).await?,
+        None => read_video_task_detail(state, task_id).await?,
+    };
+    let Some(task) = task else {
         return Err(CancelVideoTaskError::NotFound);
     };
 
@@ -45,39 +70,84 @@ pub(crate) async fn cancel_video_task_record(
     }
 
     let trace_id = format!("async-task-admin-cancel-{task_id}");
+    let mut finalize_mutation = None;
     if let Some(cancel_plan) = build_video_task_cancel_plan(&task) {
-        state
-            .hydrate_video_task_for_route(Some(cancel_plan.route_family), &cancel_plan.request_path)
-            .await?;
-
         let body_json = json!({});
-        let follow_up = state.video_tasks.prepare_follow_up_sync_plan(
-            cancel_plan.plan_kind,
-            &cancel_plan.request_path,
-            Some(&body_json),
-            None,
-            &trace_id,
-        );
+        let follow_up = if let Some(user_id) = expected_user_id {
+            if state
+                .hydrate_video_task_for_route_for_user(
+                    Some(cancel_plan.route_family),
+                    &cancel_plan.request_path,
+                    user_id,
+                )
+                .await?
+                != VideoTaskRouteAccess::Allowed
+            {
+                return Err(CancelVideoTaskError::NotFound);
+            }
+            state.video_tasks.prepare_follow_up_sync_plan_for_user_id(
+                cancel_plan.plan_kind,
+                &cancel_plan.request_path,
+                Some(&body_json),
+                user_id,
+                task.api_key_id.as_deref(),
+                &trace_id,
+            )
+        } else {
+            state
+                .hydrate_video_task_for_route(
+                    Some(cancel_plan.route_family),
+                    &cancel_plan.request_path,
+                )
+                .await?;
+            state.video_tasks.prepare_follow_up_sync_plan(
+                cancel_plan.plan_kind,
+                &cancel_plan.request_path,
+                Some(&body_json),
+                None,
+                &trace_id,
+            )
+        };
 
         if let Some(follow_up) = follow_up {
             execute_video_task_cancel_plan(state, &trace_id, follow_up.plan)
                 .await
                 .map_err(CancelVideoTaskError::Response)?;
+            finalize_mutation = Some((
+                cancel_plan.request_path,
+                cancel_plan.report_kind.to_string(),
+            ));
+        } else if expected_user_id.is_none() {
+            finalize_mutation = Some((
+                cancel_plan.request_path,
+                cancel_plan.report_kind.to_string(),
+            ));
         }
-
-        state
-            .video_tasks
-            .apply_finalize_mutation(&cancel_plan.request_path, cancel_plan.report_kind);
     }
 
-    let request_metadata = build_cancelled_request_metadata(state, &task).await?;
-    let stored = persist_cancelled_video_task(state, &task, request_metadata)
-        .await?
-        .ok_or_else(|| {
-            CancelVideoTaskError::Gateway(GatewayError::Internal(
+    let stored = match persist_cancelled_video_task(state, &task).await? {
+        Some(stored) => stored,
+        None => {
+            let current = match expected_user_id {
+                Some(user_id) => read_video_task_detail_for_user(state, task_id, user_id).await?,
+                None => read_video_task_detail(state, task_id).await?,
+            };
+            let Some(current) = current else {
+                return Err(CancelVideoTaskError::NotFound);
+            };
+            if !current.status.is_active() {
+                return Err(CancelVideoTaskError::InvalidStatus(current.status));
+            }
+            return Err(CancelVideoTaskError::Gateway(GatewayError::Internal(
                 "video task repository is unavailable".to_string(),
-            ))
-        })?;
+            )));
+        }
+    };
+    if let Some((request_path, report_kind)) = finalize_mutation {
+        state
+            .video_tasks
+            .apply_finalize_mutation(&request_path, &report_kind);
+    }
     finalize_video_task_if_terminal(state, &stored).await;
     Ok(stored)
 }
@@ -91,12 +161,7 @@ struct VideoTaskCancelPlan<'a> {
 }
 
 fn build_video_task_cancel_plan(task: &StoredVideoTask) -> Option<VideoTaskCancelPlan<'_>> {
-    let provider_api_format = task
-        .provider_api_format
-        .as_deref()
-        .or(task.client_api_format.as_deref())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())?;
+    let provider_api_format = task.effective_api_format()?;
 
     match provider_api_format {
         "openai:video" => Some(VideoTaskCancelPlan {
@@ -131,99 +196,52 @@ async fn execute_video_task_cancel_plan(
     let result =
         crate::execution_runtime::execute_execution_runtime_sync_plan(state, Some(trace_id), &plan)
             .await
-            .map_err(|err| {
+            .map_err(|_| {
                 GatewayError::UpstreamUnavailable {
                     trace_id: trace_id.to_string(),
-                    message: format!("{err:?}"),
+                    message: "video cancellation request failed".to_string(),
                 }
                 .into_response()
             })?;
 
     if result.status_code >= 400 {
-        let status = axum::http::StatusCode::from_u16(result.status_code)
-            .unwrap_or(axum::http::StatusCode::BAD_GATEWAY);
-        let body_json = result
-            .body
-            .and_then(|body| body.json_body)
-            .unwrap_or_else(|| {
-                json!({
-                    "error": {
-                        "message": result
-                            .error
-                            .as_ref()
-                            .map(|error| error.message.clone())
-                            .unwrap_or_else(|| {
-                                format!("execution runtime returned {}", result.status_code)
-                            }),
-                    }
-                })
-            });
-        return Err((status, Json(body_json)).into_response());
+        return Err(build_video_task_cancel_upstream_error_response(&result));
     }
 
     Ok(())
 }
 
-async fn build_cancelled_request_metadata(
-    state: &AppState,
-    task: &StoredVideoTask,
-) -> Result<Option<Value>, GatewayError> {
-    let mut metadata = match task.request_metadata.clone() {
-        Some(Value::Object(object)) => object,
-        _ => Map::new(),
-    };
-    let mut snapshot_value = metadata.get("rust_local_snapshot").cloned();
-    if snapshot_value.is_none() {
-        snapshot_value = state
-            .reconstruct_video_task_snapshot(task)
-            .await?
-            .map(|snapshot| {
-                serde_json::to_value(snapshot)
-                    .map_err(|err| GatewayError::Internal(err.to_string()))
-            })
-            .transpose()?;
-    }
-    if let Some(snapshot_value_ref) = snapshot_value.as_mut() {
-        mark_snapshot_value_cancelled(snapshot_value_ref);
-        metadata.insert(
-            "rust_owner".to_string(),
-            Value::String("async_task".to_string()),
-        );
-        metadata.insert(
-            "rust_local_snapshot".to_string(),
-            snapshot_value_ref.clone(),
-        );
-        return Ok(Some(Value::Object(metadata)));
-    }
-
-    Ok(task.request_metadata.clone())
-}
-
-fn mark_snapshot_value_cancelled(snapshot_value: &mut Value) {
-    if let Some(object) = snapshot_value
-        .get_mut("OpenAi")
-        .and_then(Value::as_object_mut)
-    {
-        object.insert("status".to_string(), Value::String("Cancelled".to_string()));
-        return;
-    }
-    if let Some(object) = snapshot_value
-        .get_mut("Gemini")
-        .and_then(Value::as_object_mut)
-    {
-        object.insert("status".to_string(), Value::String("Cancelled".to_string()));
-    }
+fn build_video_task_cancel_upstream_error_response(
+    result: &aether_contracts::ExecutionResult,
+) -> axum::response::Response {
+    let status = axum::http::StatusCode::from_u16(result.status_code)
+        .unwrap_or(axum::http::StatusCode::BAD_GATEWAY);
+    tracing::warn!(
+        event_name = "video_task_cancel_upstream_error",
+        upstream_status = result.status_code,
+        "video cancellation upstream response body discarded"
+    );
+    (
+        status,
+        Json(json!({
+            "error": {
+                "message": format!(
+                    "video cancellation upstream returned HTTP {}",
+                    result.status_code
+                ),
+            }
+        })),
+    )
+        .into_response()
 }
 
 async fn persist_cancelled_video_task(
     state: &AppState,
     task: &StoredVideoTask,
-    request_metadata: Option<Value>,
 ) -> Result<Option<StoredVideoTask>, GatewayError> {
     let now_unix_secs = current_unix_secs();
     state
-        .data
-        .upsert_video_task(UpsertVideoTask {
+        .update_active_video_task(UpsertVideoTask {
             id: task.id.clone(),
             short_id: task.short_id.clone(),
             request_id: task.request_id.clone(),
@@ -240,14 +258,14 @@ async fn persist_cancelled_video_task(
             format_converted: task.format_converted,
             model: task.model.clone(),
             prompt: task.prompt.clone(),
-            original_request_body: task.original_request_body.clone(),
+            original_request_body: None,
             duration_seconds: task.duration_seconds,
             resolution: task.resolution.clone(),
             aspect_ratio: task.aspect_ratio.clone(),
             size: task.size.clone(),
             status: VideoTaskStatus::Cancelled,
             progress_percent: task.progress_percent,
-            progress_message: task.progress_message.clone(),
+            progress_message: None,
             retry_count: task.retry_count,
             poll_interval_seconds: task.poll_interval_seconds,
             next_poll_at_unix_secs: None,
@@ -258,10 +276,73 @@ async fn persist_cancelled_video_task(
             completed_at_unix_secs: Some(now_unix_secs),
             updated_at_unix_secs: now_unix_secs,
             error_code: task.error_code.clone(),
-            error_message: task.error_message.clone(),
+            error_message: None,
             video_url: task.video_url.clone(),
-            request_metadata,
+            request_metadata: None,
         })
         .await
-        .map_err(|err| GatewayError::Internal(err.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use aether_contracts::{
+        ExecutionError, ExecutionErrorKind, ExecutionPhase, ExecutionResult, ResponseBody,
+    };
+    use axum::body::to_bytes;
+    use serde_json::json;
+
+    use super::build_video_task_cancel_upstream_error_response;
+
+    #[tokio::test]
+    async fn cancellation_upstream_errors_do_not_expose_runtime_payloads() {
+        let result = ExecutionResult {
+            request_id: "cancel-secret-request-id".to_string(),
+            candidate_id: Some("cancel-secret-candidate-id".to_string()),
+            status_code: 502,
+            headers: BTreeMap::from([(
+                "x-internal-secret".to_string(),
+                "cancel-secret-header".to_string(),
+            )]),
+            response_observation: None,
+            body: Some(ResponseBody {
+                json_body: Some(json!({
+                    "error": {
+                        "message": "cancel-secret-upstream-body",
+                    }
+                })),
+                body_bytes_b64: None,
+            }),
+            telemetry: None,
+            error: Some(ExecutionError {
+                kind: ExecutionErrorKind::Upstream5xx,
+                phase: ExecutionPhase::FirstByte,
+                message: "cancel-secret-runtime-error".to_string(),
+                upstream_status: Some(502),
+                retryable: true,
+                failover_recommended: false,
+            }),
+        };
+
+        let response = build_video_task_cancel_upstream_error_response(&result);
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_GATEWAY);
+        assert!(response.headers().get("x-internal-secret").is_none());
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body should read");
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("response body should parse");
+
+        assert_eq!(
+            payload,
+            json!({
+                "error": {
+                    "message": "video cancellation upstream returned HTTP 502",
+                }
+            })
+        );
+        let body = String::from_utf8(body.to_vec()).expect("response body should be utf-8");
+        assert!(!body.contains("cancel-secret"));
+    }
 }

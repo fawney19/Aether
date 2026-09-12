@@ -178,6 +178,36 @@ END $mig$;
 
 
 --
+-- Name: ldap_configs ldap_configs_singleton_key_check; Type: CHECK CONSTRAINT; Schema: public; Owner: -
+--
+
+DO $mig$ BEGIN
+  ALTER TABLE ONLY public.ldap_configs
+    ADD CONSTRAINT ldap_configs_singleton_key_check CHECK (singleton_key = 1);
+EXCEPTION
+  WHEN duplicate_object THEN NULL;
+  WHEN duplicate_table THEN NULL;
+  WHEN invalid_table_definition THEN NULL;
+END $mig$;
+
+
+
+--
+-- Name: ldap_configs ldap_configs_singleton_key_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+DO $mig$ BEGIN
+  ALTER TABLE ONLY public.ldap_configs
+    ADD CONSTRAINT ldap_configs_singleton_key_key UNIQUE (singleton_key);
+EXCEPTION
+  WHEN duplicate_object THEN NULL;
+  WHEN duplicate_table THEN NULL;
+  WHEN invalid_table_definition THEN NULL;
+END $mig$;
+
+
+
+--
 -- Name: management_tokens management_tokens_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 

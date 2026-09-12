@@ -225,8 +225,9 @@ impl BackgroundTaskReadRepository for SqlxBackgroundTaskRepository {
 impl BackgroundTaskWriteRepository for SqlxBackgroundTaskRepository {
     async fn upsert_run(
         &self,
-        run: UpsertBackgroundTaskRun,
+        mut run: UpsertBackgroundTaskRun,
     ) -> Result<StoredBackgroundTaskRun, DataLayerError> {
+        run.sanitize_for_persistence();
         run.validate()?;
         sqlx::query(
             r#"
@@ -327,8 +328,9 @@ ON CONFLICT(id) DO UPDATE SET
 
     async fn upsert_event(
         &self,
-        event: UpsertBackgroundTaskEvent,
+        mut event: UpsertBackgroundTaskEvent,
     ) -> Result<StoredBackgroundTaskEvent, DataLayerError> {
+        event.sanitize_for_persistence();
         event.validate()?;
         sqlx::query(
             r#"
@@ -383,7 +385,7 @@ fn map_run_row(row: &PgRow) -> Result<StoredBackgroundTaskRun, DataLayerError> {
         row.try_get("finished_at_unix_secs").map_postgres_err()?;
     let updated_at_unix_secs: i64 = row.try_get("updated_at_unix_secs").map_postgres_err()?;
 
-    Ok(StoredBackgroundTaskRun {
+    let mut run = StoredBackgroundTaskRun {
         id: row.try_get("id").map_postgres_err()?,
         task_key: row.try_get("task_key").map_postgres_err()?,
         kind: BackgroundTaskKind::from_database(&kind)?,
@@ -403,19 +405,23 @@ fn map_run_row(row: &PgRow) -> Result<StoredBackgroundTaskRun, DataLayerError> {
         started_at_unix_secs: started_at_unix_secs.and_then(|value| u64::try_from(value).ok()),
         finished_at_unix_secs: finished_at_unix_secs.and_then(|value| u64::try_from(value).ok()),
         updated_at_unix_secs: u64::try_from(updated_at_unix_secs).unwrap_or_default(),
-    })
+    };
+    run.sanitize_persisted_data();
+    Ok(run)
 }
 
 fn map_event_row(row: &PgRow) -> Result<StoredBackgroundTaskEvent, DataLayerError> {
     let created_at_unix_secs: i64 = row.try_get("created_at_unix_secs").map_postgres_err()?;
-    Ok(StoredBackgroundTaskEvent {
+    let mut event = StoredBackgroundTaskEvent {
         id: row.try_get("id").map_postgres_err()?,
         run_id: row.try_get("run_id").map_postgres_err()?,
         event_type: row.try_get("event_type").map_postgres_err()?,
         message: row.try_get("message").map_postgres_err()?,
         payload_json: row.try_get("payload_json").map_postgres_err()?,
         created_at_unix_secs: u64::try_from(created_at_unix_secs).unwrap_or_default(),
-    })
+    };
+    event.sanitize_persisted_data();
+    Ok(event)
 }
 
 fn i64_from_usize(value: usize, label: &str) -> Result<i64, DataLayerError> {

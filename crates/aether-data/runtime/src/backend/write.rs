@@ -1,12 +1,8 @@
 use std::fmt;
 use std::sync::Arc;
 
-#[cfg(feature = "mysql")]
-use super::MysqlBackend;
 #[cfg(feature = "postgres")]
 use super::PostgresBackend;
-#[cfg(feature = "sqlite")]
-use super::SqliteBackend;
 use crate::repository::announcements::AnnouncementWriteRepository;
 use crate::repository::auth::AuthApiKeyWriteRepository;
 use crate::repository::auth_modules::AuthModuleWriteRepository;
@@ -79,21 +75,11 @@ impl fmt::Debug for DataWriteRepositories {
 impl DataWriteRepositories {
     pub(crate) fn from_backends(
         #[cfg(feature = "postgres")] postgres: Option<&PostgresBackend>,
-        #[cfg(feature = "mysql")] mysql: Option<&MysqlBackend>,
-        #[cfg(feature = "sqlite")] sqlite: Option<&SqliteBackend>,
     ) -> Self {
         let mut repositories = Self::default();
         #[cfg(feature = "postgres")]
         if let Some(postgres) = postgres {
             repositories.install_postgres(postgres);
-        }
-        #[cfg(feature = "mysql")]
-        if let Some(mysql) = mysql {
-            repositories.install_mysql(mysql);
-        }
-        #[cfg(feature = "sqlite")]
-        if let Some(sqlite) = sqlite {
-            repositories.install_sqlite(sqlite);
         }
         repositories
     }
@@ -162,136 +148,10 @@ impl DataWriteRepositories {
         }
     }
 
-    #[cfg(feature = "mysql")]
-    fn install_mysql(&mut self, backend: &MysqlBackend) {
-        if self.announcements.is_none() {
-            self.announcements = Some(MysqlBackend::announcement_write_repository(backend));
-        }
-        if self.auth_api_keys.is_none() {
-            self.auth_api_keys = Some(MysqlBackend::auth_api_key_write_repository(backend));
-        }
-        if self.auth_modules.is_none() {
-            self.auth_modules = Some(MysqlBackend::auth_module_write_repository(backend));
-        }
-        if self.background_tasks.is_none() {
-            self.background_tasks = Some(MysqlBackend::background_task_write_repository(backend));
-        }
-        if self.request_candidates.is_none() {
-            self.request_candidates =
-                Some(MysqlBackend::request_candidate_write_repository(backend));
-        }
-        if self.gemini_file_mappings.is_none() {
-            self.gemini_file_mappings =
-                Some(MysqlBackend::gemini_file_mapping_write_repository(backend));
-        }
-        if self.global_models.is_none() {
-            self.global_models = Some(MysqlBackend::global_model_write_repository(backend));
-        }
-        if self.management_tokens.is_none() {
-            self.management_tokens = Some(MysqlBackend::management_token_write_repository(backend));
-        }
-        if self.oauth_providers.is_none() {
-            self.oauth_providers = Some(MysqlBackend::oauth_provider_write_repository(backend));
-        }
-        if self.pool_scores.is_none() {
-            self.pool_scores = Some(MysqlBackend::pool_score_write_repository(backend));
-        }
-        if self.proxy_nodes.is_none() {
-            self.proxy_nodes = Some(MysqlBackend::proxy_node_write_repository(backend));
-        }
-        if self.provider_catalog.is_none() {
-            self.provider_catalog = Some(MysqlBackend::provider_catalog_write_repository(backend));
-        }
-        if self.provider_quotas.is_none() {
-            self.provider_quotas = Some(MysqlBackend::provider_quota_write_repository(backend));
-        }
-        if self.routing_groups.is_none() {
-            self.routing_groups = Some(MysqlBackend::routing_group_write_repository(backend));
-        }
-        if self.settlement.is_none() {
-            self.settlement = Some(MysqlBackend::settlement_write_repository(backend));
-        }
-        if self.usage.is_none() {
-            self.usage = Some(MysqlBackend::usage_write_repository(backend));
-        }
-        if self.video_tasks.is_none() {
-            self.video_tasks = Some(MysqlBackend::video_task_write_repository(backend));
-        }
-        if self.wallets.is_none() {
-            self.wallets = Some(MysqlBackend::wallet_write_repository(backend));
-        }
-    }
-
-    #[cfg(feature = "sqlite")]
-    fn install_sqlite(&mut self, backend: &SqliteBackend) {
-        if self.announcements.is_none() {
-            self.announcements = Some(SqliteBackend::announcement_write_repository(backend));
-        }
-        if self.auth_api_keys.is_none() {
-            self.auth_api_keys = Some(SqliteBackend::auth_api_key_write_repository(backend));
-        }
-        if self.auth_modules.is_none() {
-            self.auth_modules = Some(SqliteBackend::auth_module_write_repository(backend));
-        }
-        if self.background_tasks.is_none() {
-            self.background_tasks = Some(SqliteBackend::background_task_write_repository(backend));
-        }
-        if self.request_candidates.is_none() {
-            self.request_candidates =
-                Some(SqliteBackend::request_candidate_write_repository(backend));
-        }
-        if self.gemini_file_mappings.is_none() {
-            self.gemini_file_mappings =
-                Some(SqliteBackend::gemini_file_mapping_write_repository(backend));
-        }
-        if self.global_models.is_none() {
-            self.global_models = Some(SqliteBackend::global_model_write_repository(backend));
-        }
-        if self.management_tokens.is_none() {
-            self.management_tokens =
-                Some(SqliteBackend::management_token_write_repository(backend));
-        }
-        if self.oauth_providers.is_none() {
-            self.oauth_providers = Some(SqliteBackend::oauth_provider_write_repository(backend));
-        }
-        if self.pool_scores.is_none() {
-            self.pool_scores = Some(SqliteBackend::pool_score_write_repository(backend));
-        }
-        if self.proxy_nodes.is_none() {
-            self.proxy_nodes = Some(SqliteBackend::proxy_node_write_repository(backend));
-        }
-        if self.provider_catalog.is_none() {
-            self.provider_catalog = Some(SqliteBackend::provider_catalog_write_repository(backend));
-        }
-        if self.provider_quotas.is_none() {
-            self.provider_quotas = Some(SqliteBackend::provider_quota_write_repository(backend));
-        }
-        if self.routing_groups.is_none() {
-            self.routing_groups = Some(SqliteBackend::routing_group_write_repository(backend));
-        }
-        if self.settlement.is_none() {
-            self.settlement = Some(SqliteBackend::settlement_write_repository(backend));
-        }
-        if self.usage.is_none() {
-            self.usage = Some(SqliteBackend::usage_write_repository(backend));
-        }
-        if self.video_tasks.is_none() {
-            self.video_tasks = Some(SqliteBackend::video_task_write_repository(backend));
-        }
-        if self.wallets.is_none() {
-            self.wallets = Some(SqliteBackend::wallet_write_repository(backend));
-        }
-    }
     #[cfg(test)]
     #[cfg(feature = "postgres")]
     pub(crate) fn from_postgres(postgres: Option<&PostgresBackend>) -> Self {
-        Self::from_backends(
-            postgres,
-            #[cfg(feature = "mysql")]
-            None,
-            #[cfg(feature = "sqlite")]
-            None,
-        )
+        Self::from_backends(postgres)
     }
 
     pub fn announcements(&self) -> Option<Arc<dyn AnnouncementWriteRepository>> {

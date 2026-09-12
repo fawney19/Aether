@@ -3,7 +3,7 @@ use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 use base64::Engine;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use hmac::{Hmac, Mac};
-use sha2::Sha256;
+use sha2::{Digest as _, Sha256};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::tunnel::{Frame, MsgType, HEADER_SIZE};
@@ -12,10 +12,21 @@ type HmacSha256 = Hmac<Sha256>;
 
 pub const TUNNEL_SECURITY_HEADER: &str = "x-aether-tunnel-security";
 pub const TUNNEL_SECURITY_SESSION_HEADER: &str = "x-aether-tunnel-security-session";
+pub const TUNNEL_SECURITY_PROOF_TIMESTAMP_HEADER: &str = "x-aether-tunnel-security-proof-timestamp";
+pub const TUNNEL_SECURITY_PROOF_NONCE_HEADER: &str = "x-aether-tunnel-security-proof-nonce";
+pub const TUNNEL_SECURITY_PROOF_SIGNATURE_HEADER: &str = "x-aether-tunnel-security-proof-signature";
+pub const TUNNEL_GENERATION_HEADER: &str = "x-aether-tunnel-generation";
+pub const TUNNEL_CONTROL_PLANE_NODE_ID_HEADER: &str = "x-aether-tunnel-control-plane-node-id";
+pub const TUNNEL_CONTROL_PLANE_GENERATION_HEADER: &str = "x-aether-tunnel-control-plane-generation";
+pub const TUNNEL_CONTROL_PLANE_TIMESTAMP_HEADER: &str = "x-aether-tunnel-control-plane-timestamp";
+pub const TUNNEL_CONTROL_PLANE_NONCE_HEADER: &str = "x-aether-tunnel-control-plane-nonce";
+pub const TUNNEL_CONTROL_PLANE_SIGNATURE_HEADER: &str = "x-aether-tunnel-control-plane-signature";
 pub const TUNNEL_SECURITY_NON_TLS_REQUIRED: &str = "non_tls_required";
 pub const FLAG_ENCRYPTED: u8 = 0x04;
 
 const CONTEXT: &[u8] = b"aether-tunnel-secure-v1";
+const HANDSHAKE_PROOF_CONTEXT: &[u8] = b"aether-tunnel-handshake-proof-v1";
+const CONTROL_PLANE_AUTH_CONTEXT: &[u8] = b"aether-tunnel-control-plane-auth-v1";
 const CLIENT_TO_SERVER_LABEL: &[u8] = b"client-to-server";
 const SERVER_TO_CLIENT_LABEL: &[u8] = b"server-to-client";
 const CLIENT_TO_SERVER_NONCE_PREFIX: [u8; 4] = *b"c2s1";
@@ -41,6 +52,8 @@ pub enum TunnelSecurityError {
     PayloadTooShort,
     #[error("secure tunnel frame sequence is not the expected next value")]
     UnexpectedSequence,
+    #[error("secure tunnel frame sequence space is exhausted")]
+    SequenceExhausted,
     #[error("secure tunnel frame encryption failed")]
     Encrypt,
     #[error("secure tunnel frame decryption failed")]
@@ -98,7 +111,12 @@ impl SecureFrameCodec {
     }
 
     pub fn encrypt_frame(&self, frame: Frame) -> Result<Bytes, TunnelSecurityError> {
-        let sequence = self.next_sequence.fetch_add(1, Ordering::Relaxed);
+        let sequence = self
+            .next_sequence
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                current.checked_add(1)
+            })
+            .map_err(|_| TunnelSecurityError::SequenceExhausted)?;
         let nonce_bytes = nonce_bytes(self.seal_prefix, sequence);
         let nonce = Nonce::from_slice(&nonce_bytes);
         let clear_flags = frame.flags & !FLAG_ENCRYPTED;
@@ -154,8 +172,17 @@ impl SecureFrameCodec {
                 },
             )
             .map_err(|_| TunnelSecurityError::Decrypt)?;
+        let next_sequence = expected_sequence
+            .checked_add(1)
+            .ok_or(TunnelSecurityError::SequenceExhausted)?;
         self.next_open_sequence
-            .store(expected_sequence.wrapping_add(1), Ordering::Relaxed);
+            .compare_exchange(
+                expected_sequence,
+                next_sequence,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .map_err(|_| TunnelSecurityError::UnexpectedSequence)?;
 
         Ok(Frame::new(
             frame.stream_id,
@@ -167,12 +194,297 @@ impl SecureFrameCodec {
 }
 
 pub fn decode_psk(key: &str) -> Result<[u8; 32], TunnelSecurityError> {
+    let key = key.trim();
+    if key.len() > 44 {
+        return Err(TunnelSecurityError::InvalidKey);
+    }
     let decoded = base64::engine::general_purpose::STANDARD
-        .decode(key.trim())
+        .decode(key)
         .map_err(|_| TunnelSecurityError::InvalidKey)?;
     decoded
         .try_into()
         .map_err(|_| TunnelSecurityError::InvalidKey)
+}
+
+pub fn sign_tunnel_security_handshake(
+    key: &str,
+    node_id: &str,
+    security_mode: &str,
+    session_id: &str,
+    protocol_version: u8,
+    timestamp_unix_secs: u64,
+    nonce: &str,
+) -> Result<String, TunnelSecurityError> {
+    sign_tunnel_security_handshake_for_generation(
+        key,
+        node_id,
+        "",
+        security_mode,
+        session_id,
+        protocol_version,
+        timestamp_unix_secs,
+        nonce,
+    )
+}
+
+// These arguments are the versioned handshake transcript. Keep them explicit
+// and ordered so existing clients and servers compute the same MAC.
+#[allow(clippy::too_many_arguments)]
+pub fn sign_tunnel_security_handshake_for_generation(
+    key: &str,
+    node_id: &str,
+    tunnel_generation: &str,
+    security_mode: &str,
+    session_id: &str,
+    protocol_version: u8,
+    timestamp_unix_secs: u64,
+    nonce: &str,
+) -> Result<String, TunnelSecurityError> {
+    let psk = decode_psk(key)?;
+    let mut mac =
+        <HmacSha256 as Mac>::new_from_slice(&psk).expect("HMAC accepts a 32-byte tunnel PSK");
+    update_handshake_proof_mac(
+        &mut mac,
+        node_id,
+        tunnel_generation,
+        security_mode,
+        session_id,
+        protocol_version,
+        timestamp_unix_secs,
+        nonce,
+    );
+    Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes()))
+}
+
+// The verifier preserves the legacy public signature while delegating to the
+// generation-aware transcript implementation.
+#[allow(clippy::too_many_arguments)]
+pub fn verify_tunnel_security_handshake(
+    key: &str,
+    node_id: &str,
+    security_mode: &str,
+    session_id: &str,
+    protocol_version: u8,
+    timestamp_unix_secs: u64,
+    nonce: &str,
+    signature: &str,
+) -> bool {
+    verify_tunnel_security_handshake_for_generation(
+        key,
+        node_id,
+        "",
+        security_mode,
+        session_id,
+        protocol_version,
+        timestamp_unix_secs,
+        nonce,
+        signature,
+    )
+}
+
+// This mirrors the signing API exactly; the argument order is part of the
+// authenticated handshake format.
+#[allow(clippy::too_many_arguments)]
+pub fn verify_tunnel_security_handshake_for_generation(
+    key: &str,
+    node_id: &str,
+    tunnel_generation: &str,
+    security_mode: &str,
+    session_id: &str,
+    protocol_version: u8,
+    timestamp_unix_secs: u64,
+    nonce: &str,
+    signature: &str,
+) -> bool {
+    let Ok(psk) = decode_psk(key) else {
+        return false;
+    };
+    if signature.len() > 43 {
+        return false;
+    }
+    let Ok(signature) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(signature) else {
+        return false;
+    };
+    let Ok(mut mac) = <HmacSha256 as Mac>::new_from_slice(&psk) else {
+        return false;
+    };
+    update_handshake_proof_mac(
+        &mut mac,
+        node_id,
+        tunnel_generation,
+        security_mode,
+        session_id,
+        protocol_version,
+        timestamp_unix_secs,
+        nonce,
+    );
+    mac.verify_slice(&signature).is_ok()
+}
+
+pub fn sign_tunnel_control_plane_request(
+    key: &str,
+    method: &str,
+    path: &str,
+    node_id: &str,
+    timestamp_unix_secs: u64,
+    nonce: &str,
+    body: &[u8],
+) -> Result<String, TunnelSecurityError> {
+    sign_tunnel_control_plane_request_for_generation(
+        key,
+        method,
+        path,
+        node_id,
+        "",
+        timestamp_unix_secs,
+        nonce,
+        body,
+    )
+}
+
+// Control-plane authentication signs these fields in this fixed order. Keep
+// the public API stable instead of introducing a reordered parameter object.
+#[allow(clippy::too_many_arguments)]
+pub fn sign_tunnel_control_plane_request_for_generation(
+    key: &str,
+    method: &str,
+    path: &str,
+    node_id: &str,
+    tunnel_generation: &str,
+    timestamp_unix_secs: u64,
+    nonce: &str,
+    body: &[u8],
+) -> Result<String, TunnelSecurityError> {
+    let psk = decode_psk(key)?;
+    let mut mac =
+        <HmacSha256 as Mac>::new_from_slice(&psk).expect("HMAC accepts a 32-byte tunnel PSK");
+    update_control_plane_auth_mac(
+        &mut mac,
+        method,
+        path,
+        node_id,
+        tunnel_generation,
+        timestamp_unix_secs,
+        nonce,
+        body,
+    );
+    Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes()))
+}
+
+// Preserve the legacy verifier signature; it must feed the same transcript as
+// the corresponding signing function.
+#[allow(clippy::too_many_arguments)]
+pub fn verify_tunnel_control_plane_request(
+    key: &str,
+    method: &str,
+    path: &str,
+    node_id: &str,
+    timestamp_unix_secs: u64,
+    nonce: &str,
+    body: &[u8],
+    signature: &str,
+) -> bool {
+    verify_tunnel_control_plane_request_for_generation(
+        key,
+        method,
+        path,
+        node_id,
+        "",
+        timestamp_unix_secs,
+        nonce,
+        body,
+        signature,
+    )
+}
+
+// The generation-aware verifier intentionally mirrors the signer field order,
+// which is part of the control-plane wire contract.
+#[allow(clippy::too_many_arguments)]
+pub fn verify_tunnel_control_plane_request_for_generation(
+    key: &str,
+    method: &str,
+    path: &str,
+    node_id: &str,
+    tunnel_generation: &str,
+    timestamp_unix_secs: u64,
+    nonce: &str,
+    body: &[u8],
+    signature: &str,
+) -> bool {
+    let Ok(psk) = decode_psk(key) else {
+        return false;
+    };
+    if signature.len() > 43 {
+        return false;
+    }
+    let Ok(signature) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(signature) else {
+        return false;
+    };
+    let Ok(mut mac) = <HmacSha256 as Mac>::new_from_slice(&psk) else {
+        return false;
+    };
+    update_control_plane_auth_mac(
+        &mut mac,
+        method,
+        path,
+        node_id,
+        tunnel_generation,
+        timestamp_unix_secs,
+        nonce,
+        body,
+    );
+    mac.verify_slice(&signature).is_ok()
+}
+
+// Keep the MAC input fields separate and visibly ordered to avoid accidental
+// changes to the authenticated control-plane transcript.
+#[allow(clippy::too_many_arguments)]
+fn update_control_plane_auth_mac(
+    mac: &mut HmacSha256,
+    method: &str,
+    path: &str,
+    node_id: &str,
+    tunnel_generation: &str,
+    timestamp_unix_secs: u64,
+    nonce: &str,
+    body: &[u8],
+) {
+    mac.update(CONTROL_PLANE_AUTH_CONTEXT);
+    update_handshake_proof_field(mac, method.as_bytes());
+    update_handshake_proof_field(mac, path.as_bytes());
+    update_handshake_proof_field(mac, node_id.as_bytes());
+    update_handshake_proof_field(mac, tunnel_generation.as_bytes());
+    mac.update(&timestamp_unix_secs.to_be_bytes());
+    update_handshake_proof_field(mac, nonce.as_bytes());
+    mac.update(&Sha256::digest(body));
+}
+
+// This helper encodes the handshake transcript in a fixed cryptographic order;
+// grouping arguments into a struct would obscure that wire-level contract.
+#[allow(clippy::too_many_arguments)]
+fn update_handshake_proof_mac(
+    mac: &mut HmacSha256,
+    node_id: &str,
+    tunnel_generation: &str,
+    security_mode: &str,
+    session_id: &str,
+    protocol_version: u8,
+    timestamp_unix_secs: u64,
+    nonce: &str,
+) {
+    mac.update(HANDSHAKE_PROOF_CONTEXT);
+    update_handshake_proof_field(mac, node_id.as_bytes());
+    update_handshake_proof_field(mac, tunnel_generation.as_bytes());
+    update_handshake_proof_field(mac, security_mode.as_bytes());
+    update_handshake_proof_field(mac, session_id.as_bytes());
+    mac.update(&[protocol_version]);
+    mac.update(&timestamp_unix_secs.to_be_bytes());
+    update_handshake_proof_field(mac, nonce.as_bytes());
+}
+
+fn update_handshake_proof_field(mac: &mut HmacSha256, value: &[u8]) {
+    mac.update(&(value.len() as u64).to_be_bytes());
+    mac.update(value);
 }
 
 fn derive_key(psk: &[u8; 32], session_id: &[u8], label: &[u8]) -> [u8; 32] {
@@ -277,6 +589,70 @@ mod tests {
     }
 
     #[test]
+    fn secure_frame_accepts_a_concurrent_sequence_only_once() {
+        use std::sync::{Arc, Barrier};
+
+        let client = SecureFrameCodec::new(&test_key(), "session-1", TunnelSecurityRole::Client)
+            .expect("client codec");
+        let server = Arc::new(
+            SecureFrameCodec::new(&test_key(), "session-1", TunnelSecurityRole::Server)
+                .expect("server codec"),
+        );
+        let encrypted = client
+            .encrypt_frame(Frame::new(
+                1,
+                MsgType::RequestBody,
+                0,
+                Bytes::from_static(b"secret"),
+            ))
+            .expect("encrypt");
+        let wire = Frame::decode(encrypted).expect("wire frame");
+        let barrier = Arc::new(Barrier::new(3));
+        let workers = (0..2)
+            .map(|_| {
+                let server = Arc::clone(&server);
+                let barrier = Arc::clone(&barrier);
+                let wire = wire.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    server.decrypt_frame(wire)
+                })
+            })
+            .collect::<Vec<_>>();
+        barrier.wait();
+        let results = workers
+            .into_iter()
+            .map(|worker| worker.join().expect("worker should not panic"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(result, Err(TunnelSecurityError::UnexpectedSequence)))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn secure_frame_fails_closed_before_sequence_wrap() {
+        let codec = SecureFrameCodec::new(&test_key(), "session-1", TunnelSecurityRole::Client)
+            .expect("codec");
+        codec.next_sequence.store(u64::MAX, Ordering::Relaxed);
+
+        assert!(matches!(
+            codec.encrypt_frame(Frame::new(
+                1,
+                MsgType::RequestBody,
+                0,
+                Bytes::from_static(b"secret"),
+            )),
+            Err(TunnelSecurityError::SequenceExhausted)
+        ));
+    }
+
+    #[test]
     fn secure_frame_rejects_out_of_order_sequence_without_advancing() {
         let client = SecureFrameCodec::new(&test_key(), "session-1", TunnelSecurityRole::Client)
             .expect("client codec");
@@ -334,5 +710,196 @@ mod tests {
         let encrypted_b = client_b.encrypt_frame(frame).expect("encrypt b");
 
         assert_ne!(encrypted_a, encrypted_b);
+    }
+
+    #[test]
+    fn handshake_proof_round_trips_and_binds_every_field() {
+        let key = test_key();
+        let signature = sign_tunnel_security_handshake(
+            &key,
+            "node-1",
+            TUNNEL_SECURITY_NON_TLS_REQUIRED,
+            "0123456789abcdef0123456789abcdef",
+            3,
+            1_700_000_000,
+            "abcdef0123456789abcdef0123456789",
+        )
+        .expect("sign handshake");
+        assert_eq!(signature.len(), 43);
+        assert!(verify_tunnel_security_handshake(
+            &key,
+            "node-1",
+            TUNNEL_SECURITY_NON_TLS_REQUIRED,
+            "0123456789abcdef0123456789abcdef",
+            3,
+            1_700_000_000,
+            "abcdef0123456789abcdef0123456789",
+            &signature,
+        ));
+
+        for valid in [
+            verify_tunnel_security_handshake(
+                &key,
+                "node-2",
+                TUNNEL_SECURITY_NON_TLS_REQUIRED,
+                "0123456789abcdef0123456789abcdef",
+                3,
+                1_700_000_000,
+                "abcdef0123456789abcdef0123456789",
+                &signature,
+            ),
+            verify_tunnel_security_handshake(
+                &key,
+                "node-1",
+                TUNNEL_SECURITY_NON_TLS_REQUIRED,
+                "1123456789abcdef0123456789abcdef",
+                3,
+                1_700_000_000,
+                "abcdef0123456789abcdef0123456789",
+                &signature,
+            ),
+            verify_tunnel_security_handshake(
+                &key,
+                "node-1",
+                TUNNEL_SECURITY_NON_TLS_REQUIRED,
+                "0123456789abcdef0123456789abcdef",
+                2,
+                1_700_000_000,
+                "abcdef0123456789abcdef0123456789",
+                &signature,
+            ),
+            verify_tunnel_security_handshake(
+                &key,
+                "node-1",
+                TUNNEL_SECURITY_NON_TLS_REQUIRED,
+                "0123456789abcdef0123456789abcdef",
+                3,
+                1_700_000_001,
+                "abcdef0123456789abcdef0123456789",
+                &signature,
+            ),
+            verify_tunnel_security_handshake(
+                &key,
+                "node-1",
+                TUNNEL_SECURITY_NON_TLS_REQUIRED,
+                "0123456789abcdef0123456789abcdef",
+                3,
+                1_700_000_000,
+                "bbcdef0123456789abcdef0123456789",
+                &signature,
+            ),
+        ] {
+            assert!(!valid, "tampered handshake field must fail verification");
+        }
+    }
+
+    #[test]
+    fn handshake_proof_rejects_wrong_key_and_malformed_signature() {
+        let key = test_key();
+        let signature = sign_tunnel_security_handshake(
+            &key,
+            "node-1",
+            TUNNEL_SECURITY_NON_TLS_REQUIRED,
+            "0123456789abcdef0123456789abcdef",
+            3,
+            1_700_000_000,
+            "abcdef0123456789abcdef0123456789",
+        )
+        .expect("sign handshake");
+        let wrong_key = base64::engine::general_purpose::STANDARD.encode([8_u8; 32]);
+        assert!(!verify_tunnel_security_handshake(
+            &wrong_key,
+            "node-1",
+            TUNNEL_SECURITY_NON_TLS_REQUIRED,
+            "0123456789abcdef0123456789abcdef",
+            3,
+            1_700_000_000,
+            "abcdef0123456789abcdef0123456789",
+            &signature,
+        ));
+        assert!(!verify_tunnel_security_handshake(
+            &key,
+            "node-1",
+            TUNNEL_SECURITY_NON_TLS_REQUIRED,
+            "0123456789abcdef0123456789abcdef",
+            3,
+            1_700_000_000,
+            "abcdef0123456789abcdef0123456789",
+            "not-base64",
+        ));
+    }
+
+    #[test]
+    fn control_plane_proof_round_trips_and_binds_identity_route_and_body() {
+        let key = test_key();
+        let body = br#"{"node_id":"node-1","heartbeat_id":7}"#;
+        let signature = sign_tunnel_control_plane_request(
+            &key,
+            "POST",
+            "/api/internal/tunnel/heartbeat",
+            "node-1",
+            1_700_000_000,
+            "nonce-0123456789abcdef",
+            body,
+        )
+        .expect("sign control-plane request");
+
+        assert!(verify_tunnel_control_plane_request(
+            &key,
+            "POST",
+            "/api/internal/tunnel/heartbeat",
+            "node-1",
+            1_700_000_000,
+            "nonce-0123456789abcdef",
+            body,
+            &signature,
+        ));
+        for valid in [
+            verify_tunnel_control_plane_request(
+                &key,
+                "GET",
+                "/api/internal/tunnel/heartbeat",
+                "node-1",
+                1_700_000_000,
+                "nonce-0123456789abcdef",
+                body,
+                &signature,
+            ),
+            verify_tunnel_control_plane_request(
+                &key,
+                "POST",
+                "/api/internal/tunnel/node-status",
+                "node-1",
+                1_700_000_000,
+                "nonce-0123456789abcdef",
+                body,
+                &signature,
+            ),
+            verify_tunnel_control_plane_request(
+                &key,
+                "POST",
+                "/api/internal/tunnel/heartbeat",
+                "node-2",
+                1_700_000_000,
+                "nonce-0123456789abcdef",
+                body,
+                &signature,
+            ),
+            verify_tunnel_control_plane_request(
+                &key,
+                "POST",
+                "/api/internal/tunnel/heartbeat",
+                "node-1",
+                1_700_000_000,
+                "nonce-0123456789abcdef",
+                br#"{"node_id":"node-1","heartbeat_id":8}"#,
+                &signature,
+            ),
+        ] {
+            assert!(
+                !valid,
+                "tampered control-plane field must fail verification"
+            );
+        }
     }
 }

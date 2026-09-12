@@ -29,6 +29,7 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
+import { useI18n } from '@/i18n'
 import LineChart from '@/components/charts/LineChart.vue'
 import { LoadingState } from '@/components/common'
 import { formatCurrency } from '@/utils/format'
@@ -45,6 +46,7 @@ const props = withDefaults(defineProps<Props>(), {
   subtitle: undefined,
   loading: false
 })
+const { t } = useI18n()
 
 const labels = computed(() => [
   ...props.history.map(item => item.date),
@@ -58,7 +60,7 @@ const chartData = computed(() => {
     labels: labels.value,
     datasets: [
       {
-        label: '实际成本',
+        label: t('chart.actualCost'),
         data: historyValues.concat(new Array(forecastValues.length).fill(null)),
         borderColor: 'rgb(59, 130, 246)',
         backgroundColor: 'rgba(59, 130, 246, 0.15)',
@@ -66,7 +68,7 @@ const chartData = computed(() => {
         pointRadius: 2
       },
       {
-        label: '预测成本',
+        label: t('chart.forecastCost'),
         data: new Array(historyValues.length).fill(null).concat(forecastValues),
         borderColor: 'rgb(234, 179, 8)',
         backgroundColor: 'rgba(234, 179, 8, 0.15)',

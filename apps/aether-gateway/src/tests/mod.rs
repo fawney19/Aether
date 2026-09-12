@@ -17,6 +17,7 @@ mod concurrency;
 mod control;
 mod files;
 mod frontdoor;
+mod operational_auth;
 mod proxy;
 mod usage;
 mod video;
@@ -43,6 +44,44 @@ pub(super) async fn start_server(app: Router) -> (String, tokio::task::JoinHandl
         .expect("server should run");
     });
     (format!("http://{addr}"), handle)
+}
+
+pub(super) const OPERATIONAL_ADMIN_DEVICE_ID: &str = "device-operational-admin";
+
+pub(super) async fn start_authenticated_operational_server(
+    state: AppState,
+) -> (String, tokio::task::JoinHandle<()>, String) {
+    let access_token =
+        control::issue_shared_test_admin_access_token(&state, OPERATIONAL_ADMIN_DEVICE_ID).await;
+    let (url, handle) = start_server(build_router_with_state(state)).await;
+    (url, handle, access_token)
+}
+
+pub(super) fn authenticated_operational_client(access_token: &str) -> reqwest::Client {
+    authenticated_operational_client_with_builder(reqwest::Client::builder(), access_token)
+}
+
+pub(super) fn authenticated_operational_client_with_builder(
+    builder: reqwest::ClientBuilder,
+    access_token: &str,
+) -> reqwest::Client {
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        reqwest::header::AUTHORIZATION,
+        format!("Bearer {access_token}")
+            .parse()
+            .expect("operational authorization header should build"),
+    );
+    headers.insert(
+        "x-client-device-id",
+        OPERATIONAL_ADMIN_DEVICE_ID
+            .parse()
+            .expect("operational device header should build"),
+    );
+    builder
+        .default_headers(headers)
+        .build()
+        .expect("operational client should build")
 }
 
 pub(super) async fn send_request(app: Router, mut request: Request) -> Response {

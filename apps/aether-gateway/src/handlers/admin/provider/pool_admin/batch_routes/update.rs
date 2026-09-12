@@ -1,6 +1,6 @@
 use super::{
-    admin_pool_provider_id_from_path, build_admin_pool_error_response,
-    ADMIN_POOL_PROVIDER_CATALOG_READER_UNAVAILABLE_DETAIL,
+    admin_pool_provider_id_from_path, batch_action::validate_admin_pool_batch_item_count,
+    build_admin_pool_error_response, ADMIN_POOL_PROVIDER_CATALOG_READER_UNAVAILABLE_DETAIL,
     ADMIN_POOL_PROVIDER_CATALOG_WRITER_UNAVAILABLE_DETAIL,
 };
 use crate::handlers::admin::provider::shared::payloads::AdminProviderKeyBatchUpdateRequest;
@@ -53,6 +53,12 @@ pub(super) async fn build_admin_pool_batch_update_response(
             ));
         }
     };
+    if let Err(detail) = validate_admin_pool_batch_item_count(payload.key_ids.len()) {
+        return Ok(build_admin_pool_error_response(
+            http::StatusCode::BAD_REQUEST,
+            detail,
+        ));
+    }
 
     state
         .build_admin_pool_batch_update_response(&provider_id, payload)

@@ -1,4 +1,7 @@
-use super::{build_admin_users_bad_request_response, format_optional_datetime_iso8601};
+use super::{
+    build_admin_users_bad_request_response, build_admin_users_permission_denied_response,
+    format_optional_datetime_iso8601, management_token_may_administer_user_accounts,
+};
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::handlers::admin::shared::attach_admin_audit_response;
 use crate::{GatewayError, GatewayUserSessionView};
@@ -98,12 +101,19 @@ pub(super) async fn build_admin_delete_user_session_response(
         ));
     };
 
-    if state.find_user_auth_by_id(&user_id).await?.is_none() {
+    let Some(user) = state.find_user_auth_by_id(&user_id).await? else {
         return Ok((
             http::StatusCode::NOT_FOUND,
             Json(json!({ "detail": "用户不存在" })),
         )
             .into_response());
+    };
+    if crate::roles::can_access_admin_console(&user.role)
+        && !management_token_may_administer_user_accounts(request_context)
+    {
+        return Ok(build_admin_users_permission_denied_response(
+            request_context,
+        ));
     }
 
     if state
@@ -144,12 +154,19 @@ pub(super) async fn build_admin_delete_user_sessions_response(
         return Ok(build_admin_users_bad_request_response("缺少 user_id"));
     };
 
-    if state.find_user_auth_by_id(&user_id).await?.is_none() {
+    let Some(user) = state.find_user_auth_by_id(&user_id).await? else {
         return Ok((
             http::StatusCode::NOT_FOUND,
             Json(json!({ "detail": "用户不存在" })),
         )
             .into_response());
+    };
+    if crate::roles::can_access_admin_console(&user.role)
+        && !management_token_may_administer_user_accounts(request_context)
+    {
+        return Ok(build_admin_users_permission_denied_response(
+            request_context,
+        ));
     }
 
     let revoked_count = state

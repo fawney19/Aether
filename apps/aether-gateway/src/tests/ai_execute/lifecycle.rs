@@ -1,7 +1,7 @@
 use super::{
     any, build_router_with_state, build_state_with_execution_runtime_override, json, start_server,
     Arc, Body, Bytes, HeaderValue, Infallible, Json, Mutex, Request, Response, Router, StatusCode,
-    TRACE_ID_HEADER,
+    LOCAL_EXECUTION_RUNTIME_MISS_REASON_HEADER, TRACE_ID_HEADER,
 };
 
 use aether_crypto::{encrypt_python_fernet_plaintext, DEVELOPMENT_ENCRYPTION_KEY};
@@ -13,6 +13,9 @@ use aether_data::repository::candidates::InMemoryRequestCandidateRepository;
 use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
 use aether_data_contracts::repository::candidate_selection::{
     StoredMinimalCandidateSelectionRow, StoredProviderModelMapping,
+};
+use aether_data_contracts::repository::candidates::{
+    RequestCandidateReadRepository, RequestCandidateStatus,
 };
 use aether_data_contracts::repository::provider_catalog::{
     StoredProviderCatalogEndpoint, StoredProviderCatalogKey, StoredProviderCatalogProvider,
@@ -50,6 +53,24 @@ fn hash_api_key(value: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(value.as_bytes());
     format!("{:x}", hasher.finalize())
+}
+
+async fn build_cancelling_gateway(state: crate::AppState) -> Router {
+    state
+        .data
+        .update_routing_group(
+            "system-default",
+            aether_data_contracts::repository::routing_profiles::UpdateRoutingGroupRecord {
+                config_json: Some(json!({"default_policy": {"cancel_on_client_disconnect": true}})),
+                version: Some(2),
+                updated_at: 2,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("routing policy should update")
+        .expect("default strategy should exist");
+    build_router_with_state(state)
 }
 
 fn sample_local_openai_auth_snapshot(api_key_id: &str, user_id: &str) -> StoredAuthApiKeySnapshot {
@@ -382,7 +403,7 @@ async fn gateway_stops_execution_runtime_stream_when_client_disconnects_impl() {
         vec![sample_local_openai_key()],
     ));
     let request_candidate_repository = Arc::new(InMemoryRequestCandidateRepository::default());
-    let gateway = build_router_with_state(
+    let gateway = build_cancelling_gateway(
         build_state_with_execution_runtime_override(execution_runtime_url)
             .with_data_state_for_tests(
                 GatewayDataState::with_auth_candidate_selection_provider_catalog_and_request_candidate_repository_for_tests(
@@ -393,7 +414,7 @@ async fn gateway_stops_execution_runtime_stream_when_client_disconnects_impl() {
                     DEVELOPMENT_ENCRYPTION_KEY,
                 ),
             ),
-    );
+    ).await;
     let (gateway_url, gateway_handle) = start_server(gateway).await;
 
     let response = reqwest::Client::new()
@@ -426,6 +447,112 @@ async fn gateway_stops_execution_runtime_stream_when_client_disconnects_impl() {
     gateway_handle.abort();
     execution_runtime_handle.abort();
     upstream_handle.abort();
+}
+
+#[test]
+fn gateway_settles_stream_attempt_when_client_disconnects_before_first_byte() {
+    run_lifecycle_test(
+        "gateway_settles_stream_attempt_when_client_disconnects_before_first_byte",
+        gateway_settles_stream_attempt_when_client_disconnects_before_first_byte_impl,
+    );
+}
+
+async fn gateway_settles_stream_attempt_when_client_disconnects_before_first_byte_impl() {
+    // The execution runtime accepts the plan and then goes quiet, so the attempt
+    // is parked between its `pending` rows and the first upstream byte.
+    let execution_runtime = Router::new().route(
+        "/v1/execute/stream",
+        any(|_request: Request| async move {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            StatusCode::OK
+        }),
+    );
+
+    let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
+    let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+        Some(hash_api_key("sk-client-openai-stream-precommit-disconnect")),
+        sample_local_openai_auth_snapshot(
+            "api-key-openai-lifecycle-local-1",
+            "user-openai-lifecycle-local-1",
+        ),
+    )]));
+    let candidate_selection_repository =
+        Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
+            sample_local_openai_candidate_row(),
+        ]));
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![sample_local_openai_provider()],
+        vec![sample_local_openai_endpoint()],
+        vec![sample_local_openai_key()],
+    ));
+    let request_candidate_repository = Arc::new(InMemoryRequestCandidateRepository::default());
+    let gateway = build_cancelling_gateway(
+        build_state_with_execution_runtime_override(execution_runtime_url)
+            .with_data_state_for_tests(
+                GatewayDataState::with_auth_candidate_selection_provider_catalog_and_request_candidate_repository_for_tests(
+                    auth_repository,
+                    candidate_selection_repository,
+                    provider_catalog_repository,
+                    Arc::clone(&request_candidate_repository),
+                    DEVELOPMENT_ENCRYPTION_KEY,
+                ),
+            ),
+    ).await;
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let request = reqwest::Client::new()
+        .post(format!("{gateway_url}/v1/chat/completions"))
+        .header(http::header::CONTENT_TYPE, "application/json")
+        .header(
+            http::header::AUTHORIZATION,
+            "Bearer sk-client-openai-stream-precommit-disconnect",
+        )
+        .header(
+            TRACE_ID_HEADER,
+            "trace-openai-chat-stream-precommit-disconnect-123",
+        )
+        .body("{\"model\":\"gpt-5\",\"messages\":[],\"stream\":true}")
+        .send();
+
+    // Drop the in-flight request the way a downstream client does when its own
+    // first-byte timeout fires, before any response header exists.
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(750), request)
+            .await
+            .is_err(),
+        "the execution runtime should not have answered before the client gave up"
+    );
+
+    let mut stored_candidates = Vec::new();
+    for _ in 0..200 {
+        stored_candidates = request_candidate_repository
+            .list_by_request_id("trace-openai-chat-stream-precommit-disconnect-123")
+            .await
+            .expect("request candidate trace should read");
+        if stored_candidates
+            .iter()
+            .any(|candidate| candidate.status == RequestCandidateStatus::Cancelled)
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    let cancelled = stored_candidates
+        .iter()
+        .find(|candidate| candidate.status == RequestCandidateStatus::Cancelled)
+        .unwrap_or_else(|| {
+            panic!("dropped stream attempt should settle as cancelled: {stored_candidates:?}")
+        });
+    assert_eq!(cancelled.status_code, Some(499));
+    assert_eq!(
+        cancelled.error_type.as_deref(),
+        Some("local_stream_attempt_cancelled")
+    );
+    assert!(cancelled.finished_at_unix_ms.is_some());
+
+    gateway_handle.abort();
+    execution_runtime_handle.abort();
 }
 
 #[test]
@@ -500,7 +627,7 @@ async fn gateway_returns_error_body_when_prefetch_detects_embedded_stream_error_
                     auth_repository,
                     candidate_selection_repository,
                     provider_catalog_repository,
-                    request_candidate_repository,
+                    Arc::clone(&request_candidate_repository),
                     DEVELOPMENT_ENCRYPTION_KEY,
                 ),
             ),
@@ -523,17 +650,41 @@ async fn gateway_returns_error_body_when_prefetch_detects_embedded_stream_error_
         .await
         .expect("request should succeed");
 
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(
         response
             .headers()
             .get(http::header::CONTENT_TYPE)
             .and_then(|value| value.to_str().ok()),
-        Some("text/event-stream")
+        Some("application/json")
     );
-    let body_text = response.text().await.expect("response body should read");
-    assert!(body_text.contains("\"rate_limit_error\""));
-    assert!(body_text.contains("\"slow down\""));
+    assert_eq!(
+        response
+            .headers()
+            .get(LOCAL_EXECUTION_RUNTIME_MISS_REASON_HEADER)
+            .and_then(|value| value.to_str().ok()),
+        Some("execution_runtime_candidates_exhausted")
+    );
+    let body_json: serde_json::Value = response.json().await.expect("response body should parse");
+    assert_eq!(body_json["error"]["type"], "http_error");
+    let stored_candidates = request_candidate_repository
+        .list_by_request_id("trace-openai-chat-stream-prefetch-error-123")
+        .await
+        .expect("request candidate trace should read");
+    let failed_candidate = stored_candidates
+        .iter()
+        .find(|candidate| candidate.status == RequestCandidateStatus::Failed)
+        .expect("prefetched error should mark the attempted candidate as failed");
+    assert!(stored_candidates
+        .iter()
+        .all(|candidate| candidate.status != RequestCandidateStatus::Success));
+    assert_eq!(failed_candidate.status_code, Some(429));
+    assert_eq!(
+        failed_candidate.error_type.as_deref(),
+        Some("rate_limit_error")
+    );
+    assert_eq!(failed_candidate.error_message.as_deref(), Some("slow down"));
+    assert!(failed_candidate.finished_at_unix_ms.is_some());
     assert_eq!(*public_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();

@@ -94,7 +94,7 @@
                 <div class="flex items-center gap-2">
                   <span class="text-xs text-muted-foreground">启用代理</span>
                   <Switch
-                    :model-value="formData[group.toggleKey] || false"
+                    :model-value="formData[group.toggleKey] === true"
                     @update:model-value="handleProxyToggle(group.toggleKey, $event)"
                   />
                 </div>
@@ -107,7 +107,7 @@
               >
                 <ProxyNodeSelect
                   ref="proxyNodeSelectRef"
-                  :model-value="formData.proxy_node_id || ''"
+                  :model-value="stringFieldValue('proxy_node_id')"
                   trigger-class="h-8"
                   @update:model-value="(v: string) => { formData.proxy_node_id = v; handleFieldChange('proxy_node_id', v) }"
                 />
@@ -146,7 +146,7 @@
                   <!-- 文本输入 -->
                   <Input
                     v-if="field.type === 'text'"
-                    v-model="formData[field.key]"
+                    :model-value="stringFieldValue(field.key)"
                     :placeholder="field.sensitive ? (sensitivePlaceholders[field.key] || field.placeholder) : field.placeholder"
                     :masked="field.sensitive"
                     disable-autofill
@@ -156,7 +156,7 @@
                   <!-- 密码/敏感输入 -->
                   <Input
                     v-else-if="field.type === 'password'"
-                    v-model="formData[field.key]"
+                    :model-value="stringFieldValue(field.key)"
                     :placeholder="sensitivePlaceholders[field.key] || field.placeholder"
                     masked
                     @update:model-value="handleFieldChange(field.key, $event)"
@@ -182,7 +182,7 @@
                   <!-- 文本输入 -->
                   <Input
                     v-if="field.type === 'text'"
-                    v-model="formData[field.key]"
+                    :model-value="stringFieldValue(field.key)"
                     :placeholder="field.sensitive ? (sensitivePlaceholders[field.key] || field.placeholder) : field.placeholder"
                     :masked="field.sensitive"
                     disable-autofill
@@ -192,7 +192,7 @@
                   <!-- 密码/敏感输入 -->
                   <Input
                     v-else-if="field.type === 'password'"
-                    v-model="formData[field.key]"
+                    :model-value="stringFieldValue(field.key)"
                     :placeholder="sensitivePlaceholders[field.key] || field.placeholder"
                     masked
                     @update:model-value="handleFieldChange(field.key, $event)"
@@ -201,7 +201,7 @@
                   <!-- 下拉选择 -->
                   <Select
                     v-else-if="field.type === 'select'"
-                    v-model="formData[field.key]"
+                    :model-value="stringFieldValue(field.key)"
                     @update:model-value="handleFieldChange(field.key, $event)"
                   >
                     <SelectTrigger>
@@ -221,7 +221,7 @@
                   <!-- 多行文本 -->
                   <Textarea
                     v-else-if="field.type === 'textarea'"
-                    v-model="formData[field.key]"
+                    :model-value="stringFieldValue(field.key)"
                     :placeholder="field.placeholder"
                     rows="3"
                     @update:model-value="handleFieldChange(field.key, $event)"
@@ -417,6 +417,11 @@ const architecturesLoaded = ref(false)
 const selectedArchitectureId = ref('new_api')
 const selectedAuthType = ref('')
 const formData = ref<Record<string, unknown>>({})
+function stringFieldValue(key: string): string {
+  const value = formData.value[key]
+  return typeof value === 'string' || typeof value === 'number' ? String(value) : ''
+}
+
 const quotaAlert = ref<QuotaAlertConfig>({
   enabled: false,
   threshold_amount: 0,
@@ -439,11 +444,11 @@ const currentSchema = computed<CredentialsSchema | null>(() => {
   if (selectedAuthType.value && arch.supported_auth_types.length > 1) {
     const authType = arch.supported_auth_types.find((t) => t.type === selectedAuthType.value)
     if (authType?.credentials_schema) {
-      return authType.credentials_schema as CredentialsSchema
+      return authType.credentials_schema
     }
   }
 
-  return (arch?.credentials_schema as CredentialsSchema) ?? null
+  return arch?.credentials_schema ?? null
 })
 
 // 表单是否可以验证（必填字段已填写）
@@ -464,7 +469,7 @@ const canVerify = computed(() => {
   const error = validateFromSchema(schema, dataToValidate)
   if (error) return false
 
-  const effectiveBaseUrl = formData.value.base_url || props.providerWebsite
+  const effectiveBaseUrl = stringFieldValue('base_url') || props.providerWebsite
   return !!effectiveBaseUrl
 })
 
@@ -503,6 +508,7 @@ function handleAuthTypeChange() {
 }
 
 function handleFieldChange(fieldKey: string, value: unknown) {
+  formData.value[fieldKey] = value
   formChanged.value = true
 
   // 执行 schema 定义的字段钩子
@@ -533,7 +539,7 @@ function resetFormData() {
   // 初始化表单数据
   const data: Record<string, unknown> = {}
   for (const [key, prop] of Object.entries(schema.properties)) {
-    data[key] = (prop as Record<string, unknown>)['x-default-value'] ?? ''
+    data[key] = prop['x-default-value'] ?? ''
   }
   // 代理相关默认值
   data.proxy_enabled = false
@@ -575,7 +581,7 @@ async function handleVerify() {
     return
   }
 
-  const effectiveBaseUrl = formData.value.base_url || props.providerWebsite
+  const effectiveBaseUrl = stringFieldValue('base_url') || props.providerWebsite
   if (!effectiveBaseUrl) {
     showError('请填写 API 地址')
     return
@@ -672,7 +678,7 @@ async function handleSave() {
     return
   }
 
-  const effectiveBaseUrl = formData.value.base_url || props.providerWebsite
+  const effectiveBaseUrl = stringFieldValue('base_url') || props.providerWebsite
   if (!effectiveBaseUrl) {
     showError('请填写 API 地址')
     return

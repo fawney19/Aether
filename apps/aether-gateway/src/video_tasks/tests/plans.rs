@@ -62,6 +62,30 @@ fn rust_authoritative_service_builds_openai_cancel_follow_up_plan() {
             .and_then(Value::as_str),
         Some("task-local-123")
     );
+
+    let mut same_user_new_key = sample_auth_context();
+    same_user_new_key.api_key_id = "key-rotated".to_string();
+    assert!(service
+        .prepare_follow_up_sync_plan_for_user(
+            "openai_video_cancel_sync",
+            "/v1/videos/task-local-123/cancel",
+            None,
+            Some(&same_user_new_key),
+            "trace-openai-cancel-owner-rotated-key",
+        )
+        .is_some());
+    let mut foreign_auth = sample_auth_context();
+    foreign_auth.user_id = "user-foreign".to_string();
+    foreign_auth.api_key_id = "key-foreign".to_string();
+    assert!(service
+        .prepare_follow_up_sync_plan_for_user(
+            "openai_video_cancel_sync",
+            "/v1/videos/task-local-123/cancel",
+            None,
+            Some(&foreign_auth),
+            "trace-openai-cancel-foreign",
+        )
+        .is_none());
 }
 
 #[test]
@@ -123,6 +147,30 @@ fn rust_authoritative_service_builds_openai_remix_follow_up_plan() {
             .and_then(Value::as_str),
         Some("task-local-123")
     );
+
+    let mut same_user_new_key = sample_auth_context();
+    same_user_new_key.api_key_id = "key-rotated".to_string();
+    assert!(service
+        .prepare_follow_up_sync_plan_for_user(
+            "openai_video_remix_sync",
+            "/v1/videos/task-local-123/remix",
+            Some(&remix_body),
+            Some(&same_user_new_key),
+            "trace-openai-remix-owner-rotated-key",
+        )
+        .is_some());
+    let mut foreign_auth = sample_auth_context();
+    foreign_auth.user_id = "user-foreign".to_string();
+    foreign_auth.api_key_id = "key-foreign".to_string();
+    assert!(service
+        .prepare_follow_up_sync_plan_for_user(
+            "openai_video_remix_sync",
+            "/v1/videos/task-local-123/remix",
+            Some(&remix_body),
+            Some(&foreign_auth),
+            "trace-openai-remix-foreign",
+        )
+        .is_none());
 }
 
 #[test]
@@ -180,6 +228,30 @@ fn rust_authoritative_service_builds_openai_delete_follow_up_plan() {
             .and_then(Value::as_str),
         Some("task-local-123")
     );
+
+    let mut same_user_new_key = sample_auth_context();
+    same_user_new_key.api_key_id = "key-rotated".to_string();
+    assert!(service
+        .prepare_follow_up_sync_plan_for_user(
+            "openai_video_delete_sync",
+            "/v1/videos/task-local-123",
+            None,
+            Some(&same_user_new_key),
+            "trace-openai-delete-owner-rotated-key",
+        )
+        .is_some());
+    let mut foreign_auth = sample_auth_context();
+    foreign_auth.user_id = "user-foreign".to_string();
+    foreign_auth.api_key_id = "key-foreign".to_string();
+    assert!(service
+        .prepare_follow_up_sync_plan_for_user(
+            "openai_video_delete_sync",
+            "/v1/videos/task-local-123",
+            None,
+            Some(&foreign_auth),
+            "trace-openai-delete-foreign",
+        )
+        .is_none());
 }
 
 #[test]
@@ -230,6 +302,30 @@ fn rust_authoritative_service_builds_gemini_cancel_follow_up_plan() {
             .and_then(Value::as_str),
         Some("localshort123")
     );
+
+    let mut same_user_new_key = sample_auth_context();
+    same_user_new_key.api_key_id = "key-rotated".to_string();
+    assert!(service
+        .prepare_follow_up_sync_plan_for_user(
+            "gemini_video_cancel_sync",
+            "/v1beta/models/veo-3/operations/localshort123:cancel",
+            None,
+            Some(&same_user_new_key),
+            "trace-gemini-cancel-owner-rotated-key",
+        )
+        .is_some());
+    let mut foreign_auth = sample_auth_context();
+    foreign_auth.user_id = "user-foreign".to_string();
+    foreign_auth.api_key_id = "key-foreign".to_string();
+    assert!(service
+        .prepare_follow_up_sync_plan_for_user(
+            "gemini_video_cancel_sync",
+            "/v1beta/models/veo-3/operations/localshort123:cancel",
+            None,
+            Some(&foreign_auth),
+            "trace-gemini-cancel-foreign",
+        )
+        .is_none());
 }
 
 #[test]
@@ -367,9 +463,13 @@ fn rust_authoritative_service_builds_poll_refresh_batch_for_active_tasks_only() 
 fn file_video_task_store_persists_snapshots_across_service_rebuilds() {
     let store_path =
         std::env::temp_dir().join(format!("aether-video-task-store-{}.json", Uuid::new_v4()));
-    let service =
-        VideoTaskService::with_file_store(VideoTaskTruthSourceMode::RustAuthoritative, &store_path)
-            .expect("file-backed service should build");
+    let encryption_key = "video-task-test-encryption-key";
+    let service = VideoTaskService::with_file_store(
+        VideoTaskTruthSourceMode::RustAuthoritative,
+        &store_path,
+        encryption_key,
+    )
+    .expect("file-backed service should build");
     service.record_snapshot(LocalVideoTaskSnapshot::OpenAi(OpenAiVideoTaskSeed {
         local_task_id: "task-file-123".to_string(),
         upstream_task_id: "ext-video-task-123".to_string(),
@@ -393,9 +493,16 @@ fn file_video_task_store_persists_snapshots_across_service_rebuilds() {
     }));
     drop(service);
 
-    let reopened =
-        VideoTaskService::with_file_store(VideoTaskTruthSourceMode::RustAuthoritative, &store_path)
-            .expect("reopened file-backed service should build");
+    let stored_bytes = std::fs::read(&store_path).expect("encrypted store should exist");
+    assert!(stored_bytes.starts_with(b"aether-video-tasks-v2\n"));
+    assert!(!String::from_utf8_lossy(&stored_bytes).contains("api.openai.example"));
+
+    let reopened = VideoTaskService::with_file_store(
+        VideoTaskTruthSourceMode::RustAuthoritative,
+        &store_path,
+        encryption_key,
+    )
+    .expect("reopened file-backed service should build");
     let response = reopened
         .read_response(Some("openai"), "/v1/videos/task-file-123")
         .expect("persisted read response should exist");

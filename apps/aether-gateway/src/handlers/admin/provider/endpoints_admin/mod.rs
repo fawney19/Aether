@@ -6,6 +6,7 @@ mod extractors;
 mod list;
 pub(crate) mod payloads;
 mod reads;
+mod reveal;
 mod support;
 mod update;
 
@@ -38,6 +39,10 @@ pub(crate) async fn maybe_build_local_admin_endpoints_routes_response(
     }
 
     if let Some(response) = detail::maybe_handle(state, request_context, request_body).await? {
+        return Ok(Some(response));
+    }
+
+    if let Some(response) = reveal::maybe_handle(state, request_context).await? {
         return Ok(Some(response));
     }
 

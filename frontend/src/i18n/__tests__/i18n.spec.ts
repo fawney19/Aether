@@ -1,7 +1,8 @@
-import { beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, defineComponent, h, nextTick, ref } from 'vue'
 
-import { createI18n, useI18n, useLocaleOptions } from '@/i18n'
+import { createI18n, getI18nLocale, normalizeLocale, setI18nLocale, useI18n, useLocaleOptions } from '@/i18n'
+import { formatDate, formatRelativeTime } from '@/utils/format'
 import { translateLegacyText } from '@/i18n/messages'
 import { transformLegacyTemplateI18n } from '@/i18n/legacy-template-transform'
 
@@ -117,5 +118,40 @@ describe('i18n infrastructure', () => {
     expect(translateLegacyText('0 (不限制)', 'en-US')).toBe('0 (unlimited)')
     expect(translateLegacyText('  发布于 2026-01-01  ', 'en-US')).toBe('  Published at 2026-01-01  ')
     expect(translateLegacyText('git clone https://github.com/fawney19/Aether.git', 'en-US')).toBe('git clone https://github.com/fawney19/Aether.git')
+  })
+
+  it('normalizes saved language aliases without accepting unrelated language names', () => {
+    expect(normalizeLocale('en')).toBe('en-US')
+    expect(normalizeLocale('en_GB')).toBe('en-US')
+    expect(normalizeLocale(' ZH-cn ')).toBe('zh-CN')
+    expect(normalizeLocale('english')).toBeUndefined()
+    expect(normalizeLocale('fr-FR')).toBeUndefined()
+  })
+
+  it('continues switching language when browser storage is unavailable', () => {
+    const write = vi.spyOn(localStorage, 'setItem').mockImplementation(() => {
+      throw new DOMException('Storage blocked', 'SecurityError')
+    })
+    try {
+      expect(() => setI18nLocale('en-US')).not.toThrow()
+      expect(getI18nLocale()).toBe('en-US')
+      expect(document.documentElement.lang).toBe('en-US')
+    } finally {
+      write.mockRestore()
+    }
+  })
+
+  it('updates date and relative-time formatting with the selected language', () => {
+    const date = '2026-09-07T12:30:00'
+    setI18nLocale('zh-CN')
+    const chineseDate = formatDate(date)
+    expect(formatRelativeTime(-1, 'day')).toBe('昨天')
+    setI18nLocale('en-US')
+    expect(formatRelativeTime(-1, 'day')).toBe('yesterday')
+    expect(formatRelativeTime(-1, 'minute')).toBe('1 minute ago')
+    expect(formatRelativeTime(-2, 'minute')).toBe('2 minutes ago')
+    expect(formatDate(date)).not.toBe(chineseDate)
+    setI18nLocale('zh-CN')
+    expect(formatDate(date)).toBe(chineseDate)
   })
 })

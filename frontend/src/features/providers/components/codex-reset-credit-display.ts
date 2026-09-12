@@ -277,7 +277,7 @@ export function getVisibleCodexResetCreditItems(
   if (!snapshot || !Array.isArray(credits)) return []
 
   return credits
-    .map((item) => {
+    .map((item): CodexResetCreditDisplayCandidate | null => {
       if (!codexResetCreditStatusIsDisplayable(item)) return null
       const remainingSeconds = codexResetCreditRemainingSeconds(item, snapshot, nowUnixSecs)
       if (remainingSeconds === null || remainingSeconds <= 0) return null

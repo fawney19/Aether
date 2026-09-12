@@ -87,7 +87,7 @@ export const referralApi = {
   async getAdminReferrals(
     params: ReferralRelationshipQuery = {}
   ): Promise<ReferralListResponse<ReferralRelationshipRecord>> {
-    const response = await apiClient.get('/api/admin/referrals', {
+    const response = await apiClient.get<ReferralListResponse<ReferralRelationshipRecord>>('/api/admin/referrals', {
       params: cleanParams(params as Record<string, unknown>)
     })
     return response.data
@@ -96,19 +96,19 @@ export const referralApi = {
   async getAdminReferralRewards(
     params: ReferralRewardQuery = {}
   ): Promise<ReferralListResponse<ReferralRewardRecord>> {
-    const response = await apiClient.get('/api/admin/referral-rewards', {
+    const response = await apiClient.get<ReferralListResponse<ReferralRewardRecord>>('/api/admin/referral-rewards', {
       params: cleanParams(params as Record<string, unknown>)
     })
     return response.data
   },
 
   async retryReferralReward(id: string, note?: string): Promise<{ reward: ReferralRewardRecord }> {
-    const response = await apiClient.post(`/api/admin/referral-rewards/${id}/retry`, { note })
+    const response = await apiClient.post<{ reward: ReferralRewardRecord }>(`/api/admin/referral-rewards/${id}/retry`, { note })
     return response.data
   },
 
   async voidReferralReward(id: string, note?: string): Promise<{ reward: ReferralRewardRecord }> {
-    const response = await apiClient.post(`/api/admin/referral-rewards/${id}/void`, { note })
+    const response = await apiClient.post<{ reward: ReferralRewardRecord }>(`/api/admin/referral-rewards/${id}/void`, { note })
     return response.data
   }
 }

@@ -275,7 +275,7 @@ const taskError = ref<string | null>(null)
 
 let previewDebounceTimer: ReturnType<typeof setTimeout> | null = null
 let previewSeq = 0
-let taskPollTimer: ReturnType<typeof window.setInterval> | null = null
+let taskPollTimer: number | null = null
 
 const modeOptions: Array<{ value: ManualCleanupMode; label: string; description: string }> = [
   { value: 'policy', label: '按当前策略', description: '沿用页面上配置的保留天数' },
@@ -465,7 +465,7 @@ async function handleConfirm() {
   taskError.value = null
   try {
     const response = await adminApi.runManualUsageCleanup(buildRequest())
-    if ('detail' in response && response.detail === 'usage_cleanup_already_running') {
+    if ('detail' in response) {
       taskError.value = response.message
       emit('running-change', false)
       return

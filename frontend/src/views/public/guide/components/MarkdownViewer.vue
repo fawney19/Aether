@@ -12,8 +12,8 @@
 <script setup lang="ts">
 import { ref, watch, onMounted } from 'vue'
 import { marked, type Renderer } from 'marked'
-import DOMPurify from 'dompurify'
 import hljs from 'highlight.js'
+import { sanitizeMarkdown } from '@/utils/sanitize'
 import 'highlight.js/styles/github-dark.css'
 
 const props = defineProps<{
@@ -41,7 +41,7 @@ const renderMarkdown = () => {
 
   try {
     const rawHtml = marked.parse(props.content) as string
-    renderedHtml.value = DOMPurify.sanitize(rawHtml)
+    renderedHtml.value = sanitizeMarkdown(rawHtml)
   } catch {
     renderedHtml.value = '<p class="text-red-500">Failed to render content</p>'
   }

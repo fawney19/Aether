@@ -81,9 +81,6 @@
             :registration-privacy-policy-version="systemConfig.registration_privacy_policy_version"
             :auto-delete-expired-keys="systemConfig.auto_delete_expired_keys"
             :enable-format-conversion="systemConfig.enable_format_conversion"
-            :enable-openai-image-sync-heartbeat="systemConfig.enable_openai_image_sync_heartbeat"
-            :enable-standard-text-sync-heartbeat="systemConfig.enable_standard_text_sync_heartbeat"
-            :cyber-continue-failover="systemConfig.cyber_continue_failover"
             :loading="systemConfigLoading || basicConfigLoading"
             :has-changes="hasBasicConfigChanges"
             @save="saveBasicConfig"
@@ -107,9 +104,6 @@
             @update:registration-privacy-policy-version="systemConfig.registration_privacy_policy_version = $event"
             @update:auto-delete-expired-keys="systemConfig.auto_delete_expired_keys = $event"
             @update:enable-format-conversion="systemConfig.enable_format_conversion = $event"
-            @update:enable-openai-image-sync-heartbeat="systemConfig.enable_openai_image_sync_heartbeat = $event"
-            @update:enable-standard-text-sync-heartbeat="systemConfig.enable_standard_text_sync_heartbeat = $event"
-            @update:cyber-continue-failover="systemConfig.cyber_continue_failover = $event"
           />
 
           <!-- 请求记录配置 -->

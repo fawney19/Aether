@@ -11,8 +11,23 @@ export interface PaymentCallbackRecord {
   payload_hash: string | null
   signature_valid: boolean
   status: string
-  payload: Record<string, unknown> | null
+  payload: null
+  has_payload: boolean
+  payload_summary: {
+    kind: 'null' | 'boolean' | 'number' | 'string' | 'array' | 'object'
+    serialized_bytes: number
+    objects: number
+    arrays: number
+    strings: number
+    numbers: number
+    booleans: number
+    nulls: number
+    object_fields: number
+    array_items: number
+    max_depth: number
+  } | null
   error_message: string | null
+  has_error_message: boolean
   created_at: string
   processed_at: string | null
 }

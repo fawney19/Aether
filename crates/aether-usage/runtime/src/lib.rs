@@ -1,15 +1,19 @@
 mod body_capture;
 pub mod config;
+mod dead_letter_encoding;
 pub mod event;
+mod event_capture_budget;
 mod executor;
 mod keyed_lock;
 pub mod queue;
+mod queue_read_budget;
 pub mod record;
 pub mod report;
 pub mod report_context;
 mod request_metadata;
 pub mod runtime;
 pub mod settlement;
+mod shutdown;
 pub mod standardized_usage;
 pub mod usage_mapper;
 pub mod worker;
@@ -21,20 +25,22 @@ pub use body_capture::{
 };
 pub use config::UsageRuntimeConfig;
 pub use event::{now_ms, UsageEvent, UsageEventData, UsageEventType, USAGE_EVENT_VERSION};
+pub use executor::shutdown_usage_background_runtime;
 pub use queue::UsageQueue;
 pub use record::build_upsert_usage_record_from_event;
 pub use report::{
-    extract_gemini_file_mapping_entries, gemini_file_mapping_cache_key,
-    infer_internal_finalize_signature, is_local_ai_stream_report_kind,
-    is_local_ai_sync_report_kind, normalize_gemini_file_name, report_request_id,
-    resolve_internal_finalize_route, should_handle_local_stream_report,
+    decode_internal_report_body_base64, extract_gemini_file_mapping_entries,
+    gemini_file_mapping_cache_key, infer_internal_finalize_signature,
+    is_local_ai_stream_report_kind, is_local_ai_sync_report_kind, normalize_gemini_file_name,
+    report_request_id, resolve_internal_finalize_route, should_handle_local_stream_report,
     should_handle_local_sync_report, stream_capture_terminal_state,
     stream_report_missing_terminal_event, stream_report_represents_failure,
     stream_report_requires_observed_terminal_event, sync_report_represents_failure,
     GatewayStreamReportRequest, GatewaySyncReportRequest, GeminiFileMappingEntry,
     InternalFinalizeRoute, StreamCapturedTerminalState, GEMINI_FILE_MAPPING_TTL_SECONDS,
-    STREAM_MISSING_TERMINAL_EVENT_CATEGORY, STREAM_MISSING_TERMINAL_EVENT_MESSAGE,
-    STREAM_TERMINAL_ERROR_CATEGORY, STREAM_TERMINAL_ERROR_MESSAGE,
+    MAX_INTERNAL_REPORT_BODY_BYTES, STREAM_MISSING_TERMINAL_EVENT_CATEGORY,
+    STREAM_MISSING_TERMINAL_EVENT_MESSAGE, STREAM_TERMINAL_ERROR_CATEGORY,
+    STREAM_TERMINAL_ERROR_MESSAGE,
 };
 pub use report_context::{
     build_locally_actionable_report_context_from_request_candidate,
@@ -46,7 +52,10 @@ pub use runtime::{
     DEFAULT_USAGE_REQUEST_BODY_CAPTURE_LIMIT_BYTES,
     DEFAULT_USAGE_RESPONSE_BODY_CAPTURE_LIMIT_BYTES,
 };
-pub use settlement::{settle_usage_if_needed, UsageSettlementWriter};
+pub use settlement::{
+    reconcile_usage_policy_cost_for_event, settle_usage_if_needed, UsageSettlementWriter,
+};
+pub use shutdown::UsageProducerGuard;
 pub use standardized_usage::StandardizedUsage;
 pub use usage_mapper::{map_usage, map_usage_from_response, UsageMapper};
 pub use worker::{
@@ -61,7 +70,8 @@ pub use write::{
     build_sync_terminal_usage_event, build_sync_terminal_usage_outcome,
     build_sync_terminal_usage_payload_seed, build_sync_terminal_usage_seed,
     build_terminal_usage_context_seed, build_terminal_usage_event_from_outcome,
-    build_terminal_usage_event_from_seed, build_usage_event_data_seed, LifecycleUsageSeed,
+    build_terminal_usage_event_from_seed, build_usage_event_data_seed,
+    build_usage_event_data_seed_describing_request_bodies, LifecycleUsageSeed,
     StreamTerminalUsagePayloadSeed, SyncTerminalUsagePayloadSeed, TerminalUsageContextSeed,
     TerminalUsageOutcome, TerminalUsageSeed, UsageTerminalState,
 };

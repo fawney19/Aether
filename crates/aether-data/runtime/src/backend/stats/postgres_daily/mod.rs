@@ -66,6 +66,12 @@ async fn perform_stats_aggregation_for_day(
 ) -> Result<StatsDailyAggregationSummary, sqlx::Error> {
     let day_end_utc = day_start_utc + chrono::Duration::days(1);
     let mut tx = pool.begin().await?;
+    sqlx::query("SET LOCAL statement_timeout = '5min'")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("SET LOCAL lock_timeout = '30s'")
+        .execute(&mut *tx)
+        .await?;
     let aggregate_row = sqlx::query(SELECT_STATS_DAILY_AGGREGATE_SQL)
         .bind(day_start_utc)
         .bind(day_end_utc)

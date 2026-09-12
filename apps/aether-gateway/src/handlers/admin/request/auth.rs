@@ -38,11 +38,33 @@ impl<'a> AdminAppState<'a> {
         self.app.upsert_oauth_provider_config(record).await
     }
 
-    pub(crate) async fn delete_oauth_provider_config(
+    pub(crate) async fn upsert_oauth_provider_config_with_force_disable(
+        &self,
+        record: &aether_data::repository::oauth_providers::UpsertOAuthProviderConfigRecord,
+        force_disable: bool,
+    ) -> Result<
+        Option<aether_data::repository::oauth_providers::UpsertOAuthProviderConfigOutcome>,
+        GatewayError,
+    > {
+        self.app
+            .upsert_oauth_provider_config_with_force_disable(record, force_disable)
+            .await
+    }
+
+    pub(crate) async fn delete_oauth_provider_config_if_unlinked(
         &self,
         provider_type: &str,
     ) -> Result<bool, GatewayError> {
-        self.app.delete_oauth_provider_config(provider_type).await
+        self.app
+            .delete_oauth_provider_config_if_unlinked(provider_type)
+            .await
+    }
+
+    pub(crate) async fn has_oauth_links_for_provider(
+        &self,
+        provider_type: &str,
+    ) -> Result<bool, GatewayError> {
+        self.app.has_oauth_links_for_provider(provider_type).await
     }
 
     pub(crate) async fn count_locked_users_if_oauth_provider_disabled(
@@ -179,12 +201,27 @@ impl<'a> AdminAppState<'a> {
         self.app.list_admin_security_whitelist().await
     }
 
-    pub(crate) async fn upsert_ldap_module_config(
+    pub(crate) async fn compare_and_swap_ldap_module_config(
         &self,
-        config: &aether_data::repository::auth_modules::StoredLdapModuleConfig,
-    ) -> Result<Option<aether_data::repository::auth_modules::StoredLdapModuleConfig>, GatewayError>
-    {
-        self.app.upsert_ldap_module_config(config).await
+        expected: Option<&aether_data::repository::auth_modules::StoredLdapModuleConfig>,
+        replacement: &aether_data::repository::auth_modules::StoredLdapModuleConfig,
+        bind_password_update: &aether_data::repository::auth_modules::LdapBindPasswordUpdate,
+    ) -> Result<
+        Option<aether_data::repository::auth_modules::CompareAndSwapLdapConfigResult>,
+        GatewayError,
+    > {
+        self.app
+            .compare_and_swap_ldap_module_config(expected, replacement, bind_password_update)
+            .await
+    }
+
+    pub(crate) async fn delete_ldap_module_config_if_matches(
+        &self,
+        expected: &aether_data::repository::auth_modules::StoredLdapModuleConfig,
+    ) -> Result<bool, GatewayError> {
+        self.app
+            .delete_ldap_module_config_if_matches(expected)
+            .await
     }
 
     pub(crate) async fn count_active_local_admin_users_with_valid_password(

@@ -1,11 +1,24 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { observeNearViewportOnce } from '@/utils/nearViewport'
 
-interface MockObserverInstance {
+interface MockObserverInstance extends IntersectionObserver {
   callback: IntersectionObserverCallback
   options?: IntersectionObserverInit
   observed: Element[]
-  disconnect: ReturnType<typeof vi.fn>
+  disconnect: ReturnType<typeof vi.fn<() => void>>
+}
+
+function intersection(target: Element): IntersectionObserverEntry {
+  const rect = target.getBoundingClientRect()
+  return {
+    target,
+    isIntersecting: true,
+    time: 0,
+    boundingClientRect: rect,
+    rootBounds: null,
+    intersectionRect: rect,
+    intersectionRatio: 1,
+  }
 }
 
 const instances: MockObserverInstance[] = []
@@ -58,11 +71,11 @@ describe('observeNearViewportOnce', () => {
     expect(onNearViewport).not.toHaveBeenCalled()
 
     observer?.callback([
-      { isIntersecting: true, target } as IntersectionObserverEntry,
-    ], observer as unknown as IntersectionObserver)
+      intersection(target),
+    ], observer)
     observer?.callback([
-      { isIntersecting: true, target } as IntersectionObserverEntry,
-    ], observer as unknown as IntersectionObserver)
+      intersection(target),
+    ], observer)
 
     expect(onNearViewport).toHaveBeenCalledTimes(1)
     expect(observer?.disconnect).toHaveBeenCalledTimes(1)
@@ -77,8 +90,8 @@ describe('observeNearViewportOnce', () => {
 
     stop()
     observer?.callback([
-      { isIntersecting: true, target } as IntersectionObserverEntry,
-    ], observer as unknown as IntersectionObserver)
+      intersection(target),
+    ], observer)
 
     expect(observer?.disconnect).toHaveBeenCalledTimes(1)
     expect(onNearViewport).not.toHaveBeenCalled()

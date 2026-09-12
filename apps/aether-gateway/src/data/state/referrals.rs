@@ -4,9 +4,9 @@ use aether_data::DataLayerError;
 use super::GatewayDataState;
 
 pub(crate) use aether_data::backend::{
-    ReferralAdminStats, ReferralMutationStatus, ReferralRelationshipListQuery,
-    ReferralRelationshipRecord, ReferralRewardConfig, ReferralRewardListQuery,
-    ReferralRewardRecord, ReferralUserDashboard,
+    ReferralAdminStats, ReferralMutationStatus, ReferralReconciliationSummary,
+    ReferralRelationshipListQuery, ReferralRelationshipRecord, ReferralRewardConfig,
+    ReferralRewardListQuery, ReferralRewardRecord, ReferralUserDashboard,
 };
 
 impl GatewayDataState {
@@ -113,6 +113,15 @@ impl GatewayDataState {
     ) -> Result<Vec<ReferralRewardRecord>, DataLayerError> {
         self.referrals()
             .reverse_referral_rewards_for_order(order_id, amount_usd)
+            .await
+    }
+
+    pub(crate) async fn reconcile_referral_rewards_once(
+        &self,
+        reward_config: Option<ReferralRewardConfig>,
+    ) -> Result<ReferralReconciliationSummary, DataLayerError> {
+        self.referrals()
+            .reconcile_referral_rewards_once(reward_config)
             .await
     }
 }

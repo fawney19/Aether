@@ -5,8 +5,36 @@ use super::{
     EXECUTION_PATH_HEADER, EXECUTION_PATH_LOCAL_EXECUTION_RUNTIME_MISS, TRACE_ID_HEADER,
 };
 
-#[tokio::test]
-async fn gateway_locally_denies_sync_ai_control_execute_when_opted_in_and_execution_runtime_missing(
+fn run_async_test_on_large_stack<F>(name: &'static str, future: F)
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    let handle = std::thread::Builder::new()
+        .name(name.to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio runtime should build")
+                .block_on(future);
+        })
+        .expect("large-stack control execute test thread should spawn");
+
+    if let Err(payload) = handle.join() {
+        std::panic::resume_unwind(payload);
+    }
+}
+
+#[test]
+fn gateway_locally_denies_sync_ai_control_execute_when_opted_in_and_execution_runtime_missing() {
+    run_async_test_on_large_stack(
+        "gateway_locally_denies_sync_ai_control_execute_when_opted_in_and_execution_runtime_missing",
+        gateway_locally_denies_sync_ai_control_execute_when_opted_in_and_execution_runtime_missing_impl(),
+    );
+}
+
+async fn gateway_locally_denies_sync_ai_control_execute_when_opted_in_and_execution_runtime_missing_impl(
 ) {
     let execute_hits = Arc::new(Mutex::new(0usize));
     let execute_hits_clone = Arc::clone(&execute_hits);
@@ -271,8 +299,16 @@ async fn gateway_locally_denies_stream_ai_control_execute_when_opted_in_and_exec
     upstream_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_does_not_proxy_control_execute_over_http_when_opted_in_and_execution_runtime_misses_sync_ai_routes(
+#[test]
+fn gateway_does_not_proxy_control_execute_over_http_when_opted_in_and_execution_runtime_misses_sync_ai_routes(
+) {
+    run_async_test_on_large_stack(
+        "gateway_does_not_proxy_control_execute_over_http_when_opted_in_and_execution_runtime_misses_sync_ai_routes",
+        gateway_does_not_proxy_control_execute_over_http_when_opted_in_and_execution_runtime_misses_sync_ai_routes_impl(),
+    );
+}
+
+async fn gateway_does_not_proxy_control_execute_over_http_when_opted_in_and_execution_runtime_misses_sync_ai_routes_impl(
 ) {
     let plan_hits = Arc::new(Mutex::new(0usize));
     let plan_hits_clone = Arc::clone(&plan_hits);
@@ -404,8 +440,16 @@ async fn gateway_does_not_proxy_control_execute_over_http_when_opted_in_and_exec
     upstream_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_does_not_proxy_control_execute_over_http_when_opted_in_and_execution_runtime_misses_stream_ai_routes(
+#[test]
+fn gateway_does_not_proxy_control_execute_over_http_when_opted_in_and_execution_runtime_misses_stream_ai_routes(
+) {
+    run_async_test_on_large_stack(
+        "gateway_does_not_proxy_control_execute_over_http_when_opted_in_and_execution_runtime_misses_stream_ai_routes",
+        gateway_does_not_proxy_control_execute_over_http_when_opted_in_and_execution_runtime_misses_stream_ai_routes_impl(),
+    );
+}
+
+async fn gateway_does_not_proxy_control_execute_over_http_when_opted_in_and_execution_runtime_misses_stream_ai_routes_impl(
 ) {
     let plan_hits = Arc::new(Mutex::new(0usize));
     let plan_hits_clone = Arc::clone(&plan_hits);

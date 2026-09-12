@@ -93,7 +93,7 @@ pub async fn run_migrations_with_bootstrap(
     pool: &PgPool,
     bootstrap: &dyn PostgresMigrationBootstrap,
 ) -> Result<(), MigrateError> {
-    let mut conn = pool.acquire().await?;
+    let mut conn = crate::pool::acquire_postgres_migration_connection(pool).await?;
 
     if POSTGRES_MIGRATOR.locking {
         conn.lock().await?;
@@ -132,7 +132,7 @@ pub async fn prepare_database_for_startup_with_bootstrap(
     pool: &PgPool,
     bootstrap: &dyn PostgresMigrationBootstrap,
 ) -> Result<Vec<PendingMigrationInfo>, MigrateError> {
-    let mut conn = pool.acquire().await?;
+    let mut conn = crate::pool::acquire_postgres_migration_connection(pool).await?;
 
     if POSTGRES_MIGRATOR.locking {
         conn.lock().await?;
@@ -424,5 +424,38 @@ mod tests {
             .find(|migration| migration.version == 20260715130100)
             .expect("analyze tuning migration should be embedded");
         assert!(!analyze_tuning.no_tx);
+    }
+
+    #[test]
+    fn tunnel_generation_backfill_does_not_require_pgcrypto() {
+        let migration = POSTGRES_MIGRATOR
+            .iter()
+            .find(|migration| migration.version == 20260831010000)
+            .expect("tunnel generation migration should be embedded");
+        let sql = migration.sql.as_ref();
+
+        // Existing installations may not have the optional pgcrypto extension.
+        // Legacy rows only need an opaque epoch marker; new registrations use a
+        // CSPRNG in the application layer.
+        assert!(sql.contains("SET tunnel_generation = md5("));
+        assert!(sql.contains("ctid::text"));
+        assert!(!sql.contains("gen_random_uuid"));
+    }
+
+    #[test]
+    fn gemini_file_mapping_metadata_migration_expands_legacy_columns() {
+        let migration = POSTGRES_MIGRATOR
+            .iter()
+            .find(|migration| migration.version == 20260901000000)
+            .expect("Gemini file mapping metadata migration should be embedded");
+        let sql = migration.sql.as_ref();
+
+        for expected in [
+            "file_name TYPE character varying(512)",
+            "display_name TYPE character varying(512)",
+            "mime_type TYPE character varying(255)",
+        ] {
+            assert!(sql.contains(expected), "migration is missing {expected}");
+        }
     }
 }

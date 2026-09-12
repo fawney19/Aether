@@ -1,18 +1,36 @@
 use super::{
     auth_email_is_verified, auth_now, auth_registration_email_configured,
     auth_verification_code_expire_minutes, auth_verification_send_cooldown_seconds,
-    build_auth_error_response, build_auth_json_response, build_auth_verification_email,
-    clear_auth_email_pending_code, clear_auth_email_verification, generate_auth_verification_code,
-    http, json, mark_auth_email_verified, read_auth_email_verification_code, read_auth_smtp_config,
-    send_auth_email, store_auth_email_verification_code, system_config_bool, system_config_f64,
-    system_config_string, system_config_string_list, verify_auth_turnstile, AppState,
-    AuthTurnstileAction, Body, GatewayError, Regex, Response,
+    build_auth_error_response, build_auth_json_response, build_auth_rate_limited_response,
+    build_auth_verification_email, clear_auth_email_pending_code,
+    consume_auth_email_registration_proof, consume_auth_email_verification_code,
+    enforce_auth_identity_rate_limit, enforce_auth_ip_rate_limit, generate_auth_verification_code,
+    generate_auth_verification_token, http, json, mark_auth_email_verified,
+    mark_sensitive_response_no_store, read_auth_email_verification_code, read_auth_smtp_config,
+    record_auth_verification_failure, send_auth_email, store_auth_email_verification_code,
+    system_config_bool, system_config_f64, system_config_string, system_config_string_list,
+    verify_auth_turnstile, AppState, AuthTurnstileAction, AuthVerificationFailureDecision, Body,
+    GatewayError, Regex, Response, AUTH_REGISTER_RATE_LIMIT, AUTH_SEND_VERIFICATION_RATE_LIMIT,
+    AUTH_VERIFICATION_STATUS_RATE_LIMIT, AUTH_VERIFY_EMAIL_RATE_LIMIT,
 };
 use serde::Deserialize;
+use std::net::IpAddr;
 
 const AUTH_REGISTRATION_STORAGE_UNAVAILABLE_DETAIL: &str = "注册数据存储暂不可用";
+const AUTH_REGISTRATION_UNAVAILABLE_DETAIL: &str = "注册暂不可用，请稍后重试";
+const AUTH_REGISTRATION_IDENTITY_UNAVAILABLE_DETAIL: &str = "无法使用该注册信息";
+const AUTH_VERIFICATION_UNAVAILABLE_DETAIL: &str = "邮箱验证暂不可用，请稍后重试";
 
-#[derive(Debug, Deserialize)]
+fn build_auth_internal_error_response(
+    event_name: &'static str,
+    _err: &GatewayError,
+    detail: &'static str,
+) -> Response<Body> {
+    tracing::warn!(event_name, "public authentication request failed");
+    build_auth_error_response(http::StatusCode::INTERNAL_SERVER_ERROR, detail, false)
+}
+
+#[derive(Deserialize)]
 struct AuthRegisterRequest {
     email: Option<String>,
     username: String,
@@ -21,18 +39,26 @@ struct AuthRegisterRequest {
     invite_code: Option<String>,
     privacy_policy_accepted: Option<bool>,
     privacy_policy_version: Option<String>,
+    email_verification_token: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct AuthEmailRequest {
     email: String,
     turnstile_token: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct AuthVerifyEmailRequest {
     email: String,
     code: String,
+    verification_token: String,
+}
+
+#[derive(Deserialize)]
+struct AuthVerificationStatusRequest {
+    email: String,
+    verification_token: String,
 }
 
 fn normalize_auth_email(value: &str) -> Option<String> {
@@ -203,9 +229,14 @@ async fn validate_auth_email_suffix(
 pub(super) async fn handle_auth_send_verification_code(
     state: &AppState,
     headers: &http::HeaderMap,
-    cf_connecting_ip: Option<&str>,
+    client_ip: IpAddr,
     request_body: Option<&axum::body::Bytes>,
 ) -> Response<Body> {
+    if let Err(response) =
+        enforce_auth_ip_rate_limit(state, AUTH_SEND_VERIFICATION_RATE_LIMIT, client_ip).await
+    {
+        return response;
+    }
     let Some(request_body) = request_body else {
         return build_auth_error_response(http::StatusCode::BAD_REQUEST, "请求数据验证失败", false);
     };
@@ -222,11 +253,15 @@ pub(super) async fn handle_auth_send_verification_code(
     let Some(email) = normalize_auth_email(&payload.email) else {
         return build_auth_error_response(http::StatusCode::BAD_REQUEST, "邮箱格式无效", false);
     };
+    if let Err(response) =
+        enforce_auth_identity_rate_limit(state, AUTH_SEND_VERIFICATION_RATE_LIMIT, &email).await
+    {
+        return response;
+    }
 
     if let Err(response) = verify_auth_turnstile(
         state,
-        headers,
-        cf_connecting_ip,
+        client_ip,
         payload.turnstile_token.as_deref(),
         AuthTurnstileAction::SendVerificationCode,
     )
@@ -241,26 +276,12 @@ pub(super) async fn handle_auth_send_verification_code(
             return build_auth_error_response(http::StatusCode::BAD_REQUEST, detail, false);
         }
         Err(err) => {
-            return build_auth_error_response(
-                http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("auth settings lookup failed: {err:?}"),
-                false,
+            return build_auth_internal_error_response(
+                "auth_send_verification_email_policy_lookup_failed",
+                &err,
+                AUTH_VERIFICATION_UNAVAILABLE_DETAIL,
             );
         }
-    }
-
-    if state
-        .find_user_auth_by_identifier(&email)
-        .await
-        .ok()
-        .flatten()
-        .is_some()
-    {
-        return build_auth_error_response(
-            http::StatusCode::BAD_REQUEST,
-            "该邮箱已被注册，请直接登录或使用其他邮箱",
-            false,
-        );
     }
 
     let smtp_config = match read_auth_smtp_config(state).await {
@@ -273,10 +294,10 @@ pub(super) async fn handle_auth_send_verification_code(
             );
         }
         Err(err) => {
-            return build_auth_error_response(
-                http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("auth smtp settings lookup failed: {err:?}"),
-                false,
+            return build_auth_internal_error_response(
+                "auth_send_verification_smtp_lookup_failed",
+                &err,
+                AUTH_VERIFICATION_UNAVAILABLE_DETAIL,
             );
         }
     };
@@ -306,14 +327,15 @@ pub(super) async fn handle_auth_send_verification_code(
 
     let expire_minutes = auth_verification_code_expire_minutes();
     let code = generate_auth_verification_code();
+    let verification_token = generate_auth_verification_token();
     let email_message =
         match build_auth_verification_email(state, &email, &code, expire_minutes).await {
             Ok(value) => value,
             Err(err) => {
-                return build_auth_error_response(
-                    http::StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("auth verification email render failed: {err:?}"),
-                    false,
+                return build_auth_internal_error_response(
+                    "auth_verification_email_render_failed",
+                    &err,
+                    AUTH_VERIFICATION_UNAVAILABLE_DETAIL,
                 );
             }
         };
@@ -322,19 +344,25 @@ pub(super) async fn handle_auth_send_verification_code(
         state,
         &email,
         &code,
+        &verification_token,
         now,
         u64::try_from(expire_minutes.saturating_mul(60)).unwrap_or(300),
     )
     .await
     {
-        return build_auth_error_response(
-            http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("auth verification code save failed: {err:?}"),
-            false,
+        return build_auth_internal_error_response(
+            "auth_verification_challenge_store_failed",
+            &err,
+            AUTH_VERIFICATION_UNAVAILABLE_DETAIL,
         );
     }
 
-    if let Err(_err) = send_auth_email(state, smtp_config, email_message).await {
+    if let Err(err) = send_auth_email(state, smtp_config, email_message).await {
+        tracing::warn!(
+            event_name = "auth_verification_email_send_failed",
+            error = %crate::error::redact_error_debug(&err),
+            "failed to send authentication verification email"
+        );
         let _ = clear_auth_email_pending_code(state, &email).await;
         return build_auth_error_response(
             http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -343,23 +371,29 @@ pub(super) async fn handle_auth_send_verification_code(
         );
     }
 
-    build_auth_json_response(
+    mark_sensitive_response_no_store(build_auth_json_response(
         http::StatusCode::OK,
         json!({
             "message": "验证码已发送，请查收邮件",
             "success": true,
             "expire_minutes": expire_minutes,
+            "verification_token": verification_token,
         }),
         None,
-    )
+    ))
 }
 
 pub(super) async fn handle_auth_register(
     state: &AppState,
     headers: &http::HeaderMap,
-    cf_connecting_ip: Option<&str>,
+    client_ip: IpAddr,
     request_body: Option<&axum::body::Bytes>,
 ) -> Response<Body> {
+    if let Err(response) =
+        enforce_auth_ip_rate_limit(state, AUTH_REGISTER_RATE_LIMIT, client_ip).await
+    {
+        return response;
+    }
     let Some(request_body) = request_body else {
         return build_auth_error_response(http::StatusCode::BAD_REQUEST, "缺少请求体", false);
     };
@@ -381,13 +415,30 @@ pub(super) async fn handle_auth_register(
             return build_auth_error_response(http::StatusCode::BAD_REQUEST, detail, false);
         }
     };
+    if let Some(email) = email.as_deref() {
+        if let Err(response) =
+            enforce_auth_identity_rate_limit(state, AUTH_REGISTER_RATE_LIMIT, email).await
+        {
+            return response;
+        }
+    }
+    let username_rate_limit_identity = format!("username:{}", username.to_ascii_lowercase());
+    if let Err(response) = enforce_auth_identity_rate_limit(
+        state,
+        AUTH_REGISTER_RATE_LIMIT,
+        &username_rate_limit_identity,
+    )
+    .await
+    {
+        return response;
+    }
     let password_policy = match auth_password_policy_level(state).await {
         Ok(value) => value,
         Err(err) => {
-            return build_auth_error_response(
-                http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("auth settings lookup failed: {err:?}"),
-                false,
+            return build_auth_internal_error_response(
+                "auth_registration_password_policy_lookup_failed",
+                &err,
+                AUTH_REGISTRATION_UNAVAILABLE_DETAIL,
             );
         }
     };
@@ -401,10 +452,10 @@ pub(super) async fn handle_auth_register(
     {
         Ok(value) => system_config_bool(value.as_ref(), false),
         Err(err) => {
-            return build_auth_error_response(
-                http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("auth settings lookup failed: {err:?}"),
-                false,
+            return build_auth_internal_error_response(
+                "auth_registration_enabled_lookup_failed",
+                &err,
+                AUTH_REGISTRATION_UNAVAILABLE_DETAIL,
             );
         }
     };
@@ -414,10 +465,10 @@ pub(super) async fn handle_auth_register(
     let privacy_policy = match read_registration_privacy_policy_settings(state).await {
         Ok(value) => value,
         Err(err) => {
-            return build_auth_error_response(
-                http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("auth settings lookup failed: {err:?}"),
-                false,
+            return build_auth_internal_error_response(
+                "auth_registration_privacy_policy_lookup_failed",
+                &err,
+                AUTH_REGISTRATION_UNAVAILABLE_DETAIL,
             );
         }
     };
@@ -439,8 +490,7 @@ pub(super) async fn handle_auth_register(
 
     if let Err(response) = verify_auth_turnstile(
         state,
-        headers,
-        cf_connecting_ip,
+        client_ip,
         payload.turnstile_token.as_deref(),
         AuthTurnstileAction::Register,
     )
@@ -452,10 +502,10 @@ pub(super) async fn handle_auth_register(
     let email_configured = match auth_registration_email_configured(state).await {
         Ok(value) => value,
         Err(err) => {
-            return build_auth_error_response(
-                http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("auth settings lookup failed: {err:?}"),
-                false,
+            return build_auth_internal_error_response(
+                "auth_registration_email_configuration_lookup_failed",
+                &err,
+                AUTH_REGISTRATION_UNAVAILABLE_DETAIL,
             );
         }
     };
@@ -463,15 +513,26 @@ pub(super) async fn handle_auth_register(
         .read_system_config_json_value("require_email_verification")
         .await
     {
-        Ok(value) => system_config_bool(value.as_ref(), false) && email_configured,
+        Ok(value) => system_config_bool(value.as_ref(), false),
         Err(err) => {
-            return build_auth_error_response(
-                http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("auth settings lookup failed: {err:?}"),
-                false,
+            return build_auth_internal_error_response(
+                "auth_registration_verification_policy_lookup_failed",
+                &err,
+                AUTH_REGISTRATION_UNAVAILABLE_DETAIL,
             );
         }
     };
+    if require_verification && !email_configured {
+        tracing::error!(
+            event_name = "auth_registration_verification_channel_unavailable",
+            "email verification is required but SMTP delivery is not configured"
+        );
+        return build_auth_error_response(
+            http::StatusCode::SERVICE_UNAVAILABLE,
+            AUTH_REGISTRATION_UNAVAILABLE_DETAIL,
+            false,
+        );
+    }
 
     if require_verification && email.is_none() {
         return build_auth_error_response(
@@ -480,26 +541,17 @@ pub(super) async fn handle_auth_register(
             false,
         );
     }
-    if require_verification {
-        if let Some(email) = email.as_deref() {
-            let is_verified = match auth_email_is_verified(state, email).await {
-                Ok(value) => value,
-                Err(err) => {
-                    return build_auth_error_response(
-                        http::StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("auth verification lookup failed: {err:?}"),
-                        false,
-                    );
-                }
-            };
-            if !is_verified {
-                return build_auth_error_response(
-                    http::StatusCode::BAD_REQUEST,
-                    "请先完成邮箱验证。请发送验证码并验证后再注册。",
-                    false,
-                );
-            }
-        }
+    let email_verification_token = payload
+        .email_verification_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if require_verification && email_verification_token.is_none() {
+        return build_auth_error_response(
+            http::StatusCode::BAD_REQUEST,
+            "请先完成邮箱验证。请发送验证码并验证后再注册。",
+            false,
+        );
     }
     if let Some(email) = email.as_deref() {
         match validate_auth_email_suffix(state, email).await {
@@ -508,39 +560,68 @@ pub(super) async fn handle_auth_register(
                 return build_auth_error_response(http::StatusCode::BAD_REQUEST, detail, false);
             }
             Err(err) => {
-                return build_auth_error_response(
-                    http::StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("auth settings lookup failed: {err:?}"),
-                    false,
+                return build_auth_internal_error_response(
+                    "auth_registration_email_policy_lookup_failed",
+                    &err,
+                    AUTH_REGISTRATION_UNAVAILABLE_DETAIL,
                 );
             }
         }
-        if state
-            .find_user_auth_by_identifier(email)
-            .await
-            .ok()
-            .flatten()
-            .is_some()
-        {
+        if require_verification {
+            let verification_token = email_verification_token
+                .expect("verified registration requires verification token");
+            match auth_email_is_verified(state, email, verification_token).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    return build_auth_error_response(
+                        http::StatusCode::BAD_REQUEST,
+                        "邮箱验证凭据无效或已过期，请重新验证",
+                        false,
+                    );
+                }
+                Err(err) => {
+                    return build_auth_internal_error_response(
+                        "auth_registration_proof_lookup_failed",
+                        &err,
+                        AUTH_REGISTRATION_UNAVAILABLE_DETAIL,
+                    );
+                }
+            }
+        }
+        match state.find_user_auth_by_identifier(email).await {
+            Ok(Some(_)) => {
+                return build_auth_error_response(
+                    http::StatusCode::BAD_REQUEST,
+                    AUTH_REGISTRATION_IDENTITY_UNAVAILABLE_DETAIL,
+                    false,
+                );
+            }
+            Ok(None) => {}
+            Err(err) => {
+                return build_auth_internal_error_response(
+                    "auth_registration_email_lookup_failed",
+                    &err,
+                    AUTH_REGISTRATION_UNAVAILABLE_DETAIL,
+                );
+            }
+        }
+    }
+    match state.find_user_auth_by_identifier(&username).await {
+        Ok(Some(_)) => {
             return build_auth_error_response(
                 http::StatusCode::BAD_REQUEST,
-                format!("邮箱已存在: {email}"),
+                AUTH_REGISTRATION_IDENTITY_UNAVAILABLE_DETAIL,
                 false,
             );
         }
-    }
-    if state
-        .find_user_auth_by_identifier(&username)
-        .await
-        .ok()
-        .flatten()
-        .is_some()
-    {
-        return build_auth_error_response(
-            http::StatusCode::BAD_REQUEST,
-            format!("用户名已存在: {username}"),
-            false,
-        );
+        Ok(None) => {}
+        Err(err) => {
+            return build_auth_internal_error_response(
+                "auth_registration_username_lookup_failed",
+                &err,
+                AUTH_REGISTRATION_UNAVAILABLE_DETAIL,
+            );
+        }
     }
 
     let password_hash = match bcrypt::hash(&payload.password, bcrypt::DEFAULT_COST) {
@@ -559,15 +640,44 @@ pub(super) async fn handle_auth_register(
     {
         Ok(value) => system_config_f64(value.as_ref(), 10.0),
         Err(err) => {
-            return build_auth_error_response(
-                http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("auth settings lookup failed: {err:?}"),
-                false,
+            return build_auth_internal_error_response(
+                "auth_registration_initial_gift_lookup_failed",
+                &err,
+                AUTH_REGISTRATION_UNAVAILABLE_DETAIL,
             );
         }
     };
-    let Some((user, _wallet)) = (match state
-        .register_local_auth_user(
+    if require_verification {
+        let email = email
+            .as_deref()
+            .expect("verified registration requires email");
+        let verification_token =
+            email_verification_token.expect("verified registration requires verification token");
+        match consume_auth_email_registration_proof(state, email, verification_token).await {
+            Ok(true) => {}
+            Ok(false) => {
+                return build_auth_error_response(
+                    http::StatusCode::BAD_REQUEST,
+                    "邮箱验证凭据无效或已过期，请重新验证",
+                    false,
+                );
+            }
+            Err(err) => {
+                tracing::warn!(
+                    event_name = "auth_email_registration_proof_consume_failed",
+                    error = %crate::error::redact_error_debug(&err),
+                    "failed to consume email registration proof"
+                );
+                return build_auth_error_response(
+                    http::StatusCode::INTERNAL_SERVER_ERROR,
+                    "注册暂不可用，请稍后重试",
+                    false,
+                );
+            }
+        }
+    }
+    let Some((user, wallet, wallet_created)) = (match state
+        .register_local_auth_user_with_wallet_outcome(
             email.clone(),
             require_verification && email.is_some(),
             username.clone(),
@@ -579,10 +689,10 @@ pub(super) async fn handle_auth_register(
     {
         Ok(value) => value,
         Err(err) => {
-            return build_auth_error_response(
-                http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("auth register failed: {err:?}"),
-                false,
+            return build_auth_internal_error_response(
+                "auth_registration_create_user_failed",
+                &err,
+                AUTH_REGISTRATION_UNAVAILABLE_DETAIL,
             );
         }
     }) else {
@@ -592,15 +702,18 @@ pub(super) async fn handle_auth_register(
             false,
         );
     };
+    let owned_wallet_id = wallet_created.then(|| wallet.id.clone());
     if let Err(err) = state
         .assign_default_group_to_self_registered_user(&user.id)
         .await
     {
-        let _ = state.delete_local_auth_user(&user.id).await;
-        return build_auth_error_response(
-            http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("auth default user group assignment failed: {err:?}"),
-            false,
+        let _ = state
+            .rollback_provisional_auth_user_with_wallet(&user.id, owned_wallet_id.as_deref())
+            .await;
+        return build_auth_internal_error_response(
+            "auth_registration_default_group_assignment_failed",
+            &err,
+            AUTH_REGISTRATION_UNAVAILABLE_DETAIL,
         );
     }
     if privacy_policy.enabled {
@@ -610,7 +723,12 @@ pub(super) async fn handle_auth_register(
         {
             Ok(true) => {}
             Ok(false) => {
-                let _ = state.delete_local_auth_user(&user.id).await;
+                let _ = state
+                    .rollback_provisional_auth_user_with_wallet(
+                        &user.id,
+                        owned_wallet_id.as_deref(),
+                    )
+                    .await;
                 return build_auth_error_response(
                     http::StatusCode::SERVICE_UNAVAILABLE,
                     AUTH_REGISTRATION_STORAGE_UNAVAILABLE_DETAIL,
@@ -618,11 +736,16 @@ pub(super) async fn handle_auth_register(
                 );
             }
             Err(err) => {
-                let _ = state.delete_local_auth_user(&user.id).await;
-                return build_auth_error_response(
-                    http::StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("auth privacy policy acceptance failed: {err:?}"),
-                    false,
+                let _ = state
+                    .rollback_provisional_auth_user_with_wallet(
+                        &user.id,
+                        owned_wallet_id.as_deref(),
+                    )
+                    .await;
+                return build_auth_internal_error_response(
+                    "auth_registration_privacy_policy_record_failed",
+                    &err,
+                    AUTH_REGISTRATION_UNAVAILABLE_DETAIL,
                 );
             }
         }
@@ -635,7 +758,7 @@ pub(super) async fn handle_auth_register(
     if invite_code.is_some() {
         let source = json!({
             "channel": "registration",
-            "ip": cf_connecting_ip,
+            "ip": client_ip.to_string(),
             "user_agent": headers
                 .get(http::header::USER_AGENT)
                 .and_then(|value| value.to_str().ok()),
@@ -649,23 +772,23 @@ pub(super) async fn handle_auth_register(
             )
             .await
         {
-            let _ = state.delete_local_auth_user(&user.id).await;
+            let _ = state
+                .rollback_provisional_auth_user_with_wallet(&user.id, owned_wallet_id.as_deref())
+                .await;
             let (status, detail) = match err {
                 GatewayError::Client { status, message } => (status, message),
-                other => (
-                    http::StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("auth referral binding failed: {other:?}"),
-                ),
+                other => {
+                    return build_auth_internal_error_response(
+                        "auth_registration_referral_binding_failed",
+                        &other,
+                        AUTH_REGISTRATION_UNAVAILABLE_DETAIL,
+                    );
+                }
             };
             return build_auth_error_response(status, detail, false);
         }
     }
 
-    if require_verification {
-        if let Some(email) = email.as_deref() {
-            let _ = clear_auth_email_verification(state, email).await;
-        }
-    }
     build_auth_json_response(
         http::StatusCode::OK,
         json!({
@@ -680,8 +803,14 @@ pub(super) async fn handle_auth_register(
 
 pub(super) async fn handle_auth_verify_email(
     state: &AppState,
+    client_ip: IpAddr,
     request_body: Option<&axum::body::Bytes>,
 ) -> Response<Body> {
+    if let Err(response) =
+        enforce_auth_ip_rate_limit(state, AUTH_VERIFY_EMAIL_RATE_LIMIT, client_ip).await
+    {
+        return response;
+    }
     let Some(request_body) = request_body else {
         return build_auth_error_response(http::StatusCode::BAD_REQUEST, "缺少请求体", false);
     };
@@ -694,7 +823,20 @@ pub(super) async fn handle_auth_verify_email(
     let Some(email) = normalize_auth_email(&payload.email) else {
         return build_auth_error_response(http::StatusCode::BAD_REQUEST, "邮箱格式无效", false);
     };
+    if let Err(response) =
+        enforce_auth_identity_rate_limit(state, AUTH_VERIFY_EMAIL_RATE_LIMIT, &email).await
+    {
+        return response;
+    }
     let code = payload.code.trim();
+    let verification_token = payload.verification_token.trim();
+    if verification_token.is_empty() {
+        return build_auth_error_response(
+            http::StatusCode::BAD_REQUEST,
+            "验证会话无效或已过期",
+            false,
+        );
+    }
     if code.len() != 6 || !code.chars().all(|ch| ch.is_ascii_digit()) {
         return build_auth_error_response(
             http::StatusCode::BAD_REQUEST,
@@ -705,20 +847,27 @@ pub(super) async fn handle_auth_verify_email(
     let pending = match read_auth_email_verification_code(state, &email).await {
         Ok(value) => value,
         Err(err) => {
-            return build_auth_error_response(
-                http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("verification lookup failed: {err:?}"),
-                false,
+            return build_auth_internal_error_response(
+                "auth_verification_challenge_lookup_failed",
+                &err,
+                AUTH_VERIFICATION_UNAVAILABLE_DETAIL,
             )
         }
     };
     let Some(pending) = pending else {
         return build_auth_error_response(
             http::StatusCode::BAD_REQUEST,
-            "验证码不存在或已过期",
+            "验证会话无效或已过期",
             false,
         );
     };
+    if !super::auth_verification_token_matches(&pending, verification_token) {
+        return build_auth_error_response(
+            http::StatusCode::BAD_REQUEST,
+            "验证会话无效或已过期",
+            false,
+        );
+    }
     let created_at = chrono::DateTime::parse_from_rfc3339(&pending.created_at)
         .ok()
         .map(|value| value.with_timezone(&chrono::Utc));
@@ -728,17 +877,86 @@ pub(super) async fn handle_auth_verify_email(
         let _ = clear_auth_email_pending_code(state, &email).await;
         return build_auth_error_response(
             http::StatusCode::BAD_REQUEST,
-            "验证码不存在或已过期",
+            "验证会话无效或已过期",
             false,
         );
     }
-    if pending.code != code {
-        return build_auth_error_response(http::StatusCode::BAD_REQUEST, "验证码错误", false);
+    if !super::auth_verification_code_matches(&pending, verification_token, code) {
+        let challenge_ttl_seconds = expires_at
+            .map(|value| value.signed_duration_since(auth_now()).num_seconds().max(1) as u64)
+            .unwrap_or_else(|| {
+                u64::try_from(auth_verification_code_expire_minutes().saturating_mul(60))
+                    .unwrap_or(300)
+                    .max(1)
+            });
+        match record_auth_verification_failure(
+            state,
+            &email,
+            &pending.created_at,
+            &pending.code_hash,
+            challenge_ttl_seconds,
+        )
+        .await
+        {
+            Ok(AuthVerificationFailureDecision::Incorrect) => {
+                return build_auth_error_response(
+                    http::StatusCode::BAD_REQUEST,
+                    "验证码错误",
+                    false,
+                );
+            }
+            Ok(AuthVerificationFailureDecision::Exhausted { retry_after }) => {
+                // The counter and pending challenge use different runtime structures. The
+                // counter transition is atomic; invalidating the challenge is best-effort.
+                let _ = clear_auth_email_pending_code(state, &email).await;
+                return build_auth_rate_limited_response(
+                    "验证码尝试次数过多，请重新获取",
+                    retry_after,
+                );
+            }
+            Err(response) => {
+                let _ = clear_auth_email_pending_code(state, &email).await;
+                return response;
+            }
+        }
     }
-    if mark_auth_email_verified(state, &email).await.ok() != Some(true) {
-        return build_auth_error_response(http::StatusCode::BAD_REQUEST, "系统错误", false);
+    let consumed = match consume_auth_email_verification_code(state, &email).await {
+        Ok(Some(consumed))
+            if consumed.code_hash == pending.code_hash
+                && super::auth_verification_token_matches(&consumed, verification_token) =>
+        {
+            true
+        }
+        Ok(_) => false,
+        Err(err) => {
+            tracing::warn!(
+                event_name = "auth_email_verification_consume_failed",
+                error = %crate::error::redact_error_debug(&err),
+                "failed to consume email verification challenge"
+            );
+            false
+        }
+    };
+    if !consumed
+        || match mark_auth_email_verified(state, &email, verification_token).await {
+            Ok(true) => false,
+            Ok(false) => true,
+            Err(err) => {
+                tracing::warn!(
+                    event_name = "auth_registration_proof_store_failed",
+                    error = %crate::error::redact_error_debug(&err),
+                    "failed to store email registration proof"
+                );
+                true
+            }
+        }
+    {
+        return build_auth_error_response(
+            http::StatusCode::BAD_REQUEST,
+            "验证会话无效或已过期",
+            false,
+        );
     }
-    let _ = clear_auth_email_pending_code(state, &email).await;
     build_auth_json_response(
         http::StatusCode::OK,
         json!({ "message": "邮箱验证成功", "success": true }),
@@ -748,12 +966,18 @@ pub(super) async fn handle_auth_verify_email(
 
 pub(super) async fn handle_auth_verification_status(
     state: &AppState,
+    client_ip: IpAddr,
     request_body: Option<&axum::body::Bytes>,
 ) -> Response<Body> {
+    if let Err(response) =
+        enforce_auth_ip_rate_limit(state, AUTH_VERIFICATION_STATUS_RATE_LIMIT, client_ip).await
+    {
+        return response;
+    }
     let Some(request_body) = request_body else {
         return build_auth_error_response(http::StatusCode::BAD_REQUEST, "缺少请求体", false);
     };
-    let payload = match serde_json::from_slice::<AuthEmailRequest>(request_body) {
+    let payload = match serde_json::from_slice::<AuthVerificationStatusRequest>(request_body) {
         Ok(value) => value,
         Err(_) => {
             return build_auth_error_response(http::StatusCode::BAD_REQUEST, "输入验证失败", false)
@@ -762,11 +986,35 @@ pub(super) async fn handle_auth_verification_status(
     let Some(email) = normalize_auth_email(&payload.email) else {
         return build_auth_error_response(http::StatusCode::BAD_REQUEST, "邮箱格式无效", false);
     };
+    let verification_token = payload.verification_token.trim();
+    if verification_token.is_empty() {
+        return build_auth_error_response(
+            http::StatusCode::BAD_REQUEST,
+            "验证会话无效或已过期",
+            false,
+        );
+    }
+    if let Err(response) =
+        enforce_auth_identity_rate_limit(state, AUTH_VERIFICATION_STATUS_RATE_LIMIT, &email).await
+    {
+        return response;
+    }
     let pending = read_auth_email_verification_code(state, &email)
         .await
         .ok()
         .flatten();
-    let is_verified = auth_email_is_verified(state, &email).await.unwrap_or(false);
+    let pending = pending
+        .filter(|pending| super::auth_verification_token_matches(pending, verification_token));
+    let is_verified = auth_email_is_verified(state, &email, verification_token)
+        .await
+        .unwrap_or(false);
+    if pending.is_none() && !is_verified {
+        return build_auth_error_response(
+            http::StatusCode::BAD_REQUEST,
+            "验证会话无效或已过期",
+            false,
+        );
+    }
     let now = auth_now();
     let (has_pending_code, cooldown_remaining, code_expires_in) = if let Some(pending) = pending {
         let created_at = chrono::DateTime::parse_from_rfc3339(&pending.created_at)

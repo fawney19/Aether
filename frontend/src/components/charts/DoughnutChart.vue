@@ -6,6 +6,7 @@
 
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, watch, nextTick } from 'vue'
+import { useI18n } from '@/i18n'
 import {
   Chart as ChartJS,
   ArcElement,
@@ -37,6 +38,7 @@ interface Props {
 }
 
 const chartRef = ref<HTMLCanvasElement>()
+const { locale } = useI18n()
 let chart: ChartJS<'doughnut'> | null = null
 
 const defaultOptions: ChartOptions<'doughnut'> = {
@@ -79,6 +81,7 @@ function createChart() {
     data: props.data,
     options: {
       ...defaultOptions,
+      locale: locale.value,
       ...props.options
     }
   })
@@ -104,9 +107,9 @@ onUnmounted(() => {
 })
 
 watch(() => props.data, updateChart, { deep: true })
-watch(() => props.options, () => {
+watch([() => props.options, locale], () => {
   if (chart) {
-    chart.options = { ...defaultOptions, ...props.options }
+    chart.options = { ...defaultOptions, locale: locale.value, ...props.options }
     chart.update()
   }
 }, { deep: true })

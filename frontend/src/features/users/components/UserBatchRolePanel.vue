@@ -23,7 +23,7 @@
       </div>
       <Select
         :model-value="modelValue"
-        @update:model-value="$emit('update:modelValue', $event)"
+        @update:model-value="($event === 'user' || $event === 'admin' || $event === 'audit_admin') && $emit('update:modelValue', $event)"
       >
         <SelectTrigger class="h-10 w-full">
           <SelectValue />

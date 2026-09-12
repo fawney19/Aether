@@ -65,6 +65,12 @@ async fn perform_stats_hourly_aggregation_for_hour(
 ) -> Result<StatsHourlyAggregationSummary, sqlx::Error> {
     let hour_end = hour_utc + chrono::Duration::hours(1);
     let mut tx = pool.begin().await?;
+    sqlx::query("SET LOCAL statement_timeout = '5min'")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("SET LOCAL lock_timeout = '30s'")
+        .execute(&mut *tx)
+        .await?;
 
     let row = sqlx::query(SELECT_STATS_HOURLY_AGGREGATE_SQL)
         .bind(hour_utc)

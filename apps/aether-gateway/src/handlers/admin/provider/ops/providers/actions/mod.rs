@@ -5,7 +5,7 @@ mod support;
 
 use super::config::{
     admin_provider_ops_config_object, admin_provider_ops_connector_object,
-    admin_provider_ops_decrypted_credentials, resolve_admin_provider_ops_base_url,
+    admin_provider_ops_credential_snapshot,
 };
 use super::support::ADMIN_PROVIDER_OPS_ACTION_RUST_ONLY_MESSAGE;
 use super::verify::{
@@ -36,13 +36,23 @@ pub(crate) async fn admin_provider_ops_local_action_response(
     state: &AdminAppState<'_>,
     provider_id: &str,
     provider: Option<&StoredProviderCatalogProvider>,
-    endpoints: &[StoredProviderCatalogEndpoint],
+    _endpoints: &[StoredProviderCatalogEndpoint],
     action_type: &str,
     request_config: Option<&serde_json::Map<String, serde_json::Value>>,
 ) -> serde_json::Value {
     let Some(provider) = provider else {
         return responses::admin_provider_ops_action_not_configured(action_type, "未配置操作设置");
     };
+    let credential_snapshot = match admin_provider_ops_credential_snapshot(state, provider).await {
+        Ok(snapshot) => snapshot,
+        Err(_) => {
+            return responses::admin_provider_ops_action_not_configured(
+                action_type,
+                "已保存的 Provider Ops 凭据无法解密或迁移",
+            )
+        }
+    };
+    let provider = &credential_snapshot.provider;
     let Some(provider_ops_config) = admin_provider_ops_config_object(provider) else {
         return responses::admin_provider_ops_action_not_configured(action_type, "未配置操作设置");
     };
@@ -57,14 +67,11 @@ pub(crate) async fn admin_provider_ops_local_action_response(
             ADMIN_PROVIDER_OPS_ACTION_RUST_ONLY_MESSAGE,
         );
     };
-    let Some(base_url) =
-        resolve_admin_provider_ops_base_url(provider, endpoints, Some(provider_ops_config))
-    else {
-        return responses::admin_provider_ops_action_not_configured(
-            action_type,
-            "Provider 未配置 base_url",
-        );
-    };
+    let base_url = credential_snapshot
+        .binding
+        .destination
+        .base_url()
+        .to_string();
 
     let mut connector_config = admin_provider_ops_connector_object(provider_ops_config)
         .and_then(|connector| connector.get("config"))
@@ -84,12 +91,7 @@ pub(crate) async fn admin_provider_ops_local_action_response(
     let proxy_snapshot =
         admin_provider_ops_resolve_proxy_snapshot(state, Some(&connector_config)).await;
 
-    let credentials = admin_provider_ops_decrypted_credentials(
-        state,
-        admin_provider_ops_config_object(provider)
-            .and_then(admin_provider_ops_connector_object)
-            .and_then(|connector| connector.get("credentials")),
-    );
+    let credentials = credential_snapshot.credentials;
     let headers = match build_headers(
         architecture.architecture_id,
         &connector_config,

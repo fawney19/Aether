@@ -3,7 +3,7 @@ use crate::handlers::admin::shared::unix_secs_to_rfc3339;
 use crate::handlers::public::{request_candidate_event_unix_ms, request_candidate_status_label};
 use crate::handlers::shared::unix_ms_to_rfc3339;
 use aether_data_contracts::repository::candidates::{
-    RequestCandidateStatus, StoredRequestCandidate,
+    sanitize_request_candidate_error_type, RequestCandidateStatus, StoredRequestCandidate,
 };
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -128,8 +128,8 @@ pub(crate) async fn build_admin_provider_health_monitor_payload(
                         "status": request_candidate_status_label(candidate.status),
                         "status_code": candidate.status_code,
                         "latency_ms": candidate.latency_ms,
-                        "error_type": candidate.error_type,
-                        "error_message": candidate.error_message,
+                        "error_type": sanitize_request_candidate_error_type(candidate.error_type),
+                        "error_message": serde_json::Value::Null,
                     }))
                 })
                 .collect::<Vec<_>>();

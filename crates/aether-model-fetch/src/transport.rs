@@ -729,10 +729,14 @@ fn append_query_param(mut url: String, key: &str, value: &str) -> String {
         return url;
     }
     let separator = if url.contains('?') { '&' } else { '?' };
+    let encoded_key =
+        url::form_urlencoded::byte_serialize(key.trim().as_bytes()).collect::<String>();
+    let encoded_value =
+        url::form_urlencoded::byte_serialize(value.trim().as_bytes()).collect::<String>();
     url.push(separator);
-    url.push_str(key.trim());
+    url.push_str(&encoded_key);
     url.push('=');
-    url.push_str(value.trim());
+    url.push_str(&encoded_value);
     url
 }
 
@@ -773,9 +777,10 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        build_antigravity_fetch_available_models_plan, build_antigravity_load_code_assist_plan,
-        build_gemini_cli_load_code_assist_plan, build_kiro_list_available_models_plan,
-        build_models_fetch_execution_plan, build_models_fetch_execution_plan_for_client_version,
+        append_query_param, build_antigravity_fetch_available_models_plan,
+        build_antigravity_load_code_assist_plan, build_gemini_cli_load_code_assist_plan,
+        build_kiro_list_available_models_plan, build_models_fetch_execution_plan,
+        build_models_fetch_execution_plan_for_client_version,
         build_standard_models_fetch_execution_plan, build_vertex_models_fetch_execution_plan,
         ModelFetchTransportRuntime, ANTIGRAVITY_REQUEST_USER_AGENT,
     };
@@ -986,7 +991,10 @@ mod tests {
 
         assert_eq!(
             plan.url,
-            "https://chatgpt.com/backend-api/codex/models?client_version=0.144.1"
+            format!(
+                "https://chatgpt.com/backend-api/codex/models?client_version={}",
+                aether_ai_formats::CODEX_CLIENT_VERSION
+            )
         );
         assert_eq!(
             plan.headers.get("authorization").map(String::as_str),
@@ -1185,7 +1193,7 @@ mod tests {
         );
         assert_eq!(
             plan.headers.get("x-client-version").map(String::as_str),
-            Some("1.2.3")
+            Some("4.3.0")
         );
         assert_eq!(
             plan.headers.get("x-vscode-sessionid").map(String::as_str),
@@ -1326,5 +1334,17 @@ mod tests {
             "https://aiplatform.googleapis.com/v1/publishers/google/models?key=secret"
         );
         assert!(plan.headers.contains_key("sec-ch-ua"));
+    }
+
+    #[test]
+    fn pagination_cursor_cannot_inject_additional_query_parameters() {
+        assert_eq!(
+            append_query_param(
+                "https://api.example.test/models?limit=100".to_string(),
+                "after_id",
+                "cursor&limit=10000#fragment",
+            ),
+            "https://api.example.test/models?limit=100&after_id=cursor%26limit%3D10000%23fragment"
+        );
     }
 }

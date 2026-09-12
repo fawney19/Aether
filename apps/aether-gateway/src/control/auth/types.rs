@@ -44,7 +44,7 @@ pub(super) struct GatewayTrustedAdminHeaders {
     pub(super) management_token_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub(super) struct GatewayCredentialBundle {
     pub(super) authorization_bearer: Option<String>,
     pub(super) x_api_key: Option<String>,
@@ -54,7 +54,25 @@ pub(super) struct GatewayCredentialBundle {
     pub(super) cookie_header: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+impl std::fmt::Debug for GatewayCredentialBundle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let redacted = |value: &Option<String>| value.as_ref().map(|_| "[REDACTED]");
+        formatter
+            .debug_struct("GatewayCredentialBundle")
+            .field(
+                "authorization_bearer",
+                &redacted(&self.authorization_bearer),
+            )
+            .field("x_api_key", &redacted(&self.x_api_key))
+            .field("api_key", &redacted(&self.api_key))
+            .field("x_goog_api_key", &redacted(&self.x_goog_api_key))
+            .field("query_key", &redacted(&self.query_key))
+            .field("cookie_header", &redacted(&self.cookie_header))
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
 pub(super) enum GatewayPrimaryCredential {
     ProviderApiKey {
         raw: String,
@@ -70,6 +88,21 @@ pub(super) enum GatewayPrimaryCredential {
     },
 }
 
+impl std::fmt::Debug for GatewayPrimaryCredential {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (variant, carrier) = match self {
+            Self::ProviderApiKey { carrier, .. } => ("ProviderApiKey", carrier),
+            Self::BearerToken { carrier, .. } => ("BearerToken", carrier),
+            Self::CookieHeader { carrier, .. } => ("CookieHeader", carrier),
+        };
+        formatter
+            .debug_struct(variant)
+            .field("raw", &"[REDACTED]")
+            .field("carrier", carrier)
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct GatewayExtractedCredentials {
     pub(super) trusted_headers: Option<GatewayTrustedAuthHeaders>,
@@ -78,7 +111,7 @@ pub(super) struct GatewayExtractedCredentials {
     pub(super) primary: Option<GatewayPrimaryCredential>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub(super) enum GatewayPrincipalCandidate {
     TrustedHeaders(GatewayTrustedAuthHeaders),
     ApiKeyHash {
@@ -93,4 +126,59 @@ pub(super) enum GatewayPrincipalCandidate {
         raw: String,
         carrier: GatewayCredentialCarrier,
     },
+}
+
+impl std::fmt::Debug for GatewayPrincipalCandidate {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TrustedHeaders(headers) => formatter
+                .debug_tuple("TrustedHeaders")
+                .field(headers)
+                .finish(),
+            Self::ApiKeyHash { carrier, .. } => formatter
+                .debug_struct("ApiKeyHash")
+                .field("key_hash", &"[REDACTED]")
+                .field("carrier", carrier)
+                .finish(),
+            Self::DeferredBearerToken { carrier, .. } => formatter
+                .debug_struct("DeferredBearerToken")
+                .field("raw", &"[REDACTED]")
+                .field("carrier", carrier)
+                .finish(),
+            Self::DeferredCookieHeader { carrier, .. } => formatter
+                .debug_struct("DeferredCookieHeader")
+                .field("raw", &"[REDACTED]")
+                .field("carrier", carrier)
+                .finish(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod debug_redaction_tests {
+    use super::{GatewayCredentialBundle, GatewayCredentialCarrier, GatewayPrimaryCredential};
+
+    #[test]
+    fn gateway_credential_debug_output_redacts_raw_authorization_values() {
+        let bundle = GatewayCredentialBundle {
+            authorization_bearer: Some("bundle-bearer-canary".to_string()),
+            api_key: Some("bundle-api-key-canary".to_string()),
+            cookie_header: Some("bundle-cookie-canary".to_string()),
+            ..GatewayCredentialBundle::default()
+        };
+        let primary = GatewayPrimaryCredential::ProviderApiKey {
+            raw: "primary-api-key-canary".to_string(),
+            carrier: GatewayCredentialCarrier::ApiKey,
+        };
+        let debug = format!("{bundle:?} {primary:?}");
+        assert!(debug.contains("[REDACTED]"));
+        for secret in [
+            "bundle-bearer-canary",
+            "bundle-api-key-canary",
+            "bundle-cookie-canary",
+            "primary-api-key-canary",
+        ] {
+            assert!(!debug.contains(secret), "debug output leaked {secret}");
+        }
+    }
 }

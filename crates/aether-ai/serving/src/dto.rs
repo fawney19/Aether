@@ -1,7 +1,10 @@
 use std::collections::BTreeMap;
+use std::fmt;
 
 use aether_ai_formats::api::ExecutionRuntimeAuthContext;
-use aether_contracts::{ExecutionPlan, ExecutionTimeouts, ProxySnapshot, ResolvedTransportProfile};
+use aether_contracts::{
+    redact_url_for_debug, ExecutionPlan, ExecutionTimeouts, ProxySnapshot, ResolvedTransportProfile,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -74,7 +77,7 @@ pub struct AiRequestGzipPolicy {
     pub min_bytes: Option<usize>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Deserialize, Serialize)]
 pub struct AiExecutionPlanPayload {
     pub action: String,
     #[serde(default)]
@@ -89,7 +92,25 @@ pub struct AiExecutionPlanPayload {
     pub auth_context: Option<ExecutionRuntimeAuthContext>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+impl fmt::Debug for AiExecutionPlanPayload {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AiExecutionPlanPayload")
+            .field("action", &self.action)
+            .field("plan_kind", &self.plan_kind)
+            .field("plan", &self.plan)
+            .field("report_kind", &self.report_kind)
+            .field("has_report_context", &self.report_context.is_some())
+            .field(
+                "report_context_bytes",
+                &json_value_len(&self.report_context),
+            )
+            .field("has_auth_context", &self.auth_context.is_some())
+            .finish()
+    }
+}
+
+#[derive(Clone, Deserialize, Serialize)]
 pub struct AiExecutionDecision {
     pub action: String,
     #[serde(default)]
@@ -166,18 +187,130 @@ pub struct AiExecutionDecision {
     pub auth_context: Option<ExecutionRuntimeAuthContext>,
 }
 
-#[derive(Debug)]
+impl fmt::Debug for AiExecutionDecision {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut debug = formatter.debug_struct("AiExecutionDecision");
+        debug
+            .field("action", &self.action)
+            .field("decision_kind", &self.decision_kind)
+            .field("execution_strategy", &self.execution_strategy)
+            .field("conversion_mode", &self.conversion_mode)
+            .field("request_id", &self.request_id)
+            .field("candidate_id", &self.candidate_id)
+            .field("provider_name", &self.provider_name)
+            .field("provider_type", &self.provider_type)
+            .field("provider_id", &self.provider_id)
+            .field("endpoint_id", &self.endpoint_id)
+            .field("key_id", &self.key_id)
+            .field(
+                "upstream_base_url",
+                &self.upstream_base_url.as_deref().map(redact_url_for_debug),
+            )
+            .field(
+                "upstream_url",
+                &self.upstream_url.as_deref().map(redact_url_for_debug),
+            )
+            .field("provider_request_method", &self.provider_request_method)
+            .field("auth_header", &self.auth_header)
+            .field("has_auth_value", &self.auth_value.is_some())
+            .field("auth_value_len", &self.auth_value.as_ref().map(String::len))
+            .field("provider_api_format", &self.provider_api_format)
+            .field("client_api_format", &self.client_api_format)
+            .field("provider_contract", &self.provider_contract)
+            .field("client_contract", &self.client_contract)
+            .field("model_name", &self.model_name)
+            .field("mapped_model", &self.mapped_model)
+            .field("has_prompt_cache_key", &self.prompt_cache_key.is_some())
+            .field(
+                "prompt_cache_key_len",
+                &self.prompt_cache_key.as_ref().map(String::len),
+            )
+            .field(
+                "extra_header_names",
+                &self.extra_headers.keys().collect::<Vec<_>>(),
+            )
+            .field(
+                "provider_request_header_names",
+                &self.provider_request_headers.keys().collect::<Vec<_>>(),
+            )
+            .field(
+                "has_provider_request_body",
+                &self.provider_request_body.is_some(),
+            )
+            .field(
+                "provider_request_body_bytes",
+                &json_value_len(&self.provider_request_body),
+            )
+            .field(
+                "provider_request_body_base64_len",
+                &self.provider_request_body_base64.as_ref().map(String::len),
+            )
+            .field("content_type", &self.content_type)
+            .field("content_encoding", &self.content_encoding)
+            .field("request_gzip", &self.request_gzip)
+            .field("proxy", &self.proxy)
+            .field("transport_profile", &self.transport_profile)
+            .field("timeouts", &self.timeouts)
+            .field("upstream_is_stream", &self.upstream_is_stream)
+            .field("report_kind", &self.report_kind)
+            .field("has_report_context", &self.report_context.is_some())
+            .field(
+                "report_context_bytes",
+                &json_value_len(&self.report_context),
+            )
+            .field("has_auth_context", &self.auth_context.is_some())
+            .finish()
+    }
+}
+
+#[derive(Clone)]
 pub struct AiSyncAttempt {
     pub plan: ExecutionPlan,
     pub report_kind: Option<String>,
     pub report_context: Option<serde_json::Value>,
 }
 
-#[derive(Debug)]
+impl fmt::Debug for AiSyncAttempt {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AiSyncAttempt")
+            .field("plan", &self.plan)
+            .field("report_kind", &self.report_kind)
+            .field("has_report_context", &self.report_context.is_some())
+            .field(
+                "report_context_bytes",
+                &json_value_len(&self.report_context),
+            )
+            .finish()
+    }
+}
+
+#[derive(Clone)]
 pub struct AiStreamAttempt {
     pub plan: ExecutionPlan,
     pub report_kind: Option<String>,
     pub report_context: Option<serde_json::Value>,
+}
+
+impl fmt::Debug for AiStreamAttempt {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AiStreamAttempt")
+            .field("plan", &self.plan)
+            .field("report_kind", &self.report_kind)
+            .field("has_report_context", &self.report_context.is_some())
+            .field(
+                "report_context_bytes",
+                &json_value_len(&self.report_context),
+            )
+            .finish()
+    }
+}
+
+fn json_value_len(value: &Option<serde_json::Value>) -> Option<usize> {
+    value
+        .as_ref()
+        .and_then(|value| serde_json::to_vec(value).ok().map(|bytes| bytes.len()))
 }
 
 pub fn augment_sync_report_context(

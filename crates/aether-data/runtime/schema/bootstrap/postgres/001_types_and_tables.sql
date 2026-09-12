@@ -265,11 +265,11 @@ CREATE TABLE IF NOT EXISTS public.dimension_collectors (
 
 CREATE TABLE IF NOT EXISTS public.gemini_file_mappings (
     id character varying(36) NOT NULL,
-    file_name character varying(255) NOT NULL,
+    file_name character varying(512) NOT NULL,
     key_id character varying(36) NOT NULL,
     user_id character varying(36),
-    display_name character varying(255),
-    mime_type character varying(100),
+    display_name character varying(512),
+    mime_type character varying(255),
     source_hash character varying(64),
     created_at timestamp with time zone NOT NULL,
     expires_at timestamp with time zone NOT NULL
@@ -305,6 +305,7 @@ CREATE TABLE IF NOT EXISTS public.global_models (
 
 CREATE TABLE IF NOT EXISTS public.ldap_configs (
     id integer NOT NULL,
+    singleton_key integer DEFAULT 1 NOT NULL,
     server_url character varying(255) NOT NULL,
     bind_dn text NOT NULL,
     bind_password_encrypted text,
@@ -788,6 +789,7 @@ ALTER SEQUENCE public.proxy_node_events_id_seq OWNED BY public.proxy_node_events
 
 CREATE TABLE IF NOT EXISTS public.proxy_nodes (
     id character varying(36) NOT NULL,
+    tunnel_generation character varying(64) NOT NULL,
     name character varying(100) NOT NULL,
     ip character varying(512) NOT NULL,
     port integer NOT NULL,
@@ -802,7 +804,7 @@ CREATE TABLE IF NOT EXISTS public.proxy_nodes (
     is_manual boolean DEFAULT false NOT NULL,
     proxy_url character varying(500),
     proxy_username character varying(255),
-    proxy_password character varying(500),
+    proxy_password text,
     created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
     updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
     remote_config json,
@@ -1275,6 +1277,7 @@ CREATE TABLE IF NOT EXISTS public.usage_counter_deltas (
     request_id character varying(128) NOT NULL,
     kind character varying(64) NOT NULL,
     target_id text NOT NULL,
+    target_tunnel_generation character varying(64),
     request_count_delta bigint DEFAULT 0 NOT NULL,
     total_requests_delta bigint DEFAULT 0 NOT NULL,
     success_count_delta bigint DEFAULT 0 NOT NULL,
@@ -1361,6 +1364,7 @@ CREATE TABLE IF NOT EXISTS public.user_preferences (
 CREATE TABLE IF NOT EXISTS public.user_sessions (
     id character varying(36) NOT NULL,
     user_id character varying(36) NOT NULL,
+    security_version bigint DEFAULT 0 NOT NULL,
     client_device_id character varying(128) NOT NULL,
     device_label character varying(120),
     device_type character varying(20) DEFAULT 'unknown'::character varying NOT NULL,
@@ -1406,6 +1410,7 @@ CREATE TABLE IF NOT EXISTS public.users (
     feature_settings jsonb,
     is_active boolean DEFAULT true NOT NULL,
     is_deleted boolean DEFAULT false NOT NULL,
+    security_version bigint DEFAULT 0 NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     last_login_at timestamp with time zone,
@@ -1493,6 +1498,7 @@ CREATE TABLE IF NOT EXISTS public.user_groups (
     priority integer DEFAULT 0 NOT NULL,
     allowed_providers json,
     allowed_providers_mode text DEFAULT 'inherit'::text NOT NULL,
+    provider_key_policies jsonb,
     allowed_api_formats json,
     allowed_api_formats_mode text DEFAULT 'inherit'::text NOT NULL,
     allowed_models json,

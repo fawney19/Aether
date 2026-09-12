@@ -33,7 +33,7 @@
         <Select
           :model-value="usersMergeMode"
           :open="usersMergeModeSelectOpen"
-          @update:model-value="$emit('update:usersMergeMode', $event)"
+          @update:model-value="($event === 'skip' || $event === 'overwrite' || $event === 'error') && $emit('update:usersMergeMode', $event)"
           @update:open="$emit('update:usersMergeModeSelectOpen', $event)"
         >
           <SelectTrigger>
@@ -59,13 +59,13 @@
             已存在的用户将被导入的数据覆盖
           </template>
           <template v-else>
-            如果发现任何冲突，导入将中止并回滚
+            如果发现任何冲突，导入将在写入前预检并中止
           </template>
         </p>
       </div>
 
       <p class="text-xs text-muted-foreground">
-        注意：用户 API Keys 需要目标系统使用相同的 ENCRYPTION_KEY 环境变量才能正常工作。
+        注意：备份不会导出或恢复用户密码及 API Key 凭据。导入仅恢复账户、Key 元数据、用量与钱包数据；导入后的用户和独立余额 API Keys 默认禁用，需重置用户密码并重新签发 Keys 后再使用。
       </p>
 
       <div

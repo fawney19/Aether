@@ -90,6 +90,7 @@ pub(super) async fn maybe_build_local_video_create_decision_payload_for_candidat
         client_session_affinity: input.client_session_affinity.as_ref(),
         routing_policy: input.routing_policy.as_ref(),
         scheduler_affinity_epoch: eligible.orchestration.scheduler_affinity_epoch,
+        sticky_key_attempts: eligible.orchestration.sticky_key_attempts,
         client_requested_stream: false,
         upstream_is_stream: false,
         has_envelope: false,

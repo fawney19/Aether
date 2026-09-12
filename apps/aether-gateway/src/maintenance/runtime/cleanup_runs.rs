@@ -15,6 +15,15 @@ const CLEANUP_RUN_HISTORY_KEY: &str = "admin_cleanup_run_history";
 const CLEANUP_RUN_HISTORY_LIMIT: usize = 50;
 const REQUEST_BODY_PROGRESS_UPDATE_BATCHES: usize = 10;
 
+const CLEANUP_ERROR_INVALID_CONFIGURATION: &str = "invalid_configuration";
+const CLEANUP_ERROR_INVALID_INPUT: &str = "invalid_input";
+const CLEANUP_ERROR_POSTGRES: &str = "postgres";
+const CLEANUP_ERROR_REDIS: &str = "redis";
+const CLEANUP_ERROR_SQL: &str = "sql";
+const CLEANUP_ERROR_TIMED_OUT: &str = "timed_out";
+const CLEANUP_ERROR_UNEXPECTED_VALUE: &str = "unexpected_value";
+const CLEANUP_ERROR_INTERNAL: &str = "internal_error";
+
 pub(crate) const USAGE_CLEANUP_KIND: &str = "usage_cleanup";
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct AdminCleanupRunRecord {
@@ -28,6 +37,73 @@ pub(crate) struct AdminCleanupRunRecord {
     pub(crate) duration_ms: Option<u64>,
     pub(crate) summary: Value,
     pub(crate) error: Option<String>,
+}
+
+pub(super) fn cleanup_data_layer_error_category(error: &DataLayerError) -> &'static str {
+    match error {
+        DataLayerError::InvalidConfiguration(_) => CLEANUP_ERROR_INVALID_CONFIGURATION,
+        DataLayerError::InvalidInput(_) => CLEANUP_ERROR_INVALID_INPUT,
+        DataLayerError::Postgres(_) => CLEANUP_ERROR_POSTGRES,
+        DataLayerError::Redis(_) => CLEANUP_ERROR_REDIS,
+        DataLayerError::Sql(_) => CLEANUP_ERROR_SQL,
+        DataLayerError::TimedOut(_) => CLEANUP_ERROR_TIMED_OUT,
+        DataLayerError::UnexpectedValue(_) => CLEANUP_ERROR_UNEXPECTED_VALUE,
+    }
+}
+
+fn cleanup_gateway_error_category(error: &GatewayError) -> &'static str {
+    match error {
+        GatewayError::UpstreamUnavailable { .. } => "upstream_unavailable",
+        GatewayError::ControlUnavailable { .. } => "control_unavailable",
+        GatewayError::LocalExecutionPlanningTimeout { .. } => "planning_timed_out",
+        GatewayError::AdmissionTimeout { .. } => "admission_timed_out",
+        GatewayError::Client { status, .. } if status.is_server_error() => "upstream_error",
+        GatewayError::Client { .. } => "request_rejected",
+        GatewayError::PlanUsageLimited(_) => "plan_usage_limited",
+        GatewayError::LastActiveAdminUpdateDenied | GatewayError::LastActiveAdminDeleteDenied => {
+            "operation_rejected"
+        }
+        GatewayError::Internal(_) => CLEANUP_ERROR_INTERNAL,
+    }
+}
+
+fn normalize_stored_cleanup_error(error: &str) -> &'static str {
+    let error = error.trim();
+    match error {
+        CLEANUP_ERROR_INVALID_CONFIGURATION => CLEANUP_ERROR_INVALID_CONFIGURATION,
+        CLEANUP_ERROR_INVALID_INPUT => CLEANUP_ERROR_INVALID_INPUT,
+        CLEANUP_ERROR_POSTGRES => CLEANUP_ERROR_POSTGRES,
+        CLEANUP_ERROR_REDIS => CLEANUP_ERROR_REDIS,
+        CLEANUP_ERROR_SQL => CLEANUP_ERROR_SQL,
+        CLEANUP_ERROR_TIMED_OUT => CLEANUP_ERROR_TIMED_OUT,
+        CLEANUP_ERROR_UNEXPECTED_VALUE => CLEANUP_ERROR_UNEXPECTED_VALUE,
+        CLEANUP_ERROR_INTERNAL => CLEANUP_ERROR_INTERNAL,
+        "upstream_unavailable" => "upstream_unavailable",
+        "control_unavailable" => "control_unavailable",
+        "planning_timed_out" => "planning_timed_out",
+        "admission_timed_out" => "admission_timed_out",
+        "upstream_error" => "upstream_error",
+        "request_rejected" => "request_rejected",
+        "plan_usage_limited" => "plan_usage_limited",
+        "operation_rejected" => "operation_rejected",
+        _ if error.starts_with("invalid configuration:") => CLEANUP_ERROR_INVALID_CONFIGURATION,
+        _ if error.starts_with("invalid input:") => CLEANUP_ERROR_INVALID_INPUT,
+        _ if error.starts_with("postgres error:") => CLEANUP_ERROR_POSTGRES,
+        _ if error.starts_with("redis error:") => CLEANUP_ERROR_REDIS,
+        _ if error.starts_with("sql error:") => CLEANUP_ERROR_SQL,
+        _ if error.starts_with("operation timed out:") => CLEANUP_ERROR_TIMED_OUT,
+        _ if error.starts_with("unexpected database value:") => CLEANUP_ERROR_UNEXPECTED_VALUE,
+        _ => CLEANUP_ERROR_INTERNAL,
+    }
+}
+
+fn normalize_cleanup_run_record(mut record: AdminCleanupRunRecord) -> AdminCleanupRunRecord {
+    record.error = record
+        .error
+        .as_deref()
+        .map(normalize_stored_cleanup_error)
+        .map(str::to_string);
+    record
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -225,7 +301,7 @@ pub(crate) async fn record_failed_cleanup_run(
                 .unwrap_or(u64::MAX),
         ),
         summary: json!({}),
-        error: Some(error.to_string()),
+        error: Some(cleanup_data_layer_error_category(error).to_string()),
     };
     if let Err(err) = record_cleanup_run(data, record).await {
         warn!(error = %err, kind, "failed to record failed cleanup run");
@@ -277,7 +353,7 @@ async fn run_request_body_cleanup_task(
                     batch_size,
                     &total,
                     Some(started_at),
-                    Some(err.to_string()),
+                    Some(cleanup_data_layer_error_category(&err).to_string()),
                 );
                 if let Err(record_err) = record_cleanup_run(&data, failed).await {
                     warn!(error = %record_err, "failed to record request body cleanup failure");
@@ -350,12 +426,12 @@ async fn run_admin_system_purge_task(
                 kind.failure_message().to_string(),
                 json!({}),
                 Some(started_at),
-                Some(format!("{err:?}")),
+                Some(cleanup_gateway_error_category(&err).to_string()),
             );
             if let Err(record_err) = record_cleanup_run(&data, failed).await {
                 warn!(error = %record_err, "failed to record admin system purge task failure");
             }
-            warn!(error = ?err, kind = ?kind, "admin system purge task failed");
+            warn!(error = %crate::error::redact_error_debug(&err), kind = ?kind, "admin system purge task failed");
         }
     }
 }
@@ -493,6 +569,7 @@ pub(crate) async fn record_admin_cleanup_run(
     data: &GatewayDataState,
     record: AdminCleanupRunRecord,
 ) -> Result<(), DataLayerError> {
+    let record = normalize_cleanup_run_record(record);
     let mut records = list_admin_cleanup_run_records(data).await?;
     records.retain(|existing| existing.id != record.id);
     records.insert(0, record);
@@ -522,5 +599,50 @@ fn parse_cleanup_run_records(value: Value) -> Vec<AdminCleanupRunRecord> {
         .into_iter()
         .flat_map(|items| items.iter())
         .filter_map(|item| serde_json::from_value::<AdminCleanupRunRecord>(item.clone()).ok())
+        .map(normalize_cleanup_run_record)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        cleanup_data_layer_error_category, parse_cleanup_run_records, AdminCleanupRunRecord,
+    };
+    use aether_data_contracts::DataLayerError;
+    use serde_json::json;
+
+    #[test]
+    fn cleanup_error_categories_do_not_include_data_layer_details() {
+        let error = DataLayerError::Postgres(
+            "connection failed for postgresql://admin:database-secret@db.internal/aether"
+                .to_string(),
+        );
+
+        assert_eq!(cleanup_data_layer_error_category(&error), "postgres");
+        assert!(!cleanup_data_layer_error_category(&error).contains("database-secret"));
+    }
+
+    #[test]
+    fn cleanup_history_read_projection_removes_legacy_error_details() {
+        let secret = "postgres error: password=database-secret path=/srv/aether/private.db";
+        let stored = AdminCleanupRunRecord {
+            id: "cleanup-secret-regression".to_string(),
+            kind: "usage_cleanup".to_string(),
+            trigger: "manual".to_string(),
+            status: "failed".to_string(),
+            message: "请求记录手动清理失败".to_string(),
+            started_at_unix_secs: 1,
+            completed_at_unix_secs: Some(2),
+            duration_ms: Some(10),
+            summary: json!({}),
+            error: Some(secret.to_string()),
+        };
+
+        let records = parse_cleanup_run_records(json!([stored]));
+        let serialized = serde_json::to_string(&records).expect("cleanup records should serialize");
+
+        assert_eq!(records[0].error.as_deref(), Some("postgres"));
+        assert!(!serialized.contains("database-secret"));
+        assert!(!serialized.contains("/srv/aether/private.db"));
+    }
 }

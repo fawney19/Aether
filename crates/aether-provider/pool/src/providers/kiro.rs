@@ -12,21 +12,35 @@ use crate::provider::{
 };
 use crate::quota::{
     provider_pool_current_unix_secs, provider_pool_json_f64, provider_pool_metadata_bucket,
-    provider_pool_quota_snapshot_exhausted_decision, provider_pool_reset_deadline_elapsed,
-    provider_pool_timestamp_unix_secs,
+    provider_pool_model_quota_exhausted, provider_pool_quota_snapshot_exhausted_decision,
+    provider_pool_reset_deadline_elapsed, provider_pool_timestamp_unix_secs,
 };
 use crate::quota_refresh::ProviderPoolQuotaRequestSpec;
+use aether_provider_transport::kiro::normalize_kiro_region;
 
 pub const KIRO_USAGE_LIMITS_PATH: &str = "/getUsageLimits";
 pub const KIRO_USAGE_SDK_VERSION: &str = "1.0.0";
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct KiroPoolQuotaAuthInput {
     pub authorization_value: String,
     pub api_region: String,
     pub kiro_version: String,
     pub machine_id: String,
     pub profile_arn: Option<String>,
+}
+
+impl std::fmt::Debug for KiroPoolQuotaAuthInput {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("KiroPoolQuotaAuthInput")
+            .field("authorization_value", &"[REDACTED]")
+            .field("api_region", &self.api_region)
+            .field("kiro_version", &self.kiro_version)
+            .field("machine_id", &self.machine_id)
+            .field("profile_arn", &self.profile_arn)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -46,6 +60,11 @@ impl ProviderPoolAdapter for KiroProviderPoolAdapter {
     }
 
     fn quota_exhausted(&self, input: &ProviderPoolMemberInput<'_>) -> bool {
+        if let Some(exhausted) = input.provider_model_name.and_then(|model| {
+            provider_pool_model_quota_exhausted(input.key, input.provider_type, model)
+        }) {
+            return exhausted;
+        }
         if let Some(exhausted) =
             provider_pool_quota_snapshot_exhausted_decision(input.key, input.provider_type)
         {
@@ -129,17 +148,11 @@ pub fn build_kiro_pool_quota_request(
         client_api_format: "claude:messages".to_string(),
         provider_api_format: "kiro:usage".to_string(),
         model_name: Some("kiro-usage-limits".to_string()),
-        accept_invalid_certs: false,
     }
 }
 
 fn normalize_region(value: &str) -> &str {
-    let value = value.trim();
-    if value.is_empty() {
-        "us-east-1"
-    } else {
-        value
-    }
+    normalize_kiro_region(value)
 }
 
 fn normalize_kiro_version(value: &str) -> &str {
@@ -173,5 +186,25 @@ pub(crate) fn quota_exhausted_from_bucket(bucket: &Map<String, Value>) -> bool {
     ) {
         (Some(limit), Some(current)) if limit > 0.0 => current >= limit,
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::KiroPoolQuotaAuthInput;
+
+    #[test]
+    fn quota_auth_debug_output_redacts_authorization() {
+        let input = KiroPoolQuotaAuthInput {
+            authorization_value: "Bearer kiro-secret-canary".to_string(),
+            api_region: "us-east-1".to_string(),
+            kiro_version: "1.0.0".to_string(),
+            machine_id: "machine-1".to_string(),
+            profile_arn: None,
+        };
+
+        let debug = format!("{input:?}");
+        assert!(!debug.contains("kiro-secret-canary"));
+        assert!(debug.contains("[REDACTED]"));
     }
 }

@@ -86,6 +86,77 @@ WHERE file_name = $1
         }
     }
 
+    async fn find_active_by_file_name_for_user(
+        &self,
+        file_name: &str,
+        user_id: &str,
+        now_unix_secs: u64,
+    ) -> Result<Option<StoredGeminiFileMapping>, DataLayerError> {
+        let row = sqlx::query(
+            r#"
+SELECT
+  id,
+  file_name,
+  key_id,
+  user_id,
+  display_name,
+  mime_type,
+  source_hash,
+  EXTRACT(EPOCH FROM created_at)::bigint AS created_at_unix_ms,
+  EXTRACT(EPOCH FROM expires_at)::bigint AS expires_at_unix_secs
+FROM gemini_file_mappings
+WHERE file_name = $1
+  AND user_id = $2
+  AND expires_at > TO_TIMESTAMP($3::double precision)
+"#,
+        )
+        .bind(file_name)
+        .bind(user_id)
+        .bind(now_unix_secs as f64)
+        .fetch_optional(&self.pool)
+        .await
+        .map_postgres_err()?;
+
+        row.as_ref().map(Self::map_row).transpose()
+    }
+
+    async fn find_active_by_file_name_for_owner(
+        &self,
+        file_name: &str,
+        key_id: &str,
+        user_id: &str,
+        now_unix_secs: u64,
+    ) -> Result<Option<StoredGeminiFileMapping>, DataLayerError> {
+        let row = sqlx::query(
+            r#"
+SELECT
+  id,
+  file_name,
+  key_id,
+  user_id,
+  display_name,
+  mime_type,
+  source_hash,
+  EXTRACT(EPOCH FROM created_at)::bigint AS created_at_unix_ms,
+  EXTRACT(EPOCH FROM expires_at)::bigint AS expires_at_unix_secs
+FROM gemini_file_mappings
+WHERE file_name = $1
+  AND key_id = $2
+  AND user_id = $3
+  AND expires_at > TO_TIMESTAMP($4::double precision)
+"#,
+        )
+        .bind(file_name)
+        .bind(key_id)
+        .bind(user_id)
+        .bind(now_unix_secs as f64)
+        .fetch_optional(&self.pool)
+        .await
+        .map_postgres_err()?;
+
+        row.as_ref().map(Self::map_row).transpose()
+    }
+
     async fn list_mappings(
         &self,
         query: &GeminiFileMappingListQuery,
@@ -223,6 +294,61 @@ RETURNING
         Self::map_row(&row)
     }
 
+    async fn upsert_if_owner_matches(
+        &self,
+        record: UpsertGeminiFileMappingRecord,
+    ) -> Result<Option<StoredGeminiFileMapping>, DataLayerError> {
+        record.validate()?;
+        let row = sqlx::query(
+            r#"
+INSERT INTO gemini_file_mappings (
+  id,
+  file_name,
+  key_id,
+  user_id,
+  display_name,
+  mime_type,
+  source_hash,
+  created_at,
+  expires_at
+)
+VALUES ($1,$2,$3,$4,$5,$6,$7,NOW(),TO_TIMESTAMP($8::double precision))
+ON CONFLICT (file_name)
+DO UPDATE
+SET
+  display_name = EXCLUDED.display_name,
+  mime_type = EXCLUDED.mime_type,
+  source_hash = EXCLUDED.source_hash,
+  expires_at = EXCLUDED.expires_at
+WHERE gemini_file_mappings.key_id = EXCLUDED.key_id
+  AND gemini_file_mappings.user_id IS NOT DISTINCT FROM EXCLUDED.user_id
+RETURNING
+  id,
+  file_name,
+  key_id,
+  user_id,
+  display_name,
+  mime_type,
+  source_hash,
+  EXTRACT(EPOCH FROM created_at)::bigint AS created_at_unix_ms,
+  EXTRACT(EPOCH FROM expires_at)::bigint AS expires_at_unix_secs
+"#,
+        )
+        .bind(record.id)
+        .bind(record.file_name)
+        .bind(record.key_id)
+        .bind(record.user_id)
+        .bind(record.display_name)
+        .bind(record.mime_type)
+        .bind(record.source_hash)
+        .bind(record.expires_at_unix_secs as f64)
+        .fetch_optional(&self.pool)
+        .await
+        .map_postgres_err()?;
+
+        row.as_ref().map(Self::map_row).transpose()
+    }
+
     async fn delete_by_file_name(&self, file_name: &str) -> Result<bool, DataLayerError> {
         let result = sqlx::query(
             r#"
@@ -231,6 +357,48 @@ WHERE file_name = $1
 #"#,
         )
         .bind(file_name)
+        .execute(&self.pool)
+        .await
+        .map_postgres_err()?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn delete_by_file_name_for_user(
+        &self,
+        file_name: &str,
+        user_id: &str,
+    ) -> Result<bool, DataLayerError> {
+        let result = sqlx::query(
+            r#"
+DELETE FROM gemini_file_mappings
+WHERE file_name = $1 AND user_id = $2
+"#,
+        )
+        .bind(file_name)
+        .bind(user_id)
+        .execute(&self.pool)
+        .await
+        .map_postgres_err()?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn delete_by_file_name_for_owner(
+        &self,
+        file_name: &str,
+        key_id: &str,
+        user_id: &str,
+    ) -> Result<bool, DataLayerError> {
+        let result = sqlx::query(
+            r#"
+DELETE FROM gemini_file_mappings
+WHERE file_name = $1 AND key_id = $2 AND user_id = $3
+"#,
+        )
+        .bind(file_name)
+        .bind(key_id)
+        .bind(user_id)
         .execute(&self.pool)
         .await
         .map_postgres_err()?;
@@ -325,6 +493,11 @@ fn apply_list_filters(
     where_clause: &mut WhereClause,
     query: &GeminiFileMappingListQuery,
 ) {
+    if let Some(user_id) = query.user_id.as_deref() {
+        where_clause.push_next(builder);
+        builder.push("user_id = ");
+        builder.push_bind(user_id.to_string());
+    }
     if !query.include_expired {
         where_clause.push_next(builder);
         builder.push("expires_at > TO_TIMESTAMP(");

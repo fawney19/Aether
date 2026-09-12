@@ -24,7 +24,7 @@
 
     <div class="max-h-[64vh] space-y-4 overflow-y-auto">
       <div class="rounded-lg border border-amber-500/20 bg-amber-500/10 px-3 py-2.5 text-xs text-amber-100/90">
-        {{ legacyT('后台发放会立即生效；如果新套餐包含每日额度或会员权益，用户已有的同类旧套餐会自动失效。') }}
+        {{ legacyT('后台发放会立即生效；新旧套餐包含同类每日额度、同类会员权益或同名互斥组时，旧套餐整包失效。') }}
       </div>
 
       <section class="space-y-2.5">
@@ -79,8 +79,8 @@
                 </div>
                 <div class="mt-2 flex flex-wrap gap-1.5">
                   <Badge
-                    v-for="label in entitlementLabels(item.entitlements)"
-                    :key="label"
+                    v-for="(label, index) in entitlementLabels(item.entitlements)"
+                    :key="`${label}-${index}`"
                     variant="outline"
                     class="h-5 px-1.5 py-0 text-[10px]"
                   >
@@ -88,9 +88,21 @@
                   </Badge>
                 </div>
               </div>
-              <div class="text-left text-[11px] text-muted-foreground sm:text-right">
-                <div>{{ legacyT('开始：') }}{{ formatDateTime(item.starts_at) }}</div>
-                <div>{{ legacyT('到期：') }}{{ formatDateTime(item.expires_at) }}</div>
+              <div class="flex shrink-0 items-start gap-2">
+                <div class="text-left text-[11px] text-muted-foreground sm:text-right">
+                  <div>{{ legacyT('开始：') }}{{ formatDateTime(item.starts_at) }}</div>
+                  <div>{{ legacyT('到期：') }}{{ formatDateTime(item.expires_at) }}</div>
+                </div>
+                <Button
+                  v-if="item.active"
+                  variant="destructive"
+                  size="sm"
+                  class="h-7 px-2 text-[11px]"
+                  :disabled="revokingEntitlementId === item.id"
+                  @click="$emit('revoke', item)"
+                >
+                  {{ revokingEntitlementId === item.id ? legacyT('撤销中...') : legacyT('撤销套餐') }}
+                </Button>
               </div>
             </div>
           </div>
@@ -103,7 +115,7 @@
             {{ legacyT('发放套餐') }}
           </h4>
           <p class="text-xs text-muted-foreground">
-            {{ legacyT('仅发放套餐权益，不产生用户付款；同类旧套餐会按现有规则自动替换。') }}
+            {{ legacyT('仅发放套餐权益，不产生用户付款；命中同类权益或同名互斥组时，冲突的旧套餐会整包失效。') }}
           </p>
         </div>
 
@@ -199,6 +211,7 @@ defineProps<{
   loadingEntitlements: boolean
   loadingPlans: boolean
   granting: boolean
+  revokingEntitlementId?: string | null
   formatDateTime: (value?: string | null) => string
   formatPlanPrice: (plan: BillingPlan) => string
   formatPlanDuration: (plan: BillingPlan) => string
@@ -211,6 +224,7 @@ defineEmits<{
   'update:grantReason': [value: string]
   'refresh-entitlements': [userId: string]
   grant: []
+  revoke: [entitlement: AdminUserPlanEntitlement]
 }>()
 
 const { legacyT } = useI18n()

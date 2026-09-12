@@ -465,7 +465,7 @@
                                 完成
                               </Button>
                               <Button
-                                v-if="canFailRefund(refund.status)"
+                                v-if="canFailRefund(refund)"
                                 size="sm"
                                 variant="destructive"
                                 :disabled="submittingRefundAction"
@@ -509,6 +509,7 @@
 </template>
 
 <script setup lang="ts">
+import { getI18nLocale } from '@/i18n'
 import { computed, ref, watch } from 'vue'
 import {
   Badge,
@@ -937,8 +938,12 @@ function canProcessRefund(status: string) {
   return status === 'pending_approval' || status === 'approved'
 }
 
-function canFailRefund(status: string) {
-  return status === 'processing' || status === 'pending_approval' || status === 'approved'
+function canFailRefund(refund: Pick<RefundRequest, 'status' | 'refund_mode' | 'gateway_refund_id' | 'payout_proof'>) {
+  if (refund.status === 'pending_approval' || refund.status === 'approved') return true
+  return refund.status === 'processing'
+    && refund.refund_mode === 'offline_payout'
+    && !refund.gateway_refund_id?.trim()
+    && !refund.payout_proof
 }
 
 function canCompleteRefund(status: string) {
@@ -1023,7 +1028,7 @@ async function submitCompleteRefund() {
 
 function formatDateTime(value: string | null | undefined) {
   if (!value) return '-'
-  return new Date(value).toLocaleString('zh-CN', {
+  return new Date(value).toLocaleString(getI18nLocale(), {
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',

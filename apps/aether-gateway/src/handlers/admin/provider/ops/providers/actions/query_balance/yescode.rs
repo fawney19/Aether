@@ -5,6 +5,9 @@ use super::super::responses::{
     admin_provider_ops_action_error, admin_provider_ops_action_response,
 };
 use crate::handlers::admin::request::AdminAppState;
+use crate::handlers::shared::{
+    canonicalize_provider_ops_base_url, resolve_provider_ops_same_origin_url,
+};
 use aether_admin::provider::ops::parse_yescode_combined_balance_payload;
 use aether_contracts::ProxySnapshot;
 use serde_json::json;
@@ -17,8 +20,44 @@ pub(super) async fn admin_provider_ops_yescode_balance_payload(
     proxy_snapshot: Option<&ProxySnapshot>,
 ) -> serde_json::Value {
     let start = std::time::Instant::now();
-    let balance_url = format!("{}/api/v1/user/balance", base_url.trim_end_matches('/'));
-    let profile_url = format!("{}/api/v1/auth/profile", base_url.trim_end_matches('/'));
+    // Resolve fixed action paths against a canonical origin.  Avoid string
+    // concatenation so malformed bases (or path-like inputs) cannot redirect
+    // credentials to another host.
+    let destination = match canonicalize_provider_ops_base_url(base_url) {
+        Ok(destination) => destination,
+        Err(_) => {
+            return admin_provider_ops_action_error(
+                "auth_failed",
+                "query_balance",
+                "Cookie 已失效，请重新配置",
+                Some(start.elapsed().as_millis() as u64),
+            );
+        }
+    };
+    let balance_url =
+        match resolve_provider_ops_same_origin_url(&destination, "/api/v1/user/balance") {
+            Ok(url) => url,
+            Err(_) => {
+                return admin_provider_ops_action_error(
+                    "auth_failed",
+                    "query_balance",
+                    "Cookie 已失效，请重新配置",
+                    Some(start.elapsed().as_millis() as u64),
+                );
+            }
+        };
+    let profile_url =
+        match resolve_provider_ops_same_origin_url(&destination, "/api/v1/auth/profile") {
+            Ok(url) => url,
+            Err(_) => {
+                return admin_provider_ops_action_error(
+                    "auth_failed",
+                    "query_balance",
+                    "Cookie 已失效，请重新配置",
+                    Some(start.elapsed().as_millis() as u64),
+                );
+            }
+        };
     let (balance_result, profile_result) = tokio::join!(
         admin_provider_ops_execute_json_request(
             state,

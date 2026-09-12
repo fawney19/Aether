@@ -95,8 +95,8 @@ mod tests {
     fn new_database_config_takes_priority_over_legacy_postgres_config() {
         let config = DataLayerConfig {
             database: Some(SqlDatabaseConfig {
-                driver: DatabaseDriver::Sqlite,
-                url: "sqlite://./data/aether.db".to_string(),
+                driver: DatabaseDriver::Postgres,
+                url: "postgres://localhost/preferred".to_string(),
                 pool: SqlPoolConfig::default(),
             }),
             postgres: Some(PostgresPoolConfig {
@@ -114,6 +114,7 @@ mod tests {
         let effective = config
             .effective_database()
             .expect("database config should exist");
-        assert_eq!(effective.driver, DatabaseDriver::Sqlite);
+        assert_eq!(effective.driver, DatabaseDriver::Postgres);
+        assert_eq!(effective.url, "postgres://localhost/preferred");
     }
 }

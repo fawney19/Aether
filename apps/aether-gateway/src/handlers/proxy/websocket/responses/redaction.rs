@@ -15,7 +15,7 @@
 //! （`privacy::restore_sync_response_body` / `privacy::StreamingResponseRestorer`），
 //! WS 少了这一步，客户端就会直接看到 `<AETHER:EMAIL:...>`。
 //! [`ResponsesWebSocketRedactionRestorer`] 补上这一跳，语义与 HTTP 完全一致：
-//! 复用 `privacy::restore_json_strings`，只还原本连接自己 mask 出来的映射，
+//! 复用 `privacy::restore_json_strings_with_budget`，只还原本连接自己 mask 出来的映射，
 //! 未映射的占位符原样透传。
 //!
 //! ## session 为什么活在连接上而不是活在这一轮里
@@ -48,7 +48,11 @@ use crate::ai_serving::{
     resolve_local_decision_execution_runtime_auth_context, resolve_provider_chat_pii_redaction,
 };
 use crate::control::GatewayControlDecision;
-use crate::privacy::{restore_json_strings, RedactionSession, RedactionSessionSlot};
+use crate::privacy::{
+    restore_json_strings_with_budget, serialize_json_value_with_limit, RedactionSession,
+    RedactionSessionSlot, RestoreExpansionBudget, MAX_STREAM_RESTORE_EXPANSION_BYTES,
+    MAX_STREAM_RESTORE_OUTPUT_BYTES,
+};
 use crate::{AppState, GatewayError};
 
 /// Responses WebSocket 只承载 `openai:responses`，脱敏规则按这个客户端格式选取。
@@ -191,29 +195,48 @@ impl ResponsesWebSocketRedactionRestorer {
 
     /// 把一帧 provider 事件里的占位符换回真实值，返回要发给客户端的帧文本。
     ///
-    /// `None` 表示这一帧没有任何东西要还原，调用方必须原样转发上游字节：未启用
-    /// 脱敏（没有任何 session）时连 clone 都不做。
+    /// `Ok(None)` 表示这一帧没有任何东西要还原，调用方必须原样转发上游字节：
+    /// 未启用脱敏（没有任何 session）时连 clone 都不做。`Err` 表示恢复或有界
+    /// 序列化失败，调用方必须停止转发，不能把它降级成“未命中”而泄漏占位符。
     ///
     /// 入参只读：审计与终态观测继续消费脱敏态的事件，还原只作用于发往客户端的
     /// 那一份拷贝，和 HTTP 侧「审计存脱敏体、线上还原」保持一致。
-    pub(super) fn restore_provider_frame_text(&self, event: &Value) -> Option<String> {
+    pub(super) fn restore_provider_frame_text(
+        &self,
+        event: &Value,
+    ) -> Result<Option<String>, GatewayError> {
         if self.sessions.is_empty() {
-            return None;
+            return Ok(None);
         }
         let mut restored_event = event.clone();
         let mut restored = false;
+        // Fresh per provider frame: this bounds one allocation amplification
+        // without imposing a cumulative byte or duration cap on the socket.
+        let mut budget = RestoreExpansionBudget::new(MAX_STREAM_RESTORE_EXPANSION_BYTES);
         for session in &self.sessions {
             // 逐 session 还原而不是合并映射：每个 session 只认自己 mask 过的
             // sentinel（`RedactionSession::restore_text`），跨 session 合并会绕开
             // 这条边界。同一个值在不同轮派生出的 sentinel 相同，所以顺序无关。
-            restored |= restore_json_strings(&mut restored_event, session);
+            restored |=
+                restore_json_strings_with_budget(&mut restored_event, session, &mut budget)?;
         }
         if !restored {
-            return None;
+            return Ok(None);
         }
-        // 刚从 JSON 解析出来的 Value 再序列化不会失败；真失败时宁可让客户端看到
-        // 占位符，也不能丢掉这一帧——丢帧会让客户端的协议状态机卡死。
-        serde_json::to_string(&restored_event).ok()
+        // The parsed input frame is bounded at ingress, but use the same bounded
+        // serializer here so calculating the restored output limit cannot create
+        // an unchecked temporary allocation.
+        let original_len =
+            serialize_json_value_with_limit(event, MAX_STREAM_RESTORE_OUTPUT_BYTES)?.len();
+        let output_limit = original_len
+            .checked_add(MAX_STREAM_RESTORE_EXPANSION_BYTES)
+            .ok_or_else(|| {
+                GatewayError::Internal(
+                    "WebSocket redaction restored frame length overflow".to_string(),
+                )
+            })?
+            .min(MAX_STREAM_RESTORE_OUTPUT_BYTES);
+        serialize_json_value_with_limit(&restored_event, output_limit).map(Some)
     }
 }
 
@@ -334,6 +357,7 @@ mod tests {
             local_rejection: None,
             allowed_models: None,
             ip_rules: None,
+            verified_api_key_hash: None,
         });
         decision
     }
@@ -691,6 +715,7 @@ mod tests {
         let frame = provider_delta_frame(&format!("your mail is {sentinel}"));
         let restored = restorer
             .restore_provider_frame_text(&frame)
+            .expect("frame restoration must not fail")
             .expect("a frame echoing this turn's sentinel must be restored");
 
         assert!(
@@ -725,6 +750,7 @@ mod tests {
         });
         let restored = restorer
             .restore_provider_frame_text(&frame)
+            .expect("frame restoration must not fail")
             .expect("a batched sentinel must be restored");
 
         assert!(restored.contains(TEST_EMAIL), "{restored}");
@@ -744,6 +770,7 @@ mod tests {
         let frame = provider_delta_frame(&format!("{FOREIGN_SENTINEL} and {sentinel}"));
         let restored = restorer
             .restore_provider_frame_text(&frame)
+            .expect("frame restoration must not fail")
             .expect("the mapped sentinel is still restored");
 
         assert!(restored.contains(TEST_EMAIL), "{restored}");
@@ -764,15 +791,34 @@ mod tests {
         assert!(
             restorer
                 .restore_provider_frame_text(&provider_delta_frame("nothing to restore"))
+                .expect("frame restoration must not fail")
                 .is_none(),
             "a frame with no mapped sentinel must be relayed byte-for-byte"
         );
         assert!(
             restorer
                 .restore_provider_frame_text(&provider_delta_frame(FOREIGN_SENTINEL))
+                .expect("frame restoration must not fail")
                 .is_none(),
             "a frame that only carries unmapped placeholders must not be rewritten"
         );
+    }
+
+    #[tokio::test]
+    async fn frame_restore_budget_does_not_accumulate_across_frames() {
+        let state = redaction_enabled_state();
+        let redaction = turn_redaction(&state, &control_decision(), TEST_EMAIL).await;
+        let sentinel = sentinel_for(&redaction, TEST_EMAIL);
+        let mut restorer = ResponsesWebSocketRedactionRestorer::default();
+        restorer.register(redaction.session);
+
+        for _ in 0..3 {
+            let restored = restorer
+                .restore_provider_frame_text(&provider_delta_frame(&sentinel))
+                .expect("frame restoration must not fail")
+                .expect("each provider frame gets an independent expansion budget");
+            assert!(restored.contains(TEST_EMAIL));
+        }
     }
 
     /// 未启用脱敏（或这条连接从没 mask 到东西）时，还原器必须完全不介入：
@@ -783,9 +829,11 @@ mod tests {
 
         assert!(restorer
             .restore_provider_frame_text(&provider_delta_frame(FOREIGN_SENTINEL))
+            .expect("frame restoration must not fail")
             .is_none());
         assert!(restorer
             .restore_provider_frame_text(&provider_delta_frame(TEST_EMAIL))
+            .expect("frame restoration must not fail")
             .is_none());
     }
 
@@ -806,6 +854,7 @@ mod tests {
 
         assert!(restorer
             .restore_provider_frame_text(&provider_delta_frame(FOREIGN_SENTINEL))
+            .expect("frame restoration must not fail")
             .is_none());
     }
 
@@ -822,6 +871,7 @@ mod tests {
         let before = frame.clone();
         let _ = restorer
             .restore_provider_frame_text(&frame)
+            .expect("frame restoration must not fail")
             .expect("the frame is restored for the client");
 
         assert_eq!(
@@ -849,6 +899,7 @@ mod tests {
         let frame = provider_delta_frame(&format!("{first_sentinel} then {second_sentinel}"));
         let restored = restorer
             .restore_provider_frame_text(&frame)
+            .expect("frame restoration must not fail")
             .expect("both turns' sentinels are restorable on this connection");
 
         assert!(restored.contains(TEST_EMAIL), "{restored}");
@@ -876,11 +927,13 @@ mod tests {
         assert!(
             restorer
                 .restore_provider_frame_text(&provider_delta_frame(&prior_sentinel))
+                .expect("prior-chain restoration check must not fail")
                 .is_none(),
             "an independent chain must not restore PII from its predecessor"
         );
         let restored = restorer
             .restore_provider_frame_text(&provider_delta_frame(&current_sentinel))
+            .expect("the new chain's first-turn restoration must not fail")
             .expect("the new chain's first-turn mapping must remain available");
         assert!(restored.contains(OTHER_TEST_EMAIL), "{restored}");
         assert!(!restored.contains(&current_sentinel), "{restored}");
@@ -901,6 +954,7 @@ mod tests {
         assert!(!restorer.has_sessions());
         assert!(restorer
             .restore_provider_frame_text(&provider_delta_frame(&prior_sentinel))
+            .expect("cleared-chain restoration check must not fail")
             .is_none());
     }
 
@@ -927,12 +981,14 @@ mod tests {
         assert!(
             restorer
                 .restore_provider_frame_text(&provider_delta_frame(&oldest_sentinel))
+                .expect("frame restoration must not fail")
                 .is_none(),
             "the evicted turn's sentinel is relayed verbatim, never mis-restored"
         );
         assert!(
             restorer
                 .restore_provider_frame_text(&provider_delta_frame(&newest_sentinel))
+                .expect("frame restoration must not fail")
                 .is_some(),
             "the most recent turns stay restorable"
         );

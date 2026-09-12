@@ -5,8 +5,8 @@ use serde_json::Value;
 use super::super::snapshot::GatewayProviderTransportSnapshot;
 
 pub const ANTIGRAVITY_PROVIDER_TYPE: &str = "antigravity";
-pub const ANTIGRAVITY_REQUEST_USER_AGENT: &str =
-    "antigravity/cli/1.0.16 (aidev_client; os_type=linux; arch=arm64; auth_method=consumer)";
+pub const ANTIGRAVITY_CLIENT_VERSION: &str = "4.3.0";
+pub const ANTIGRAVITY_REQUEST_USER_AGENT: &str = "vscode/1.X.X (Antigravity/4.3.0)";
 const ANTIGRAVITY_CLIENT_NAME: &str = "antigravity";
 const ANTIGRAVITY_GOOG_API_CLIENT: &str = "gl-node/18.18.2 fire/0.8.6 grpc/1.10.x";
 
@@ -109,7 +109,7 @@ pub fn build_antigravity_static_identity_headers(
 }
 
 pub fn build_antigravity_static_client_headers(
-    client_version: Option<&str>,
+    _client_version: Option<&str>,
     session_id: Option<&str>,
 ) -> BTreeMap<String, String> {
     let mut headers = BTreeMap::from([
@@ -125,14 +125,12 @@ pub fn build_antigravity_static_client_headers(
             String::from("user-agent"),
             String::from(ANTIGRAVITY_REQUEST_USER_AGENT),
         ),
+        (
+            String::from("x-client-version"),
+            String::from(ANTIGRAVITY_CLIENT_VERSION),
+        ),
     ]);
 
-    if let Some(client_version) = client_version
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        headers.insert(String::from("x-client-version"), client_version.to_string());
-    }
     if let Some(session_id) = session_id.map(str::trim).filter(|value| !value.is_empty()) {
         headers.insert(String::from("x-vscode-sessionid"), session_id.to_string());
     }
@@ -273,7 +271,8 @@ mod tests {
 
     use super::{
         build_antigravity_static_client_headers, resolve_local_antigravity_request_auth,
-        AntigravityRequestAuth, AntigravityRequestAuthSupport, ANTIGRAVITY_REQUEST_USER_AGENT,
+        AntigravityRequestAuth, AntigravityRequestAuthSupport, ANTIGRAVITY_CLIENT_VERSION,
+        ANTIGRAVITY_REQUEST_USER_AGENT,
     };
     use crate::snapshot::{
         GatewayProviderTransportEndpoint, GatewayProviderTransportKey,
@@ -383,7 +382,7 @@ mod tests {
     }
 
     #[test]
-    fn static_client_headers_use_native_antigravity_cli_user_agent() {
+    fn static_client_headers_pin_the_known_good_antigravity_identity() {
         let headers = build_antigravity_static_client_headers(Some("1.0.16"), Some("session-abc"));
 
         assert_eq!(
@@ -396,7 +395,7 @@ mod tests {
         );
         assert_eq!(
             headers.get("x-client-version").map(String::as_str),
-            Some("1.0.16")
+            Some(ANTIGRAVITY_CLIENT_VERSION)
         );
         assert_eq!(
             headers.get("x-vscode-sessionid").map(String::as_str),

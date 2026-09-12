@@ -8,6 +8,7 @@ use aether_data::repository::users::StoredUserGroup;
 use aether_data_contracts::repository::billing::UserDailyQuotaAvailabilityRecord;
 use aether_data_contracts::repository::quota::StoredProviderQuotaSnapshot;
 use aether_data_contracts::repository::usage::UsageCounterHealthSnapshot;
+use aether_gateway_frontdoor::HttpConnectionBudget;
 use aether_runtime::ConcurrencyGate;
 use aether_runtime_state::{RuntimeSemaphore, RuntimeState};
 use dashmap::DashMap;
@@ -34,8 +35,8 @@ use super::{
     ProviderTransportSnapshotFlight,
 };
 
-const DEFAULT_REQUEST_BODY_READ_TIMEOUT_MS: u64 = 120_000;
 const MIN_REQUEST_BODY_READ_TIMEOUT_MS: u64 = 1_000;
+const DEFAULT_REQUEST_BODY_READ_TIMEOUT_MS: u64 = 120_000;
 const MAX_REQUEST_BODY_READ_TIMEOUT_MS: u64 = 600_000;
 const REQUEST_BODY_READ_TIMEOUT_MS_ENV: &str = "AETHER_GATEWAY_REQUEST_BODY_READ_TIMEOUT_MS";
 const DEFAULT_REQUEST_BODY_BUFFER_BUDGET_MB: usize = 256;
@@ -96,7 +97,7 @@ impl std::fmt::Debug for TestExecutionRuntimeSyncOverride {
 
 #[derive(Debug, Clone)]
 pub(crate) struct FrontdoorRuntimeGuardConfig {
-    pub(crate) request_body_read_timeout: Duration,
+    pub(crate) request_body_read_timeout: Option<Duration>,
     pub(crate) request_body_buffer_budget_bytes: usize,
     pub(crate) request_body_buffer_budget_permits: usize,
     pub(crate) local_execution_planning_timeout: Duration,
@@ -113,9 +114,8 @@ pub(crate) const METRIC_SNAPSHOT_TTL: Duration = Duration::from_secs(2);
 impl FrontdoorRuntimeGuardConfig {
     pub(crate) fn from_env() -> Self {
         Self {
-            request_body_read_timeout: env_duration_ms(
+            request_body_read_timeout: optional_env_duration_ms(
                 REQUEST_BODY_READ_TIMEOUT_MS_ENV,
-                DEFAULT_REQUEST_BODY_READ_TIMEOUT_MS,
                 MIN_REQUEST_BODY_READ_TIMEOUT_MS,
                 MAX_REQUEST_BODY_READ_TIMEOUT_MS,
             ),
@@ -148,7 +148,7 @@ impl FrontdoorRuntimeGuardConfig {
 
     #[cfg(test)]
     pub(crate) fn for_tests(
-        request_body_read_timeout: Duration,
+        request_body_read_timeout: Option<Duration>,
         local_execution_planning_timeout: Duration,
     ) -> Self {
         Self {
@@ -187,6 +187,21 @@ fn request_body_buffer_budget_bytes_from_env() -> usize {
 fn request_body_buffer_budget_permits_from_env() -> usize {
     request_body_buffer_budget_bytes_from_env().saturating_add(REQUEST_BODY_BUFFER_PERMIT_BYTES - 1)
         / REQUEST_BODY_BUFFER_PERMIT_BYTES
+}
+
+fn optional_env_duration_ms(key: &str, min_ms: u64, max_ms: u64) -> Option<Duration> {
+    let raw = std::env::var(key).ok();
+    parse_optional_duration_ms(raw.as_deref(), min_ms, max_ms)
+}
+
+fn parse_optional_duration_ms(raw: Option<&str>, min_ms: u64, max_ms: u64) -> Option<Duration> {
+    let parsed = raw
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_REQUEST_BODY_READ_TIMEOUT_MS);
+    if parsed == 0 {
+        return None;
+    }
+    Some(Duration::from_millis(parsed.clamp(min_ms, max_ms)))
 }
 
 fn env_duration_ms(key: &str, default_ms: u64, min_ms: u64, max_ms: u64) -> Duration {
@@ -371,11 +386,13 @@ pub struct AppState {
     pub(crate) background_data: Arc<GatewayDataState>,
     pub(crate) background_data_isolated: bool,
     pub(crate) runtime_state: Arc<RuntimeState>,
+    pub(crate) internal_gateway_auth: Arc<crate::internal_gateway_auth::InternalGatewayAuthConfig>,
     pub(crate) usage_runtime: Arc<usage::UsageRuntime>,
     pub(crate) video_tasks: Arc<VideoTaskService>,
     pub(crate) video_task_poller: Option<VideoTaskPollerConfig>,
     pub(crate) frontdoor_runtime_guards: Arc<FrontdoorRuntimeGuardConfig>,
     pub(crate) request_body_buffer_budget: Arc<Semaphore>,
+    pub(crate) http_connection_budget: Option<Arc<HttpConnectionBudget>>,
     pub(crate) request_gate: Option<Arc<ConcurrencyGate>>,
     pub(crate) websocket_connection_gate: Option<Arc<ConcurrencyGate>>,
     pub(crate) auth_snapshot_load_gate: Option<Arc<ConcurrencyGate>>,
@@ -397,6 +414,8 @@ pub struct AppState {
     pub(crate) auth_api_key_feature_settings_cache: Arc<JsonValueCache<AuthApiKeyFeatureCacheKey>>,
     pub(crate) auth_daily_quota_availability_cache:
         Arc<ValueCache<String, UserDailyQuotaAvailabilityRecord>>,
+    pub(crate) auth_plan_usage_policy_cache:
+        Arc<ValueCache<String, crate::plan_usage_policy::EffectivePlanUsagePolicy>>,
     pub(crate) auth_wallet_snapshot_cache:
         Arc<ValueCache<String, aether_data::repository::wallet::StoredWalletSnapshot>>,
     pub(crate) auth_request_cost_upper_bound_cache: Arc<ValueCache<String, f64>>,
@@ -442,6 +461,8 @@ pub struct AppState {
         Arc<DashMap<String, LocalExecutionRuntimeMissDiagnostic>>,
     pub(crate) admin_monitoring_error_stats_reset_at: Arc<StdMutex<Option<u64>>>,
     pub(crate) provider_delete_tasks: Arc<StdMutex<HashMap<String, LocalProviderDeleteTaskState>>>,
+    pub(crate) pool_quota_probe_replenish:
+        Arc<crate::maintenance::PoolQuotaProbeReplenishCoordinator>,
     #[cfg(test)]
     pub(crate) turnstile_siteverify_url_override: Option<String>,
     #[cfg(test)]
@@ -517,6 +538,63 @@ mod tests {
         cpu_parallelism: 12,
         fd_soft_limit: 1_048_576,
     };
+
+    #[test]
+    fn request_body_read_timeout_parser_uses_a_finite_default() {
+        for value in [None, Some(""), Some("invalid"), Some("-1")] {
+            assert_eq!(
+                parse_optional_duration_ms(
+                    value,
+                    MIN_REQUEST_BODY_READ_TIMEOUT_MS,
+                    MAX_REQUEST_BODY_READ_TIMEOUT_MS,
+                ),
+                Some(Duration::from_millis(DEFAULT_REQUEST_BODY_READ_TIMEOUT_MS)),
+            );
+        }
+    }
+
+    #[test]
+    fn request_body_read_timeout_parser_only_disables_explicit_zero() {
+        for value in ["0", " 0 "] {
+            assert_eq!(
+                parse_optional_duration_ms(
+                    Some(value),
+                    MIN_REQUEST_BODY_READ_TIMEOUT_MS,
+                    MAX_REQUEST_BODY_READ_TIMEOUT_MS,
+                ),
+                None,
+                "{value:?} should disable the optional timeout"
+            );
+        }
+    }
+
+    #[test]
+    fn request_body_read_timeout_parser_clamps_nonzero_values() {
+        assert_eq!(
+            parse_optional_duration_ms(
+                Some("1"),
+                MIN_REQUEST_BODY_READ_TIMEOUT_MS,
+                MAX_REQUEST_BODY_READ_TIMEOUT_MS,
+            ),
+            Some(Duration::from_millis(MIN_REQUEST_BODY_READ_TIMEOUT_MS))
+        );
+        assert_eq!(
+            parse_optional_duration_ms(
+                Some("120000"),
+                MIN_REQUEST_BODY_READ_TIMEOUT_MS,
+                MAX_REQUEST_BODY_READ_TIMEOUT_MS,
+            ),
+            Some(Duration::from_millis(120_000))
+        );
+        assert_eq!(
+            parse_optional_duration_ms(
+                Some("900000"),
+                MIN_REQUEST_BODY_READ_TIMEOUT_MS,
+                MAX_REQUEST_BODY_READ_TIMEOUT_MS,
+            ),
+            Some(Duration::from_millis(MAX_REQUEST_BODY_READ_TIMEOUT_MS))
+        );
+    }
 
     #[test]
     fn gate_limit_parser_defaults_to_auto() {

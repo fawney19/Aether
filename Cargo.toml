@@ -11,8 +11,6 @@ members = [
     "crates/aether-routing-core",
     "crates/aether-data/contracts",
     "crates/aether-data/adapters/postgres",
-    "crates/aether-data/adapters/mysql",
-    "crates/aether-data/adapters/sqlite",
     "crates/aether-data/query",
     "crates/aether-data/schema",
     "crates/aether-dispatch-core",
@@ -66,8 +64,6 @@ aether-provider-pool = { path = "crates/aether-provider/pool" }
 aether-routing-core = { path = "crates/aether-routing-core" }
 aether-data-contracts = { path = "crates/aether-data/contracts" }
 aether-data-postgres = { path = "crates/aether-data/adapters/postgres" }
-aether-data-mysql = { path = "crates/aether-data/adapters/mysql" }
-aether-data-sqlite = { path = "crates/aether-data/adapters/sqlite" }
 aether-data-query = { path = "crates/aether-data/query" }
 aether-data-schema = { path = "crates/aether-data/schema" }
 aether-dispatch-core = { path = "crates/aether-dispatch-core" }
@@ -101,6 +97,7 @@ aether-runtime = { path = "crates/aether-runtime/base" }
 aether-testkit = { path = "crates/aether-testing/testkit" }
 aes = "0.8"
 aes-gcm = "0.10"
+aws-lc-rs = { version = "1.16.2", default-features = false, features = ["alloc", "aws-lc-sys"] }
 async-stream = "0.3"
 async-trait = "0.1"
 axum = "0.8"
@@ -117,8 +114,9 @@ flate2 = "1"
 futures-util = "0.3"
 hmac = "0.12"
 http = "1"
-object_store = { version = "0.12", default-features = false, features = ["aws"] }
+object_store = { version = "0.14.1", default-features = false, features = ["aws"] }
 pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
+percent-encoding = "2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "http2", "socks"] }
 redis = { version = "0.28", default-features = false, features = ["tokio-comp", "script", "streams", "connection-manager"] }
 regex = "1"

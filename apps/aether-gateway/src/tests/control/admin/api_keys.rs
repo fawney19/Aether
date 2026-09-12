@@ -1,8 +1,9 @@
 use std::sync::{Arc, Mutex};
 
-use aether_crypto::{encrypt_python_fernet_plaintext, DEVELOPMENT_ENCRYPTION_KEY};
+use aether_crypto::DEVELOPMENT_ENCRYPTION_KEY;
 use aether_data::repository::auth::{
-    InMemoryAuthApiKeySnapshotRepository, StoredAuthApiKeyExportRecord, StoredAuthApiKeySnapshot,
+    AuthApiKeyWriteRepository, InMemoryAuthApiKeySnapshotRepository, StoredAuthApiKeyExportRecord,
+    StoredAuthApiKeySnapshot,
 };
 use aether_data::repository::usage::InMemoryUsageReadRepository;
 use aether_data::repository::wallet::{InMemoryWalletRepository, StoredWalletSnapshot};
@@ -12,6 +13,7 @@ use axum::routing::any;
 use axum::{extract::Request, Router};
 use http::StatusCode;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 
 use super::super::{build_router_with_state, start_server, AppState};
 use crate::constants::{
@@ -26,6 +28,12 @@ fn admin_request(builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
         .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
         .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+}
+
+fn hash_api_key(value: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(value.as_bytes());
+    format!("{:x}", hasher.finalize())
 }
 
 async fn start_api_keys_upstream(
@@ -85,14 +93,26 @@ fn sample_standalone_export_record(
     plaintext_key: &str,
     is_active: bool,
 ) -> StoredAuthApiKeyExportRecord {
+    let key_hash = hash_api_key(plaintext_key);
+    let bootstrap = AppState::new()
+        .expect("bootstrap state should build")
+        .with_data_state_for_tests(
+            GatewayDataState::disabled().with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+        );
+    let key_encrypted = crate::handlers::shared::seal_auth_api_key_secret(
+        &bootstrap,
+        user_id,
+        api_key_id,
+        &key_hash,
+        true,
+        plaintext_key,
+    )
+    .expect("key should encrypt");
     let mut record = StoredAuthApiKeyExportRecord::new(
         user_id.to_string(),
         api_key_id.to_string(),
-        format!("hash-{api_key_id}"),
-        Some(
-            encrypt_python_fernet_plaintext(DEVELOPMENT_ENCRYPTION_KEY, plaintext_key)
-                .expect("key should encrypt"),
-        ),
+        key_hash,
+        Some(key_encrypted),
         Some(format!("key-{api_key_id}")),
         Some(json!(["openai"])),
         Some(json!(["openai:chat"])),
@@ -240,10 +260,7 @@ async fn gateway_handles_admin_api_keys_list_locally_with_trusted_admin_principa
     assert_eq!(payload["skip"], json!(0));
     assert_eq!(payload["api_keys"][0]["id"], json!("key-1"));
     assert_eq!(payload["api_keys"][0]["is_standalone"], json!(true));
-    assert_eq!(
-        payload["api_keys"][0]["key_display"],
-        json!("sk-key-1-p...text")
-    );
+    assert_eq!(payload["api_keys"][0]["key_display"], json!("sk-ke...text"));
     assert_eq!(payload["api_keys"][0]["total_requests"], json!(7));
     assert_eq!(payload["api_keys"][0]["total_tokens"], json!(0));
     assert_eq!(
@@ -317,7 +334,7 @@ async fn gateway_handles_admin_api_keys_detail_locally_with_trusted_admin_princi
     assert_eq!(payload["wallet"]["id"], json!("wallet-key-1"));
     assert_eq!(payload["wallet"]["unlimited"], json!(true));
     assert_eq!(payload["wallet"]["balance"], json!(20.0));
-    assert_eq!(payload["key_display"], json!("sk-key-1-p...text"));
+    assert_eq!(payload["key_display"], json!("sk-ke...text"));
     assert_eq!(payload["total_tokens"], json!(77));
     assert_eq!(payload["created_at"], json!("2024-03-21T05:48:20+00:00"));
     assert_eq!(payload["last_used_at"], json!("2024-03-21T05:48:22+00:00"));
@@ -442,8 +459,10 @@ async fn gateway_handles_admin_api_key_install_session_locally_with_trusted_admi
         AppState::new()
             .expect("gateway should build")
             .with_data_state_for_tests(
-                GatewayDataState::with_auth_api_key_repository_for_tests(auth_repository)
-                    .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+                GatewayDataState::with_auth_api_key_repository_for_tests(Arc::clone(
+                    &auth_repository,
+                ))
+                .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
             ),
     );
     let (gateway_url, gateway_handle) = start_server(gateway).await;
@@ -479,15 +498,78 @@ async fn gateway_handles_admin_api_key_install_session_locally_with_trusted_admi
     assert_eq!(
         payload["unix_command"],
         json!(format!(
-            "curl -fsSL https://aether.example/install/{install_code} | sh"
+            "curl -fsSL 'https://aether.example/install/{install_code}' | sh"
         ))
     );
     assert_eq!(
         payload["powershell_command"],
         json!(format!(
-            "irm https://aether.example/install/{install_code}.ps1 | iex"
+            "irm 'https://aether.example/install/{install_code}.ps1' | iex"
         ))
     );
+
+    let second_response = admin_request(reqwest::Client::new().post(format!(
+        "{gateway_url}/api/admin/api-keys/key-1/install-sessions"
+    )))
+    .header("x-forwarded-host", "aether.example")
+    .header("x-forwarded-proto", "https")
+    .json(&json!({
+        "target_cli": "codex_cli",
+        "target_system": "linux",
+    }))
+    .send()
+    .await
+    .expect("second install session should be created");
+    assert_eq!(second_response.status(), StatusCode::OK);
+    let second_payload: serde_json::Value = second_response
+        .json()
+        .await
+        .expect("second install session response should parse");
+    let second_install_code = second_payload["install_code"]
+        .as_str()
+        .expect("second install code should be returned");
+
+    let script_response = reqwest::Client::new()
+        .get(format!("{gateway_url}/install/{install_code}"))
+        .send()
+        .await
+        .expect("install script should resolve");
+    assert_eq!(script_response.status(), StatusCode::OK);
+    assert_eq!(
+        script_response
+            .headers()
+            .get("cache-control")
+            .and_then(|value| value.to_str().ok()),
+        Some("no-store")
+    );
+    assert!(script_response
+        .text()
+        .await
+        .expect("install script should be readable")
+        .contains("sk-key-1-plaintext"));
+
+    let replay = reqwest::Client::new()
+        .get(format!("{gateway_url}/install/{install_code}"))
+        .send()
+        .await
+        .expect("install replay should receive a response");
+    assert_eq!(replay.status(), StatusCode::NOT_FOUND);
+
+    assert!(auth_repository
+        .delete_standalone_api_key("key-1")
+        .await
+        .expect("test API key deletion should succeed"));
+    let deleted_key_session = reqwest::Client::new()
+        .get(format!("{gateway_url}/install/{second_install_code}"))
+        .send()
+        .await
+        .expect("deleted-key install session should receive a response");
+    assert_eq!(deleted_key_session.status(), StatusCode::NOT_FOUND);
+    assert!(!deleted_key_session
+        .text()
+        .await
+        .expect("deleted-key response should be readable")
+        .contains("sk-key-1-plaintext"));
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();

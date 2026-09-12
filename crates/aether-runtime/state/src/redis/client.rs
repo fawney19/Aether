@@ -1,9 +1,12 @@
 use crate::error::RedisResultExt;
 use crate::redis::RedisKeyspace;
 use crate::DataLayerError;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tracing::info;
 
 pub(crate) type RedisClient = redis::Client;
@@ -17,10 +20,44 @@ pub(crate) const REDIS_COMMAND_LATENCY_BUCKETS_MS: [u64; 12] =
     [1, 5, 10, 25, 50, 100, 250, 500, 1_000, 2_500, 5_000, 10_000];
 const REDIS_COMMAND_LATENCY_BUCKET_COUNT: usize = REDIS_COMMAND_LATENCY_BUCKETS_MS.len() + 1;
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[derive(Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct RedisClientConfig {
     pub url: String,
     pub key_prefix: Option<String>,
+}
+
+impl std::fmt::Debug for RedisClientConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RedisClientConfig")
+            .field("url", &redact_redis_url_for_debug(&self.url))
+            .field("key_prefix_len", &self.key_prefix.as_ref().map(String::len))
+            .finish()
+    }
+}
+
+fn redact_redis_url_for_debug(raw: &str) -> String {
+    const MAX_DEBUG_URL_CHARS: usize = 512;
+    let raw = raw.trim();
+    let Ok(mut url) = url::Url::parse(raw) else {
+        return format!("[invalid-redis-url len={}]", raw.len());
+    };
+    let _ = url.set_username("");
+    let _ = url.set_password(None);
+    url.set_query(None);
+    url.set_fragment(None);
+    let rendered = url.to_string();
+    if rendered.chars().count() <= MAX_DEBUG_URL_CHARS {
+        rendered
+    } else {
+        format!(
+            "{}...",
+            rendered
+                .chars()
+                .take(MAX_DEBUG_URL_CHARS.saturating_sub(3))
+                .collect::<String>()
+        )
+    }
 }
 
 impl RedisClientConfig {
@@ -107,8 +144,8 @@ pub(crate) struct RedisConnectionRouter {
     fast: RedisManagedConnection,
     stream: Arc<Vec<RedisManagedConnection>>,
     stream_next: Arc<AtomicUsize>,
-    blocking_stream: Arc<Vec<RedisManagedConnection>>,
-    blocking_stream_next: Arc<AtomicUsize>,
+    blocking_stream: Arc<RedisBlockingStreamPool>,
+    usage_cleanup: Arc<RedisBlockingStreamPool>,
     admin: RedisManagedConnection,
     metrics: Arc<RedisConnectionMetrics>,
 }
@@ -118,7 +155,7 @@ impl std::fmt::Debug for RedisConnectionRouter {
         f.debug_struct("RedisConnectionRouter")
             .field("lanes", &["fast", "stream", "blocking_stream", "admin"])
             .field("stream_lanes", &self.stream.len())
-            .field("blocking_stream_lanes", &self.blocking_stream.len())
+            .field("blocking_stream_lanes", &self.blocking_stream.capacity)
             .finish()
     }
 }
@@ -148,7 +185,7 @@ impl RedisConnectionRouter {
         )
         .await?;
         let stream_lanes = stream.len();
-        let blocking_stream_lanes = blocking_stream.len();
+        let blocking_stream_lanes = blocking_stream.capacity;
         info!(
             redis_lanes = "fast,stream,blocking_stream,admin",
             redis_stream_lanes = stream_lanes,
@@ -160,7 +197,11 @@ impl RedisConnectionRouter {
             stream: Arc::new(stream),
             stream_next: Arc::new(AtomicUsize::new(0)),
             blocking_stream: Arc::new(blocking_stream),
-            blocking_stream_next: Arc::new(AtomicUsize::new(0)),
+            usage_cleanup: Arc::new(RedisBlockingStreamPool::new(
+                client,
+                command_timeout_ms,
+                vec![None, None],
+            )),
             admin,
             metrics: Arc::new(RedisConnectionMetrics::default()),
         })
@@ -174,11 +215,24 @@ impl RedisConnectionRouter {
                 self.stream[index].clone()
             }
             RedisConnectionLane::BlockingStream => {
-                let index = next_lane_index(&self.blocking_stream_next, self.blocking_stream.len());
-                self.blocking_stream[index].clone()
+                unreachable!("blocking stream commands require an exclusive connection lease")
             }
             RedisConnectionLane::Admin => self.admin.clone(),
         }
+    }
+
+    pub(crate) async fn blocking_stream_connection(
+        &self,
+    ) -> Result<RedisBlockingStreamLease, DataLayerError> {
+        self.blocking_stream.checkout().await
+    }
+
+    // WATCH/MULTI state must never share a multiplexed connection with other callers.
+    // These lazy leases own their drivers, so cancellation closes an unfinished transaction.
+    pub(crate) async fn usage_cleanup_connection(
+        &self,
+    ) -> Result<RedisBlockingStreamLease, DataLayerError> {
+        self.usage_cleanup.checkout().await
     }
 
     pub(crate) fn record_error(&self, lane: RedisConnectionLane) {
@@ -220,6 +274,114 @@ impl RedisConnectionRouter {
             }
         })
         .collect()
+    }
+}
+
+struct RedisBlockingConnection {
+    connection: redis::aio::MultiplexedConnection,
+    driver: Pin<Box<dyn Future<Output = ()> + Send>>,
+}
+
+impl RedisBlockingConnection {
+    async fn query(&mut self, command: &redis::Cmd) -> Result<redis::Value, DataLayerError> {
+        // Drive the connection inside its owning query, so cancellation drops the
+        // socket immediately instead of leaving a spawned driver with an old BLOCK.
+        tokio::select! {
+            result = command.query_async(&mut self.connection) => result.map_redis_err(),
+            () = self.driver.as_mut() => Err(DataLayerError::Redis(
+                "runtime redis blocking stream connection driver terminated".to_string(),
+            )),
+        }
+    }
+}
+
+struct RedisBlockingStreamPool {
+    client: RedisClient,
+    command_timeout_ms: Option<u64>,
+    capacity: usize,
+    available: Mutex<Vec<Option<RedisBlockingConnection>>>,
+    permits: Arc<Semaphore>,
+}
+
+impl RedisBlockingStreamPool {
+    fn new(
+        client: RedisClient,
+        command_timeout_ms: Option<u64>,
+        available: Vec<Option<RedisBlockingConnection>>,
+    ) -> Self {
+        let capacity = available.len();
+        Self {
+            client,
+            command_timeout_ms,
+            capacity,
+            available: Mutex::new(available),
+            permits: Arc::new(Semaphore::new(capacity)),
+        }
+    }
+
+    async fn checkout(self: &Arc<Self>) -> Result<RedisBlockingStreamLease, DataLayerError> {
+        let permit = Arc::clone(&self.permits)
+            .acquire_owned()
+            .await
+            .map_err(|_| {
+                DataLayerError::Redis("runtime redis blocking stream pool closed".to_string())
+            })?;
+        let connection = self
+            .available
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .pop()
+            .expect("blocking stream permit must have an available slot");
+        Ok(RedisBlockingStreamLease {
+            pool: Arc::clone(self),
+            connection,
+            reusable: false,
+            _permit: permit,
+        })
+    }
+}
+
+pub(crate) struct RedisBlockingStreamLease {
+    pool: Arc<RedisBlockingStreamPool>,
+    connection: Option<RedisBlockingConnection>,
+    reusable: bool,
+    _permit: OwnedSemaphorePermit,
+}
+
+impl RedisBlockingStreamLease {
+    pub(crate) async fn query(
+        &mut self,
+        command: &redis::Cmd,
+    ) -> Result<redis::Value, DataLayerError> {
+        self.reusable = false;
+        if self.connection.is_none() {
+            self.connection = Some(
+                connect_blocking_stream_lane(&self.pool.client, self.pool.command_timeout_ms)
+                    .await?,
+            );
+        }
+        self.connection
+            .as_mut()
+            .expect("blocking stream connection initialized")
+            .query(command)
+            .await
+    }
+
+    pub(crate) fn recycle(&mut self) {
+        self.reusable = true;
+    }
+}
+
+impl Drop for RedisBlockingStreamLease {
+    fn drop(&mut self) {
+        let connection = self.connection.take().filter(|_| self.reusable);
+        self.pool
+            .available
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(connection);
+        // The permit is released after the slot is restored. An uncompleted
+        // query has already dropped both its connection and its owned driver.
     }
 }
 
@@ -372,21 +534,46 @@ async fn connect_blocking_stream_lanes(
     client: &RedisClient,
     command_timeout_ms: Option<u64>,
     requested_lanes: Option<usize>,
-) -> Result<Vec<RedisManagedConnection>, DataLayerError> {
+) -> Result<RedisBlockingStreamPool, DataLayerError> {
     let lane_count = blocking_stream_lane_count(requested_lanes)?;
     let mut lanes = Vec::with_capacity(lane_count);
     for _ in 0..lane_count {
-        lanes.push(
-            connect_lane(
-                client,
-                connection_manager_config(command_timeout_ms),
-                RedisConnectionLane::BlockingStream,
-                command_timeout_ms,
-            )
-            .await?,
-        );
+        lanes.push(Some(
+            connect_blocking_stream_lane(client, command_timeout_ms).await?,
+        ));
     }
-    Ok(lanes)
+    Ok(RedisBlockingStreamPool::new(
+        client.clone(),
+        command_timeout_ms,
+        lanes,
+    ))
+}
+
+async fn connect_blocking_stream_lane(
+    client: &RedisClient,
+    command_timeout_ms: Option<u64>,
+) -> Result<RedisBlockingConnection, DataLayerError> {
+    let connect = client.create_multiplexed_tokio_connection();
+    let result = if let Some(timeout_ms) = command_timeout_ms {
+        tokio::time::timeout(Duration::from_millis(timeout_ms), connect)
+            .await
+            .map_err(|_| {
+                DataLayerError::TimedOut(format!(
+                    "runtime redis blocking_stream lane connection exceeded {timeout_ms}ms timeout"
+                ))
+            })?
+    } else {
+        connect.await
+    };
+    let (connection, driver) = result.map_err(|err| {
+        DataLayerError::Redis(format!(
+            "failed to initialize runtime redis blocking_stream lane: {err}"
+        ))
+    })?;
+    Ok(RedisBlockingConnection {
+        connection,
+        driver: Box::pin(driver),
+    })
 }
 
 fn blocking_stream_lane_count(requested_lanes: Option<usize>) -> Result<usize, DataLayerError> {
@@ -446,10 +633,12 @@ async fn connect_lane(
 mod tests {
     use super::{
         blocking_stream_lane_count, default_blocking_stream_lane_count, next_lane_index,
-        stream_lane_count, RedisClientConfig, RedisClientFactory, RedisLaneMetrics,
-        DEFAULT_STREAM_LANES, MAX_BLOCKING_STREAM_LANES_CAP, REDIS_COMMAND_LATENCY_BUCKETS_MS,
+        stream_lane_count, RedisBlockingStreamPool, RedisClientConfig, RedisClientFactory,
+        RedisLaneMetrics, DEFAULT_STREAM_LANES, MAX_BLOCKING_STREAM_LANES_CAP,
+        REDIS_COMMAND_LATENCY_BUCKETS_MS,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
     use std::time::Duration;
 
     #[test]
@@ -464,6 +653,25 @@ mod tests {
         let _client = factory
             .connect_lazy()
             .expect("lazy redis client should build");
+    }
+
+    #[test]
+    fn redis_config_debug_redacts_url_credentials_and_query() {
+        let config = RedisClientConfig {
+            url: "redis://redis-user:redis-password@redis.example/0?token=redis-secret".into(),
+            key_prefix: Some("tenant-secret".into()),
+        };
+        let debug = format!("{config:?}");
+        for secret in [
+            "redis-user",
+            "redis-password",
+            "redis-secret",
+            "tenant-secret",
+        ] {
+            assert!(!debug.contains(secret), "debug leaked {secret}: {debug}");
+        }
+        assert!(debug.contains("redis.example"));
+        assert!(debug.contains("key_prefix_len"));
     }
 
     #[test]
@@ -488,6 +696,85 @@ mod tests {
             MAX_BLOCKING_STREAM_LANES_CAP
         );
         assert!(blocking_stream_lane_count(Some(0)).is_err());
+    }
+
+    fn empty_blocking_pool(capacity: usize) -> Arc<RedisBlockingStreamPool> {
+        Arc::new(RedisBlockingStreamPool::new(
+            redis::Client::open("redis://127.0.0.1/0").expect("lazy client"),
+            None,
+            (0..capacity).map(|_| None).collect(),
+        ))
+    }
+
+    #[tokio::test]
+    async fn blocking_stream_pool_cancelled_checkout_preserves_owner_and_capacity() {
+        use std::future::Future;
+        use std::task::Poll;
+
+        let pool = empty_blocking_pool(1);
+        let owner = pool.checkout().await.expect("first lease");
+        let mut waiting = Box::pin(pool.checkout());
+        std::future::poll_fn(|cx| {
+            assert!(matches!(waiting.as_mut().poll(cx), Poll::Pending));
+            Poll::Ready(())
+        })
+        .await;
+        drop(waiting);
+        assert_eq!(pool.permits.available_permits(), 0);
+        assert!(pool.available.lock().unwrap().is_empty());
+
+        drop(owner);
+        assert_eq!(pool.permits.available_permits(), 1);
+        let replacement = pool
+            .checkout()
+            .await
+            .expect("cancelled owner slot restored");
+        assert!(replacement.connection.is_none());
+        let panic = tokio::spawn(async move {
+            let _lease = replacement;
+            panic!("test owner panic");
+        });
+        assert!(panic.await.expect_err("owner panicked").is_panic());
+        assert_eq!(pool.permits.available_permits(), 1);
+        assert_eq!(pool.available.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn blocking_stream_pool_concurrent_checkouts_stay_within_capacity() {
+        let pool = empty_blocking_pool(3);
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let barrier = Arc::new(tokio::sync::Barrier::new(32));
+        let mut tasks = tokio::task::JoinSet::new();
+        for _ in 0..32 {
+            let pool = Arc::clone(&pool);
+            let active = Arc::clone(&active);
+            let peak = Arc::clone(&peak);
+            let barrier = Arc::clone(&barrier);
+            tasks.spawn(async move {
+                barrier.wait().await;
+                for _ in 0..32 {
+                    let lease = pool.checkout().await.expect("bounded lease");
+                    let concurrent = active.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak.fetch_max(concurrent, Ordering::SeqCst);
+                    assert!(concurrent <= 3);
+                    tokio::task::yield_now().await;
+                    active.fetch_sub(1, Ordering::SeqCst);
+                    drop(lease);
+                }
+            });
+        }
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(result) = tasks.join_next().await {
+                result.expect("checkout task");
+            }
+        })
+        .await
+        .expect("all checkouts complete without losing capacity");
+        assert!(peak.load(Ordering::SeqCst) <= 3);
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+        assert_eq!(pool.permits.available_permits(), 3);
+        assert_eq!(pool.available.lock().unwrap().len(), 3);
     }
 
     #[test]

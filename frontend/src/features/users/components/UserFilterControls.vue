@@ -17,7 +17,7 @@
     <div class="xl:hidden">
       <Select
         :model-value="filterRole"
-        @update:model-value="$emit('update:filterRole', $event)"
+        @update:model-value="updateRole"
       >
         <SelectTrigger :class="mobile ? 'w-24 h-8 text-xs border-border/60' : 'w-32 h-8 text-xs border-border/60'">
           <SelectValue :placeholder="legacyT(mobile ? '角色' : '全部角色')" />
@@ -37,7 +37,7 @@
     <div class="xl:hidden">
       <Select
         :model-value="filterStatus"
-        @update:model-value="$emit('update:filterStatus', $event)"
+        @update:model-value="updateStatus"
       >
         <SelectTrigger :class="mobile ? 'w-20 h-8 text-xs border-border/60' : 'w-28 h-8 text-xs border-border/60'">
           <SelectValue :placeholder="legacyT(mobile ? '状态' : '全部状态')" />
@@ -78,7 +78,7 @@
     <div class="xl:hidden">
       <Select
         :model-value="sortOption"
-        @update:model-value="$emit('update:sortOption', $event)"
+        @update:model-value="updateSort"
       >
         <SelectTrigger :class="mobile ? 'w-32 h-8 text-xs border-border/60' : 'w-40 h-8 text-xs border-border/60'">
           <SelectValue :placeholder="legacyT('排序')" />
@@ -133,13 +133,28 @@ const props = withDefaults(defineProps<{
   mobile: false,
 })
 
-defineEmits<{
+const emit = defineEmits<{
   'update:searchQuery': [value: string]
   'update:filterRole': [value: FilterRole]
   'update:filterGroup': [value: string]
   'update:filterStatus': [value: FilterStatus]
   'update:sortOption': [value: SortOption]
 }>()
+
+function updateRole(value: string) {
+  const option = props.roleOptions.find((option) => option.value === value)
+  if (option) emit('update:filterRole', option.value)
+}
+
+function updateStatus(value: string) {
+  const option = props.statusOptions.find((option) => option.value === value)
+  if (option) emit('update:filterStatus', option.value)
+}
+
+function updateSort(value: string) {
+  const option = props.sortOptions.find((option) => option.value === value)
+  if (option) emit('update:sortOption', option.value)
+}
 
 const { legacyT } = useI18n()
 const searchPlaceholder = computed(() => props.mobile ? legacyT('搜索...') : legacyT('搜索用户名或邮箱...'))

@@ -7,14 +7,20 @@ repository.workspace = true
 description = "Shared data contracts and repository traits for Aether Rust services"
 
 [dependencies]
+aether-contracts.workspace = true
 aether-ai-formats.workspace = true
 aether-routing-core.workspace = true
 async-trait.workspace = true
+base64.workspace = true
+bcrypt.workspace = true
 chrono.workspace = true
+chrono-tz.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
+url.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true

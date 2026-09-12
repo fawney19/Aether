@@ -9,7 +9,8 @@ use http::StatusCode;
 use serde_json::json;
 
 use super::super::super::{
-    build_router_with_state, sample_endpoint, sample_key, sample_provider, start_server, AppState,
+    build_router_with_state, sample_bound_key as sample_key, sample_endpoint, sample_provider,
+    start_server, AppState,
 };
 use crate::constants::{
     GATEWAY_HEADER, TRUSTED_ADMIN_SESSION_ID_HEADER, TRUSTED_ADMIN_USER_ID_HEADER,
@@ -478,7 +479,7 @@ async fn gateway_returns_service_unavailable_for_admin_provider_endpoint_create_
 }
 
 #[tokio::test]
-async fn gateway_creates_admin_provider_endpoint_locally_with_trusted_admin_principal() {
+async fn gateway_creates_admin_http_provider_endpoint_locally_with_trusted_admin_principal() {
     let upstream_hits = Arc::new(Mutex::new(0usize));
     let upstream_hits_clone = Arc::clone(&upstream_hits);
     let upstream = Router::new().route(
@@ -521,7 +522,7 @@ async fn gateway_creates_admin_provider_endpoint_locally_with_trusted_admin_prin
         .json(&json!({
             "provider_id": "provider-openai",
             "api_format": "openai:chat",
-            "base_url": "https://api.openai.example/",
+            "base_url": "http://api.openai.example:8080/",
             "custom_path": "/v1/chat/completions",
             "max_retries": 5,
             "config": {"foo": "bar"},
@@ -536,12 +537,12 @@ async fn gateway_creates_admin_provider_endpoint_locally_with_trusted_admin_prin
     assert_eq!(payload["provider_id"], "provider-openai");
     assert_eq!(payload["provider_name"], "openai");
     assert_eq!(payload["api_format"], "openai:chat");
-    assert_eq!(payload["base_url"], "https://api.openai.example");
+    assert_eq!(payload["base_url"], "http://api.openai.example:8080");
     assert_eq!(payload["custom_path"], "/v1/chat/completions");
     assert_eq!(payload["max_retries"], 5);
     assert_eq!(payload["total_keys"], 0);
     assert_eq!(payload["active_keys"], 0);
-    assert_eq!(payload["proxy"]["url"], "http://proxy.internal");
+    assert_eq!(payload["proxy"]["url"], "http://proxy.internal/");
     assert_eq!(payload["proxy"]["password"], "***");
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
@@ -552,7 +553,7 @@ async fn gateway_creates_admin_provider_endpoint_locally_with_trusted_admin_prin
     assert_eq!(endpoints.len(), 1);
     assert_eq!(endpoints[0].provider_id, "provider-openai");
     assert_eq!(endpoints[0].api_format, "openai:chat");
-    assert_eq!(endpoints[0].base_url, "https://api.openai.example");
+    assert_eq!(endpoints[0].base_url, "http://api.openai.example:8080");
     assert_eq!(endpoints[0].max_retries, Some(5));
 
     gateway_handle.abort();
@@ -657,7 +658,7 @@ async fn gateway_rejects_streaming_policy_for_search_endpoint_before_catalog_wri
 }
 
 #[tokio::test]
-async fn gateway_updates_admin_provider_endpoint_locally_with_trusted_admin_principal() {
+async fn gateway_updates_admin_http_provider_endpoint_locally_with_trusted_admin_principal() {
     let upstream_hits = Arc::new(Mutex::new(0usize));
     let upstream_hits_clone = Arc::clone(&upstream_hits);
     let upstream = Router::new().route(
@@ -719,7 +720,7 @@ async fn gateway_updates_admin_provider_endpoint_locally_with_trusted_admin_prin
         .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
         .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
         .json(&json!({
-            "base_url": "https://updated.openai.example/",
+            "base_url": "http://updated.openai.example:8080/",
             "custom_path": "/v1/responses",
             "max_retries": 5,
             "is_active": false,
@@ -735,14 +736,14 @@ async fn gateway_updates_admin_provider_endpoint_locally_with_trusted_admin_prin
     assert_eq!(payload["id"], "endpoint-openai-chat");
     assert_eq!(payload["provider_id"], "provider-openai");
     assert_eq!(payload["api_format"], "openai:chat");
-    assert_eq!(payload["base_url"], "https://updated.openai.example");
+    assert_eq!(payload["base_url"], "http://updated.openai.example:8080");
     assert_eq!(payload["custom_path"], "/v1/responses");
     assert_eq!(payload["max_retries"], 5);
     assert_eq!(payload["is_active"], false);
     assert_eq!(payload["total_keys"], 1);
     assert_eq!(payload["active_keys"], 1);
-    assert_eq!(payload["proxy"]["url"], "http://proxy-2.internal");
-    assert_eq!(payload["proxy"]["password"], "***");
+    assert_eq!(payload["proxy"]["url"], "http://proxy-2.internal/");
+    assert_eq!(payload["proxy"]["password"], serde_json::Value::Null);
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     let endpoints = provider_catalog_repository
@@ -750,14 +751,14 @@ async fn gateway_updates_admin_provider_endpoint_locally_with_trusted_admin_prin
         .await
         .expect("endpoints should read");
     assert_eq!(endpoints.len(), 1);
-    assert_eq!(endpoints[0].base_url, "https://updated.openai.example");
+    assert_eq!(endpoints[0].base_url, "http://updated.openai.example:8080");
     assert_eq!(endpoints[0].custom_path.as_deref(), Some("/v1/responses"));
     assert_eq!(endpoints[0].max_retries, Some(5));
     assert!(!endpoints[0].is_active);
     assert_eq!(endpoints[0].config, Some(json!({"foo":"new"})));
     assert_eq!(
         endpoints[0].proxy,
-        Some(json!({"url":"http://proxy-2.internal","password":"secret"}))
+        Some(json!({"url":"http://proxy-2.internal/"}))
     );
 
     gateway_handle.abort();

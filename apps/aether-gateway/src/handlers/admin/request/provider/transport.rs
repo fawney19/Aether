@@ -126,20 +126,25 @@ impl<'a> AdminAppState<'a> {
         &self,
         connector_config: Option<&Map<String, Value>>,
     ) -> Option<ProxySnapshot> {
-        let explicit_node_id = connector_config
-            .and_then(|config| admin_provider_transport_string_field(config, "proxy_node_id"));
-        if let Some(snapshot) = self
-            .resolve_admin_proxy_node_snapshot(explicit_node_id.as_deref())
-            .await
-        {
-            return Some(snapshot);
+        let explicit_node_id_value =
+            connector_config.and_then(|config| config.get("proxy_node_id"));
+        if explicit_node_id_value.is_some_and(|value| !value.is_null()) {
+            let explicit_node_id = connector_config
+                .and_then(|config| admin_provider_transport_string_field(config, "proxy_node_id"));
+            return self
+                .resolve_admin_proxy_node_snapshot(explicit_node_id.as_deref())
+                .await
+                .or_else(|| {
+                    Some(crate::state::unavailable_proxy_snapshot(
+                        "admin_connector_proxy_node_unavailable",
+                    ))
+                });
         }
 
-        let proxy = connector_config
-            .and_then(|config| config.get("proxy"))
-            .and_then(admin_provider_transport_proxy_snapshot);
-        if proxy.is_some() {
-            return proxy;
+        if let Some(raw_proxy) = connector_config.and_then(|config| config.get("proxy")) {
+            if let Some(proxy) = admin_provider_transport_proxy_snapshot(raw_proxy) {
+                return Some(proxy);
+            }
         }
 
         self.app.resolve_system_proxy_snapshot().await
@@ -276,15 +281,24 @@ impl<'a> AdminAppState<'a> {
 }
 
 fn admin_provider_transport_proxy_snapshot(value: &Value) -> Option<ProxySnapshot> {
-    let object = value.as_object()?;
+    let Some(object) = value.as_object() else {
+        return Some(crate::state::unavailable_proxy_snapshot(
+            "admin_connector_proxy_invalid",
+        ));
+    };
     if object.get("enabled").and_then(Value::as_bool) == Some(false) {
         return None;
     }
-    let proxy_url = object
+    let Some(proxy_url) = object
         .get("url")
         .and_then(Value::as_str)
         .map(str::trim)
-        .filter(|value| !value.is_empty())?;
+        .filter(|value| !value.is_empty())
+    else {
+        return Some(crate::state::unavailable_proxy_snapshot(
+            "admin_connector_proxy_url_unavailable",
+        ));
+    };
     let username = object
         .get("username")
         .and_then(Value::as_str)
@@ -295,6 +309,14 @@ fn admin_provider_transport_proxy_snapshot(value: &Value) -> Option<ProxySnapsho
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty());
+    let url = match admin_provider_transport_inject_proxy_auth(proxy_url, username, password) {
+        Some(url) => url,
+        None => {
+            return Some(crate::state::unavailable_proxy_snapshot(
+                "admin_connector_proxy_auth_unavailable",
+            ));
+        }
+    };
     Some(ProxySnapshot {
         enabled: Some(true),
         mode: object
@@ -311,8 +333,7 @@ fn admin_provider_transport_proxy_snapshot(value: &Value) -> Option<ProxySnapsho
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(ToOwned::to_owned),
-        url: admin_provider_transport_inject_proxy_auth(proxy_url, username, password)
-            .or_else(|| Some(proxy_url.to_string())),
+        url: Some(url),
         extra: None,
     })
 }
@@ -322,8 +343,18 @@ fn admin_provider_transport_inject_proxy_auth(
     username: Option<&str>,
     password: Option<&str>,
 ) -> Option<String> {
-    let username = username.filter(|value| !value.is_empty())?;
+    let username = username.filter(|value| !value.is_empty());
+    let password = password.filter(|value| !value.is_empty());
     let mut parsed = Url::parse(proxy_url).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https" | "socks5" | "socks5h")
+        || parsed.host_str().is_none()
+    {
+        return None;
+    }
+    if username.is_none() && password.is_none() {
+        return Some(parsed.to_string());
+    }
+    let username = username?;
     parsed.set_username(username).ok()?;
     parsed.set_password(password).ok()?;
     Some(parsed.to_string())
@@ -363,21 +394,21 @@ mod tests {
     use super::admin_provider_transport_proxy_snapshot;
 
     #[test]
-    fn connector_proxy_snapshot_requires_object_value() {
-        assert_eq!(
-            admin_provider_transport_proxy_snapshot(&json!("http://proxy.example:8080")),
-            None
-        );
+    fn connector_proxy_snapshot_keeps_invalid_explicit_value_fail_closed() {
+        let snapshot = admin_provider_transport_proxy_snapshot(&json!("http://proxy.example:8080"))
+            .expect("invalid explicit proxy should remain represented");
+        assert_eq!(snapshot.mode.as_deref(), Some("unavailable"));
+        assert!(snapshot.url.is_none());
     }
 
     #[test]
-    fn connector_proxy_snapshot_requires_url_field() {
-        assert_eq!(
-            admin_provider_transport_proxy_snapshot(&json!({
-                "proxy_url": "http://proxy.example:8080"
-            })),
-            None
-        );
+    fn connector_proxy_snapshot_keeps_missing_url_fail_closed() {
+        let snapshot = admin_provider_transport_proxy_snapshot(&json!({
+            "proxy_url": "http://proxy.example:8080"
+        }))
+        .expect("invalid explicit proxy should remain represented");
+        assert_eq!(snapshot.mode.as_deref(), Some("unavailable"));
+        assert!(snapshot.url.is_none());
     }
 
     #[test]
@@ -398,6 +429,41 @@ mod tests {
                 url: Some("http://alice:secret@proxy.example:8080/".to_string()),
                 extra: None,
             })
+        );
+    }
+
+    #[test]
+    fn connector_proxy_auth_injection_failure_is_not_unauthenticated_fallback() {
+        for value in [
+            json!({
+                "url": "http://proxy.example:8080",
+                "password": "secret"
+            }),
+            json!({
+                "url": "not a proxy url",
+                "username": "alice",
+                "password": "secret"
+            }),
+            json!({
+                "url": "mailto:proxy@example.com",
+                "username": "alice"
+            }),
+        ] {
+            let snapshot = admin_provider_transport_proxy_snapshot(&value)
+                .expect("invalid explicit proxy should remain represented");
+            assert_eq!(snapshot.mode.as_deref(), Some("unavailable"));
+            assert!(snapshot.url.is_none());
+        }
+    }
+
+    #[test]
+    fn disabled_connector_proxy_allows_lower_priority_resolution() {
+        assert_eq!(
+            admin_provider_transport_proxy_snapshot(&json!({
+                "enabled": false,
+                "url": "http://proxy.example:8080"
+            })),
+            None
         );
     }
 }

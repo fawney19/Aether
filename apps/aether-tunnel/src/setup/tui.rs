@@ -200,11 +200,11 @@ impl App {
                 Field {
                     label: "Allow Private Targets",
                     key: "allow_private_targets",
-                    value: "true".into(),
+                    value: "false".into(),
                     kind: FieldKind::Bool,
                     required: false,
                     help:
-                        "Allow proxying private/reserved upstream IPs by default; takes effect after restart",
+                        "Allow proxying private/reserved upstream IPs; disabled by default and takes effect after restart",
                 },
                 Field {
                     label: "Heartbeat Interval",
@@ -213,6 +213,14 @@ impl App {
                     kind: FieldKind::Text,
                     required: false,
                     help: "Heartbeat interval in seconds; default is 5",
+                },
+                Field {
+                    label: "Proxy Remote DNS",
+                    key: "upstream_proxy_remote_dns",
+                    value: "false".into(),
+                    kind: FieldKind::Bool,
+                    required: false,
+                    help: "Trust HTTP/SOCKS5h egress proxy to resolve provider hosts and enforce destination IP ACLs; restart required",
                 },
             ],
             selected: 0,
@@ -288,6 +296,9 @@ impl App {
                 "allow_private_targets" => cfg.allow_private_targets.map(|v| v.to_string()),
                 "heartbeat_interval" => cfg.heartbeat_interval.map(|v| v.to_string()),
                 "upstream_proxy_url" => cfg.upstream_proxy_url.clone(),
+                "upstream_proxy_remote_dns" => {
+                    cfg.upstream_proxy_remote_dns.map(|value| value.to_string())
+                }
                 _ => None,
             };
             if let Some(v) = val {
@@ -396,11 +407,23 @@ impl App {
         let get_tab = |tab: &ServerTab, key: &str| -> Option<String> { Self::get_tab(tab, key) };
 
         let save_logs_to_file = self.toggle_enabled("save_logs_to_file");
+        let upstream_proxy_url = self.parse_optional_upstream_proxy_url()?;
+        let upstream_proxy_remote_dns = self.toggle_enabled("upstream_proxy_remote_dns");
+        if upstream_proxy_remote_dns {
+            let proxy_url = upstream_proxy_url
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("Proxy Remote DNS requires an egress proxy"))?;
+            let proxy = UpstreamProxyConfig::parse(proxy_url).map_err(anyhow::Error::msg)?;
+            if !proxy.supports_remote_target_dns() {
+                anyhow::bail!("Proxy Remote DNS requires an http:// or socks5h:// proxy");
+            }
+        }
         let mut cfg = ConfigFile {
             log_level: get_global("log_level"),
             allow_private_targets: Some(self.toggle_enabled("allow_private_targets")),
             heartbeat_interval: self.parse_optional_heartbeat_interval()?,
-            upstream_proxy_url: self.parse_optional_upstream_proxy_url()?,
+            upstream_proxy_url,
+            upstream_proxy_remote_dns: Some(upstream_proxy_remote_dns),
             log_destination: Some(if save_logs_to_file {
                 TunnelLogDestinationArg::Both
             } else {
@@ -450,13 +473,6 @@ impl App {
     fn save(&mut self) -> anyhow::Result<()> {
         let cfg = self.to_config()?;
         cfg.save(&self.config_path)?;
-        // Restrict config file permissions to owner-only (contains management token).
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ =
-                std::fs::set_permissions(&self.config_path, std::fs::Permissions::from_mode(0o600));
-        }
         self.modified = false;
         self.saved_once = true;
         self.message = Some((
@@ -1091,6 +1107,37 @@ mod tests {
         set_server_field(&mut app, "management_token", "ae_test");
         set_server_field(&mut app, "node_name", "jp-proxy-01");
         app
+    }
+
+    #[test]
+    fn proxy_remote_dns_toggle_round_trips_and_requires_a_trusted_proxy() {
+        let mut app = sample_app();
+        assert_eq!(
+            app.to_config().unwrap().upstream_proxy_remote_dns,
+            Some(false)
+        );
+        set_global_field(&mut app, "upstream_proxy_remote_dns", "true");
+        assert!(app
+            .to_config()
+            .unwrap_err()
+            .to_string()
+            .contains("requires an egress proxy"));
+        set_global_field(&mut app, "upstream_proxy_url", "socks5://127.0.0.1:1080");
+        assert!(app
+            .to_config()
+            .unwrap_err()
+            .to_string()
+            .contains("socks5h://"));
+
+        for proxy in ["http://127.0.0.1:8080", "socks5h://127.0.0.1:1080"] {
+            set_global_field(&mut app, "upstream_proxy_url", proxy);
+            let config = app.to_config().unwrap();
+            let mut restored = sample_app();
+            restored.apply_config(&config);
+            let round_trip = restored.to_config().unwrap();
+            assert_eq!(round_trip.upstream_proxy_remote_dns, Some(true));
+            assert_eq!(round_trip.upstream_proxy_url.as_deref(), Some(proxy));
+        }
     }
 
     fn unique_temp_config_path(name: &str) -> PathBuf {

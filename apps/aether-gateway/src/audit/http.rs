@@ -26,7 +26,10 @@ pub(crate) async fn get_request_candidate_trace(
         .map_err(|err| GatewayError::Internal(err.to_string()).into_response())?;
 
     match trace {
-        Some(trace) => Ok(Json(trace)),
+        Some(mut trace) => {
+            trace.sanitize_sensitive_diagnostics();
+            Ok(Json(trace))
+        }
         None => Err((
             axum::http::StatusCode::NOT_FOUND,
             Json(json!({
@@ -52,7 +55,10 @@ pub(crate) async fn get_decision_trace(
         .map_err(|err| GatewayError::Internal(err.to_string()).into_response())?;
 
     match trace {
-        Some(trace) => Ok(Json(trace)),
+        Some(mut trace) => {
+            trace.sanitize_sensitive_diagnostics();
+            Ok(Json(trace))
+        }
         None => Err((
             axum::http::StatusCode::NOT_FOUND,
             Json(json!({

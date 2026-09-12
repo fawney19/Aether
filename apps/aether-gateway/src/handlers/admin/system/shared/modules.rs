@@ -123,6 +123,18 @@ pub(crate) const ADMIN_MODULE_DEFINITIONS: &[AdminModuleDefinition] = &[
         admin_menu_order: 59,
     },
     AdminModuleDefinition {
+        name: "vscodex",
+        display_name: "远程控制",
+        description: "通过 aether-vscodex 插件远程控制本地 Codex 工作区",
+        category: "integration",
+        env_key: "VSCODEX_AVAILABLE",
+        default_available: true,
+        admin_route: Some("/dashboard/vscodex"),
+        admin_menu_icon: Some("SquareTerminal"),
+        admin_menu_group: Some("overview"),
+        admin_menu_order: 80,
+    },
+    AdminModuleDefinition {
         name: "s3_backup",
         display_name: "S3 备份",
         description: "将配置、用户或完整数据定期备份到 S3-compatible 对象存储",
@@ -248,7 +260,7 @@ pub(crate) fn oauth_module_config_is_valid(
 pub(crate) fn ldap_module_config_is_valid(
     config: Option<&aether_data::repository::auth_modules::StoredLdapModuleConfig>,
 ) -> bool {
-    admin_system_kernel::ldap_module_config_is_valid(config)
+    crate::handlers::shared::ldap_module_config_is_valid(config)
 }
 
 pub(crate) async fn build_admin_module_runtime_state(

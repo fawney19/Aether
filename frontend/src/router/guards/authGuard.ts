@@ -16,6 +16,10 @@ function isNetworkError(error: unknown): boolean {
 export async function ensureUserLoaded(
   authStore: ReturnType<typeof useAuthStore>
 ): Promise<boolean> {
+  if (!authStore.token) {
+    await authStore.restoreSession()
+  }
+
   if (authStore.token && !authStore.user) {
     try {
       await authStore.fetchCurrentUser()

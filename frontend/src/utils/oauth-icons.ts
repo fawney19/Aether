@@ -10,9 +10,42 @@ export const OAUTH_ICONS: Record<string, string> = {
 // Default icon when provider type is not found
 const DEFAULT_ICON = OAUTH_ICONS.github
 
+function escapeHtmlAttribute(value: string): string {
+  return value
+    .replaceAll('&', '&amp;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+}
+
+function safeOAuthIconUrl(iconUrl: string): string | null {
+  const value = iconUrl.trim()
+  if (
+    !value
+    || value.startsWith('//')
+    || value.includes('\\')
+    || /[\s"'<>`]/.test(value)
+  ) return null
+
+  if (value.startsWith('/')) {
+    return value
+  }
+
+  try {
+    const parsed = new URL(value)
+    return parsed.protocol === 'https:' ? parsed.href : null
+  } catch {
+    return null
+  }
+}
+
 export function getOAuthIcon(providerType: string, iconUrl?: string | null): string {
   const builtin = OAUTH_ICONS[providerType.toLowerCase()]
   if (builtin) return builtin
-  if (iconUrl) return `<img src="${iconUrl}" alt="" style="width:100%;height:100%;object-fit:contain;" />`
+  const safeIconUrl = iconUrl ? safeOAuthIconUrl(iconUrl) : null
+  if (safeIconUrl) {
+    return `<img src="${escapeHtmlAttribute(safeIconUrl)}" alt="" style="width:100%;height:100%;object-fit:contain;" />`
+  }
   return DEFAULT_ICON
 }

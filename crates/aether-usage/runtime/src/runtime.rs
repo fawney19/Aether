@@ -14,22 +14,30 @@ use futures_util::{FutureExt, StreamExt};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
+use crate::event_capture_budget::{
+    json_heap_estimate, EventCaptureMemoryBudget, UsageEventCaptureRetention,
+};
 use crate::executor::spawn_on_usage_background_runtime;
+use crate::queue::is_permanent_enqueue_error;
 use crate::request_metadata::{
     attach_client_request_body_metadata, attach_provider_request_body_metadata,
     attach_provider_response_body_metadata, clear_client_request_body_metadata,
     clear_provider_request_body_metadata, request_body_derived_facts_action,
     retain_first_byte_request_metadata, RequestBodyDerivedFactsAction,
 };
+use crate::settlement::{
+    reconcile_usage_policy_cost_for_event_with_result, settle_usage_with_reconciled_cost,
+};
+use crate::shutdown::{UsageBackgroundTasks, UsageShutdownState};
 use crate::worker::{
     build_usage_queue_worker_with_record_gate, UsageWorkerControl, UsageWorkerObservation,
 };
 use crate::{
     apply_usage_body_capture_policy_to_event, build_stream_terminal_usage_seed,
     build_sync_terminal_usage_seed, build_terminal_usage_event_from_seed,
-    build_upsert_usage_record_from_event, settle_usage_if_needed, LifecycleUsageSeed,
-    StreamTerminalUsagePayloadSeed, SyncTerminalUsagePayloadSeed, TerminalUsageContextSeed,
-    UsageEvent, UsageQueue, UsageRecordWriter, UsageRuntimeConfig, UsageSettlementWriter,
+    build_upsert_usage_record_from_event, LifecycleUsageSeed, StreamTerminalUsagePayloadSeed,
+    SyncTerminalUsagePayloadSeed, TerminalUsageContextSeed, UsageEvent, UsageQueue,
+    UsageRecordWriter, UsageRuntimeConfig, UsageSettlementWriter,
 };
 
 #[async_trait]
@@ -39,8 +47,8 @@ pub trait UsageBillingEventEnricher: Send + Sync {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum UsageRequestRecordLevel {
-    Basic,
     #[default]
+    Basic,
     Full,
 }
 
@@ -55,7 +63,7 @@ pub struct UsageBodyCapturePolicy {
 impl Default for UsageBodyCapturePolicy {
     fn default() -> Self {
         Self {
-            record_level: UsageRequestRecordLevel::Full,
+            record_level: UsageRequestRecordLevel::Basic,
         }
     }
 }
@@ -86,6 +94,7 @@ pub trait UsageRuntimeAccess:
 #[derive(Debug, Clone)]
 pub struct UsageRuntime {
     config: UsageRuntimeConfig,
+    shutdown: Arc<UsageShutdownState>,
     body_policy_cache: Arc<tokio::sync::Mutex<Option<UsageBodyCapturePolicyCacheEntry>>>,
     enqueue_retry: Arc<UsageEnqueueRetryDispatcher>,
     worker_supervisor_state: Arc<UsageWorkerSupervisorState>,
@@ -450,6 +459,28 @@ impl UsageWorkerSupervisorState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct UsageRuntimeMetricsSnapshot {
     pub enabled: bool,
+    pub shutdown_started: bool,
+    pub producers_in_flight: usize,
+    pub delayed_lifecycle_pending: usize,
+    pub queue_payload_max_bytes: usize,
+    pub queue_payload_downgraded_total: u64,
+    pub queue_payload_rejected_total: u64,
+    pub queue_read_payload_budget_bytes: usize,
+    pub queue_read_batch_payload_bytes: usize,
+    pub queue_read_payload_reserved_bytes: usize,
+    pub queue_read_payload_waiters: usize,
+    pub queue_read_payload_wait_total: u64,
+    pub queue_read_actual_field_bytes_total: u64,
+    pub queue_read_oversized_entries_total: u64,
+    pub queue_read_oversized_batches_total: u64,
+    pub dlq_encoding_budget_bytes: usize,
+    pub dlq_encoding_max_jobs: usize,
+    pub dlq_encoding_reserved_bytes: usize,
+    pub dlq_encoding_active_jobs: usize,
+    pub dlq_encoding_capacity_rejected_total: u64,
+    pub dlq_encoding_oversized_rejected_total: u64,
+    pub dlq_encoding_encoded_total: u64,
+    pub enqueue_retry_permanent_failure_total: u64,
     pub queue_terminal_events: bool,
     pub queue_lifecycle_events: bool,
     pub worker_count: usize,
@@ -535,6 +566,9 @@ pub struct UsageRuntimeMetricsSnapshot {
     pub enqueue_retry_pending: u64,
     pub enqueue_retry_failed_total: u64,
     pub enqueue_retry_closed_or_unavailable_total: u64,
+    pub event_capture_memory_budget_bytes: usize,
+    pub event_capture_memory_retained_bytes: usize,
+    pub event_capture_memory_downgraded_total: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1201,11 +1235,17 @@ enum LifecycleTerminalUsageSeed {
     Sync {
         context: TerminalUsageContextSeed,
         payload: SyncTerminalUsagePayloadSeed,
+        capture: Option<TerminalSeedCaptureRetention>,
     },
     Stream {
         context: TerminalUsageContextSeed,
         payload: StreamTerminalUsagePayloadSeed,
         cancelled: bool,
+        capture: Option<TerminalSeedCaptureRetention>,
+    },
+    Prepared {
+        kind: TerminalSeedKind,
+        result: Result<UsageEvent, DataLayerError>,
     },
     #[cfg(test)]
     BlockedBuild {
@@ -1215,40 +1255,145 @@ enum LifecycleTerminalUsageSeed {
     },
 }
 
+#[derive(Clone, Copy)]
+enum TerminalSeedKind {
+    Sync,
+    Stream,
+}
+
+struct TerminalSeedCaptureRetention {
+    budget: Arc<EventCaptureMemoryBudget>,
+    retention: UsageEventCaptureRetention,
+}
+
+impl TerminalSeedCaptureRetention {
+    fn try_reserve(
+        bodies: [Option<&serde_json::Value>; 4],
+        budget: Arc<EventCaptureMemoryBudget>,
+    ) -> Option<Self> {
+        let bytes = bodies.into_iter().flatten().fold(0usize, |bytes, body| {
+            bytes
+                .saturating_add(std::mem::size_of::<serde_json::Value>())
+                .saturating_add(json_heap_estimate(body))
+        });
+        let mut retention = UsageEventCaptureRetention::default();
+        retention
+            .reserve(Arc::clone(&budget), bytes)
+            .then_some(Self { budget, retention })
+    }
+
+    fn attach(self, event: &mut UsageEvent) {
+        // The builder moves seed bodies into an unmanaged event. Transfer its existing
+        // reservation before resizing so concurrent seeds cannot claim the same bytes.
+        event.data.capture_retention = self.retention;
+        prepare_event_capture_memory(event, self.budget);
+    }
+}
+
 impl LifecycleTerminalUsageSeed {
-    async fn build(self, request_id: &str) -> Result<UsageEvent, DataLayerError> {
-        match self {
-            Self::Sync { context, payload } => {
-                let result = build_sync_terminal_usage_event_offthread(context, payload).await;
-                if let Err(err) = &result {
-                    warn!(
-                        event_name = "usage_sync_terminal_build_failed",
-                        log_type = "event",
-                        request_id,
-                        error = %err,
-                        "usage runtime failed to build sync terminal usage event"
-                    );
+    fn prepare_capture_memory(self, budget: Arc<EventCaptureMemoryBudget>) -> Self {
+        let (kind, result) = match self {
+            Self::Sync {
+                context,
+                payload,
+                capture: None,
+            } => {
+                let capture = TerminalSeedCaptureRetention::try_reserve(
+                    [
+                        context.request_body.as_ref(),
+                        context.provider_request.as_ref(),
+                        payload.provider_response_full.as_ref(),
+                        payload.client_response.as_ref(),
+                    ],
+                    Arc::clone(&budget),
+                );
+                if capture.is_some() {
+                    return Self::Sync {
+                        context,
+                        payload,
+                        capture,
+                    };
                 }
-                result
+                (
+                    TerminalSeedKind::Sync,
+                    catch_unwind(AssertUnwindSafe(|| {
+                        build_terminal_usage_event_from_seed(build_sync_terminal_usage_seed(
+                            context, payload,
+                        ))
+                    })),
+                )
             }
             Self::Stream {
                 context,
                 payload,
                 cancelled,
+                capture: None,
             } => {
-                let result =
-                    build_stream_terminal_usage_event_offthread(context, payload, cancelled).await;
-                if let Err(err) = &result {
-                    warn!(
-                        event_name = "usage_stream_terminal_build_failed",
-                        log_type = "event",
-                        request_id,
-                        error = %err,
-                        "usage runtime failed to build stream terminal usage event"
-                    );
+                let capture = TerminalSeedCaptureRetention::try_reserve(
+                    [
+                        context.request_body.as_ref(),
+                        context.provider_request.as_ref(),
+                        payload.provider_response_full.as_ref(),
+                        payload.client_response.as_ref(),
+                    ],
+                    Arc::clone(&budget),
+                );
+                if capture.is_some() {
+                    return Self::Stream {
+                        context,
+                        payload,
+                        cancelled,
+                        capture,
+                    };
                 }
-                result
+                (
+                    TerminalSeedKind::Stream,
+                    catch_unwind(AssertUnwindSafe(|| {
+                        build_terminal_usage_event_from_seed(build_stream_terminal_usage_seed(
+                            context, payload, cancelled,
+                        ))
+                    })),
+                )
             }
+            prepared => return prepared,
+        };
+        // These seeds still contain token fallbacks, image estimates and terminal
+        // evidence. Resolve the existing pure builder before discarding diagnostics.
+        // Keep failures queued so their ordering and error handling remain unchanged.
+        let result = result
+            .unwrap_or_else(|_| {
+                Err(DataLayerError::UnexpectedValue(
+                    "usage builder panicked while preparing capture budget".to_string(),
+                ))
+            })
+            .map(|mut event| {
+                prepare_event_capture_memory(&mut event, budget);
+                event
+            });
+        Self::Prepared { kind, result }
+    }
+
+    async fn build(self, request_id: &str) -> Result<UsageEvent, DataLayerError> {
+        let (kind, result) = match self {
+            Self::Sync {
+                context,
+                payload,
+                capture,
+            } => (
+                TerminalSeedKind::Sync,
+                build_sync_terminal_usage_event_offthread(context, payload, capture).await,
+            ),
+            Self::Stream {
+                context,
+                payload,
+                cancelled,
+                capture,
+            } => (
+                TerminalSeedKind::Stream,
+                build_stream_terminal_usage_event_offthread(context, payload, cancelled, capture)
+                    .await,
+            ),
+            Self::Prepared { kind, result } => (kind, result),
             #[cfg(test)]
             Self::BlockedBuild {
                 event,
@@ -1257,9 +1402,32 @@ impl LifecycleTerminalUsageSeed {
             } => {
                 started.notify_one();
                 release.notified().await;
-                Ok(event)
+                return Ok(event);
+            }
+        };
+        if let Err(err) = &result {
+            match kind {
+                TerminalSeedKind::Sync => {
+                    warn!(
+                        event_name = "usage_sync_terminal_build_failed",
+                        log_type = "event",
+                        request_id,
+                        error = %err,
+                        "usage runtime failed to build sync terminal usage event"
+                    );
+                }
+                TerminalSeedKind::Stream => {
+                    warn!(
+                        event_name = "usage_stream_terminal_build_failed",
+                        log_type = "event",
+                        request_id,
+                        error = %err,
+                        "usage runtime failed to build stream terminal usage event"
+                    );
+                }
             }
         }
+        result
     }
 }
 
@@ -1672,7 +1840,7 @@ impl LifecycleSubmissionDispatcher {
         })
     }
 
-    fn spawn(config: &UsageRuntimeConfig) -> Arc<Self> {
+    fn spawn(config: &UsageRuntimeConfig, tasks: &UsageBackgroundTasks) -> Arc<Self> {
         if !config.enabled {
             return Self::disabled();
         }
@@ -1689,7 +1857,7 @@ impl LifecycleSubmissionDispatcher {
         for _ in 0..workers {
             let (sender, receiver) = mpsc::unbounded_channel();
             let slots = Arc::new(StdMutex::new(HashMap::new()));
-            spawn_on_usage_background_runtime(run_lifecycle_submission_worker(
+            tasks.spawn(run_lifecycle_submission_worker(
                 receiver,
                 Arc::clone(&slots),
                 Arc::clone(&state),
@@ -2186,10 +2354,11 @@ impl OrderedLifecycleDispatcher {
     fn spawn(
         config: &UsageRuntimeConfig,
         terminal_execution: Arc<TerminalExecutionDispatcher>,
+        tasks: &UsageBackgroundTasks,
     ) -> Arc<Self> {
         let dispatcher = Self::disabled(terminal_execution);
         if config.enabled {
-            spawn_on_usage_background_runtime(run_ordered_lifecycle_dispatcher(Arc::downgrade(
+            tasks.spawn(run_ordered_lifecycle_dispatcher(Arc::downgrade(
                 &dispatcher.core,
             )));
         }
@@ -2477,7 +2646,7 @@ impl PendingPersistenceDispatcher {
         })
     }
 
-    fn spawn(config: &UsageRuntimeConfig) -> Arc<Self> {
+    fn spawn(config: &UsageRuntimeConfig, tasks: &UsageBackgroundTasks) -> Arc<Self> {
         if !config.enabled {
             return Self::disabled();
         }
@@ -2486,7 +2655,7 @@ impl PendingPersistenceDispatcher {
             .clamp(1_024, PENDING_PERSISTENCE_MAX_BUFFER);
         let state = Arc::new(PendingPersistenceState::new(capacity));
         let (sender, receiver) = mpsc::channel(capacity);
-        spawn_on_usage_background_runtime(run_pending_persistence_dispatcher(
+        tasks.spawn(run_pending_persistence_dispatcher(
             receiver,
             Arc::clone(&state),
         ));
@@ -3060,7 +3229,7 @@ impl FirstBytePersistenceDispatcher {
         })
     }
 
-    fn spawn(config: &UsageRuntimeConfig) -> Arc<Self> {
+    fn spawn(config: &UsageRuntimeConfig, tasks: &UsageBackgroundTasks) -> Arc<Self> {
         if !config.enabled || !config.queue_lifecycle_events {
             return Self::disabled();
         }
@@ -3073,7 +3242,7 @@ impl FirstBytePersistenceDispatcher {
             .clamp(1, 256);
         let state = Arc::new(FirstBytePersistenceState::new(capacity));
         let (sender, receiver) = mpsc::channel(capacity);
-        spawn_on_usage_background_runtime(run_first_byte_persistence_dispatcher(
+        tasks.spawn(run_first_byte_persistence_dispatcher(
             receiver,
             concurrency,
             Arc::clone(&state),
@@ -3289,6 +3458,7 @@ impl UsageRuntime {
         let terminal_execution = TerminalExecutionDispatcher::disabled();
         Self {
             config: UsageRuntimeConfig::disabled(),
+            shutdown: Arc::new(UsageShutdownState::default()),
             body_policy_cache: Arc::new(tokio::sync::Mutex::new(None)),
             enqueue_retry: UsageEnqueueRetryDispatcher::disabled(),
             worker_supervisor_state: Arc::new(UsageWorkerSupervisorState::default()),
@@ -3311,7 +3481,8 @@ impl UsageRuntime {
 
     pub fn new(config: UsageRuntimeConfig) -> Result<Self, DataLayerError> {
         config.validate()?;
-        let enqueue_retry = UsageEnqueueRetryDispatcher::spawn(config.clone());
+        let shutdown = Arc::new(UsageShutdownState::default());
+        let enqueue_retry = UsageEnqueueRetryDispatcher::spawn(config.clone(), &shutdown);
         let worker_record_gate = config
             .worker_record_concurrency_limit
             .map(UsageWorkerRecordConcurrencyGate::new)
@@ -3321,17 +3492,22 @@ impl UsageRuntime {
             config.enqueue_retry_buffer_capacity,
         ));
         if config.enabled {
-            spawn_on_usage_background_runtime(run_lifecycle_coalescer_compactor(Arc::downgrade(
-                &lifecycle_coalescer,
-            )));
+            shutdown
+                .tasks
+                .spawn(run_lifecycle_coalescer_compactor(Arc::downgrade(
+                    &lifecycle_coalescer,
+                )));
         }
         let terminal_submission_state = Arc::new(TerminalSubmissionState::new(
             terminal_submission_limit(&config),
         ));
         let terminal_execution = TerminalExecutionDispatcher::spawn(&config);
-        let ordered_lifecycle =
-            OrderedLifecycleDispatcher::spawn(&config, Arc::clone(&terminal_execution));
-        let pending_persistence = PendingPersistenceDispatcher::spawn(&config);
+        let ordered_lifecycle = OrderedLifecycleDispatcher::spawn(
+            &config,
+            Arc::clone(&terminal_execution),
+            &shutdown.tasks,
+        );
+        let pending_persistence = PendingPersistenceDispatcher::spawn(&config, &shutdown.tasks);
         let terminal_direct_fallback_state = Arc::new(TerminalDirectFallbackState::new(
             terminal_direct_fallback_limit(&config),
         ));
@@ -3340,11 +3516,14 @@ impl UsageRuntime {
             Arc::clone(&lifecycle_coalescer),
             Arc::clone(&lifecycle_enqueue_state),
             Arc::clone(&enqueue_retry),
+            &shutdown,
         );
-        let lifecycle_submission = LifecycleSubmissionDispatcher::spawn(&config);
-        let first_byte_persistence = FirstBytePersistenceDispatcher::spawn(&config);
+        let lifecycle_submission = LifecycleSubmissionDispatcher::spawn(&config, &shutdown.tasks);
+        let first_byte_persistence =
+            FirstBytePersistenceDispatcher::spawn(&config, &shutdown.tasks);
         Ok(Self {
             config,
+            shutdown,
             body_policy_cache: Arc::new(tokio::sync::Mutex::new(None)),
             enqueue_retry,
             worker_supervisor_state: Arc::new(UsageWorkerSupervisorState::default()),
@@ -3367,10 +3546,155 @@ impl UsageRuntime {
         self.config.enabled
     }
 
+    /// Call before spawning a request finalizer that can outlive its HTTP body.
+    pub fn track_producer(&self) -> crate::UsageProducerGuard {
+        self.shutdown.producers.fetch_add(1, Ordering::AcqRel);
+        crate::UsageProducerGuard(Arc::clone(&self.shutdown.producers))
+    }
+
+    /// Stop request producers before calling. Queued Redis records remain durable
+    /// for the next consumer; local retry buffers must reach Redis or the database.
+    /// A timeout leaves the remaining work running so shutdown can be retried.
+    pub async fn shutdown(&self, timeout: Duration) -> Result<(), DataLayerError> {
+        self.shutdown_with_local_queue(timeout, None).await
+    }
+
+    /// A process-local queue must also be consumed before stopping its workers.
+    pub async fn shutdown_with_local_queue(
+        &self,
+        timeout: Duration,
+        local_queue: Option<Arc<dyn RuntimeQueueStore>>,
+    ) -> Result<(), DataLayerError> {
+        let drain = async {
+            let _lock = self.shutdown.lock.lock().await;
+            while self.shutdown.producers.load(Ordering::Acquire) != 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            self.lifecycle_submission.state.admission.close();
+            self.shutdown.drain.send_replace(true);
+            while self.local_work_pending() != 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            if self.config.enabled {
+                if let Some(queue) = &local_queue {
+                    loop {
+                        let stats = queue
+                            .stats(&self.config.stream_key, Some(&self.config.consumer_group))
+                            .await?;
+                        if stats.stream_length == 0
+                            || (stats.group_pending == 0 && stats.group_lag == Some(0))
+                        {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                    if queue
+                        .stats(&self.config.dlq_stream_key, None)
+                        .await?
+                        .stream_length
+                        != 0
+                    {
+                        return Err(DataLayerError::InvalidInput(
+                            "local usage dead-letter queue must be recovered before shutdown"
+                                .into(),
+                        ));
+                    }
+                }
+            }
+            self.terminal_submission_state.semaphore.close();
+            self.shutdown.worker_control.request_shutdown();
+            while self.shutdown.supervisors.load(Ordering::Acquire) != 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            self.shutdown.tasks.stop_idle().await;
+            Ok(())
+        };
+        tokio::time::timeout(timeout, drain).await.map_err(|_| {
+            DataLayerError::TimedOut(format!(
+                "usage shutdown incomplete: producers={}, local_work={}, retry_pending={}, workers={}",
+                self.shutdown.producers.load(Ordering::Acquire),
+                self.local_work_pending(),
+                self.enqueue_retry.pending(),
+                self.shutdown.supervisors.load(Ordering::Acquire),
+            ))
+        })?
+    }
+
+    fn local_work_pending(&self) -> u64 {
+        let snapshot = self.metrics_snapshot();
+        // Admission lives through every ordered handoff, including gaps between
+        // per-stage gauges. Delayed events and retry buffers retain separate permits.
+        let admitted = self.lifecycle_submission.state.capacity.saturating_sub(
+            self.lifecycle_submission
+                .state
+                .admission
+                .available_permits(),
+        );
+        [
+            admitted as u64,
+            snapshot.delayed_lifecycle_pending as u64,
+            snapshot.lifecycle_submission_pending as u64,
+            snapshot.ordered_lifecycle_pending as u64,
+            snapshot.pending_persistence_pending as u64,
+            snapshot.first_byte_persistence_pending as u64,
+            snapshot.terminal_submission_pending as u64,
+            snapshot.terminal_submission_in_flight as u64,
+            snapshot.terminal_enqueue_in_flight,
+            snapshot.terminal_direct_fallback_in_flight as u64,
+            snapshot.lifecycle_enqueue_in_flight,
+            snapshot.enqueue_retry_pending,
+        ]
+        .into_iter()
+        .fold(0_u64, u64::saturating_add)
+    }
+
+    fn track_worker(&self) -> crate::UsageProducerGuard {
+        self.shutdown.supervisors.fetch_add(1, Ordering::AcqRel);
+        crate::UsageProducerGuard(Arc::clone(&self.shutdown.supervisors))
+    }
+
     pub fn metrics_snapshot(&self) -> UsageRuntimeMetricsSnapshot {
+        let (
+            event_capture_memory_budget_bytes,
+            event_capture_memory_retained_bytes,
+            event_capture_memory_downgraded_total,
+        ) = crate::event_capture_budget::capture_memory_metrics();
+        let (queue_payload_downgraded_total, queue_payload_rejected_total) =
+            crate::queue::payload_encoding_totals();
+        let queue_read = crate::queue_read_budget::queue_read_budget_metrics();
+        let dlq_encoding = crate::dead_letter_encoding::dead_letter_encoding_metrics();
         UsageRuntimeMetricsSnapshot {
+            queue_payload_max_bytes: self.config.queue_payload_max_bytes,
+            queue_payload_downgraded_total,
+            queue_payload_rejected_total,
+            queue_read_payload_budget_bytes: queue_read.limit_bytes,
+            queue_read_batch_payload_bytes: queue_read.batch_limit_bytes,
+            queue_read_payload_reserved_bytes: queue_read.reserved_bytes,
+            queue_read_payload_waiters: queue_read.waiters,
+            queue_read_payload_wait_total: queue_read.wait_total,
+            queue_read_actual_field_bytes_total: queue_read.actual_field_bytes_total,
+            queue_read_oversized_entries_total: queue_read.oversized_entries_total,
+            queue_read_oversized_batches_total: queue_read.oversized_batches_total,
+            dlq_encoding_budget_bytes: dlq_encoding.limit_bytes,
+            dlq_encoding_max_jobs: dlq_encoding.job_limit,
+            dlq_encoding_reserved_bytes: dlq_encoding.reserved_bytes,
+            dlq_encoding_active_jobs: dlq_encoding.active_jobs,
+            dlq_encoding_capacity_rejected_total: dlq_encoding.capacity_rejected_total,
+            dlq_encoding_oversized_rejected_total: dlq_encoding.oversized_rejected_total,
+            dlq_encoding_encoded_total: dlq_encoding.encoded_total,
+            enqueue_retry_permanent_failure_total: self.enqueue_retry.permanent_failure_total(),
+            event_capture_memory_budget_bytes,
+            event_capture_memory_retained_bytes,
+            event_capture_memory_downgraded_total,
             enabled: self.config.enabled,
             queue_terminal_events: self.config.queue_terminal_events,
+            shutdown_started: *self.shutdown.drain.borrow(),
+            producers_in_flight: self.shutdown.producers.load(Ordering::Acquire),
+            delayed_lifecycle_pending: self.lifecycle_delay.sender.as_ref().map_or(0, |sender| {
+                sender
+                    .max_capacity()
+                    .saturating_sub(self.lifecycle_delay.admission.available_permits())
+            }),
             queue_lifecycle_events: self.config.queue_lifecycle_events,
             worker_count: self.config.worker_count,
             worker_autoscale_enabled: self.config.worker_autoscale_enabled,
@@ -3715,7 +4039,12 @@ impl UsageRuntime {
             None,
         )
         .ok()?;
-        Some(worker.spawn())
+        let worker = worker.with_shutdown(self.shutdown.worker_control.clone());
+        let guard = self.track_worker();
+        Some(spawn_on_usage_background_runtime(async move {
+            let _guard = guard;
+            worker.run().await;
+        }))
     }
 
     pub fn spawn_workers<T>(&self, data: Arc<T>) -> Vec<tokio::task::JoinHandle<()>>
@@ -3747,7 +4076,12 @@ impl UsageRuntime {
                 );
                 continue;
             };
-            handles.push(worker.spawn());
+            let worker = worker.with_shutdown(self.shutdown.worker_control.clone());
+            let guard = self.track_worker();
+            handles.push(spawn_on_usage_background_runtime(async move {
+                let _guard = guard;
+                worker.run().await;
+            }));
         }
         handles
     }
@@ -3760,15 +4094,20 @@ impl UsageRuntime {
             return None;
         }
         let runner = data.usage_worker_queue()?;
-        Some(spawn_on_usage_background_runtime(
+        let runtime = self.clone();
+        let guard = self.track_worker();
+        Some(spawn_on_usage_background_runtime(async move {
+            let _guard = guard;
             run_usage_worker_supervisor(
                 runner,
                 data,
-                self.config.clone(),
-                self.worker_record_gate.clone(),
-                Arc::clone(&self.worker_supervisor_state),
-            ),
-        ))
+                runtime.config.clone(),
+                runtime.worker_record_gate.clone(),
+                Arc::clone(&runtime.worker_supervisor_state),
+                runtime.shutdown.worker_control.clone(),
+            )
+            .await;
+        }))
     }
 
     pub fn record_pending<T>(&self, data: &T, seed: LifecycleUsageSeed)
@@ -3835,12 +4174,16 @@ impl UsageRuntime {
     async fn dispatch_terminal<T>(
         &self,
         data: &T,
-        event: UsageEvent,
+        mut event: UsageEvent,
         direct: bool,
         completion: Option<tokio::sync::oneshot::Sender<()>>,
     ) where
         T: UsageRuntimeAccess + Clone + 'static,
     {
+        prepare_event_capture_memory(
+            &mut event,
+            crate::event_capture_budget::shared_capture_memory_budget(),
+        );
         let request_id = event.request_id.clone();
         self.lifecycle_submission
             .dispatch_terminal(Box::new(LifecycleSubmissionItemImpl {
@@ -3864,6 +4207,9 @@ impl UsageRuntime {
     ) where
         T: UsageRuntimeAccess + Clone + 'static,
     {
+        let observed_at_unix_ms = now_unix_ms();
+        let seed = seed
+            .prepare_capture_memory(crate::event_capture_budget::shared_capture_memory_budget());
         self.lifecycle_submission
             .dispatch_terminal(Box::new(LifecycleSubmissionItemImpl {
                 runtime: self.clone(),
@@ -3871,7 +4217,7 @@ impl UsageRuntime {
                 request_id,
                 payload: LifecycleSubmissionPayload::TerminalSeed {
                     seed,
-                    observed_at_unix_ms: now_unix_ms(),
+                    observed_at_unix_ms,
                 },
             }))
             .await;
@@ -4017,6 +4363,7 @@ impl UsageRuntime {
             LifecycleTerminalUsageSeed::Sync {
                 context: context_seed,
                 payload: payload_seed,
+                capture: None,
             },
         )
         .await;
@@ -4042,6 +4389,7 @@ impl UsageRuntime {
                 context: context_seed,
                 payload: payload_seed,
                 cancelled,
+                capture: None,
             },
         )
         .await;
@@ -4061,9 +4409,13 @@ impl UsageRuntime {
     where
         T: UsageRuntimeAccess,
     {
-        if !self.is_enabled() {
+        if !self.is_enabled() || self.lifecycle_submission.state.admission.is_closed() {
             return;
         }
+        prepare_event_capture_memory(
+            &mut event,
+            crate::event_capture_budget::shared_capture_memory_budget(),
+        );
         let ordered_completion = self
             .await_lifecycle_submission_turn(&event.request_id)
             .await;
@@ -4085,9 +4437,13 @@ impl UsageRuntime {
     where
         T: UsageRuntimeAccess,
     {
-        if !self.is_enabled() {
+        if !self.is_enabled() || self.lifecycle_submission.state.admission.is_closed() {
             return;
         }
+        prepare_event_capture_memory(
+            &mut event,
+            crate::event_capture_budget::shared_capture_memory_budget(),
+        );
         let ordered_completion = self
             .await_lifecycle_submission_turn(&event.request_id)
             .await;
@@ -4097,14 +4453,8 @@ impl UsageRuntime {
         };
         self.apply_body_capture_policy_from_data(data, &mut event)
             .await;
-        if let Err(err) = data.enrich_usage_event(&mut event).await {
-            warn!(
-                event_name = "usage_terminal_billing_enrichment_failed",
-                log_type = "event",
-                request_id = %event.request_id,
-                error = %err,
-                "usage runtime failed to enrich terminal usage event with billing"
-            );
+        if enrich_terminal_event(data, &mut event).await.is_err() {
+            return;
         }
         let request_id = event.request_id.clone();
         if self.write_event_direct(data, &event).await {
@@ -4121,8 +4471,25 @@ impl UsageRuntime {
     where
         T: UsageRuntimeAccess,
     {
-        preserve_request_facts(event);
-        preserve_provider_response_facts(event);
+        self.apply_body_capture_policy_with_budget(
+            data,
+            event,
+            crate::event_capture_budget::shared_capture_memory_budget(),
+        )
+        .await;
+    }
+
+    async fn apply_body_capture_policy_with_budget<T>(
+        &self,
+        data: &T,
+        event: &mut UsageEvent,
+        budget: Arc<crate::event_capture_budget::EventCaptureMemoryBudget>,
+    ) where
+        T: UsageRuntimeAccess,
+    {
+        // A slow policy read must not retain unbudgeted JSON in mutex waiters.
+        // Denied captures count even when the eventual Basic policy disables them.
+        prepare_event_capture_memory(event, Arc::clone(&budget));
         match self.cached_body_capture_policy(data).await {
             Ok(policy) => apply_usage_body_capture_policy_to_event(policy, event),
             Err(err) => {
@@ -4130,13 +4497,14 @@ impl UsageRuntime {
                     event_name = "usage_body_capture_policy_read_failed",
                     log_type = "event",
                     request_id = %event.request_id,
-                    fallback = "default",
+                    fallback = "basic",
                     error = %err,
-                    "usage runtime failed to read body capture policy; keeping default capture"
+                    "usage runtime failed to read body capture policy; disabling body capture"
                 );
                 apply_usage_body_capture_policy_to_event(UsageBodyCapturePolicy::default(), event);
             }
         }
+        event.data.apply_capture_memory_budget(budget);
     }
 
     pub async fn body_capture_policy_for<T>(
@@ -4305,14 +4673,8 @@ impl UsageRuntime {
             return self.enqueue_or_write_terminal(data, event).await;
         }
 
-        if let Err(err) = data.enrich_usage_event(&mut event).await {
-            warn!(
-                event_name = "usage_terminal_billing_enrichment_failed",
-                log_type = "event",
-                request_id = %event.request_id,
-                error = %err,
-                "usage runtime failed to enrich ordered direct terminal usage event"
-            );
+        if enrich_terminal_event(data, &mut event).await.is_err() {
+            return TerminalPersistenceOutcome::Failed;
         }
         let request_id = event.request_id.clone();
         if self.write_event_direct(data, &event).await {
@@ -4523,7 +4885,7 @@ impl UsageRuntime {
             let usage_event_type = event.event_type;
             let request_id = event.request_id.clone();
             let direct_write_succeeded = self
-                .try_write_terminal_direct_fallback(data, &mut event)
+                .try_write_terminal_direct_fallback(data, &mut event, "bounded_local_enqueue_retry")
                 .await;
             let deferred_fallback = if direct_write_succeeded {
                 DeferredEnqueueFallback::DirectWrite
@@ -4543,8 +4905,8 @@ impl UsageRuntime {
                 TerminalPersistenceOutcome::Failed
             };
         }
-        if event_phase == "terminal" {
-            enrich_terminal_event(data, &mut event).await;
+        if event_phase == "terminal" && enrich_terminal_event(data, &mut event).await.is_err() {
+            return TerminalPersistenceOutcome::Failed;
         }
         if self.write_event_direct(data, &event).await {
             TerminalPersistenceOutcome::PersistedDirectly
@@ -4592,6 +4954,11 @@ impl UsageRuntime {
 
         if let Err(err) = queue.enqueue(&event).await {
             drop(_guard);
+            if is_permanent_enqueue_error(&err) {
+                return self
+                    .defer_terminal_event(data, queue, event, "invalid_input", err)
+                    .await;
+            }
             self.terminal_enqueue_state
                 .open_circuit(now_unix_ms().saturating_add(LIFECYCLE_ENQUEUE_CIRCUIT_OPEN_MS));
             let failures = self.terminal_enqueue_state.increment_failed_total();
@@ -4628,8 +4995,13 @@ impl UsageRuntime {
     {
         let usage_event_type = event.event_type;
         let request_id = event.request_id.clone();
+        let fallback = if is_permanent_enqueue_error(&cause) {
+            "report_failure"
+        } else {
+            "bounded_local_enqueue_retry"
+        };
         let direct_write_succeeded = self
-            .try_write_terminal_direct_fallback(data, &mut event)
+            .try_write_terminal_direct_fallback(data, &mut event, fallback)
             .await;
         let (deferred_fallback, outcome) = if direct_write_succeeded {
             (
@@ -4657,7 +5029,12 @@ impl UsageRuntime {
         outcome
     }
 
-    async fn try_write_terminal_direct_fallback<T>(&self, data: &T, event: &mut UsageEvent) -> bool
+    async fn try_write_terminal_direct_fallback<T>(
+        &self,
+        data: &T,
+        event: &mut UsageEvent,
+        fallback: &'static str,
+    ) -> bool
     where
         T: UsageRuntimeAccess,
     {
@@ -4670,7 +5047,7 @@ impl UsageRuntime {
                     usage_event_type = ?event.event_type,
                     request_id = %event.request_id,
                     rejected_total = rejected,
-                    fallback = "bounded_local_enqueue_retry",
+                    fallback,
                     "usage runtime skipped terminal direct fallback because the writer is unavailable or under pressure"
                 );
             }
@@ -4689,7 +5066,7 @@ impl UsageRuntime {
                         request_id = %event.request_id,
                         worker_record_limit = gate.limit(),
                         rejected_total = rejected,
-                        fallback = "bounded_local_enqueue_retry",
+                        fallback,
                         "usage runtime terminal direct fallback was rejected by the shared database concurrency gate"
                     );
                 }
@@ -4710,7 +5087,7 @@ impl UsageRuntime {
                     request_id = %event.request_id,
                     fallback_limit = self.terminal_direct_fallback_state.limit(),
                     rejected_total = rejected,
-                    fallback = "bounded_local_enqueue_retry",
+                    fallback,
                     "usage runtime terminal direct fallback is saturated"
                 );
             }
@@ -4724,7 +5101,7 @@ impl UsageRuntime {
                 usage_event_type = ?event.event_type,
                 request_id = %event.request_id,
                 error = %err,
-                fallback = "bounded_local_enqueue_retry",
+                fallback,
                 "usage runtime could not enrich terminal event for direct fallback"
             );
             false
@@ -4753,7 +5130,7 @@ impl UsageRuntime {
                     usage_event_type = ?event.event_type,
                     request_id = %event.request_id,
                     failed_total = failed,
-                    fallback = "bounded_local_enqueue_retry",
+                    fallback,
                     "usage runtime terminal direct fallback failed"
                 );
             }
@@ -4765,6 +5142,21 @@ impl UsageRuntime {
     where
         T: UsageRuntimeAccess,
     {
+        let reconciled = match reconcile_usage_policy_cost_for_event_with_result(data, event).await
+        {
+            Ok(reconciled) => reconciled,
+            Err(err) => {
+                warn!(
+                    event_name = "usage_event_cost_reconciliation_failed",
+                    log_type = "event",
+                    usage_event_type = ?event.event_type,
+                    request_id = %event.request_id,
+                    error = %err,
+                    "usage runtime failed to reconcile plan cost before direct usage upsert"
+                );
+                return false;
+            }
+        };
         match build_upsert_usage_record_from_event(event) {
             Ok(record) => match catch_usage_writer_panic(
                 "direct usage upsert",
@@ -4773,7 +5165,9 @@ impl UsageRuntime {
             .await
             {
                 Ok(Some(stored)) => {
-                    if let Err(err) = settle_usage_if_needed(data, &stored).await {
+                    if let Err(err) =
+                        settle_usage_with_reconciled_cost(data, &stored, reconciled).await
+                    {
                         warn!(
                             event_name = "usage_terminal_settlement_failed",
                             log_type = "event",
@@ -4813,7 +5207,32 @@ impl UsageRuntime {
     }
 }
 
+pub(crate) fn prepare_event_capture_memory(
+    event: &mut UsageEvent,
+    budget: Arc<crate::event_capture_budget::EventCaptureMemoryBudget>,
+) {
+    preserve_request_facts(event);
+    preserve_provider_response_facts(event);
+    event.data.apply_capture_memory_budget(budget);
+}
+
+pub(crate) fn prepare_decoded_event_capture_memory(
+    event: &mut UsageEvent,
+    budget: Arc<crate::event_capture_budget::EventCaptureMemoryBudget>,
+) {
+    preserve_request_facts_with_legacy_missing(event, true);
+    preserve_provider_response_facts(event);
+    event.data.apply_capture_memory_budget(budget);
+}
+
 fn preserve_request_facts(event: &mut UsageEvent) {
+    preserve_request_facts_with_legacy_missing(event, false);
+}
+
+fn preserve_request_facts_with_legacy_missing(
+    event: &mut UsageEvent,
+    preserve_implicit_missing: bool,
+) {
     let data = &mut event.data;
     match request_body_derived_facts_action(data.request_body.as_ref(), data.request_body_state) {
         RequestBodyDerivedFactsAction::Refresh => {
@@ -4823,8 +5242,15 @@ fn preserve_request_facts(event: &mut UsageEvent) {
             );
         }
         RequestBodyDerivedFactsAction::Clear => {
-            data.request_metadata =
-                clear_client_request_body_metadata(data.request_metadata.take());
+            // Legacy wire events can carry derived facts without either capture field.
+            // An explicit typed `none` still authoritatively clears those facts.
+            if !preserve_implicit_missing
+                || data.request_body.is_some()
+                || data.request_body_state.is_some()
+            {
+                data.request_metadata =
+                    clear_client_request_body_metadata(data.request_metadata.take());
+            }
         }
         RequestBodyDerivedFactsAction::Preserve => {}
     }
@@ -4844,8 +5270,13 @@ fn preserve_request_facts(event: &mut UsageEvent) {
             );
         }
         RequestBodyDerivedFactsAction::Clear => {
-            data.request_metadata =
-                clear_provider_request_body_metadata(data.request_metadata.take());
+            if !preserve_implicit_missing
+                || data.provider_request_body.is_some()
+                || data.provider_request_body_state.is_some()
+            {
+                data.request_metadata =
+                    clear_provider_request_body_metadata(data.request_metadata.take());
+            }
         }
         RequestBodyDerivedFactsAction::Preserve => {}
     }
@@ -4866,7 +5297,7 @@ impl UsageQueueHealthSnapshot {
     }
 }
 
-async fn enrich_terminal_event<T>(data: &T, event: &mut UsageEvent)
+async fn enrich_terminal_event<T>(data: &T, event: &mut UsageEvent) -> Result<(), DataLayerError>
 where
     T: UsageBillingEventEnricher + Send + Sync,
 {
@@ -4878,7 +5309,9 @@ where
             error = %err,
             "usage runtime failed to enrich terminal usage event with billing"
         );
+        return Err(err);
     }
+    Ok(())
 }
 
 struct ManagedUsageWorker {
@@ -4907,6 +5340,7 @@ async fn run_usage_worker_supervisor<T>(
     config: UsageRuntimeConfig,
     worker_record_gate: Option<Arc<UsageWorkerRecordConcurrencyGate>>,
     state: Arc<UsageWorkerSupervisorState>,
+    control: UsageWorkerControl,
 ) where
     T: UsageRuntimeAccess + 'static,
 {
@@ -4956,6 +5390,16 @@ async fn run_usage_worker_supervisor<T>(
 
     loop {
         tokio::select! {
+            biased;
+            _ = control.wait_for_shutdown() => {
+                state.desired_count.store(0, Ordering::Release);
+                for worker in workers.values() {
+                    worker.control.request_shutdown();
+                }
+                while join_set.join_next().await.is_some() {}
+                state.active_count.store(0, Ordering::Release);
+                break;
+            }
             Some(observation) = telemetry_rx.recv() => {
                 state.record_observation(observation);
                 if observation.entries_read == 0 {
@@ -5395,6 +5839,7 @@ impl LifecycleDelayDispatcher {
         coalescer: Arc<LifecycleEventCoalescer>,
         enqueue_state: Arc<LifecycleEnqueueState>,
         enqueue_retry: Arc<UsageEnqueueRetryDispatcher>,
+        shutdown: &UsageShutdownState,
     ) -> Arc<Self> {
         if !config.enabled
             || !config.queue_lifecycle_events
@@ -5407,12 +5852,13 @@ impl LifecycleDelayDispatcher {
         let delay = Duration::from_millis(config.lifecycle_enqueue_delay_ms.max(1));
         let admission = Arc::new(tokio::sync::Semaphore::new(capacity));
         let (sender, receiver) = mpsc::channel(capacity);
-        spawn_on_usage_background_runtime(run_lifecycle_delay_worker(
+        shutdown.tasks.spawn(run_lifecycle_delay_worker(
             config,
             coalescer,
             enqueue_state,
             enqueue_retry,
             receiver,
+            shutdown.drain.subscribe(),
         ));
         Arc::new(Self {
             delay,
@@ -5458,11 +5904,31 @@ async fn run_lifecycle_delay_worker(
     enqueue_state: Arc<LifecycleEnqueueState>,
     enqueue_retry: Arc<UsageEnqueueRetryDispatcher>,
     mut receiver: mpsc::Receiver<DelayedLifecycleQueueItem>,
+    mut drain: tokio::sync::watch::Receiver<bool>,
 ) {
     let mut pending = BTreeMap::<tokio::time::Instant, Vec<DelayedLifecycleQueueItem>>::new();
     let mut receiver_open = true;
 
     loop {
+        if *drain.borrow_and_update() {
+            receiver.close();
+            while let Ok(item) = receiver.try_recv() {
+                pending.entry(item.due_at).or_default().push(item);
+            }
+            for (_, items) in std::mem::take(&mut pending) {
+                for item in items {
+                    item.item
+                        .enqueue(
+                            config.clone(),
+                            Arc::clone(&coalescer),
+                            Arc::clone(&enqueue_state),
+                            Arc::clone(&enqueue_retry),
+                        )
+                        .await;
+                }
+            }
+            break;
+        }
         if !pending.is_empty() {
             enqueue_due_lifecycle_items(
                 &mut pending,
@@ -5479,7 +5945,11 @@ async fn run_lifecycle_delay_worker(
             if !receiver_open {
                 break;
             }
-            match receiver.recv().await {
+            let next = tokio::select! {
+                next = receiver.recv() => next,
+                _ = crate::shutdown::wait_for_drain(&mut drain) => continue,
+            };
+            match next {
                 Some(item) => {
                     pending.entry(item.due_at).or_default().push(item);
                     continue;
@@ -5495,6 +5965,7 @@ async fn run_lifecycle_delay_worker(
 
         if receiver_open {
             tokio::select! {
+                _ = crate::shutdown::wait_for_drain(&mut drain) => continue,
                 maybe_item = receiver.recv() => {
                     match maybe_item {
                         Some(item) => {
@@ -5673,6 +6144,17 @@ where
         return true;
     };
 
+    if is_permanent_enqueue_error(&err) {
+        enqueue_state.record_deferred(
+            "usage_lifecycle_event_enqueue_deferred",
+            "invalid_input",
+            event.event_type,
+            &event.request_id,
+            DeferredEnqueueFallback::Drop,
+        );
+        return enqueue_retry.schedule(queue, event, "lifecycle", err);
+    }
+
     enqueue_state.open_circuit(now_unix_ms().saturating_add(LIFECYCLE_ENQUEUE_CIRCUIT_OPEN_MS));
     let failures = enqueue_state.increment_failed_total();
     let retry_enabled = config.retry_deferred_lifecycle_events;
@@ -5715,6 +6197,7 @@ struct UsageEnqueueRetryDispatcher {
 #[derive(Debug, Default)]
 struct UsageEnqueueDispatcherMetrics {
     scheduled_total: AtomicU64,
+    permanent_failure_total: AtomicU64,
     recovered_total: AtomicU64,
     pending: AtomicU64,
     retry_failed_total: AtomicU64,
@@ -5737,7 +6220,7 @@ impl UsageEnqueueRetryDispatcher {
         })
     }
 
-    fn spawn(config: UsageRuntimeConfig) -> Arc<Self> {
+    fn spawn(config: UsageRuntimeConfig, shutdown: &UsageShutdownState) -> Arc<Self> {
         let lifecycle_retry_enabled =
             config.queue_lifecycle_events && config.retry_deferred_lifecycle_events;
         if !config.enabled || !(config.queue_terminal_events || lifecycle_retry_enabled) {
@@ -5757,12 +6240,14 @@ impl UsageEnqueueRetryDispatcher {
             senders.push(sender);
             let worker_config = config.clone();
             let worker_metrics = Arc::clone(&metrics);
-            spawn_on_usage_background_runtime(async move {
-                run_usage_enqueue_retry_worker(
+            let drain = shutdown.drain.subscribe();
+            shutdown.tasks.spawn(async move {
+                run_usage_enqueue_retry_worker_with_drain(
                     worker_index,
                     worker_config,
                     receiver,
                     worker_metrics,
+                    drain,
                 )
                 .await;
             });
@@ -5776,8 +6261,32 @@ impl UsageEnqueueRetryDispatcher {
         queue: UsageQueue,
         event: UsageEvent,
         event_phase: &'static str,
-        cause: DataLayerError,
+        mut cause: DataLayerError,
     ) -> bool {
+        // Circuit and admission failures can reach this path without an encoding attempt.
+        if !is_permanent_enqueue_error(&cause) {
+            if let Err(error) = queue.validate_event(&event) {
+                if is_permanent_enqueue_error(&error) {
+                    cause = error;
+                }
+            }
+        }
+        if is_permanent_enqueue_error(&cause) {
+            let rejected = self.metrics.record_permanent_failure();
+            if should_log_usage_retry_counter(rejected) {
+                warn!(
+                    event_name = "usage_event_enqueue_invalid_input",
+                    log_type = "ops",
+                    event_phase,
+                    usage_event_type = ?event.event_type,
+                    request_id = %event.request_id,
+                    rejected_total = rejected,
+                    error = %cause,
+                    "usage event could not be persisted; invalid queue input cannot be retried"
+                );
+            }
+            return false;
+        }
         let event_type = event.event_type;
         let request_id = event.request_id.clone();
         let cause_message = cause.to_string();
@@ -5875,6 +6384,10 @@ impl UsageEnqueueRetryDispatcher {
         self.metrics.scheduled_total.load(Ordering::Acquire)
     }
 
+    fn permanent_failure_total(&self) -> u64 {
+        self.metrics.permanent_failure_total.load(Ordering::Acquire)
+    }
+
     fn recovered_total(&self) -> u64 {
         self.metrics.recovered_total.load(Ordering::Acquire)
     }
@@ -5895,6 +6408,10 @@ impl UsageEnqueueRetryDispatcher {
 }
 
 impl UsageEnqueueDispatcherMetrics {
+    fn record_permanent_failure(&self) -> u64 {
+        self.permanent_failure_total.fetch_add(1, Ordering::AcqRel) + 1
+    }
+
     fn record_scheduled(&self) -> u64 {
         self.pending.fetch_add(1, Ordering::AcqRel);
         self.scheduled_total.fetch_add(1, Ordering::AcqRel) + 1
@@ -5917,17 +6434,32 @@ impl UsageEnqueueDispatcherMetrics {
     }
 }
 
+#[cfg(test)]
 async fn run_usage_enqueue_retry_worker(
+    worker_index: usize,
+    config: UsageRuntimeConfig,
+    receiver: mpsc::Receiver<UsageEnqueueRetryItem>,
+    metrics: Arc<UsageEnqueueDispatcherMetrics>,
+) {
+    let (_sender, drain) = tokio::sync::watch::channel(false);
+    run_usage_enqueue_retry_worker_with_drain(worker_index, config, receiver, metrics, drain).await;
+}
+
+async fn run_usage_enqueue_retry_worker_with_drain(
     worker_index: usize,
     config: UsageRuntimeConfig,
     mut receiver: mpsc::Receiver<UsageEnqueueRetryItem>,
     metrics: Arc<UsageEnqueueDispatcherMetrics>,
+    mut drain: tokio::sync::watch::Receiver<bool>,
 ) {
     let mut initial_retry_delay_applied = false;
     while let Some(mut item) = receiver.recv().await {
         if item.delay_before_first_attempt && !initial_retry_delay_applied {
             initial_retry_delay_applied = true;
-            tokio::time::sleep(usage_enqueue_retry_delay(&config, 1)).await;
+            if !*drain.borrow() {
+                crate::shutdown::retry_delay(usage_enqueue_retry_delay(&config, 1), &mut drain)
+                    .await;
+            }
         }
         loop {
             match item.queue.enqueue(&item.event).await {
@@ -5944,6 +6476,24 @@ async fn run_usage_enqueue_retry_worker(
                             retry_attempts = item.attempts,
                             retry_recovered_total = recovered,
                             "usage runtime local enqueue retry recovered"
+                        );
+                    }
+                    break;
+                }
+                Err(err) if is_permanent_enqueue_error(&err) => {
+                    let rejected = metrics.record_permanent_failure();
+                    metrics.pending.fetch_sub(1, Ordering::AcqRel);
+                    if should_log_usage_retry_counter(rejected) {
+                        warn!(
+                            event_name = "usage_event_enqueue_retry_invalid_input",
+                            log_type = "ops",
+                            event_phase = item.event_phase,
+                            usage_event_type = ?item.event.event_type,
+                            request_id = %item.event.request_id,
+                            worker_index,
+                            rejected_total = rejected,
+                            error = %err,
+                            "usage enqueue retry ended for invalid input; advancing to the next event"
                         );
                     }
                     break;
@@ -5966,7 +6516,7 @@ async fn run_usage_enqueue_retry_worker(
                             "usage runtime local enqueue retry failed; will retry"
                         );
                     }
-                    tokio::time::sleep(delay).await;
+                    crate::shutdown::retry_delay(delay, &mut drain).await;
                 }
             }
         }
@@ -6031,28 +6581,43 @@ fn should_log_usage_retry_counter(value: u64) -> bool {
 async fn build_sync_terminal_usage_event_offthread(
     context_seed: TerminalUsageContextSeed,
     payload_seed: SyncTerminalUsagePayloadSeed,
+    capture: Option<TerminalSeedCaptureRetention>,
 ) -> Result<UsageEvent, DataLayerError> {
-    tokio::task::spawn_blocking(move || {
+    build_terminal_usage_event_offthread(capture, move || {
         build_terminal_usage_event_from_seed(build_sync_terminal_usage_seed(
             context_seed,
             payload_seed,
         ))
     })
     .await
-    .map_err(join_error_to_data_layer)?
 }
 
 async fn build_stream_terminal_usage_event_offthread(
     context_seed: TerminalUsageContextSeed,
     payload_seed: StreamTerminalUsagePayloadSeed,
     cancelled: bool,
+    capture: Option<TerminalSeedCaptureRetention>,
 ) -> Result<UsageEvent, DataLayerError> {
-    tokio::task::spawn_blocking(move || {
+    build_terminal_usage_event_offthread(capture, move || {
         build_terminal_usage_event_from_seed(build_stream_terminal_usage_seed(
             context_seed,
             payload_seed,
             cancelled,
         ))
+    })
+    .await
+}
+
+async fn build_terminal_usage_event_offthread(
+    capture: Option<TerminalSeedCaptureRetention>,
+    build: impl FnOnce() -> Result<UsageEvent, DataLayerError> + Send + 'static,
+) -> Result<UsageEvent, DataLayerError> {
+    tokio::task::spawn_blocking(move || {
+        let mut event = build()?;
+        if let Some(capture) = capture {
+            capture.attach(&mut event);
+        }
+        Ok(event)
     })
     .await
     .map_err(join_error_to_data_layer)?
@@ -6075,6 +6640,14 @@ fn now_unix_ms() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    mod shutdown {
+        include!("runtime_shutdown_tests.rs");
+    }
+
+    mod queue_payload {
+        include!("runtime_queue_payload_tests.rs");
+    }
+
     use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
@@ -6154,6 +6727,425 @@ mod tests {
                 capture_metadata: None,
             },
         )
+    }
+
+    fn terminal_seed_capture_test_seeds(
+        request_id: &str,
+        padding_bytes: usize,
+    ) -> (TerminalUsageContextSeed, SyncTerminalUsagePayloadSeed) {
+        let (_, mut payload) = sync_terminal_test_seeds(request_id);
+        let provider_request = json!({
+            "model": "gpt-5.6-sol", "reasoning": {"effort": "medium"},
+            "service_tier": "priority", "prompt": "retained request facts"
+        });
+        let mut plan = terminal_test_plan(request_id);
+        plan.model_name = Some("gpt-5.6-sol".to_string());
+        plan.body = RequestBody::from_json(provider_request.clone());
+        let report_context = json!({
+            "original_request_body": {"reasoning": {"effort": "high"}},
+            "provider_request_body": provider_request,
+        });
+        let context = build_terminal_usage_context_seed(&plan, Some(&report_context));
+        payload.provider_response_full = Some(json!({
+            "id": request_id,
+            "output": "x".repeat(padding_bytes),
+            "service_tier": "default",
+            "usage": {"input_tokens": 100, "output_tokens": 500, "total_tokens": 600}
+        }));
+        (context, payload)
+    }
+
+    #[tokio::test]
+    async fn terminal_seed_capture_budget_zero_preserves_sync_facts_and_explicit_zero() {
+        for tokens in [0, 100] {
+            let (context, mut payload) = terminal_seed_capture_test_seeds("seed-budget-sync", 4096);
+            payload.provider_response_full.as_mut().unwrap()["usage"] = json!({
+                "input_tokens": tokens, "output_tokens": tokens, "total_tokens": 2 * tokens
+            });
+            let mut expected = crate::build_terminal_usage_event_from_seed(
+                crate::build_sync_terminal_usage_seed(context.clone(), payload.clone()),
+            )
+            .expect("original terminal event");
+            let budget = Arc::new(super::EventCaptureMemoryBudget::new(0));
+            let prepared = LifecycleTerminalUsageSeed::Sync {
+                context,
+                payload,
+                capture: None,
+            }
+            .prepare_capture_memory(Arc::clone(&budget));
+            assert!(matches!(
+                prepared,
+                LifecycleTerminalUsageSeed::Prepared { .. }
+            ));
+            let event = prepared
+                .build("seed-budget-sync")
+                .await
+                .expect("prepared event");
+            super::prepare_event_capture_memory(&mut expected, Arc::clone(&budget));
+            assert_eq!(event.event_type, expected.event_type);
+            assert_eq!(event.data, expected.data);
+            assert_eq!(event.data.input_tokens, Some(tokens));
+            assert_eq!(event.data.output_tokens, Some(tokens));
+            assert_eq!(event.data.total_tokens, Some(2 * tokens));
+            assert!(event.data.request_body.is_none());
+            assert!(event.data.provider_request_body.is_none());
+            assert!(event.data.response_body.is_none());
+            assert!(event.data.client_response_body.is_none());
+            assert_eq!(
+                event.data.response_body_state,
+                Some(UsageBodyCaptureState::Truncated)
+            );
+            let metadata = event.data.request_metadata.as_ref().expect("billing facts");
+            assert_eq!(metadata["requested_reasoning_effort"], "high");
+            assert_eq!(metadata["provider_reasoning_effort"], "medium");
+            assert_eq!(metadata["provider_service_tier"], "priority");
+            assert_eq!(metadata["provider_actual_service_tier"], "default");
+            assert_eq!(metadata["provider_cache_ttl_minutes"], 30);
+            assert_eq!(budget.retained_bytes(), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn terminal_seed_capture_budget_zero_preserves_image_estimates_and_dimensions() {
+        let (mut context, mut payload) = terminal_seed_capture_test_seeds("seed-budget-image", 0);
+        context.client_contract = "openai:image".to_string();
+        context.provider_contract = "openai:image".to_string();
+        context.request_type = "image".to_string();
+        context.provider_request = Some(json!({
+            "model": "gpt-image-2", "prompt": "Draw a red kite", "n": 1,
+            "size": "1024x1024", "quality": "high", "output_format": "png"
+        }));
+        payload.provider_response_full = Some(json!({
+            "data": [{"b64_json": "x".repeat(4096)}, {"b64_json": "y".repeat(4096)}]
+        }));
+        let expected = crate::build_terminal_usage_event_from_seed(
+            crate::build_sync_terminal_usage_seed(context.clone(), payload.clone()),
+        )
+        .expect("original image event");
+        let budget = Arc::new(super::EventCaptureMemoryBudget::new(0));
+        let event = LifecycleTerminalUsageSeed::Sync {
+            context,
+            payload,
+            capture: None,
+        }
+        .prepare_capture_memory(Arc::clone(&budget))
+        .build("seed-budget-image")
+        .await
+        .expect("image event");
+        assert_eq!(event.event_type, UsageEventType::Completed);
+        assert_eq!(event.data.input_tokens, expected.data.input_tokens);
+        assert!(event.data.input_tokens.unwrap_or_default() > 0);
+        assert_eq!(event.data.total_tokens, expected.data.total_tokens);
+        let metadata = event
+            .data
+            .request_metadata
+            .as_ref()
+            .expect("image dimensions");
+        assert_eq!(metadata["dimensions"]["image_count"], 2);
+        assert_eq!(metadata["dimensions"]["image_size"], "1024x1024");
+        assert_eq!(metadata["dimensions"]["image_quality"], "high");
+        assert_eq!(metadata["dimensions"]["image_output_format"], "png");
+        assert!(event.data.response_body.is_none());
+        assert!(event.data.provider_request_body.is_none());
+        assert_eq!(budget.retained_bytes(), 0);
+    }
+
+    #[tokio::test]
+    async fn terminal_seed_capture_budget_zero_preserves_stream_terminal_evidence() {
+        for (failed, cancelled) in [(false, false), (true, false), (false, true)] {
+            let (mut context, _) = terminal_seed_capture_test_seeds("seed-budget-stream", 0);
+            context.is_stream = true;
+            let provider_response_full = Some(json!({
+                "chunks": [{
+                    "type": if failed { "response.failed" } else { "response.completed" },
+                    "response": {
+                        "status": if failed { "failed" } else { "completed" },
+                        "service_tier": "default",
+                        "usage": {"input_tokens": 100, "output_tokens": 500, "total_tokens": 600},
+                        "error": if failed { json!({"message": "provider refused"}) } else { json!(null) }
+                    }
+                }]
+            }));
+            let payload = crate::StreamTerminalUsagePayloadSeed {
+                report_kind: "openai_responses_stream_success".to_string(),
+                status_code: if cancelled { 499 } else { 200 },
+                response_time_ms: Some(12),
+                first_byte_time_ms: Some(3),
+                provider_response_headers: None,
+                client_response_headers: None,
+                provider_response_full,
+                provider_response_body_state: Some(UsageBodyCaptureState::Inline),
+                client_response: None,
+                client_response_body_state: Some(UsageBodyCaptureState::None),
+                standardized_usage: None,
+                provider_actual_service_tier: Some("default".to_string()),
+                observed_stream_finish: Some(true),
+                terminal_error_message: None,
+                capture_metadata: None,
+            };
+            let mut expected = crate::build_terminal_usage_event_from_seed(
+                crate::build_stream_terminal_usage_seed(
+                    context.clone(),
+                    payload.clone(),
+                    cancelled,
+                ),
+            )
+            .expect("original stream event");
+            let budget = Arc::new(super::EventCaptureMemoryBudget::new(0));
+            let event = LifecycleTerminalUsageSeed::Stream {
+                context,
+                payload,
+                cancelled,
+                capture: None,
+            }
+            .prepare_capture_memory(Arc::clone(&budget))
+            .build("seed-budget-stream")
+            .await
+            .expect("stream event");
+            super::prepare_event_capture_memory(&mut expected, Arc::clone(&budget));
+            assert_eq!(event.event_type, expected.event_type);
+            assert_eq!(event.data, expected.data);
+            assert_eq!(event.data.input_tokens, Some(100));
+            assert_eq!(event.data.output_tokens, Some(500));
+            assert_eq!(event.data.first_byte_time_ms, Some(3));
+            assert_eq!(
+                event.event_type,
+                if cancelled {
+                    UsageEventType::Cancelled
+                } else if failed {
+                    UsageEventType::Failed
+                } else {
+                    UsageEventType::Completed
+                }
+            );
+            if failed {
+                assert_eq!(
+                    event.data.error_message.as_deref(),
+                    Some("provider refused")
+                );
+            }
+            assert!(event.data.response_body.is_none());
+            assert_eq!(budget.retained_bytes(), 0);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn terminal_seed_capture_budget_bounds_concurrent_seeds_and_transfers_to_events() {
+        const COUNT: usize = 12;
+        const LIMIT: usize = 96 * 1024;
+        let budget = Arc::new(super::EventCaptureMemoryBudget::new(LIMIT));
+        let barrier = Arc::new(tokio::sync::Barrier::new(COUNT));
+        let mut tasks = Vec::new();
+        for index in 0..COUNT {
+            let (context, payload) =
+                terminal_seed_capture_test_seeds(&format!("seed-budget-{index}"), 32 * 1024);
+            let budget = Arc::clone(&budget);
+            let barrier = Arc::clone(&barrier);
+            tasks.push(tokio::spawn(async move {
+                barrier.wait().await;
+                LifecycleTerminalUsageSeed::Sync {
+                    context,
+                    payload,
+                    capture: None,
+                }
+                .prepare_capture_memory(budget)
+            }));
+        }
+        let mut seeds = Vec::new();
+        for task in tasks {
+            seeds.push(task.await.expect("concurrent seed preparation"));
+        }
+        let retained = budget.retained_bytes();
+        assert!(retained > 0 && retained <= LIMIT);
+        assert!(seeds
+            .iter()
+            .any(|seed| matches!(seed, LifecycleTerminalUsageSeed::Prepared { .. })));
+        let mut events = Vec::new();
+        for seed in seeds {
+            let event = seed.build("seed-budget").await.expect("terminal event");
+            assert_eq!(event.data.input_tokens, Some(100));
+            assert_eq!(event.data.output_tokens, Some(500));
+            events.push(event);
+        }
+        assert_eq!(
+            budget.retained_bytes(),
+            retained,
+            "ownership transfer must not drop or duplicate reservations"
+        );
+        drop(events);
+        assert_eq!(budget.retained_bytes(), 0);
+
+        let (context, payload) = terminal_seed_capture_test_seeds("seed-budget-dropped", 4096);
+        let queued = LifecycleTerminalUsageSeed::Sync {
+            context,
+            payload,
+            capture: None,
+        }
+        .prepare_capture_memory(Arc::clone(&budget));
+        assert!(budget.retained_bytes() > 0);
+        drop(queued);
+        assert_eq!(
+            budget.retained_bytes(),
+            0,
+            "dropping an unbuilt seed releases its bodies"
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_seed_capture_budget_cancellation_keeps_running_blocking_build_reserved() {
+        let budget = Arc::new(super::EventCaptureMemoryBudget::new(64 * 1024));
+        let body = json!({"diagnostic": "x".repeat(4096)});
+        let capture = super::TerminalSeedCaptureRetention::try_reserve(
+            [Some(&body), None, None, None],
+            Arc::clone(&budget),
+        );
+        let retained = budget.retained_bytes();
+        assert!(retained > 0);
+        let (started, started_rx) = tokio::sync::oneshot::channel();
+        let (release, release_rx) = std::sync::mpsc::channel();
+        let building = tokio::spawn(super::build_terminal_usage_event_offthread(
+            capture,
+            move || {
+                let _ = started.send(());
+                release_rx
+                    .recv_timeout(std::time::Duration::from_secs(2))
+                    .expect("release blocking builder");
+                Ok(UsageEvent::new(
+                    UsageEventType::Completed,
+                    "seed-budget-cancel",
+                    UsageEventData {
+                        response_body: Some(body),
+                        ..UsageEventData::default()
+                    },
+                ))
+            },
+        ));
+        timeout(Duration::from_secs(1), started_rx)
+            .await
+            .expect("builder started")
+            .expect("start signal");
+        building.abort();
+        assert!(building
+            .await
+            .expect_err("cancelled wrapper")
+            .is_cancelled());
+        assert_eq!(
+            budget.retained_bytes(),
+            retained,
+            "spawn_blocking survives cancellation of the caller"
+        );
+        release.send(()).expect("release owned builder");
+        timeout(Duration::from_secs(2), async {
+            while budget.retained_bytes() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("detached blocking result drops its body and reservation");
+
+        let body = json!({"diagnostic": "x".repeat(4096)});
+        let capture = super::TerminalSeedCaptureRetention::try_reserve(
+            [Some(&body), None, None, None],
+            Arc::clone(&budget),
+        );
+        let result = super::build_terminal_usage_event_offthread(capture, move || {
+            drop(body);
+            panic!("forced terminal seed builder panic")
+        })
+        .await;
+        assert!(result.is_err());
+        assert_eq!(budget.retained_bytes(), 0);
+    }
+
+    #[tokio::test]
+    async fn terminal_seed_capture_budget_bounds_admission_backlog_and_preserves_failed_build_progress(
+    ) {
+        const COUNT: usize = 12;
+        for limit in [0, 96 * 1024] {
+            let config = UsageRuntimeConfig {
+                enabled: true,
+                terminal_submission_max_in_flight: 1,
+                ..UsageRuntimeConfig::default()
+            };
+            let runtime = UsageRuntime::new(config).expect("usage runtime");
+            let store = CloneQueueConfiguredUsageStore {
+                records: Arc::new(Mutex::new(Vec::new())),
+                queue: Arc::new(RuntimeState::memory(MemoryRuntimeStateConfig::default())),
+            };
+            let budget = Arc::new(super::EventCaptureMemoryBudget::new(limit));
+            let held = runtime
+                .terminal_submission_state
+                .acquire()
+                .await
+                .expect("hold terminal admission");
+            runtime
+                .dispatch_terminal_seed(
+                    &store,
+                    "seed-budget-build-error".to_string(),
+                    LifecycleTerminalUsageSeed::Prepared {
+                        kind: super::TerminalSeedKind::Sync,
+                        result: Err(DataLayerError::UnexpectedValue(
+                            "forced prepared builder failure".to_string(),
+                        )),
+                    },
+                )
+                .await;
+            for index in 0..COUNT {
+                let request_id = format!("seed-budget-backlog-{index}");
+                let (context, payload) = terminal_seed_capture_test_seeds(&request_id, 32 * 1024);
+                let seed = LifecycleTerminalUsageSeed::Sync {
+                    context,
+                    payload,
+                    capture: None,
+                }
+                .prepare_capture_memory(Arc::clone(&budget));
+                runtime
+                    .dispatch_terminal_seed(&store, request_id, seed)
+                    .await;
+            }
+            timeout(Duration::from_secs(2), async {
+                while runtime.metrics_snapshot().terminal_submission_pending < COUNT + 1 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("all seeds wait behind terminal admission");
+            assert!(budget.retained_bytes() <= limit);
+            assert_eq!(budget.retained_bytes() > 0, limit > 0);
+            assert!(budget.downgraded_total() > 0);
+            assert!(
+                store.records.lock().unwrap().is_empty(),
+                "no persistence before admission"
+            );
+            drop(held);
+            timeout(Duration::from_secs(5), async {
+                loop {
+                    let snapshot = runtime.metrics_snapshot();
+                    if store.records.lock().unwrap().len() == COUNT
+                        && snapshot.terminal_submission_pending == 0
+                        && snapshot.lifecycle_submission_pending == 0
+                    {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("failed build releases its permit and every later terminal persists");
+            let records = store.records.lock().unwrap();
+            for record in records.iter() {
+                assert_eq!(record.status, "completed");
+                assert_eq!(record.input_tokens, Some(100));
+                assert_eq!(record.output_tokens, Some(500));
+                assert_eq!(record.total_tokens, Some(600));
+                assert!(
+                    record.response_body.is_none(),
+                    "default Basic policy still applies at its original position"
+                );
+            }
+            assert_eq!(budget.retained_bytes(), 0);
+            assert_eq!(runtime.metrics_snapshot().terminal_submission_in_flight, 0);
+        }
     }
 
     struct TestLifecycleSubmissionItem {
@@ -6280,6 +7272,9 @@ mod tests {
     #[derive(Default)]
     struct NoRedisUsageStore {
         records: Mutex<Vec<UpsertUsageRecord>>,
+        enrichment_failures: AtomicUsize,
+        enrichment_calls: AtomicUsize,
+        enriched_costs: Option<(f64, f64)>,
     }
 
     struct QueueConfiguredUsageStore {
@@ -6461,7 +7456,23 @@ mod tests {
 
     #[async_trait]
     impl UsageBillingEventEnricher for NoRedisUsageStore {
-        async fn enrich_usage_event(&self, _event: &mut UsageEvent) -> Result<(), DataLayerError> {
+        async fn enrich_usage_event(&self, event: &mut UsageEvent) -> Result<(), DataLayerError> {
+            self.enrichment_calls.fetch_add(1, Ordering::AcqRel);
+            if self
+                .enrichment_failures
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok()
+            {
+                // Real enrichers may update part of the event before a lookup fails.
+                event.data.total_cost_usd = Some(999.0);
+                return Err(DataLayerError::TimedOut("test billing lookup".to_string()));
+            }
+            if let Some((listed, actual)) = self.enriched_costs {
+                event.data.total_cost_usd = Some(listed);
+                event.data.actual_total_cost_usd = Some(actual);
+            }
             Ok(())
         }
     }
@@ -7562,6 +8573,212 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Copy)]
+    enum DirectTerminalTestEntry {
+        PublicDirect,
+        OrderedDirect,
+        QueueDisabled,
+    }
+
+    async fn invoke_direct_terminal_test_entry(
+        entry: DirectTerminalTestEntry,
+        runtime: &UsageRuntime,
+        store: &NoRedisUsageStore,
+        event: UsageEvent,
+    ) -> Option<super::TerminalPersistenceOutcome> {
+        match entry {
+            DirectTerminalTestEntry::PublicDirect => {
+                runtime.record_terminal_event_direct(store, event).await;
+                None
+            }
+            DirectTerminalTestEntry::OrderedDirect => Some(
+                runtime
+                    .persist_ordered_terminal_event(store, event, true)
+                    .await,
+            ),
+            DirectTerminalTestEntry::QueueDisabled => {
+                Some(runtime.enqueue_or_write_terminal(store, event).await)
+            }
+        }
+    }
+
+    async fn assert_direct_terminal_enrichment_failure_is_not_persisted(
+        entry: DirectTerminalTestEntry,
+        request_id: &str,
+    ) {
+        let runtime = UsageRuntime::new(UsageRuntimeConfig {
+            enabled: true,
+            queue_terminal_events: false,
+            ..UsageRuntimeConfig::default()
+        })
+        .expect("usage runtime");
+        let store = NoRedisUsageStore {
+            enrichment_failures: AtomicUsize::new(1),
+            enriched_costs: Some((0.456, 0.123)),
+            ..NoRedisUsageStore::default()
+        };
+        let generation = runtime
+            .lifecycle_coalescer
+            .register(request_id.to_string())
+            .await
+            .expect("delayed lifecycle generation");
+        let event = UsageEvent::new(
+            UsageEventType::Completed,
+            request_id,
+            UsageEventData {
+                user_id: Some("user-direct-pricing-retry".to_string()),
+                provider_name: "openai".to_string(),
+                provider_id: Some("provider-direct-pricing-retry".to_string()),
+                model: "gpt-5".to_string(),
+                input_tokens: Some(4),
+                output_tokens: Some(8),
+                total_tokens: Some(12),
+                total_cost_usd: Some(0.9),
+                actual_total_cost_usd: Some(0.8),
+                status_code: Some(200),
+                ..UsageEventData::default()
+            },
+        );
+
+        let outcome = timeout(
+            Duration::from_secs(2),
+            invoke_direct_terminal_test_entry(entry, &runtime, &store, event.clone()),
+        )
+        .await
+        .expect("failed enrichment should release the terminal turn");
+        if let Some(outcome) = outcome {
+            assert_eq!(outcome, super::TerminalPersistenceOutcome::Failed);
+        }
+        assert_eq!(store.enrichment_calls.load(Ordering::Acquire), 1);
+        assert!(store.records.lock().expect("records lock").is_empty());
+        {
+            let coalescer = &runtime.lifecycle_coalescer;
+            let entries = coalescer.shards[coalescer.shard_index(request_id)]
+                .entries
+                .lock()
+                .await;
+            let marker = entries
+                .get(request_id)
+                .expect("delayed marker is preserved");
+            assert_eq!(marker.generation, generation);
+            assert!(marker.terminal_seen_at.is_none());
+        }
+        let snapshot = runtime.metrics_snapshot();
+        assert_eq!(snapshot.ordered_lifecycle_pending, 0);
+        assert_eq!(snapshot.terminal_submission_in_flight, 0);
+        assert_eq!(snapshot.enqueue_retry_scheduled_total, 0);
+
+        let outcome = timeout(
+            Duration::from_secs(2),
+            invoke_direct_terminal_test_entry(entry, &runtime, &store, event),
+        )
+        .await
+        .expect("a later terminal attempt should be able to persist");
+        if let Some(outcome) = outcome {
+            assert_eq!(
+                outcome,
+                super::TerminalPersistenceOutcome::PersistedDirectly
+            );
+        }
+        assert_eq!(store.enrichment_calls.load(Ordering::Acquire), 2);
+        {
+            let records = store.records.lock().expect("records lock");
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].total_cost_usd, Some(0.456));
+            assert_eq!(records[0].actual_total_cost_usd, Some(0.123));
+            assert_eq!(records[0].total_tokens, Some(12));
+        }
+        {
+            let coalescer = &runtime.lifecycle_coalescer;
+            let entries = coalescer.shards[coalescer.shard_index(request_id)]
+                .entries
+                .lock()
+                .await;
+            let marker = entries.get(request_id).expect("successful terminal marker");
+            assert!(marker.terminal_seen_at.is_some());
+        }
+        assert_eq!(runtime.metrics_snapshot().ordered_lifecycle_pending, 0);
+        assert_eq!(runtime.metrics_snapshot().terminal_submission_in_flight, 0);
+    }
+
+    #[tokio::test]
+    async fn direct_terminal_pricing_failure_preserves_lifecycle_and_allows_correct_retry() {
+        assert_direct_terminal_enrichment_failure_is_not_persisted(
+            DirectTerminalTestEntry::PublicDirect,
+            "direct-terminal-pricing-retry",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn ordered_direct_terminal_pricing_failure_returns_failed_before_correct_retry() {
+        assert_direct_terminal_enrichment_failure_is_not_persisted(
+            DirectTerminalTestEntry::OrderedDirect,
+            "ordered-direct-terminal-pricing-retry",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn queue_disabled_terminal_pricing_failure_returns_failed_before_correct_retry() {
+        assert_direct_terminal_enrichment_failure_is_not_persisted(
+            DirectTerminalTestEntry::QueueDisabled,
+            "queue-disabled-terminal-pricing-retry",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn bounded_direct_fallback_pricing_failure_does_not_write_or_report_success() {
+        let runtime = UsageRuntime::new(UsageRuntimeConfig {
+            enabled: true,
+            ..UsageRuntimeConfig::default()
+        })
+        .expect("usage runtime");
+        let store = NoRedisUsageStore {
+            enrichment_failures: AtomicUsize::new(1),
+            enriched_costs: Some((0.456, 0.123)),
+            ..NoRedisUsageStore::default()
+        };
+        let mut event = UsageEvent::new(
+            UsageEventType::Completed,
+            "bounded-fallback-pricing-retry",
+            UsageEventData {
+                provider_name: "openai".to_string(),
+                model: "gpt-5".to_string(),
+                total_tokens: Some(12),
+                ..UsageEventData::default()
+            },
+        );
+        assert!(
+            !runtime
+                .try_write_terminal_direct_fallback(&store, &mut event, "test_retry")
+                .await
+        );
+        assert!(store.records.lock().expect("records lock").is_empty());
+        let snapshot = runtime.metrics_snapshot();
+        assert_eq!(snapshot.terminal_direct_fallback_failed_total, 1);
+        assert_eq!(snapshot.terminal_direct_fallback_succeeded_total, 0);
+        assert_eq!(snapshot.terminal_direct_fallback_in_flight, 0);
+
+        assert!(
+            runtime
+                .try_write_terminal_direct_fallback(&store, &mut event, "test_retry")
+                .await
+        );
+        let records = store.records.lock().expect("records lock");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].total_cost_usd, Some(0.456));
+        assert_eq!(records[0].actual_total_cost_usd, Some(0.123));
+        drop(records);
+        assert_eq!(
+            runtime
+                .metrics_snapshot()
+                .terminal_direct_fallback_succeeded_total,
+            1
+        );
+    }
+
     #[tokio::test]
     async fn terminal_usage_without_redis_writes_directly_to_usage_repository() {
         let runtime = UsageRuntime::new(UsageRuntimeConfig {
@@ -8190,7 +9407,8 @@ mod tests {
             enqueue_retry_buffer_capacity: 1_024,
             ..UsageRuntimeConfig::default()
         };
-        let dispatcher = super::PendingPersistenceDispatcher::spawn(&config);
+        let tasks = super::UsageBackgroundTasks::default();
+        let dispatcher = super::PendingPersistenceDispatcher::spawn(&config, &tasks);
         let store = BlockingNonBatchPendingStore {
             release_writes: Arc::new(tokio::sync::Semaphore::new(0)),
             writes_in_flight: Arc::new(AtomicUsize::new(0)),
@@ -8922,7 +10140,8 @@ mod tests {
             worker_record_concurrency_limit: Some(1),
             ..UsageRuntimeConfig::default()
         };
-        let dispatcher = LifecycleSubmissionDispatcher::spawn(&config);
+        let tasks = super::UsageBackgroundTasks::default();
+        let dispatcher = LifecycleSubmissionDispatcher::spawn(&config, &tasks);
         let request_id = "req-lifecycle-submission-panic";
         dispatcher.dispatch(Box::new(PanickingLifecycleSubmissionItem {
             request_id: request_id.to_string(),
@@ -8971,7 +10190,8 @@ mod tests {
             worker_record_concurrency_limit: Some(1),
             ..UsageRuntimeConfig::default()
         };
-        let dispatcher = LifecycleSubmissionDispatcher::spawn(&config);
+        let tasks = super::UsageBackgroundTasks::default();
+        let dispatcher = LifecycleSubmissionDispatcher::spawn(&config, &tasks);
         let started = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());
         let seen = Arc::new(Mutex::new(Vec::new()));
@@ -11070,6 +12290,280 @@ mod tests {
         assert_eq!(dispatcher.closed_or_unavailable_total(), 1);
     }
 
+    fn event_capture_budget_retry_event(
+        budget: &Arc<crate::event_capture_budget::EventCaptureMemoryBudget>,
+    ) -> UsageEvent {
+        let mut event = UsageEvent {
+            event_type: UsageEventType::Failed,
+            request_id: "event-capture-budget-retry".to_string(),
+            timestamp_ms: 123_000,
+            data: UsageEventData {
+                provider_name: "provider".to_string(),
+                model: "model".to_string(),
+                input_tokens: Some(100),
+                output_tokens: Some(500),
+                total_tokens: Some(600),
+                cache_read_input_tokens: Some(0),
+                status_code: Some(502),
+                error_category: Some("upstream_error".to_string()),
+                error_message: Some("upstream failed".to_string()),
+                response_body: Some(json!({"diagnostic": "x".repeat(1000)})),
+                response_body_state: Some(UsageBodyCaptureState::Inline),
+                request_metadata: Some(json!({
+                    "plan_usage_reservation_token": "550e8400-e29b-41d4-a716-446655440000",
+                    "provider_service_tier": "priority",
+                    "provider_cache_ttl_minutes": 60
+                })),
+                ..UsageEventData::default()
+            },
+        };
+        event.data.apply_capture_memory_budget(Arc::clone(budget));
+        event
+    }
+
+    #[tokio::test]
+    async fn event_capture_budget_bounds_blocked_policy_waiters_and_releases_on_cancel_or_basic() {
+        for limit in [0, 64 * 1024] {
+            let runtime = UsageRuntime::new(UsageRuntimeConfig::default()).expect("runtime");
+            let store = BlockingPolicyQueueConfiguredUsageStore {
+                queue: Arc::new(RuntimeState::memory(MemoryRuntimeStateConfig::default())),
+                policy_started: Arc::new(tokio::sync::Notify::new()),
+                release_policy: Arc::new(tokio::sync::Notify::new()),
+                policy_reads: Arc::new(AtomicUsize::new(0)),
+            };
+            let budget = Arc::new(crate::event_capture_budget::EventCaptureMemoryBudget::new(
+                limit,
+            ));
+            let start = || {
+                let runtime = runtime.clone();
+                let store = store.clone();
+                let budget = Arc::clone(&budget);
+                tokio::spawn(async move {
+                    let mut event = UsageEvent::new(
+                        UsageEventType::Completed,
+                        "event-capture-budget-policy",
+                        UsageEventData {
+                            input_tokens: Some(100),
+                            output_tokens: Some(500),
+                            response_body: Some(json!("x".repeat(40 * 1024))),
+                            ..UsageEventData::default()
+                        },
+                    );
+                    runtime
+                        .apply_body_capture_policy_with_budget(&store, &mut event, budget)
+                        .await;
+                    event
+                })
+            };
+            let reading = start();
+            timeout(Duration::from_secs(2), store.policy_started.notified())
+                .await
+                .expect("policy read is blocked");
+            let retained = budget.retained_bytes();
+            assert_eq!(retained == 0, limit == 0);
+            assert!(retained <= limit);
+            let previous_denials = budget.downgraded_total();
+            let waiting = start();
+            timeout(Duration::from_secs(2), async {
+                while budget.downgraded_total() == previous_denials {
+                    sleep(Duration::from_millis(1)).await;
+                }
+            })
+            .await
+            .expect("waiting event must apply budget before acquiring policy mutex");
+            assert_eq!(store.policy_reads.load(Ordering::Acquire), 1);
+            assert_eq!(budget.retained_bytes(), retained);
+            waiting.abort();
+            assert!(waiting
+                .await
+                .expect_err("waiting task aborted")
+                .is_cancelled());
+            assert_eq!(budget.retained_bytes(), retained);
+            reading.abort();
+            assert!(reading
+                .await
+                .expect_err("reading task aborted")
+                .is_cancelled());
+            assert_eq!(budget.retained_bytes(), 0);
+
+            let completing = start();
+            timeout(Duration::from_secs(2), store.policy_started.notified())
+                .await
+                .expect("replacement policy read starts");
+            assert_eq!(budget.retained_bytes(), retained);
+            store.release_policy.notify_one();
+            let event = timeout(Duration::from_secs(2), completing)
+                .await
+                .expect("Basic policy completes")
+                .expect("policy task completion");
+            assert!(event.data.response_body.is_none());
+            assert_eq!(
+                event.data.response_body_state,
+                Some(UsageBodyCaptureState::Disabled)
+            );
+            assert_eq!(event.data.input_tokens, Some(100));
+            assert_eq!(event.data.output_tokens, Some(500));
+            assert_eq!(
+                budget.retained_bytes(),
+                0,
+                "Basic returns the lease while the event is still alive"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn event_capture_budget_retry_holds_lease_and_preserves_event_after_recovery() {
+        for limit in [0, 64 * 1024] {
+            let config = UsageRuntimeConfig {
+                enabled: true,
+                queue_terminal_events: true,
+                consumer_block_ms: 1,
+                enqueue_retry_initial_backoff_ms: 1,
+                enqueue_retry_max_backoff_ms: 2,
+                ..UsageRuntimeConfig::default()
+            };
+            let inner: Arc<dyn RuntimeQueueStore> =
+                Arc::new(RuntimeState::memory(MemoryRuntimeStateConfig::default()));
+            let flaky = Arc::new(FlakyAppendQueueStore::new(inner, usize::MAX));
+            let queue = UsageQueue::new(flaky.clone(), config.clone()).expect("retry queue");
+            queue.ensure_consumer_group().await.expect("consumer group");
+            let budget = Arc::new(crate::event_capture_budget::EventCaptureMemoryBudget::new(
+                limit,
+            ));
+            let event = event_capture_budget_retry_event(&budget);
+            let expected_fields = event.to_stream_fields().expect("expected wire event");
+            let retained = budget.retained_bytes();
+            assert_eq!(retained == 0, limit == 0);
+            let (sender, receiver) = mpsc::channel(1);
+            let metrics = Arc::new(super::UsageEnqueueDispatcherMetrics::default());
+            let dispatcher = UsageEnqueueRetryDispatcher {
+                senders: vec![sender],
+                metrics: Arc::clone(&metrics),
+            };
+            assert!(dispatcher.schedule(
+                queue.clone(),
+                event,
+                "terminal",
+                DataLayerError::Redis("initial failure".to_string())
+            ));
+            let worker = tokio::spawn(super::run_usage_enqueue_retry_worker(
+                0,
+                config,
+                receiver,
+                Arc::clone(&metrics),
+            ));
+            timeout(Duration::from_secs(2), async {
+                while metrics.retry_failed_total.load(Ordering::Acquire) < 2 {
+                    sleep(Duration::from_millis(1)).await;
+                }
+            })
+            .await
+            .expect("two retry failures");
+            assert_eq!(budget.retained_bytes(), retained);
+            assert_eq!(dispatcher.pending(), 1);
+            flaky.remaining_failures.store(0, Ordering::Release);
+            drop(dispatcher);
+            timeout(Duration::from_secs(2), worker)
+                .await
+                .expect("retry recovery")
+                .expect("worker completion");
+            assert_eq!(budget.retained_bytes(), 0);
+            assert_eq!(metrics.pending.load(Ordering::Acquire), 0);
+            let entries = queue
+                .read_group("capture-budget-consumer")
+                .await
+                .expect("persisted queue");
+            assert_eq!(entries.len(), 1);
+            assert_eq!(
+                entries[0].fields, expected_fields,
+                "retry must preserve identity, terminal failure, billing, and truncation metadata"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn event_capture_budget_retry_cancellation_releases_owned_body() {
+        let config = UsageRuntimeConfig {
+            enabled: true,
+            queue_terminal_events: true,
+            enqueue_retry_initial_backoff_ms: 1,
+            enqueue_retry_max_backoff_ms: 2,
+            ..UsageRuntimeConfig::default()
+        };
+        let inner: Arc<dyn RuntimeQueueStore> =
+            Arc::new(RuntimeState::memory(MemoryRuntimeStateConfig::default()));
+        let flaky = Arc::new(FlakyAppendQueueStore::new(inner, usize::MAX));
+        let queue = UsageQueue::new(flaky, config.clone()).expect("retry queue");
+        let budget = Arc::new(crate::event_capture_budget::EventCaptureMemoryBudget::new(
+            64 * 1024,
+        ));
+        let event = event_capture_budget_retry_event(&budget);
+        let (sender, receiver) = mpsc::channel(1);
+        let metrics = Arc::new(super::UsageEnqueueDispatcherMetrics::default());
+        let dispatcher = UsageEnqueueRetryDispatcher {
+            senders: vec![sender],
+            metrics: Arc::clone(&metrics),
+        };
+        assert!(dispatcher.schedule(
+            queue,
+            event,
+            "terminal",
+            DataLayerError::Redis("failure".to_string())
+        ));
+        let worker = tokio::spawn(super::run_usage_enqueue_retry_worker(
+            0,
+            config,
+            receiver,
+            Arc::clone(&metrics),
+        ));
+        timeout(Duration::from_secs(2), async {
+            while metrics.retry_failed_total.load(Ordering::Acquire) == 0 {
+                sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("retry starts");
+        assert!(budget.retained_bytes() > 0);
+        worker.abort();
+        assert!(worker.await.expect_err("worker was aborted").is_cancelled());
+        assert_eq!(budget.retained_bytes(), 0);
+    }
+
+    #[tokio::test]
+    async fn event_capture_budget_retry_rejection_and_queued_drop_release_owned_bodies() {
+        let budget = Arc::new(crate::event_capture_budget::EventCaptureMemoryBudget::new(
+            64 * 1024,
+        ));
+        let first = event_capture_budget_retry_event(&budget);
+        let retained_once = budget.retained_bytes();
+        let second = event_capture_budget_retry_event(&budget);
+        assert_eq!(budget.retained_bytes(), retained_once * 2);
+        let config = UsageRuntimeConfig::default();
+        let runner: Arc<dyn RuntimeQueueStore> =
+            Arc::new(RuntimeState::memory(MemoryRuntimeStateConfig::default()));
+        let queue = UsageQueue::new(runner, config).expect("queue");
+        let (sender, receiver) = mpsc::channel(1);
+        let dispatcher = UsageEnqueueRetryDispatcher {
+            senders: vec![sender],
+            metrics: Arc::new(super::UsageEnqueueDispatcherMetrics::default()),
+        };
+        assert!(dispatcher.schedule(
+            queue.clone(),
+            first,
+            "terminal",
+            DataLayerError::Redis("failure".to_string())
+        ));
+        assert!(!dispatcher.schedule(
+            queue,
+            second,
+            "terminal",
+            DataLayerError::Redis("failure".to_string())
+        ));
+        assert_eq!(budget.retained_bytes(), retained_once);
+        drop(receiver);
+        assert_eq!(budget.retained_bytes(), 0);
+    }
+
     #[tokio::test]
     async fn disabled_lifecycle_queue_writes_pending_directly() {
         let config = UsageRuntimeConfig {
@@ -12695,6 +14189,69 @@ mod tests {
         assert!(metadata.get("provider_reasoning_effort").is_none());
         assert!(metadata.get("provider_service_tier").is_none());
         assert_eq!(metadata["provider_actual_service_tier"], "priority");
+    }
+
+    #[test]
+    fn event_capture_budget_full_policy_preserves_facts_before_zero_budget_and_database_mapping() {
+        let mut event = UsageEvent::new(
+            UsageEventType::Completed,
+            "event-capture-budget-facts",
+            UsageEventData {
+                provider_name: "openai".to_string(),
+                model: "gpt-5.6-sol".to_string(),
+                endpoint_api_format: Some("openai:responses".to_string()),
+                input_tokens: Some(100),
+                output_tokens: Some(500),
+                total_tokens: Some(600),
+                cache_creation_input_tokens: Some(25),
+                cache_read_input_tokens: Some(0),
+                request_body: Some(json!({"reasoning": {"effort": "high"}})),
+                provider_request_body: Some(json!({
+                    "model": "gpt-5.6-sol", "reasoning": {"effort": "medium"},
+                    "service_tier": "priority"
+                })),
+                response_body: Some(json!({"service_tier": "Default"})),
+                request_metadata: Some(json!({
+                    "plan_usage_reservation_token": "550e8400-e29b-41d4-a716-446655440000"
+                })),
+                ..UsageEventData::default()
+            },
+        );
+        preserve_request_facts(&mut event);
+        preserve_provider_response_facts(&mut event);
+        apply_usage_body_capture_policy_to_event(
+            UsageBodyCapturePolicy {
+                record_level: UsageRequestRecordLevel::Full,
+            },
+            &mut event,
+        );
+        let budget = Arc::new(crate::event_capture_budget::EventCaptureMemoryBudget::new(
+            0,
+        ));
+        event.data.apply_capture_memory_budget(Arc::clone(&budget));
+        let record = crate::build_upsert_usage_record_from_event(&event).expect("database mapping");
+        assert_eq!(record.input_tokens, Some(100));
+        assert_eq!(record.output_tokens, Some(500));
+        assert_eq!(record.cache_creation_input_tokens, Some(25));
+        assert_eq!(record.cache_read_input_tokens, Some(0));
+        assert!(record.request_body.is_none());
+        assert!(record.provider_request_body.is_none());
+        assert!(record.response_body.is_none());
+        assert_eq!(
+            record.provider_request_body_state,
+            Some(UsageBodyCaptureState::Truncated)
+        );
+        let metadata = record.request_metadata.expect("preserved billing facts");
+        assert_eq!(metadata["requested_reasoning_effort"], "high");
+        assert_eq!(metadata["provider_reasoning_effort"], "medium");
+        assert_eq!(metadata["provider_service_tier"], "priority");
+        assert_eq!(metadata["provider_actual_service_tier"], "default");
+        assert_eq!(metadata["provider_cache_ttl_minutes"], 30);
+        assert_eq!(
+            metadata["plan_usage_reservation_token"],
+            "550e8400-e29b-41d4-a716-446655440000"
+        );
+        assert_eq!(budget.retained_bytes(), 0);
     }
 
     #[test]

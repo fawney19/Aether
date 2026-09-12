@@ -29,7 +29,10 @@ impl Default for FrontdoorUserRpmConfig {
         Self {
             bucket_seconds: 60,
             key_ttl_seconds: 120,
-            fail_open: true,
+            // A shared runtime outage must not silently disable the abuse
+            // guard.  Operators who explicitly accept that trade-off can
+            // still opt in with RATE_LIMIT_FAIL_OPEN=true.
+            fail_open: false,
             allow_local_fallback: true,
         }
     }
@@ -532,6 +535,7 @@ mod tests {
             local_rejection: None,
             allowed_models: None,
             ip_rules: None,
+            verified_api_key_hash: None,
         });
         let state = AppState::new().expect("state should build for tests");
 
@@ -572,6 +576,7 @@ mod tests {
             local_rejection: None,
             allowed_models: None,
             ip_rules: None,
+            verified_api_key_hash: None,
         });
         let state = AppState::new().expect("state should build for tests");
 
@@ -612,6 +617,7 @@ mod tests {
             local_rejection: None,
             allowed_models: None,
             ip_rules: None,
+            verified_api_key_hash: None,
         });
         let state = AppState::new().expect("state should build for tests");
 
@@ -633,8 +639,15 @@ mod tests {
         let config = FrontdoorUserRpmConfig::new(0, 0, true);
         assert_eq!(config.bucket_seconds(), 1);
         assert_eq!(config.key_ttl_seconds(), 1);
+        // `new(..., true)` remains the explicit opt-in path.
         assert!(config.fail_open());
         assert!(config.allow_local_fallback());
+    }
+
+    #[test]
+    fn default_config_fails_closed_while_explicit_opt_in_remains_available() {
+        assert!(!FrontdoorUserRpmConfig::default().fail_open());
+        assert!(FrontdoorUserRpmConfig::new(60, 120, true).fail_open());
     }
 
     #[tokio::test]
@@ -656,6 +669,7 @@ mod tests {
             local_rejection: None,
             allowed_models: None,
             ip_rules: None,
+            verified_api_key_hash: None,
         });
         let state = AppState::new().expect("state should build for tests");
 

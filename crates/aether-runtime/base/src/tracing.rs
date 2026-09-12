@@ -21,6 +21,11 @@ use crate::config::ServiceRuntimeConfig;
 use crate::error::RuntimeBootstrapError;
 use crate::observability::{FileLoggingConfig, LogDestination, LogRotation};
 
+mod writer;
+
+pub use writer::{logging_metric_samples, shutdown_logging, LogShutdownGuard};
+use writer::{register_log_workers, LogWorker, NonBlockingLogWriter};
+
 static TRACING_INIT: OnceLock<Result<(), String>> = OnceLock::new();
 
 pub type LogReloader = Box<dyn Fn(&str) + Send + Sync>;
@@ -385,17 +390,12 @@ pub(crate) fn init_tracing(config: ServiceRuntimeConfig) -> Result<(), RuntimeBo
                 .unwrap_or_else(|_| config.default_log_filter.into());
             let identity = RuntimeLogIdentity::from_config(&config);
 
-            let (file_writer, startup_cleanup_warning) =
-                if config.observability.log_destination.needs_file_sink() {
-                    let Some(file_logging) = config.observability.file_logging.clone() else {
-                        return Err("file logging requires a configured log directory".to_string());
-                    };
-                    let (writer, startup_cleanup_warning) =
-                        RollingFileMakeWriter::new(config.service_name, file_logging)?;
-                    (Some(writer), startup_cleanup_warning)
-                } else {
-                    (None, None)
-                };
+            let RuntimeLogWriters {
+                stdout_writer,
+                file_writer,
+                workers,
+                startup_cleanup_warning,
+            } = RuntimeLogWriters::new(&config)?;
 
             let init_result = match (
                 config.observability.log_format,
@@ -403,16 +403,26 @@ pub(crate) fn init_tracing(config: ServiceRuntimeConfig) -> Result<(), RuntimeBo
             ) {
                 (LogFormat::Pretty, LogDestination::Stdout) => tracing_subscriber::registry()
                     .with(filter)
-                    .with(tracing_subscriber::fmt::layer().event_format(
-                        PrettyRuntimeEventFormatter::new(identity.clone(), stdout_supports_ansi()),
-                    ))
+                    .with(
+                        tracing_subscriber::fmt::layer()
+                            .event_format(PrettyRuntimeEventFormatter::new(
+                                identity.clone(),
+                                stdout_supports_ansi(),
+                            ))
+                            .with_writer(
+                                stdout_writer.clone().expect("stdout writer should exist"),
+                            ),
+                    )
                     .try_init(),
                 (LogFormat::Json, LogDestination::Stdout) => tracing_subscriber::registry()
                     .with(filter)
                     .with(
                         tracing_subscriber::fmt::layer()
                             .json()
-                            .event_format(JsonRuntimeEventFormatter::new(identity.clone())),
+                            .event_format(JsonRuntimeEventFormatter::new(identity.clone()))
+                            .with_writer(
+                                stdout_writer.clone().expect("stdout writer should exist"),
+                            ),
                     )
                     .try_init(),
                 (LogFormat::Pretty, LogDestination::File) => tracing_subscriber::registry()
@@ -435,9 +445,16 @@ pub(crate) fn init_tracing(config: ServiceRuntimeConfig) -> Result<(), RuntimeBo
                     .try_init(),
                 (LogFormat::Pretty, LogDestination::Both) => tracing_subscriber::registry()
                     .with(filter)
-                    .with(tracing_subscriber::fmt::layer().event_format(
-                        PrettyRuntimeEventFormatter::new(identity.clone(), stdout_supports_ansi()),
-                    ))
+                    .with(
+                        tracing_subscriber::fmt::layer()
+                            .event_format(PrettyRuntimeEventFormatter::new(
+                                identity.clone(),
+                                stdout_supports_ansi(),
+                            ))
+                            .with_writer(
+                                stdout_writer.clone().expect("stdout writer should exist"),
+                            ),
+                    )
                     .with(
                         tracing_subscriber::fmt::layer()
                             .with_ansi(false)
@@ -450,7 +467,10 @@ pub(crate) fn init_tracing(config: ServiceRuntimeConfig) -> Result<(), RuntimeBo
                     .with(
                         tracing_subscriber::fmt::layer()
                             .json()
-                            .event_format(JsonRuntimeEventFormatter::new(identity.clone())),
+                            .event_format(JsonRuntimeEventFormatter::new(identity.clone()))
+                            .with_writer(
+                                stdout_writer.clone().expect("stdout writer should exist"),
+                            ),
                     )
                     .with(
                         tracing_subscriber::fmt::layer()
@@ -463,6 +483,7 @@ pub(crate) fn init_tracing(config: ServiceRuntimeConfig) -> Result<(), RuntimeBo
             .map_err(|err| err.to_string());
 
             if init_result.is_ok() {
+                register_log_workers(workers);
                 if let Some(warning) = startup_cleanup_warning.as_ref() {
                     emit_log_cleanup_warning("startup", warning.log_dir.as_path(), &warning.error);
                 }
@@ -497,39 +518,35 @@ pub fn init_reloadable_service_tracing(
     let (filter_layer, reload_handle) = reload::Layer::new(filter);
     let identity = RuntimeLogIdentity::from_config(&config);
 
-    let (file_writer, startup_cleanup_warning) =
-        if config.observability.log_destination.needs_file_sink() {
-            let Some(file_logging) = config.observability.file_logging.clone() else {
-                return Err(RuntimeBootstrapError::Tracing(
-                    "file logging requires a configured log directory".to_string(),
-                ));
-            };
-            let (writer, startup_cleanup_warning) =
-                RollingFileMakeWriter::new(config.service_name, file_logging)
-                    .map_err(RuntimeBootstrapError::Tracing)?;
-            (Some(writer), startup_cleanup_warning)
-        } else {
-            (None, None)
-        };
+    let RuntimeLogWriters {
+        stdout_writer,
+        file_writer,
+        workers,
+        startup_cleanup_warning,
+    } = RuntimeLogWriters::new(&config).map_err(RuntimeBootstrapError::Tracing)?;
 
     match (
         config.observability.log_format,
         config.observability.log_destination,
     ) {
-        (LogFormat::Pretty, LogDestination::Stdout) => {
-            tracing_subscriber::registry()
-                .with(filter_layer)
-                .with(tracing_subscriber::fmt::layer().event_format(
-                    PrettyRuntimeEventFormatter::new(identity.clone(), stdout_supports_ansi()),
-                ))
-                .try_init()
-        }
+        (LogFormat::Pretty, LogDestination::Stdout) => tracing_subscriber::registry()
+            .with(filter_layer)
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .event_format(PrettyRuntimeEventFormatter::new(
+                        identity.clone(),
+                        stdout_supports_ansi(),
+                    ))
+                    .with_writer(stdout_writer.clone().expect("stdout writer should exist")),
+            )
+            .try_init(),
         (LogFormat::Json, LogDestination::Stdout) => tracing_subscriber::registry()
             .with(filter_layer)
             .with(
                 tracing_subscriber::fmt::layer()
                     .json()
-                    .event_format(JsonRuntimeEventFormatter::new(identity.clone())),
+                    .event_format(JsonRuntimeEventFormatter::new(identity.clone()))
+                    .with_writer(stdout_writer.clone().expect("stdout writer should exist")),
             )
             .try_init(),
         (LogFormat::Pretty, LogDestination::File) => tracing_subscriber::registry()
@@ -550,26 +567,30 @@ pub fn init_reloadable_service_tracing(
                     .with_writer(file_writer.clone().expect("file writer should exist")),
             )
             .try_init(),
-        (LogFormat::Pretty, LogDestination::Both) => {
-            tracing_subscriber::registry()
-                .with(filter_layer)
-                .with(tracing_subscriber::fmt::layer().event_format(
-                    PrettyRuntimeEventFormatter::new(identity.clone(), stdout_supports_ansi()),
-                ))
-                .with(
-                    tracing_subscriber::fmt::layer()
-                        .with_ansi(false)
-                        .event_format(PrettyRuntimeEventFormatter::new(identity.clone(), false))
-                        .with_writer(file_writer.clone().expect("file writer should exist")),
-                )
-                .try_init()
-        }
+        (LogFormat::Pretty, LogDestination::Both) => tracing_subscriber::registry()
+            .with(filter_layer)
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .event_format(PrettyRuntimeEventFormatter::new(
+                        identity.clone(),
+                        stdout_supports_ansi(),
+                    ))
+                    .with_writer(stdout_writer.clone().expect("stdout writer should exist")),
+            )
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_ansi(false)
+                    .event_format(PrettyRuntimeEventFormatter::new(identity.clone(), false))
+                    .with_writer(file_writer.clone().expect("file writer should exist")),
+            )
+            .try_init(),
         (LogFormat::Json, LogDestination::Both) => tracing_subscriber::registry()
             .with(filter_layer)
             .with(
                 tracing_subscriber::fmt::layer()
                     .json()
-                    .event_format(JsonRuntimeEventFormatter::new(identity.clone())),
+                    .event_format(JsonRuntimeEventFormatter::new(identity.clone()))
+                    .with_writer(stdout_writer.clone().expect("stdout writer should exist")),
             )
             .with(
                 tracing_subscriber::fmt::layer()
@@ -581,6 +602,7 @@ pub fn init_reloadable_service_tracing(
     }
     .map_err(|err| RuntimeBootstrapError::Tracing(err.to_string()))?;
 
+    register_log_workers(workers);
     if let Some(warning) = startup_cleanup_warning.as_ref() {
         emit_log_cleanup_warning("startup", warning.log_dir.as_path(), &warning.error);
     }
@@ -593,6 +615,54 @@ pub fn init_reloadable_service_tracing(
             let _ = reload_handle.modify(|filter| *filter = new_filter);
         }
     }))
+}
+
+struct RuntimeLogWriters {
+    stdout_writer: Option<NonBlockingLogWriter>,
+    file_writer: Option<NonBlockingLogWriter>,
+    workers: Vec<LogWorker>,
+    startup_cleanup_warning: Option<StartupCleanupWarning>,
+}
+
+impl RuntimeLogWriters {
+    fn new(config: &ServiceRuntimeConfig) -> Result<Self, String> {
+        let (file_sink, startup_cleanup_warning) =
+            if config.observability.log_destination.needs_file_sink() {
+                let file_logging = config
+                    .observability
+                    .file_logging
+                    .clone()
+                    .ok_or("file logging requires a configured log directory")?;
+                let (sink, warning) =
+                    RollingFileMakeWriter::new(config.service_name, file_logging)?;
+                (Some(sink), warning)
+            } else {
+                (None, None)
+            };
+        let mut workers = Vec::with_capacity(2);
+        let stdout_writer = if config.observability.log_destination != LogDestination::File {
+            let (writer, worker) = NonBlockingLogWriter::new("stdout", io::stdout())
+                .map_err(|err| format!("failed to start stdout log writer: {err}"))?;
+            workers.push(worker);
+            Some(writer)
+        } else {
+            None
+        };
+        let file_writer = if let Some(sink) = file_sink {
+            let (writer, worker) = NonBlockingLogWriter::new("file", sink.make_writer())
+                .map_err(|err| format!("failed to start file log writer: {err}"))?;
+            workers.push(worker);
+            Some(writer)
+        } else {
+            None
+        };
+        Ok(Self {
+            stdout_writer,
+            file_writer,
+            workers,
+            startup_cleanup_warning,
+        })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -666,7 +736,8 @@ impl RollingFileSink {
         config: FileLoggingConfig,
         cleanup: fn(&str, &FileLoggingConfig) -> io::Result<usize>,
     ) -> io::Result<(Self, Option<StartupCleanupWarning>)> {
-        fs::create_dir_all(&config.dir)?;
+        fs::create_dir_all(&config.dir)
+            .map_err(|error| log_destination_error("create log directory", &config.dir, error))?;
         let startup_cleanup_warning =
             cleanup(service_name, &config)
                 .err()
@@ -691,7 +762,10 @@ impl RollingFileSink {
     }
 
     fn write(&self, buf: &[u8]) -> io::Result<usize> {
-        let now = Local::now();
+        self.write_at(buf, Local::now())
+    }
+
+    fn write_at(&self, buf: &[u8], now: DateTime<Local>) -> io::Result<usize> {
         let mut state = self
             .state
             .lock()
@@ -716,10 +790,96 @@ impl RollingFileSink {
 }
 
 fn open_bucketed_log_file(dir: &Path, service_name: &str, bucket: &str) -> io::Result<File> {
-    OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(bucketed_log_path(dir, service_name, bucket))
+    let path = bucketed_log_path(dir, service_name, bucket);
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options
+            .mode(0o600)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+    }
+
+    let file = options
+        .open(&path)
+        .map_err(|error| log_destination_error("open log file", &path, error))?;
+    validate_open_log_file(&file, &path)
+        .map_err(|error| log_destination_error("validate log file", &path, error))?;
+    Ok(file)
+}
+
+fn log_destination_error(operation: &str, path: &Path, error: io::Error) -> io::Error {
+    let mut message = format!("failed to {operation} {}: {error}", path.display());
+    #[cfg(unix)]
+    {
+        let process_uid = unsafe { libc::geteuid() };
+        let process_gid = unsafe { libc::getegid() };
+        message.push_str(&format!(" (process uid={process_uid}, gid={process_gid})"));
+    }
+    message.push_str(
+        "; check ownership and write permissions for the log directory and existing log files",
+    );
+    io::Error::new(error.kind(), message)
+}
+
+#[cfg(unix)]
+fn validate_open_log_file(file: &File, path: &Path) -> io::Result<()> {
+    validate_open_log_file_for_user(file, path, unsafe { libc::geteuid() })
+}
+
+#[cfg(unix)]
+fn validate_open_log_file_for_user(
+    file: &File,
+    path: &Path,
+    process_uid: libc::uid_t,
+) -> io::Result<()> {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+    let metadata = file.metadata()?;
+    if !metadata.file_type().is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("log destination is not a regular file: {}", path.display()),
+        ));
+    }
+    if process_uid != 0 && metadata.uid() != process_uid {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "log destination is owned by another user: {} (owner uid={}, expected uid={process_uid}); \
+                 chmod does not change file ownership",
+                path.display(),
+                metadata.uid()
+            ),
+        ));
+    }
+    if metadata.nlink() != 1 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "log destination has multiple hard links: {}",
+                path.display()
+            ),
+        ));
+    }
+    // `mode(0o600)` only affects newly-created files. Tighten an existing
+    // bucket as well so a historical permissive umask cannot keep exposing
+    // request and operational data after an upgrade.
+    file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn validate_open_log_file(file: &File, path: &Path) -> io::Result<()> {
+    let metadata = file.metadata()?;
+    if !metadata.file_type().is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("log destination is not a regular file: {}", path.display()),
+        ));
+    }
+    Ok(())
 }
 
 fn bucketed_log_path(dir: &Path, service_name: &str, bucket: &str) -> PathBuf {
@@ -746,8 +906,19 @@ fn spawn_log_cleanup_task(service_name: &'static str, config: FileLoggingConfig)
         let interval = Duration::from_secs(6 * 60 * 60);
         loop {
             tokio::time::sleep(interval).await;
-            if let Err(err) = cleanup_log_files(service_name, &config) {
-                emit_log_cleanup_warning("background", config.dir.as_path(), &err);
+            let cleanup_config = config.clone();
+            match tokio::task::spawn_blocking(move || {
+                cleanup_log_files(service_name, &cleanup_config)
+            })
+            .await
+            {
+                Ok(Ok(_)) => {}
+                Ok(Err(err)) => {
+                    emit_log_cleanup_warning("background", config.dir.as_path(), &err);
+                }
+                Err(err) => {
+                    emit_log_cleanup_warning("background", config.dir.as_path(), &err);
+                }
             }
         }
     });
@@ -838,9 +1009,9 @@ fn select_log_files_for_cleanup(
 mod tests {
     use super::{
         bucketed_log_path, cleanup_log_files, format_target_cell, log_bucket_key,
-        select_log_files_for_cleanup, FileLoggingConfig, JsonRuntimeEventFormatter,
-        LogFileCandidate, LogRotation, PrettyRuntimeEventFormatter, RollingFileSink,
-        RuntimeLogIdentity,
+        open_bucketed_log_file, select_log_files_for_cleanup, FileLoggingConfig,
+        JsonRuntimeEventFormatter, LogFileCandidate, LogRotation, PrettyRuntimeEventFormatter,
+        RollingFileSink, RuntimeLogIdentity,
     };
     use chrono::{Local, TimeZone};
     use std::fs;
@@ -942,6 +1113,78 @@ mod tests {
     }
 
     #[test]
+    fn rolling_file_sink_rotates_without_mixing_bucket_contents() {
+        for rotation in [LogRotation::Hourly, LogRotation::Daily] {
+            let dir = std::env::temp_dir().join(format!("aether-runtime-logs-{}", Uuid::new_v4()));
+            let config = FileLoggingConfig::new(&dir, rotation, 7, 30);
+            let (sink, _) = RollingFileSink::new("runtime-test", config).expect("sink should open");
+            let before = Local
+                .with_ymd_and_hms(2026, 4, 4, 23, 59, 59)
+                .single()
+                .expect("timestamp should build");
+            let after = before + chrono::Duration::seconds(2);
+
+            assert_eq!(sink.write_at(b"before\n", before).unwrap(), 7);
+            assert_eq!(sink.write_at(b"after\n", after).unwrap(), 6);
+            sink.flush().unwrap();
+            for (instant, expected) in [(before, "before\n"), (after, "after\n")] {
+                let path =
+                    bucketed_log_path(&dir, "runtime-test", &log_bucket_key(rotation, instant));
+                assert_eq!(fs::read_to_string(&path).unwrap(), expected);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt as _;
+                    assert_eq!(
+                        fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                        0o600
+                    );
+                }
+            }
+            drop(sink);
+            fs::remove_dir_all(&dir).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_rotation_preserves_old_file_and_can_retry_safely() {
+        use std::os::unix::fs::symlink;
+
+        let dir = std::env::temp_dir().join(format!("aether-runtime-logs-{}", Uuid::new_v4()));
+        let config = FileLoggingConfig::new(&dir, LogRotation::Daily, 7, 30);
+        let (sink, _) = RollingFileSink::new("runtime-test", config).unwrap();
+        let before = Local
+            .with_ymd_and_hms(2026, 4, 4, 12, 0, 0)
+            .single()
+            .unwrap();
+        let after = before + chrono::Duration::days(1);
+        let old_bucket = log_bucket_key(LogRotation::Daily, before);
+        let old_path = bucketed_log_path(&dir, "runtime-test", &old_bucket);
+        let new_path = bucketed_log_path(
+            &dir,
+            "runtime-test",
+            &log_bucket_key(LogRotation::Daily, after),
+        );
+        let victim = dir.join("victim.txt");
+        fs::write(&victim, b"unchanged").unwrap();
+        sink.write_at(b"before\n", before).unwrap();
+        symlink(&victim, &new_path).unwrap();
+
+        assert!(sink.write_at(b"rejected\n", after).is_err());
+        assert_eq!(sink.state.lock().unwrap().current_bucket, old_bucket);
+        assert_eq!(fs::read(&victim).unwrap(), b"unchanged");
+        assert_eq!(fs::read(&old_path).unwrap(), b"before\n");
+
+        fs::remove_file(&new_path).unwrap();
+        sink.write_at(b"after\n", after).unwrap();
+        sink.flush().unwrap();
+        assert_eq!(fs::read(&new_path).unwrap(), b"after\n");
+        assert_eq!(fs::read(&old_path).unwrap(), b"before\n");
+        drop(sink);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn cleanup_log_files_removes_matching_files_on_disk() {
         let dir = std::env::temp_dir().join(format!("aether-runtime-logs-{}", Uuid::new_v4()));
         fs::create_dir_all(&dir).expect("temp dir should exist");
@@ -958,6 +1201,43 @@ mod tests {
         assert_eq!(removed, 2);
         assert!(!file_a.exists(), "cleanup should remove file a");
         assert!(!file_b.exists(), "cleanup should remove file b");
+
+        fs::remove_dir_all(&dir).expect("temp dir should be removable");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rolling_log_file_is_private_and_rejects_symlink_destination() {
+        use std::os::unix::fs::{symlink, PermissionsExt as _};
+
+        let dir = std::env::temp_dir().join(format!("aether-runtime-logs-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).expect("temp dir should exist");
+
+        let private = open_bucketed_log_file(&dir, "runtime-test", "private")
+            .expect("private log should open");
+        assert_eq!(
+            private
+                .metadata()
+                .expect("log metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        drop(private);
+
+        let victim = dir.join("victim.txt");
+        fs::write(&victim, b"unchanged").expect("victim should exist");
+        let symlink_path = bucketed_log_path(&dir, "runtime-test", "symlink");
+        symlink(&victim, &symlink_path).expect("symlink should exist");
+        assert!(
+            open_bucketed_log_file(&dir, "runtime-test", "symlink").is_err(),
+            "rolling logs must not follow a pre-created symlink"
+        );
+        assert_eq!(
+            fs::read(&victim).expect("victim should remain readable"),
+            b"unchanged"
+        );
 
         fs::remove_dir_all(&dir).expect("temp dir should be removable");
     }
@@ -984,6 +1264,121 @@ mod tests {
         assert_eq!(warning.error, "cleanup denied".to_string());
 
         fs::remove_dir_all(&warning.log_dir).expect("temp dir should be removable");
+    }
+
+    #[test]
+    fn rolling_file_sink_reports_directory_creation_failure_with_context() {
+        let dir = std::env::temp_dir().join(format!("aether-runtime-logs-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).expect("temp dir should exist");
+        let blocker = dir.join("not-a-directory");
+        fs::write(&blocker, b"unchanged").expect("blocking file should exist");
+        let log_dir = blocker.join("logs");
+        let config = FileLoggingConfig::new(&log_dir, LogRotation::Daily, 7, 30);
+
+        let error = RollingFileSink::new("runtime-test", config)
+            .expect_err("a regular file must not be treated as a directory");
+        let message = error.to_string();
+        assert!(message.contains("failed to create log directory"));
+        assert!(message.contains(&log_dir.display().to_string()));
+        assert!(message.contains("ownership and write permissions"));
+        assert_eq!(fs::read(&blocker).expect("blocking file"), b"unchanged");
+
+        fs::remove_dir_all(&dir).expect("temp dir should be removable");
+    }
+
+    #[test]
+    fn rolling_log_file_reports_open_failure_with_context() {
+        let dir = std::env::temp_dir().join(format!("aether-runtime-logs-{}", Uuid::new_v4()));
+        let path = bucketed_log_path(&dir, "runtime-test", "missing");
+
+        let error = open_bucketed_log_file(&dir, "runtime-test", "missing")
+            .expect_err("a missing parent directory must prevent file creation");
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        let message = error.to_string();
+        assert!(message.contains("failed to open log file"));
+        assert!(message.contains(&path.display().to_string()));
+        assert!(message.contains("ownership and write permissions"));
+        #[cfg(unix)]
+        {
+            assert!(message.contains(&format!("process uid={}", unsafe { libc::geteuid() })));
+            assert!(message.contains(&format!("gid={}", unsafe { libc::getegid() })));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rolling_log_file_rejects_another_owner_even_with_world_writable_permissions() {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+        let dir = std::env::temp_dir().join(format!("aether-runtime-logs-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).expect("temp dir should exist");
+        let path = bucketed_log_path(&dir, "runtime-test", "another-owner");
+        fs::write(&path, b"unchanged").expect("log file should exist");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o777))
+            .expect("log permissions should be writable by all users");
+        let file = fs::File::open(&path).expect("log should open");
+        let owner_uid = file.metadata().expect("log metadata").uid();
+        let process_uid = owner_uid.wrapping_add(1);
+
+        let error = super::validate_open_log_file_for_user(&file, &path, process_uid)
+            .expect_err("chmod must not bypass the ownership check");
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        let message = error.to_string();
+        assert!(message.contains("log destination is owned by another user"));
+        assert!(message.contains(&format!("owner uid={owner_uid}")));
+        assert!(message.contains(&format!("expected uid={process_uid}")));
+        assert!(message.contains("chmod does not change file ownership"));
+        assert_eq!(fs::read(&path).expect("log contents"), b"unchanged");
+        assert_eq!(
+            file.metadata().expect("log metadata").permissions().mode() & 0o777,
+            0o777
+        );
+        drop(file);
+
+        let reopened = open_bucketed_log_file(&dir, "runtime-test", "another-owner")
+            .expect("the actual owner should be able to reopen the log");
+        assert_eq!(
+            reopened
+                .metadata()
+                .expect("log metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        assert_eq!(fs::read(&path).expect("log contents"), b"unchanged");
+        drop(reopened);
+
+        fs::remove_dir_all(&dir).expect("temp dir should be removable");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn root_log_validation_accepts_existing_owners_but_rejects_hardlinks() {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+        let dir = std::env::temp_dir().join(format!("aether-runtime-logs-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).expect("temp dir should exist");
+        let path = bucketed_log_path(&dir, "runtime-test", "existing-owner");
+        fs::write(&path, b"unchanged").expect("log file should exist");
+        let file = fs::File::open(&path).expect("log should open");
+        let owner_uid = file.metadata().expect("log metadata").uid();
+
+        super::validate_open_log_file_for_user(&file, &path, 0)
+            .expect("root may use a regular log file without changing its owner");
+        let metadata = file.metadata().expect("log metadata");
+        assert_eq!(metadata.uid(), owner_uid);
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+        assert_eq!(fs::read(&path).expect("log contents"), b"unchanged");
+
+        fs::hard_link(&path, dir.join("other-link.log")).expect("hardlink should exist");
+        let error = super::validate_open_log_file_for_user(&file, &path, 0)
+            .expect_err("root must still reject a log file with multiple hard links");
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(error.to_string().contains("multiple hard links"));
+        drop(file);
+
+        fs::remove_dir_all(&dir).expect("temp dir should be removable");
     }
 
     #[test]

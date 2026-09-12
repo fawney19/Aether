@@ -15,10 +15,11 @@ pub use presets::{
 };
 pub use provider::{ProviderPoolAdapter, ProviderPoolMemberInput};
 pub use providers::{
-    build_antigravity_pool_quota_request, build_chatgpt_web_pool_quota_request,
-    build_codex_pool_quota_request, build_codex_pool_reset_credit_consume_request,
-    build_codex_pool_reset_credits_request, build_gemini_cli_pool_quota_request,
-    build_kiro_pool_quota_request, build_windsurf_pool_model_configs_request,
+    build_antigravity_pool_quota_request, build_antigravity_pool_quota_summary_request,
+    build_chatgpt_web_pool_quota_request, build_codex_pool_quota_request,
+    build_codex_pool_reset_credit_consume_request, build_codex_pool_reset_credits_request,
+    build_gemini_cli_pool_quota_request, build_kiro_pool_quota_request,
+    build_windsurf_pool_model_configs_request,
     build_windsurf_pool_model_configs_request_with_base_url, build_windsurf_pool_quota_request,
     build_windsurf_pool_quota_request_with_base_url, build_windsurf_pool_rate_limit_request,
     build_windsurf_pool_rate_limit_request_with_base_url, enrich_chatgpt_web_quota_metadata,
@@ -27,14 +28,16 @@ pub use providers::{
     AntigravityProviderPoolAdapter, ChatGptWebProviderPoolAdapter, CodexProviderPoolAdapter,
     DefaultProviderPoolAdapter, GeminiCliProviderPoolAdapter, GrokProviderPoolAdapter,
     KiroPoolQuotaAuthInput, KiroProviderPoolAdapter, UnsupportedQuotaProviderPoolAdapter,
-    ANTIGRAVITY_FETCH_AVAILABLE_MODELS_PATH, CHATGPT_WEB_CONVERSATION_INIT_PATH,
-    CHATGPT_WEB_DEFAULT_BASE_URL, CODEX_WHAM_RESET_CREDITS_CONSUME_URL,
-    CODEX_WHAM_RESET_CREDITS_URL, CODEX_WHAM_USAGE_URL, GEMINI_CLI_RETRIEVE_USER_QUOTA_PATH,
-    GEMINI_CLI_USER_AGENT, KIRO_USAGE_LIMITS_PATH, KIRO_USAGE_SDK_VERSION,
-    WINDSURF_MODEL_CONFIGS_PATH, WINDSURF_RATE_LIMIT_PATH, WINDSURF_USER_STATUS_PATH,
+    ANTIGRAVITY_FETCH_AVAILABLE_MODELS_PATH, ANTIGRAVITY_RETRIEVE_USER_QUOTA_SUMMARY_PATH,
+    CHATGPT_WEB_CONVERSATION_INIT_PATH, CHATGPT_WEB_DEFAULT_BASE_URL,
+    CODEX_WHAM_RESET_CREDITS_CONSUME_URL, CODEX_WHAM_RESET_CREDITS_URL, CODEX_WHAM_USAGE_URL,
+    GEMINI_CLI_RETRIEVE_USER_QUOTA_PATH, GEMINI_CLI_USER_AGENT, KIRO_USAGE_LIMITS_PATH,
+    KIRO_USAGE_SDK_VERSION, WINDSURF_MODEL_CONFIGS_PATH, WINDSURF_RATE_LIMIT_PATH,
+    WINDSURF_USER_STATUS_PATH,
 };
 pub use quota::{
-    provider_pool_key_account_quota_exhausted, provider_pool_key_quota_hard_blocked,
+    provider_pool_key_account_quota_exhausted, provider_pool_key_model_quota_exhausted,
+    provider_pool_key_model_quota_hard_blocked, provider_pool_key_quota_hard_blocked,
     provider_pool_key_scheduling_label, provider_pool_member_quota_snapshot,
     provider_pool_quota_metadata_provider_type, provider_pool_quota_metadata_updated_at,
     provider_pool_quota_snapshot_updated_at,
@@ -364,6 +367,34 @@ mod tests {
     }
 
     #[test]
+    fn kiro_quota_request_rejects_region_url_injection() {
+        let spec = build_kiro_pool_quota_request(
+            "key-1",
+            &KiroPoolQuotaAuthInput {
+                authorization_value: "Bearer sensitive-access-token".to_string(),
+                api_region: "attacker.example/evil".to_string(),
+                kiro_version: "0.3.210".to_string(),
+                machine_id: "machine".to_string(),
+                profile_arn: None,
+            },
+        );
+
+        assert_eq!(
+            spec.url,
+            "https://q.us-east-1.amazonaws.com/getUsageLimits?origin=AI_EDITOR&resourceType=AGENTIC_REQUEST&isEmailRequired=true"
+        );
+        assert_eq!(
+            spec.headers.get("host").map(String::as_str),
+            Some("q.us-east-1.amazonaws.com")
+        );
+        assert!(!spec.url.contains("attacker.example"));
+        assert!(!spec
+            .headers
+            .get("host")
+            .is_some_and(|value| value.contains("attacker.example")));
+    }
+
+    #[test]
     fn chatgpt_web_quota_request_uses_default_base_url_when_empty() {
         let spec = build_chatgpt_web_pool_quota_request(
             "key-1",
@@ -379,7 +410,6 @@ mod tests {
             spec.headers.get("origin").map(String::as_str),
             Some("https://chatgpt.com")
         );
-        assert!(spec.accept_invalid_certs);
     }
 
     #[test]
@@ -561,7 +591,7 @@ mod tests {
             }
         })));
 
-        let signals = service.member_signals("windsurf", &key, None);
+        let signals = service.member_signals("windsurf", &key, None, None);
 
         assert!(!signals.quota_exhausted);
     }
@@ -588,7 +618,7 @@ mod tests {
             }
         }));
 
-        let signals = service.member_signals("windsurf", &key, None);
+        let signals = service.member_signals("windsurf", &key, None, None);
 
         assert!(signals.quota_exhausted);
     }
@@ -846,6 +876,159 @@ mod tests {
     }
 
     #[test]
+    fn antigravity_model_quota_exhaustion_does_not_block_other_models() {
+        let service = ProviderPoolService::with_builtin_adapters();
+        let mut key = sample_key(None);
+        key.status_snapshot = Some(json!({
+            "quota": {
+                "version": 2,
+                "provider_type": "antigravity",
+                "exhausted": false,
+                "windows": [
+                    {
+                        "code": "model:gemini-3.1-pro-high",
+                        "scope": "model",
+                        "model": "gemini-3.1-pro-high",
+                        "used_ratio": 1.0,
+                        "is_exhausted": true
+                    },
+                    {
+                        "code": "model:gemini-3-flash-agent",
+                        "scope": "model",
+                        "model": "gemini-3-flash-agent",
+                        "used_ratio": 0.1,
+                        "is_exhausted": false
+                    }
+                ]
+            }
+        }));
+
+        let exhausted =
+            service.member_signals("antigravity", &key, None, Some("gemini-3.1-pro-high"));
+        let available =
+            service.member_signals("antigravity", &key, None, Some("gemini-3-flash-agent"));
+
+        assert!(exhausted.quota_exhausted);
+        assert!(!available.quota_exhausted);
+    }
+
+    #[test]
+    fn antigravity_tiered_model_quota_wins_over_display_only_group_windows() {
+        let service = ProviderPoolService::with_builtin_adapters();
+        let mut key = sample_key(None);
+        key.status_snapshot = Some(json!({
+            "quota": {
+                "version": 2,
+                "provider_type": "antigravity",
+                "exhausted": true,
+                "windows": [{
+                    "code": "model:gemini-3.7-flash-tiered",
+                    "scope": "model",
+                    "model": "gemini-3.7-flash-tiered",
+                    "remaining_ratio": 0.906,
+                    "used_ratio": 0.094,
+                    "is_exhausted": false
+                }, {
+                    "code": "group:0:3p-5h",
+                    "scope": "quota_group",
+                    "quota_group": "group:0",
+                    "bucket_id": "3p-5h",
+                    "used_ratio": 1.0,
+                    "is_exhausted": true
+                }]
+            }
+        }));
+
+        let signals =
+            service.member_signals("antigravity", &key, None, Some("gemini-3.7-flash-tiered"));
+
+        assert!(!signals.quota_exhausted);
+        assert!(!signals.quota_hard_blocked);
+    }
+
+    #[test]
+    fn antigravity_tiered_variant_does_not_match_another_model_family() {
+        let service = ProviderPoolService::with_builtin_adapters();
+        let mut key = sample_key(None);
+        key.status_snapshot = Some(json!({
+            "quota": {
+                "version": 2,
+                "provider_type": "antigravity",
+                "exhausted": false,
+                "windows": [{
+                    "code": "model:gemini-3.7-pro-tiered",
+                    "scope": "model",
+                    "model": "gemini-3.7-pro-tiered",
+                    "used_ratio": 1.0,
+                    "is_exhausted": true
+                }]
+            }
+        }));
+
+        let signals =
+            service.member_signals("antigravity", &key, None, Some("gemini-3.7-flash-tiered"));
+
+        assert!(!signals.quota_exhausted);
+        assert!(!signals.quota_hard_blocked);
+    }
+
+    #[test]
+    fn codex_standard_and_spark_quota_families_are_independent() {
+        let service = ProviderPoolService::with_builtin_adapters();
+        let mut standard_exhausted = sample_key(None);
+        standard_exhausted.status_snapshot = Some(json!({
+            "quota": {
+                "version": 2,
+                "provider_type": "codex",
+                "exhausted": true,
+                "allowed": false,
+                "limit_reached": true,
+                "windows": [
+                    { "code": "weekly", "used_ratio": 1.0, "is_exhausted": true },
+                    { "code": "5h", "used_ratio": 0.5, "is_exhausted": false },
+                    { "code": "spark_weekly", "used_ratio": 0.2, "is_exhausted": false },
+                    { "code": "spark_5h", "used_ratio": 0.1, "is_exhausted": false }
+                ]
+            }
+        }));
+
+        let standard =
+            service.member_signals("codex", &standard_exhausted, None, Some("gpt-5.3-codex"));
+        let spark = service.member_signals(
+            "codex",
+            &standard_exhausted,
+            None,
+            Some("gpt-5.3-codex-spark"),
+        );
+        assert!(standard.quota_exhausted);
+        assert!(!standard.quota_hard_blocked);
+        assert!(!spark.quota_exhausted);
+        assert!(!spark.quota_hard_blocked);
+
+        let mut spark_exhausted = sample_key(None);
+        spark_exhausted.status_snapshot = Some(json!({
+            "quota": {
+                "version": 2,
+                "provider_type": "codex",
+                "exhausted": false,
+                "windows": [
+                    { "code": "weekly", "used_ratio": 0.2, "is_exhausted": false },
+                    { "code": "5h", "used_ratio": 0.1, "is_exhausted": false },
+                    { "code": "spark_weekly", "used_ratio": 1.0, "is_exhausted": true },
+                    { "code": "spark_5h", "used_ratio": 0.4, "is_exhausted": false }
+                ]
+            }
+        }));
+
+        let standard =
+            service.member_signals("codex", &spark_exhausted, None, Some("gpt-5.3-codex"));
+        let spark =
+            service.member_signals("codex", &spark_exhausted, None, Some("gpt-5.3-codex-spark"));
+        assert!(!standard.quota_exhausted);
+        assert!(spark.quota_exhausted);
+    }
+
+    #[test]
     fn provider_quota_exhaustion_metadata_expires_after_reset_at() {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -874,6 +1057,273 @@ mod tests {
             }))),
             "codex",
         ));
+    }
+
+    #[test]
+    fn model_quota_windows_are_isolated_without_provider_specific_names() {
+        let service = ProviderPoolService::with_builtin_adapters();
+        let mut key = sample_key(None);
+        key.status_snapshot = Some(json!({
+            "quota": {
+                "version": 2,
+                "provider_type": "codex",
+                "exhausted": true,
+                "windows": [
+                    {
+                        "code": "alpha_short",
+                        "quota_group": "alpha",
+                        "model": "vendor-alpha-model",
+                        "used_ratio": 1.0,
+                        "is_exhausted": true
+                    },
+                    {
+                        "code": "alpha_long",
+                        "quota_group": "alpha",
+                        "model": "vendor-alpha-model",
+                        "used_ratio": 0.2,
+                        "is_exhausted": false
+                    },
+                    {
+                        "code": "beta_short",
+                        "quota_group": "beta",
+                        "model": "vendor-beta-model",
+                        "used_ratio": 1.0,
+                        "is_exhausted": true
+                    }
+                ]
+            }
+        }));
+
+        let alpha = service.member_signals("codex", &key, None, Some("vendor-alpha-model"));
+        let beta = service.member_signals("codex", &key, None, Some("vendor-beta-model"));
+        assert!(
+            !alpha.quota_exhausted,
+            "one available alpha window must keep it usable"
+        );
+        assert!(beta.quota_exhausted);
+        assert!(!beta.quota_hard_blocked);
+    }
+
+    #[test]
+    fn legacy_family_prefix_is_matched_by_model_tokens() {
+        let service = ProviderPoolService::with_builtin_adapters();
+        let mut key = sample_key(None);
+        key.status_snapshot = Some(json!({
+            "quota": {
+                "version": 2,
+                "provider_type": "codex",
+                "exhausted": true,
+                "windows": [
+                    { "code": "alpha_weekly", "used_ratio": 1.0, "is_exhausted": true },
+                    { "code": "default_weekly", "used_ratio": 0.1, "is_exhausted": false }
+                ]
+            }
+        }));
+
+        let alpha = service.member_signals("codex", &key, None, Some("vendor-alpha-v2"));
+        assert!(alpha.quota_exhausted);
+        // An unrelated model has no identifiable bucket and therefore falls
+        // back to the account-level snapshot rather than guessing a family.
+        let unknown = service.member_signals("codex", &key, None, Some("vendor-gamma-v2"));
+        assert!(unknown.quota_exhausted);
+    }
+
+    #[test]
+    fn compact_model_bucket_identity_matches_request_tokens() {
+        let service = ProviderPoolService::with_builtin_adapters();
+        let mut key = sample_key(None);
+        key.status_snapshot = Some(json!({
+            "quota": {
+                "version": 2,
+                "provider_type": "codex",
+                "exhausted": true,
+                "windows": [
+                    {
+                        "code": "additional_0_primary_window",
+                        "scope": "model",
+                        "model": "spark",
+                        "used_ratio": 0.0,
+                        "is_exhausted": false
+                    }
+                ]
+            }
+        }));
+
+        let signals = service.member_signals("codex", &key, None, Some("gpt-5.3-codex-spark"));
+        assert!(
+            !signals.quota_exhausted,
+            "a compact bucket name should match a token in the selected model"
+        );
+    }
+
+    #[test]
+    fn model_family_token_matches_versioned_alias_without_hardcoding_name() {
+        let service = ProviderPoolService::with_builtin_adapters();
+        let mut key = sample_key(None);
+        key.status_snapshot = Some(json!({
+            "quota": {
+                "version": 2,
+                "provider_type": "codex",
+                "exhausted": true,
+                "windows": [{
+                    "code": "additional_0_primary_window",
+                    "scope": "model",
+                    "model": "gpt-5.3-codex-spark",
+                    "used_ratio": 1.0,
+                    "is_exhausted": true
+                }]
+            }
+        }));
+
+        let signals = service.member_signals("codex", &key, None, Some("gpt-5.4-codex-spark"));
+        assert!(signals.quota_exhausted);
+    }
+
+    #[test]
+    fn model_only_snapshot_does_not_poison_account_fallback() {
+        let service = ProviderPoolService::with_builtin_adapters();
+        let mut key = sample_key(None);
+        key.status_snapshot = Some(json!({
+            "quota": {
+                "version": 2,
+                "provider_type": "codex",
+                "exhausted": true,
+                "windows": [{
+                    "code": "model:vendor-alpha",
+                    "scope": "model",
+                    "model": "vendor-alpha",
+                    "used_ratio": 1.0,
+                    "is_exhausted": true
+                }]
+            }
+        }));
+
+        let signals = service.member_signals("codex", &key, None, None);
+        assert!(
+            !signals.quota_exhausted,
+            "account-level inspection must ignore model-only buckets"
+        );
+    }
+
+    #[test]
+    fn model_map_quota_is_resolved_without_materialized_windows() {
+        let service = ProviderPoolService::with_builtin_adapters();
+        let mut key = sample_key(None);
+        key.status_snapshot = Some(json!({
+            "quota": {
+                "version": 2,
+                "provider_type": "grok",
+                "exhausted": false,
+                "quota_by_model": {
+                    "vendor-alpha": {
+                        "remaining": 0.0,
+                        "total": 10.0
+                    },
+                    "vendor-beta": {
+                        "remaining": 5.0,
+                        "total": 10.0
+                    }
+                }
+            }
+        }));
+
+        let alpha = service.member_signals("grok", &key, None, Some("vendor-alpha"));
+        let beta = service.member_signals("grok", &key, None, Some("vendor-beta"));
+        assert!(alpha.quota_exhausted);
+        assert!(!beta.quota_exhausted);
+    }
+
+    #[test]
+    fn raw_provider_metadata_model_bucket_overrides_account_snapshot() {
+        let service = ProviderPoolService::with_builtin_adapters();
+        let mut key = sample_key(Some(json!({
+            "codex": {
+                "updated_at": 1_700_000_001u64,
+                "additional_quota_windows": [{
+                    "scope": "model",
+                    "model": "future-spark",
+                    "used_ratio": 0.0,
+                    "is_exhausted": false
+                }]
+            }
+        })));
+        key.status_snapshot = Some(json!({
+            "quota": {
+                "version": 2,
+                "provider_type": "codex",
+                "exhausted": true,
+                "windows": [{
+                    "code": "primary",
+                    "scope": "account",
+                    "used_ratio": 1.0,
+                    "is_exhausted": true
+                }]
+            }
+        }));
+
+        let signals = service.member_signals("codex", &key, None, Some("future-spark"));
+        assert!(
+            !signals.quota_exhausted,
+            "a newer model bucket in provider metadata must not inherit an exhausted account bucket"
+        );
+    }
+
+    #[test]
+    fn model_quota_availability_suppresses_account_hard_block() {
+        let service = ProviderPoolService::with_builtin_adapters();
+        let mut key = sample_key(None);
+        key.status_snapshot = Some(json!({
+            "quota": {
+                "version": 2,
+                "provider_type": "codex",
+                "allowed": false,
+                "limit_reached": true,
+                "exhausted": true,
+                "windows": [{
+                    "scope": "model",
+                    "model": "future-model",
+                    "used_ratio": 0.0,
+                    "is_exhausted": false
+                }]
+            }
+        }));
+
+        let signals = service.member_signals("codex", &key, None, Some("future-model"));
+        assert!(!signals.quota_exhausted);
+        assert!(!signals.quota_hard_blocked);
+    }
+
+    #[test]
+    fn newer_model_quota_observation_wins_over_stale_snapshot() {
+        let service = ProviderPoolService::with_builtin_adapters();
+        let mut key = sample_key(Some(json!({
+            "codex": {
+                "updated_at": 1_700_000_200u64,
+                "additional_quota_windows": [{
+                    "scope": "model",
+                    "model": "future-model",
+                    "used_ratio": 0.0,
+                    "is_exhausted": false
+                }]
+            }
+        })));
+        key.status_snapshot = Some(json!({
+            "quota": {
+                "version": 2,
+                "provider_type": "codex",
+                "observed_at": 1_700_000_100u64,
+                "exhausted": true,
+                "windows": [{
+                    "scope": "model",
+                    "model": "future-model",
+                    "used_ratio": 1.0,
+                    "is_exhausted": true
+                }]
+            }
+        }));
+
+        let signals = service.member_signals("codex", &key, None, Some("future-model"));
+        assert!(!signals.quota_exhausted);
     }
 
     #[test]

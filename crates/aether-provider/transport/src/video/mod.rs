@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::fmt;
 
 use aether_data_contracts::repository::video_tasks::StoredVideoTask;
 use aether_video_tasks_core::{
@@ -29,7 +30,7 @@ pub enum ProviderVideoCreateFamily {
     Gemini,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 pub struct ProviderVideoCreateHeadersInput<'a> {
     pub headers: &'a http::HeaderMap,
     pub auth_header: &'a str,
@@ -37,6 +38,37 @@ pub struct ProviderVideoCreateHeadersInput<'a> {
     pub header_rules: Option<&'a Value>,
     pub provider_request_body: &'a Value,
     pub original_request_body: &'a Value,
+}
+
+impl fmt::Debug for ProviderVideoCreateHeadersInput<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProviderVideoCreateHeadersInput")
+            .field(
+                "request_header_names",
+                &self
+                    .headers
+                    .keys()
+                    .map(|name| name.as_str())
+                    .collect::<Vec<_>>(),
+            )
+            .field("auth_header", &self.auth_header)
+            .field("has_auth_value", &(!self.auth_value.is_empty()))
+            .field("has_header_rules", &self.header_rules.is_some())
+            .field(
+                "provider_request_body_bytes",
+                &serde_json::to_vec(self.provider_request_body)
+                    .ok()
+                    .map(|bytes| bytes.len()),
+            )
+            .field(
+                "original_request_body_bytes",
+                &serde_json::to_vec(self.original_request_body)
+                    .ok()
+                    .map(|bytes| bytes.len()),
+            )
+            .finish()
+    }
 }
 
 #[async_trait]
@@ -210,6 +242,12 @@ pub fn build_video_create_headers(
     ) {
         return None;
     }
+    let declared_connection_headers =
+        super::headers::declared_connection_header_names(input.headers, &BTreeMap::new());
+    super::headers::remove_declared_connection_headers(
+        &mut provider_request_headers,
+        &declared_connection_headers,
+    );
     Some(provider_request_headers)
 }
 

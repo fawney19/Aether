@@ -208,7 +208,6 @@ fn admin_wrapped_state_owns_provider_oauth_capabilities() {
         "pub(crate) async fn create_provider_oauth_catalog_key(",
         "pub(crate) async fn update_existing_provider_oauth_catalog_key(",
         "pub(crate) async fn refresh_provider_oauth_account_state_after_update(",
-        "pub(crate) async fn update_provider_catalog_key_oauth_credentials(",
     ] {
         assert!(
             admin_request.contains(pattern),
@@ -841,12 +840,12 @@ fn admin_proxy_uses_single_admin_routes_entrypoint() {
         "pub(crate) fn has_usage_data_reader(&self) -> bool",
         "pub(crate) fn has_auth_module_writer(&self) -> bool",
         "pub(crate) async fn get_ldap_module_config(",
-        "pub(crate) async fn upsert_ldap_module_config(",
+        "pub(crate) async fn compare_and_swap_ldap_module_config(",
         "pub(crate) async fn count_active_local_admin_users_with_valid_password(",
         "pub(crate) async fn list_oauth_provider_configs(",
         "pub(crate) async fn get_oauth_provider_config(",
         "pub(crate) async fn upsert_oauth_provider_config(",
-        "pub(crate) async fn delete_oauth_provider_config(",
+        "pub(crate) async fn delete_oauth_provider_config_if_unlinked(",
         "pub(crate) async fn get_management_token_with_user(",
         "pub(crate) async fn delete_management_token(",
         "pub(crate) async fn remove_admin_security_blacklist(",

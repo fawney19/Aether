@@ -113,7 +113,7 @@ async fn gateway_skips_unsupported_local_openai_chat_sync_candidate_before_tryin
             false,
             false,
             None,
-            Some(2),
+            Some(1),
             None,
             Some(20.0),
             None,
@@ -135,7 +135,7 @@ async fn gateway_skips_unsupported_local_openai_chat_sync_candidate_before_tryin
             "https://api.openai.skip.example".to_string(),
             None,
             None,
-            Some(2),
+            Some(1),
             None,
             None,
             None,
@@ -522,7 +522,7 @@ async fn gateway_surfaces_local_execution_runtime_miss_reason_when_all_openai_ch
             false,
             false,
             None,
-            Some(2),
+            Some(1),
             None,
             Some(20.0),
             None,
@@ -544,7 +544,7 @@ async fn gateway_surfaces_local_execution_runtime_miss_reason_when_all_openai_ch
             "https://chatgpt.com/backend-api/codex".to_string(),
             None,
             None,
-            Some(2),
+            Some(1),
             None,
             None,
             None,
@@ -805,7 +805,7 @@ async fn gateway_retries_next_local_openai_chat_sync_candidate_after_auth_failur
             false,
             false,
             None,
-            Some(2),
+            Some(1),
             None,
             Some(20.0),
             None,
@@ -831,7 +831,7 @@ async fn gateway_retries_next_local_openai_chat_sync_candidate_after_auth_failur
             base_url.to_string(),
             None,
             None,
-            Some(2),
+            Some(1),
             None,
             None,
             None,
@@ -973,7 +973,9 @@ async fn gateway_retries_next_local_openai_chat_sync_candidate_after_auth_failur
                             .to_string(),
                     });
 
-                if attempt == 1 {
+                // The primary key gets two attempts under the default
+                // sticky_key_attempts; both must fail to reach the backup.
+                if attempt <= 2 {
                     return Json(json!({
                         "request_id": "trace-openai-chat-local-failover-123",
                         "status_code": 401,
@@ -1128,56 +1130,64 @@ async fn gateway_retries_next_local_openai_chat_sync_candidate_after_auth_failur
         .lock()
         .expect("mutex should lock")
         .clone();
-    assert_eq!(seen_execution_runtime_requests.len(), 2);
+    // Default sticky_key_attempts is 2: the primary key is retried once on
+    // the same key, then failover moves to the backup with a single attempt.
+    assert_eq!(seen_execution_runtime_requests.len(), 3);
+    for primary_request in &seen_execution_runtime_requests[..2] {
+        assert_eq!(
+            primary_request.trace_id,
+            "trace-openai-chat-local-failover-123"
+        );
+        assert_eq!(
+            primary_request.url,
+            "https://api.openai.primary.example/chat/completions"
+        );
+        assert_eq!(
+            primary_request.authorization,
+            "Bearer sk-upstream-openai-primary"
+        );
+    }
     assert_eq!(
-        seen_execution_runtime_requests[0].trace_id,
-        "trace-openai-chat-local-failover-123"
-    );
-    assert_eq!(
-        seen_execution_runtime_requests[0].url,
-        "https://api.openai.primary.example/chat/completions"
-    );
-    assert_eq!(
-        seen_execution_runtime_requests[0].authorization,
-        "Bearer sk-upstream-openai-primary"
-    );
-    assert_eq!(
-        seen_execution_runtime_requests[1].url,
+        seen_execution_runtime_requests[2].url,
         "https://api.openai.backup.example/chat/completions"
     );
     assert_eq!(
-        seen_execution_runtime_requests[1].model,
+        seen_execution_runtime_requests[2].model,
         "gpt-5-upstream-backup"
     );
     assert_eq!(
-        seen_execution_runtime_requests[1].authorization,
+        seen_execution_runtime_requests[2].authorization,
         "Bearer sk-upstream-openai-backup"
     );
     let stored_candidates = request_candidate_repository
         .list_by_request_id("trace-openai-chat-local-failover-123")
         .await
         .expect("request candidate trace should read");
-    assert_eq!(stored_candidates.len(), 2);
-    assert_eq!(stored_candidates[0].candidate_index, 0);
-    assert_eq!(stored_candidates[0].status, RequestCandidateStatus::Failed);
-    assert_eq!(stored_candidates[0].status_code, Some(401));
-    assert_eq!(
-        stored_candidates[0].error_message.as_deref(),
-        Some("invalid auth token")
-    );
-    let failed_upstream_response = stored_candidates[0]
-        .extra_data
-        .as_ref()
-        .and_then(|value| value.get("upstream_response"))
-        .expect("failed candidate should keep its upstream response");
-    assert_eq!(failed_upstream_response["status_code"], json!(401));
-    assert_eq!(
-        failed_upstream_response["body"]["error"]["message"],
-        json!("invalid auth token")
-    );
-    assert_eq!(stored_candidates[1].candidate_index, 1);
-    assert_eq!(stored_candidates[1].status, RequestCandidateStatus::Success);
-    assert_eq!(stored_candidates[1].status_code, Some(200));
+    assert_eq!(stored_candidates.len(), 3);
+    for (retry_index, failed_candidate) in stored_candidates[..2].iter().enumerate() {
+        assert_eq!(failed_candidate.candidate_index, 0);
+        assert_eq!(failed_candidate.retry_index, retry_index as u32);
+        assert_eq!(failed_candidate.status, RequestCandidateStatus::Failed);
+        assert_eq!(failed_candidate.status_code, Some(401));
+        assert!(failed_candidate.error_message.is_some());
+        let failed_upstream_response = failed_candidate
+            .extra_data
+            .as_ref()
+            .and_then(|value| value.get("upstream_response"))
+            .expect("failed candidate should keep its upstream response");
+        assert_eq!(failed_upstream_response["status_code"], json!(401));
+        assert_eq!(
+            failed_upstream_response["headers"]["content-type"],
+            "application/json"
+        );
+        assert_eq!(
+            failed_upstream_response["body"]["error"]["message"],
+            "invalid auth token"
+        );
+    }
+    assert_eq!(stored_candidates[2].candidate_index, 1);
+    assert_eq!(stored_candidates[2].status, RequestCandidateStatus::Success);
+    assert_eq!(stored_candidates[2].status_code, Some(200));
 
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     assert!(
@@ -1187,7 +1197,7 @@ async fn gateway_retries_next_local_openai_chat_sync_candidate_after_auth_failur
 
     assert_eq!(
         *execution_runtime_hits.lock().expect("mutex should lock"),
-        2
+        3
     );
     assert_eq!(*decision_hits.lock().expect("mutex should lock"), 0);
     assert_eq!(*plan_hits.lock().expect("mutex should lock"), 0);

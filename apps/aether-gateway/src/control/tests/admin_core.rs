@@ -628,7 +628,7 @@ fn classifies_admin_management_token_write_routes_and_permission_catalog() {
             http::Method::POST,
             "/api/admin/management-tokens",
             "create_token",
-            "admin:management_tokens:write",
+            "admin:management_tokens:admin",
         ),
         (
             http::Method::PUT,
@@ -640,7 +640,7 @@ fn classifies_admin_management_token_write_routes_and_permission_catalog() {
             http::Method::POST,
             "/api/admin/management-tokens/token-123/regenerate",
             "regenerate_token",
-            "admin:management_tokens:write",
+            "admin:management_tokens:admin",
         ),
     ];
 

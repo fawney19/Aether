@@ -4,11 +4,85 @@ use aether_data_contracts::repository::routing_profiles::{
     StoredRoutingGroup, StoredRoutingGroupBinding, StoredRoutingGroupVersion,
     UpdateRoutingGroupBindingRecord, UpdateRoutingGroupRecord,
 };
+use aether_routing_core::RoutingGroupConfig;
 use std::sync::Arc;
+use tracing::warn;
 
 use super::{AppState, GatewayError};
 
+const BOOTSTRAP_SYSTEM_DEFAULT_ROUTING_GROUP_NAME: &str = "system-default";
+
 impl AppState {
+    /// Make sure an enabled system-default routing group exists.
+    ///
+    /// When none exists, one is created from the routing defaults.
+    /// Returns the created group, or `None` when nothing had to be created (no
+    /// routing storage, no writer, or a system default already exists).
+    pub async fn ensure_system_default_routing_group(
+        &self,
+    ) -> Result<Option<StoredRoutingGroup>, std::io::Error> {
+        self.ensure_system_default_routing_group_inner()
+            .await
+            .map_err(|err| std::io::Error::other(format!("{err:?}")))
+    }
+
+    pub(crate) async fn ensure_system_default_routing_group_inner(
+        &self,
+    ) -> Result<Option<StoredRoutingGroup>, GatewayError> {
+        if !self.has_routing_group_data_reader() {
+            return Ok(None);
+        }
+        if self
+            .find_routing_group(RoutingGroupLookupKey::SystemDefault)
+            .await?
+            .is_some()
+        {
+            return Ok(None);
+        }
+        if !self.has_routing_group_data_writer() {
+            warn!(
+                event_name = "routing_system_default_bootstrap_skipped",
+                log_type = "event",
+                "no system default routing group exists and routing storage is read-only; scheduler uses routing defaults"
+            );
+            return Ok(None);
+        }
+
+        let config = RoutingGroupConfig::default();
+        let config_json = serde_json::to_value(config)
+            .map_err(|err| GatewayError::Internal(format!("serialize routing config: {err}")))?;
+
+        let name = if self
+            .find_routing_group(RoutingGroupLookupKey::Name(
+                BOOTSTRAP_SYSTEM_DEFAULT_ROUTING_GROUP_NAME,
+            ))
+            .await?
+            .is_some()
+        {
+            format!(
+                "{BOOTSTRAP_SYSTEM_DEFAULT_ROUTING_GROUP_NAME}-{}",
+                &uuid::Uuid::new_v4().simple().to_string()[..8]
+            )
+        } else {
+            BOOTSTRAP_SYSTEM_DEFAULT_ROUTING_GROUP_NAME.to_string()
+        };
+        let now = crate::clock::current_unix_secs() as i64;
+        self.create_routing_group(CreateRoutingGroupRecord {
+            id: uuid::Uuid::new_v4().to_string(),
+            name,
+            description: Some("系统默认调度策略".to_string()),
+            enabled: true,
+            is_system_default: true,
+            sort_order: 0,
+            config_json,
+            version: 1,
+            created_at: now,
+            updated_at: now,
+            published_at: Some(now),
+        })
+        .await
+    }
+
     pub(crate) fn has_routing_group_data_reader(&self) -> bool {
         self.data.has_routing_group_reader()
     }

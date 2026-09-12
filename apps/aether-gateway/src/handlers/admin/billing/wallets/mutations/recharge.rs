@@ -10,6 +10,7 @@ use super::super::shared::{
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::handlers::admin::shared::{attach_admin_audit_response, unix_secs_to_rfc3339};
 use crate::GatewayError;
+use aether_data::repository::wallet::stored_timestamp_unix_secs;
 use axum::{
     body::Body,
     response::{IntoResponse, Response},
@@ -89,7 +90,7 @@ pub(in super::super) async fn build_admin_wallet_recharge_response(
             payment_order.amount_usd,
             payment_order.payment_method,
             payment_order.status,
-            unix_secs_to_rfc3339(payment_order.created_at_unix_ms),
+            unix_secs_to_rfc3339(stored_timestamp_unix_secs(payment_order.created_at_unix_ms)),
             payment_order
                 .credited_at_unix_secs
                 .and_then(unix_secs_to_rfc3339),

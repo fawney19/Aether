@@ -1,6 +1,7 @@
 use super::{
-    build_admin_users_bad_request_response, build_admin_users_read_only_response,
-    disabled_user_policy_detail, disabled_user_policy_field, normalize_admin_user_role,
+    build_admin_users_bad_request_response, build_admin_users_permission_denied_response,
+    build_admin_users_read_only_response, disabled_user_policy_detail, disabled_user_policy_field,
+    management_token_may_administer_user_accounts, normalize_admin_user_role,
 };
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::handlers::admin::shared::attach_admin_audit_response;
@@ -131,6 +132,24 @@ pub(in super::super) async fn build_admin_user_batch_action_response(
         Ok(value) => value,
         Err(detail) => return Ok(build_admin_user_batch_bad_request_response(detail)),
     };
+    let resolved = match resolve_admin_user_selection(state, request.selection).await {
+        Ok(value) => value,
+        Err(detail) => return Ok(build_admin_user_batch_bad_request_response(detail)),
+    };
+    let mutates_admin_account = mutation
+        .role
+        .as_deref()
+        .is_some_and(crate::roles::can_access_admin_console)
+        || (mutation.has_auth_user_fields()
+            && resolved
+                .items
+                .iter()
+                .any(|item| crate::roles::can_access_admin_console(&item.role)));
+    if mutates_admin_account && !management_token_may_administer_user_accounts(request_context) {
+        return Ok(build_admin_users_permission_denied_response(
+            request_context,
+        ));
+    }
     if mutation.has_auth_user_fields() && !state.has_auth_user_write_capability() {
         return Ok(build_admin_users_read_only_response(
             "当前为只读模式，无法批量更新用户",
@@ -141,10 +160,6 @@ pub(in super::super) async fn build_admin_user_batch_action_response(
             "当前为只读模式，无法批量更新用户钱包",
         ));
     }
-    let resolved = match resolve_admin_user_selection(state, request.selection).await {
-        Ok(value) => value,
-        Err(detail) => return Ok(build_admin_user_batch_bad_request_response(detail)),
-    };
     let active_admin_demotions = count_active_admin_demotions(&mutation, &resolved.items);
     let active_admin_count = if active_admin_demotions > 0 {
         state.count_active_admin_users().await?

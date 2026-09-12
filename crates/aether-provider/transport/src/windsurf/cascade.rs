@@ -23,7 +23,7 @@ OUTPUT RULES:
 
 Violating these rules will produce broken output for the end user. Stay in chat-API mode at all times."#;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct CascadeStep {
     pub step_type: u64,
     pub status: u64,
@@ -36,10 +36,42 @@ pub struct CascadeStep {
     pub usage: Option<CascadeUsage>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+impl fmt::Debug for CascadeStep {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CascadeStep")
+            .field("step_type", &self.step_type)
+            .field("status", &self.status)
+            .field("text_len", &self.text.len())
+            .field("response_text_len", &self.response_text.len())
+            .field("modified_text_len", &self.modified_text.len())
+            .field("thinking_len", &self.thinking.len())
+            .field("error_text_len", &self.error_text.len())
+            .field("has_native_tool", &self.native_tool.is_some())
+            .field("usage", &self.usage)
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
 pub struct CascadeNativeToolStep {
     pub kind: String,
     pub arguments: Value,
+}
+
+impl fmt::Debug for CascadeNativeToolStep {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CascadeNativeToolStep")
+            .field("kind", &self.kind)
+            .field(
+                "arguments_bytes",
+                &serde_json::to_vec(&self.arguments)
+                    .ok()
+                    .map(|bytes| bytes.len()),
+            )
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -60,19 +92,57 @@ impl CascadeUsage {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct CascadeImage {
     pub base64_data: String,
     pub mime_type: String,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+impl fmt::Debug for CascadeImage {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CascadeImage")
+            .field("base64_data_len", &self.base64_data.len())
+            .field("mime_type", &self.mime_type)
+            .finish()
+    }
+}
+
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct SendCascadeMessageOptions {
     pub tool_preamble: Option<String>,
     pub images: Vec<CascadeImage>,
     pub additional_steps: Vec<Vec<u8>>,
     pub native_mode: bool,
     pub native_allowlist: Vec<String>,
+}
+
+impl fmt::Debug for SendCascadeMessageOptions {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SendCascadeMessageOptions")
+            .field(
+                "tool_preamble_len",
+                &self.tool_preamble.as_ref().map(String::len),
+            )
+            .field("image_count", &self.images.len())
+            .field(
+                "image_bytes",
+                &self
+                    .images
+                    .iter()
+                    .map(|image| image.base64_data.len())
+                    .sum::<usize>(),
+            )
+            .field("additional_steps_count", &self.additional_steps.len())
+            .field(
+                "additional_steps_bytes",
+                &self.additional_steps.iter().map(Vec::len).sum::<usize>(),
+            )
+            .field("native_mode", &self.native_mode)
+            .field("native_allowlist_count", &self.native_allowlist.len())
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

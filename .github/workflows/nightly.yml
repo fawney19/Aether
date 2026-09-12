@@ -1,0 +1,613 @@
+name: Nightly Release
+
+on:
+  # 02:17 Asia/Shanghai (18:17 UTC) every day.
+  schedule:
+    - cron: '17 18 * * *'
+  workflow_dispatch:
+
+# Checks and builds only need read access. Publishing jobs opt into write access
+# below so a failed build cannot modify the existing nightly release.
+permissions:
+  actions: read
+  contents: read
+
+# A rolling tag and image are shared by scheduled and manually retried runs.
+# Keep GitHub Release immutability disabled for this repository: the tag and
+# assets intentionally move after each successful daily build.
+concurrency:
+  group: nightly-main
+  cancel-in-progress: false
+
+env:
+  CARGO_INCREMENTAL: '0'
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: '1'
+
+jobs:
+  source:
+    name: Resolve main snapshot
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      sha: ${{ steps.snapshot.outputs.sha }}
+      short_sha: ${{ steps.snapshot.outputs.short_sha }}
+      date: ${{ steps.snapshot.outputs.date }}
+      ghcr_image: ${{ steps.snapshot.outputs.ghcr_image }}
+    steps:
+      - name: Require main branch
+        id: snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "${GITHUB_REF}" != "refs/heads/main" ]]; then
+            echo "Nightly releases must run from refs/heads/main (got ${GITHUB_REF})." >&2
+            exit 1
+          fi
+
+          sha="${GITHUB_SHA}"
+          # Docker 镜像仓库名必须全小写；GitHub owner 可能保留大写，先统一规范化。
+          repository_owner="${GITHUB_REPOSITORY%%/*}"
+          repository_owner="${repository_owner,,}"
+          echo "sha=${sha}" >> "${GITHUB_OUTPUT}"
+          echo "short_sha=${sha:0:7}" >> "${GITHUB_OUTPUT}"
+          echo "date=$(date -u +'%Y-%m-%d')" >> "${GITHUB_OUTPUT}"
+          echo "ghcr_image=ghcr.io/${repository_owner}/aether" >> "${GITHUB_OUTPUT}"
+          echo "Building main at ${sha}."
+
+  # Keep the scheduled backend coverage in one place so it cannot drift from PR CI.
+  rust_ci:
+    name: Rust CI
+    needs: source
+    uses: ./.github/workflows/rust-ci.yml
+
+  rust_extended:
+    name: Rust extended checks
+    needs: source
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ needs.source.outputs.sha }}
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: 1.95.0
+
+      - name: Show Rust toolchain
+        run: rustc -Vv
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+        with:
+          shared-key: nightly-rust-1.95-${{ runner.os }}
+          workspaces: . -> target
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad # v0.0.9
+
+      - name: Check all workspace targets
+        env:
+          RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: 'true'
+        run: cargo check --workspace --all-targets --all-features --locked
+
+      - name: Run workspace doctests
+        env:
+          RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: 'true'
+        run: cargo test --workspace --all-features --doc --locked
+
+      - name: Show sccache stats
+        if: always()
+        env:
+          RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: 'true'
+        run: sccache --show-stats
+
+  frontend:
+    name: Frontend checks and build
+    needs: source
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ needs.source.outputs.sha }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: |
+            frontend/package-lock.json
+            aether-vscodex/web/package-lock.json
+
+      # The frontend prebuild synchronizes the embedded VSCodex UI by running
+      # its build from a separate package. Install that package explicitly so
+      # vue-tsc can resolve vite/client, vitest/globals, and node types in a
+      # clean runner.
+      - name: Install VSCodex web dependencies
+        working-directory: aether-vscodex/web
+        run: npm ci
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Lint
+        working-directory: frontend
+        run: npx --no-install eslint .
+
+      - name: Type-check
+        working-directory: frontend
+        run: npm run type-check
+
+      - name: Run unit tests
+        working-directory: frontend
+        run: npm run test:run
+
+      - name: Build nightly frontend
+        working-directory: frontend
+        env:
+          AETHER_BUILD_VERSION: nightly-${{ needs.source.outputs.short_sha }}
+          AETHER_VERSION: nightly
+        run: npm run build
+
+      - name: Upload frontend artifact
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: nightly-frontend-dist
+          path: frontend/dist/
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 7
+
+  repository_health:
+    name: Repository health checks
+    needs: source
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ needs.source.outputs.sha }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: '22'
+
+      - name: Check generated format coverage matrix
+        run: python3 docs/api/generate_format_field_coverage.py --check
+
+      - name: Test pressure report checker
+        run: node --test tools/pressure/check_gateway_stage_report.test.js
+
+  checks:
+    name: Nightly check gate
+    runs-on: ubuntu-latest
+    if: ${{ always() }}
+    needs:
+      - source
+      - rust_ci
+      - rust_extended
+      - frontend
+      - repository_health
+    steps:
+      - name: Verify check jobs
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          failed=0
+          echo "source=${{ needs.source.result }}"
+          echo "rust_ci=${{ needs.rust_ci.result }}"
+          echo "rust_extended=${{ needs.rust_extended.result }}"
+          echo "frontend=${{ needs.frontend.result }}"
+          echo "repository_health=${{ needs.repository_health.result }}"
+
+          for result in \
+            "${{ needs.source.result }}" \
+            "${{ needs.rust_ci.result }}" \
+            "${{ needs.rust_extended.result }}" \
+            "${{ needs.frontend.result }}" \
+            "${{ needs.repository_health.result }}"; do
+            if [[ "${result}" != "success" ]]; then
+              failed=1
+            fi
+          done
+
+          if [[ "${failed}" -ne 0 ]]; then
+            echo 'One or more nightly checks failed or were cancelled.' >&2
+            exit 1
+          fi
+
+  build:
+    name: Build ${{ matrix.name }}
+    needs: [source, checks]
+    if: ${{ needs.checks.result == 'success' }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-amd64
+            target: x86_64-unknown-linux-musl
+            platform: linux
+            arch: amd64
+            os: ubuntu-latest
+            use_cross: true
+          - name: linux-arm64
+            target: aarch64-unknown-linux-musl
+            platform: linux
+            arch: arm64
+            os: ubuntu-latest
+            use_cross: true
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ needs.source.outputs.sha }}
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: 1.95.0
+          targets: ${{ matrix.target }}
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+        with:
+          shared-key: nightly-release-${{ matrix.target }}
+          workspaces: . -> target
+
+      - name: Install cross
+        if: matrix.use_cross
+        uses: taiki-e/install-action@1ae7257be536a92d9218a6b343dc6e6ba650f7e1 # cross
+
+      - name: Build release binary
+        env:
+          AETHER_BUILD_VERSION: nightly-${{ needs.source.outputs.short_sha }}
+          AETHER_VERSION: nightly
+          AETHER_BUILD_TYPE: release
+          CARGO_TERM_COLOR: always
+        shell: bash
+        run: |
+          if [[ "${{ matrix.use_cross }}" == "true" ]]; then
+            cross build --release --locked -p aether-gateway --target "${{ matrix.target }}"
+          else
+            cargo build --release --locked -p aether-gateway --target "${{ matrix.target }}"
+          fi
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: nightly-gateway-${{ matrix.platform }}-${{ matrix.arch }}
+          path: target/${{ matrix.target }}/release/aether-gateway
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 7
+
+  docker:
+    name: Publish nightly GHCR image
+    needs: [source, checks, build]
+    if: ${{ needs.checks.result == 'success' && needs.build.result == 'success' }}
+    runs-on: ubuntu-latest
+    env:
+      GHCR_IMAGE: ${{ needs.source.outputs.ghcr_image }}
+    permissions:
+      actions: read
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ needs.source.outputs.sha }}
+
+      - name: Download Linux binaries and frontend
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          pattern: nightly-*
+          path: artifacts
+          merge-multiple: false
+
+      - name: Prepare Docker build context
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist/frontend
+          cp artifacts/nightly-gateway-linux-amd64/aether-gateway dist/aether-gateway-amd64
+          cp artifacts/nightly-gateway-linux-arm64/aether-gateway dist/aether-gateway-arm64
+          chmod 0755 dist/aether-gateway-amd64 dist/aether-gateway-arm64
+          cp -R artifacts/nightly-frontend-dist/. dist/frontend/
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push nightly image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: ./Dockerfile.app
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: |
+            ${{ env.GHCR_IMAGE }}:nightly
+            ${{ env.GHCR_IMAGE }}:nightly-${{ needs.source.outputs.sha }}
+          labels: |
+            org.opencontainers.image.title=Aether
+            org.opencontainers.image.version=nightly
+            org.opencontainers.image.revision=${{ needs.source.outputs.sha }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+
+  package:
+    name: Package nightly archives
+    needs: [source, checks, build]
+    if: ${{ needs.checks.result == 'success' && needs.build.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ needs.source.outputs.sha }}
+
+      - name: Download nightly artifacts
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          pattern: nightly-*
+          path: artifacts
+          merge-multiple: false
+
+      - name: Build nightly release packages
+        shell: bash
+        env:
+          SOURCE_REF: ${{ needs.source.outputs.sha }}
+        run: |
+          set -euo pipefail
+          VERSION="nightly"
+
+          mkdir -p package release-assets
+          for arch in amd64 arm64; do
+            bundle="aether-${VERSION}-linux-${arch}"
+            root="package/${bundle}"
+            mkdir -p "${root}/bin" "${root}/frontend"
+
+            install -m 0755 \
+              "artifacts/nightly-gateway-linux-${arch}/aether-gateway" \
+              "${root}/bin/aether-gateway"
+            cp -R artifacts/nightly-frontend-dist/. "${root}/frontend/"
+            sed \
+              -e "s/^SOURCE_REF=\"\${AETHER_SOURCE_REF:-main}\"/SOURCE_REF=\"\${AETHER_SOURCE_REF:-${SOURCE_REF}}\"/" \
+              -e "s/^VERSION=\"\${AETHER_VERSION:-}\"/VERSION=\"\${AETHER_VERSION:-${VERSION}}\"/" \
+              install.sh > "${root}/install.sh"
+            chmod 0755 "${root}/install.sh"
+            install -m 0755 update.sh "${root}/update.sh"
+            install -m 0644 docker-compose.yml "${root}/docker-compose.yml"
+            install -m 0644 docker-compose.single-node.yml "${root}/docker-compose.single-node.yml"
+            install -m 0644 .env.example "${root}/.env.example"
+            install -m 0755 generate_keys.sh "${root}/generate_keys.sh"
+            install -m 0644 README.md "${root}/README.md"
+            install -m 0644 LICENSE "${root}/LICENSE"
+
+            tar -C package -czf "release-assets/${bundle}.tar.gz" "${bundle}"
+          done
+
+          sed \
+            -e "s/^SOURCE_REF=\"\${AETHER_SOURCE_REF:-main}\"/SOURCE_REF=\"\${AETHER_SOURCE_REF:-${SOURCE_REF}}\"/" \
+            -e "s/^VERSION=\"\${AETHER_VERSION:-}\"/VERSION=\"\${AETHER_VERSION:-${VERSION}}\"/" \
+            install.sh > release-assets/install.sh
+          chmod 0755 release-assets/install.sh
+          (cd release-assets && sha256sum *.tar.gz > SHA256SUMS)
+
+          test "$(find release-assets -maxdepth 1 -name '*.tar.gz' | wc -l)" -eq 2
+          test "$(wc -l < release-assets/SHA256SUMS)" -eq 2
+          (cd release-assets && sha256sum -c SHA256SUMS)
+          for archive in release-assets/*.tar.gz; do
+            tar -tzf "${archive}" >/dev/null
+          done
+
+      - name: Upload nightly package artifact
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: nightly-release-assets
+          path: release-assets/*
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 7
+
+  github_release:
+    name: Publish nightly GitHub Release
+    needs: [source, checks, docker, package]
+    if: ${{ needs.checks.result == 'success' && needs.docker.result == 'success' && needs.package.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Download nightly package artifact
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: nightly-release-assets
+          path: release-assets
+
+      - name: Update rolling nightly release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          RELEASE_TAG: nightly
+          SOURCE_SHA: ${{ needs.source.outputs.sha }}
+          SOURCE_SHORT_SHA: ${{ needs.source.outputs.short_sha }}
+          RELEASE_DATE: ${{ needs.source.outputs.date }}
+          GHCR_IMAGE: ${{ needs.source.outputs.ghcr_image }}
+        run: |
+          set -euo pipefail
+
+          release_title="Aether Nightly ${RELEASE_DATE} (${SOURCE_SHORT_SHA})"
+          notes_file="${RUNNER_TEMP}/nightly-release-notes.md"
+          cat > "${notes_file}" <<EOF
+          ## Aether nightly
+
+          This rolling prerelease was built from [main commit ${SOURCE_SHORT_SHA}](https://github.com/${REPOSITORY}/commit/${SOURCE_SHA}).
+
+          - Source branch: main
+          - Source commit: ${SOURCE_SHA}
+          - Build date (UTC): ${RELEASE_DATE}
+          - Container image: ${GHCR_IMAGE}:nightly
+          - Commit image: ${GHCR_IMAGE}:nightly-${SOURCE_SHA}
+
+          The nightly tag and assets are replaced by the next successful daily build.
+          EOF
+
+          # Create a draft on the first run. Later runs repair the same rolling
+          # release on retry if any upload or metadata update is interrupted.
+          if ! gh release view "${RELEASE_TAG}" --repo "${REPOSITORY}" >/dev/null 2>&1; then
+            gh release create "${RELEASE_TAG}" \
+              --repo "${REPOSITORY}" \
+              --draft \
+              --prerelease \
+              --latest=false \
+              --target "${SOURCE_SHA}" \
+              --title "${release_title}" \
+              --notes-file "${notes_file}"
+          fi
+
+          # Upload archives first, then the checksum/installer metadata. This
+          # keeps a failed upload from leaving a checksum that describes files
+          # which have not reached the Release yet.
+          gh release upload "${RELEASE_TAG}" release-assets/*.tar.gz \
+            --repo "${REPOSITORY}" \
+            --clobber
+          gh release upload "${RELEASE_TAG}" \
+            release-assets/SHA256SUMS \
+            release-assets/install.sh \
+            --repo "${REPOSITORY}" \
+            --clobber
+
+          published_assets="$(gh release view "${RELEASE_TAG}" --repo "${REPOSITORY}" --json assets --jq '.assets[].name')"
+          while IFS= read -r asset_name; do
+            if [[ "${asset_name}" == aether-nightly-*.tar.gz && ! -f "release-assets/${asset_name}" ]]; then
+              gh release delete-asset "${RELEASE_TAG}" "${asset_name}" \
+                --repo "${REPOSITORY}" \
+                --yes
+            fi
+          done <<<"${published_assets}"
+
+          # target_commitish does not move an existing git tag. Move the ref
+          # only after the complete asset set is available.
+          if gh api "repos/${REPOSITORY}/git/ref/tags/${RELEASE_TAG}" >/dev/null 2>&1; then
+            gh api -X PATCH "repos/${REPOSITORY}/git/refs/tags/${RELEASE_TAG}" \
+              -f "sha=${SOURCE_SHA}" \
+              -F 'force=true' >/dev/null
+          else
+            gh api -X POST "repos/${REPOSITORY}/git/refs" \
+              -f "ref=refs/tags/${RELEASE_TAG}" \
+              -f "sha=${SOURCE_SHA}" >/dev/null
+          fi
+
+          gh release edit "${RELEASE_TAG}" \
+            --repo "${REPOSITORY}" \
+            --draft=false \
+            --prerelease \
+            --latest=false \
+            --target "${SOURCE_SHA}" \
+            --title "${release_title}" \
+            --notes-file "${notes_file}"
+
+          expected_assets=(
+            aether-nightly-linux-amd64.tar.gz
+            aether-nightly-linux-arm64.tar.gz
+            SHA256SUMS
+            install.sh
+          )
+          asset_names="$(gh release view "${RELEASE_TAG}" --repo "${REPOSITORY}" --json assets --jq '.assets[].name')"
+          for expected_asset in "${expected_assets[@]}"; do
+            if ! grep -Fxq "${expected_asset}" <<<"${asset_names}"; then
+              echo "Published release is missing asset ${expected_asset}." >&2
+              exit 1
+            fi
+          done
+
+          resolved_sha=""
+          for attempt in {1..10}; do
+            resolved_sha="$(gh api "repos/${REPOSITORY}/commits/${RELEASE_TAG}" --jq '.sha' 2>/dev/null || true)"
+            if [[ "${resolved_sha}" == "${SOURCE_SHA}" ]]; then
+              break
+            fi
+            sleep 2
+          done
+          if [[ "${resolved_sha}" != "${SOURCE_SHA}" ]]; then
+            echo "nightly tag resolved to ${resolved_sha}, expected ${SOURCE_SHA}." >&2
+            exit 1
+          fi
+
+          release_state="$(gh release view "${RELEASE_TAG}" --repo "${REPOSITORY}" --json isDraft,isPrerelease --jq '[.isDraft, .isPrerelease] | @tsv')"
+          if [[ "${release_state}" != $'false\ttrue' ]]; then
+            echo "nightly release has unexpected state: ${release_state}" >&2
+            exit 1
+          fi
+
+          echo "Published ${RELEASE_TAG} for ${SOURCE_SHA}."
+
+  summary:
+    name: Nightly summary
+    runs-on: ubuntu-latest
+    if: ${{ always() }}
+    needs:
+      - source
+      - rust_ci
+      - rust_extended
+      - frontend
+      - repository_health
+      - checks
+      - build
+      - docker
+      - package
+      - github_release
+    steps:
+      - name: Verify nightly pipeline
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          failed=0
+          for entry in \
+            "source=${{ needs.source.result }}" \
+            "rust_ci=${{ needs.rust_ci.result }}" \
+            "rust_extended=${{ needs.rust_extended.result }}" \
+            "frontend=${{ needs.frontend.result }}" \
+            "repository_health=${{ needs.repository_health.result }}" \
+            "checks=${{ needs.checks.result }}" \
+            "build=${{ needs.build.result }}" \
+            "docker=${{ needs.docker.result }}" \
+            "package=${{ needs.package.result }}" \
+            "github_release=${{ needs.github_release.result }}"; do
+            echo "${entry}"
+            if [[ "${entry#*=}" != "success" ]]; then
+              failed=1
+            fi
+          done
+
+          if [[ "${failed}" -ne 0 ]]; then
+            echo 'Nightly pipeline did not publish a new release.' >&2
+            exit 1
+          fi

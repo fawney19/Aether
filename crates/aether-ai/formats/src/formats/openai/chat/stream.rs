@@ -1,10 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
 
 use crate::formats::openai::namespace::NamespaceToolAliases;
 use crate::formats::openai::responses::{
-    encode_gemini_tool_signature_carrier_with_direction,
+    encode_gemini_tool_signature_carrier_with_direction, openai_responses_message_item_id,
     openai_responses_synthetic_reasoning_item_id,
     response::{
         ensure_modern_openai_responses_response_fields, openai_responses_current_timestamp,
@@ -33,6 +34,7 @@ struct OpenAIChatProviderToolState {
 
 #[derive(Default)]
 pub struct OpenAIChatProviderState {
+    terminal_only: bool,
     response_id: Option<String>,
     model: Option<String>,
     actual_service_tier: Option<String>,
@@ -59,6 +61,7 @@ struct OpenAIResponsesProviderToolResultState {
 
 #[derive(Default)]
 pub struct OpenAIResponsesProviderState {
+    terminal_only: bool,
     response_id: Option<String>,
     model: Option<String>,
     actual_service_tier: Option<String>,
@@ -71,11 +74,24 @@ pub struct OpenAIResponsesProviderState {
     tool_results: BTreeMap<usize, OpenAIResponsesProviderToolResultState>,
     tool_index_by_key: BTreeMap<String, usize>,
     image_item_keys: BTreeSet<String>,
-    opaque_completed_item_keys: BTreeSet<String>,
+    opaque_completed_item_keys: BTreeSet<OpenAIResponsesOutputItemKey>,
     last_tool_index: Option<usize>,
 }
 
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+enum OpenAIResponsesOutputItemKey {
+    Full(String),
+    Digest([u8; 32]),
+}
+
 impl OpenAIChatProviderState {
+    pub(crate) fn terminal_observation() -> Self {
+        Self {
+            terminal_only: true,
+            ..Self::default()
+        }
+    }
+
     pub(crate) fn actual_service_tier(&self) -> Option<&str> {
         self.actual_service_tier.as_deref()
     }
@@ -243,12 +259,14 @@ impl OpenAIChatProviderState {
                 recognized_delta = true;
                 if !content.is_empty() {
                     self.ensure_started(report_context, &mut out);
-                    let (id, model) = self.identity(report_context);
-                    out.push(CanonicalStreamFrame {
-                        id,
-                        model,
-                        event: CanonicalStreamEvent::TextDelta(content.to_string()),
-                    });
+                    if !self.terminal_only {
+                        let (id, model) = self.identity(report_context);
+                        out.push(CanonicalStreamFrame {
+                            id,
+                            model,
+                            event: CanonicalStreamEvent::TextDelta(content.to_string()),
+                        });
+                    }
                 }
             } else if delta.contains_key("content") {
                 recognized_delta = true;
@@ -258,12 +276,16 @@ impl OpenAIChatProviderState {
                 recognized_delta = true;
                 if !reasoning_content.is_empty() {
                     self.ensure_started(report_context, &mut out);
-                    let (id, model) = self.identity(report_context);
-                    out.push(CanonicalStreamFrame {
-                        id,
-                        model,
-                        event: CanonicalStreamEvent::ReasoningDelta(reasoning_content.to_string()),
-                    });
+                    if !self.terminal_only {
+                        let (id, model) = self.identity(report_context);
+                        out.push(CanonicalStreamFrame {
+                            id,
+                            model,
+                            event: CanonicalStreamEvent::ReasoningDelta(
+                                reasoning_content.to_string(),
+                            ),
+                        });
+                    }
                 }
             } else if delta.contains_key("reasoning_content") {
                 recognized_delta = true;
@@ -272,68 +294,71 @@ impl OpenAIChatProviderState {
             if let Some(tool_calls) = delta.get("tool_calls").and_then(Value::as_array) {
                 recognized_delta = true;
                 self.ensure_started(report_context, &mut out);
-                let (id, model) = self.identity(report_context);
-                for tool_call in tool_calls {
-                    let Some(tool_call_object) = tool_call.as_object() else {
-                        continue;
-                    };
-                    let index = tool_call_object
-                        .get("index")
-                        .and_then(Value::as_u64)
-                        .map(|value| value as usize)
-                        .unwrap_or(0);
-                    let state = self.tool_calls.entry(index).or_default();
-                    if let Some(call_id) = tool_call_object.get("id").and_then(Value::as_str) {
-                        state.id = Some(call_id.to_string());
-                    }
-                    let mut arguments = None;
-                    if let Some(function) =
-                        tool_call_object.get("function").and_then(Value::as_object)
-                    {
-                        if let Some(name) = function.get("name").and_then(Value::as_str) {
-                            state.name = Some(name.to_string());
+                if !self.terminal_only {
+                    let (id, model) = self.identity(report_context);
+                    for tool_call in tool_calls {
+                        let Some(tool_call_object) = tool_call.as_object() else {
+                            continue;
+                        };
+                        let index = tool_call_object
+                            .get("index")
+                            .and_then(Value::as_u64)
+                            .map(|value| value as usize)
+                            .unwrap_or(0);
+                        let state = self.tool_calls.entry(index).or_default();
+                        if let Some(call_id) = tool_call_object.get("id").and_then(Value::as_str) {
+                            state.id = Some(call_id.to_string());
                         }
-                        arguments = function
-                            .get("arguments")
-                            .and_then(Value::as_str)
-                            .filter(|arguments| !arguments.is_empty());
-                    }
-                    if !state.started_emitted {
-                        if let Some(arguments) = arguments {
-                            state.pending_arguments.push_str(arguments);
-                        }
-                        if let (Some(call_id), Some(name)) = (state.id.clone(), state.name.clone())
+                        let mut arguments = None;
+                        if let Some(function) =
+                            tool_call_object.get("function").and_then(Value::as_object)
                         {
-                            out.push(CanonicalStreamFrame {
-                                id: id.clone(),
-                                model: model.clone(),
-                                event: CanonicalStreamEvent::ToolCallStart {
-                                    index,
-                                    call_id,
-                                    name,
-                                },
-                            });
-                            state.started_emitted = true;
-                            if !state.pending_arguments.is_empty() {
+                            if let Some(name) = function.get("name").and_then(Value::as_str) {
+                                state.name = Some(name.to_string());
+                            }
+                            arguments = function
+                                .get("arguments")
+                                .and_then(Value::as_str)
+                                .filter(|arguments| !arguments.is_empty());
+                        }
+                        if !state.started_emitted {
+                            if let Some(arguments) = arguments {
+                                state.pending_arguments.push_str(arguments);
+                            }
+                            if let (Some(call_id), Some(name)) =
+                                (state.id.clone(), state.name.clone())
+                            {
                                 out.push(CanonicalStreamFrame {
                                     id: id.clone(),
                                     model: model.clone(),
-                                    event: CanonicalStreamEvent::ToolCallArgumentsDelta {
+                                    event: CanonicalStreamEvent::ToolCallStart {
                                         index,
-                                        arguments: std::mem::take(&mut state.pending_arguments),
+                                        call_id,
+                                        name,
                                     },
                                 });
+                                state.started_emitted = true;
+                                if !state.pending_arguments.is_empty() {
+                                    out.push(CanonicalStreamFrame {
+                                        id: id.clone(),
+                                        model: model.clone(),
+                                        event: CanonicalStreamEvent::ToolCallArgumentsDelta {
+                                            index,
+                                            arguments: std::mem::take(&mut state.pending_arguments),
+                                        },
+                                    });
+                                }
                             }
+                        } else if let Some(arguments) = arguments {
+                            out.push(CanonicalStreamFrame {
+                                id: id.clone(),
+                                model: model.clone(),
+                                event: CanonicalStreamEvent::ToolCallArgumentsDelta {
+                                    index,
+                                    arguments: arguments.to_string(),
+                                },
+                            });
                         }
-                    } else if let Some(arguments) = arguments {
-                        out.push(CanonicalStreamFrame {
-                            id: id.clone(),
-                            model: model.clone(),
-                            event: CanonicalStreamEvent::ToolCallArgumentsDelta {
-                                index,
-                                arguments: arguments.to_string(),
-                            },
-                        });
                     }
                 }
             } else if delta.contains_key("tool_calls") {
@@ -389,6 +414,13 @@ impl OpenAIChatProviderState {
 }
 
 impl OpenAIResponsesProviderState {
+    pub(crate) fn terminal_observation() -> Self {
+        Self {
+            terminal_only: true,
+            ..Self::default()
+        }
+    }
+
     pub(crate) fn actual_service_tier(&self) -> Option<&str> {
         self.actual_service_tier.as_deref()
     }
@@ -494,6 +526,10 @@ impl OpenAIResponsesProviderState {
         if text.is_empty() {
             return;
         }
+        if self.terminal_only {
+            self.ensure_started(report_context, out);
+            return;
+        }
         self.text_parts.entry(key).or_default().push_str(text);
         self.ensure_started(report_context, out);
         let (id, model) = self.identity(report_context);
@@ -511,6 +547,12 @@ impl OpenAIResponsesProviderState {
         key: String,
         text: &str,
     ) {
+        if self.terminal_only {
+            if !text.is_empty() {
+                self.ensure_started(report_context, out);
+            }
+            return;
+        }
         let missing = {
             let current = self.text_parts.entry(key).or_default();
             let missing = if text.starts_with(current.as_str()) {
@@ -543,6 +585,12 @@ impl OpenAIResponsesProviderState {
         out: &mut Vec<CanonicalStreamFrame>,
         reasoning: &str,
     ) {
+        if self.terminal_only {
+            if !reasoning.is_empty() {
+                self.ensure_started(report_context, out);
+            }
+            return;
+        }
         let missing = if reasoning.starts_with(&self.reasoning) {
             reasoning[self.reasoning.len()..].to_string()
         } else if self.reasoning == reasoning {
@@ -571,6 +619,10 @@ impl OpenAIResponsesProviderState {
         text: &str,
     ) {
         if text.is_empty() {
+            return;
+        }
+        if self.terminal_only {
+            self.ensure_started(report_context, out);
             return;
         }
         let missing = {
@@ -608,6 +660,9 @@ impl OpenAIResponsesProviderState {
         out: &mut Vec<CanonicalStreamFrame>,
         index: usize,
     ) {
+        if self.terminal_only {
+            return;
+        }
         let (id, model) = self.identity(report_context);
         let Some(state) = self.tool_calls.get_mut(&index) else {
             return;
@@ -806,12 +861,13 @@ impl OpenAIResponsesProviderState {
         if let Some(name) = incoming_chat_name {
             state.name = name;
         }
-        let completed_arguments = item
-            .get("arguments")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-        Self::merge_tool_call_arguments(state, &completed_arguments);
+        if !self.terminal_only {
+            let completed_arguments = item
+                .get("arguments")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            Self::merge_tool_call_arguments(state, completed_arguments);
+        }
         self.emit_ready_function_call(report_context, out, index);
     }
 
@@ -832,10 +888,14 @@ impl OpenAIResponsesProviderState {
             .filter(|value| !value.is_empty())
             .unwrap_or("custom_tool")
             .to_string();
-        let arguments = tool_arguments_from_maybe_json_string(
-            item.get("input").or_else(|| item.get("arguments")),
-            "input",
-        );
+        let arguments = if self.terminal_only {
+            String::new()
+        } else {
+            tool_arguments_from_maybe_json_string(
+                item.get("input").or_else(|| item.get("arguments")),
+                "input",
+            )
+        };
         self.emit_generic_tool_call_item(report_context, out, item, output_index, name, arguments);
     }
 
@@ -852,16 +912,20 @@ impl OpenAIResponsesProviderState {
             "shell_call" => "shell",
             _ => return,
         };
-        let arguments = tool_arguments_from_named_fields(
-            item,
-            &[
-                "action",
-                "environment",
-                "status",
-                "created_by",
-                "max_output_length",
-            ],
-        );
+        let arguments = if self.terminal_only {
+            String::new()
+        } else {
+            tool_arguments_from_named_fields(
+                item,
+                &[
+                    "action",
+                    "environment",
+                    "status",
+                    "created_by",
+                    "max_output_length",
+                ],
+            )
+        };
         self.emit_generic_tool_call_item(
             report_context,
             out,
@@ -882,7 +946,11 @@ impl OpenAIResponsesProviderState {
         if item.get("type").and_then(Value::as_str) != Some("apply_patch_call") {
             return;
         }
-        let arguments = tool_arguments_from_named_fields(item, &["operation", "status"]);
+        let arguments = if self.terminal_only {
+            String::new()
+        } else {
+            tool_arguments_from_named_fields(item, &["operation", "status"])
+        };
         self.emit_generic_tool_call_item(
             report_context,
             out,
@@ -903,10 +971,14 @@ impl OpenAIResponsesProviderState {
         if item.get("type").and_then(Value::as_str) != Some("computer_call") {
             return;
         }
-        let arguments = tool_arguments_from_named_fields(
-            item,
-            &["action", "actions", "pending_safety_checks", "status"],
-        );
+        let arguments = if self.terminal_only {
+            String::new()
+        } else {
+            tool_arguments_from_named_fields(
+                item,
+                &["action", "actions", "pending_safety_checks", "status"],
+            )
+        };
         self.emit_generic_tool_call_item(
             report_context,
             out,
@@ -941,8 +1013,18 @@ impl OpenAIResponsesProviderState {
             .unwrap_or(state.call_id.as_str())
             .to_string();
         state.name = name;
-        Self::merge_tool_call_arguments(state, &arguments);
+        if !self.terminal_only {
+            Self::merge_tool_call_arguments(state, &arguments);
+        }
         self.emit_ready_tool_call(report_context, out, index);
+    }
+
+    fn tool_result_content(&self, value: Option<&Value>) -> String {
+        if self.terminal_only {
+            String::new()
+        } else {
+            openai_tool_result_content_from_value(value)
+        }
     }
 
     fn emit_missing_tool_result(
@@ -955,6 +1037,9 @@ impl OpenAIResponsesProviderState {
         content: &str,
     ) {
         self.ensure_started(report_context, out);
+        if self.terminal_only {
+            return;
+        }
         let state = self.tool_results.entry(index).or_default();
         let missing = if !state.emitted {
             content.to_string()
@@ -1005,7 +1090,7 @@ impl OpenAIResponsesProviderState {
             Some(format!("function_call_output:{tool_use_id}")),
             output_index,
         );
-        let content = openai_tool_result_content_from_value(
+        let content = self.tool_result_content(
             item.get("output")
                 .or_else(|| item.get("content"))
                 .or_else(|| item.get("delta")),
@@ -1047,7 +1132,7 @@ impl OpenAIResponsesProviderState {
             .to_string();
         let index =
             self.tool_index_for_key(Some(format!("{item_type}:{tool_use_id}")), output_index);
-        let content = openai_tool_result_content_from_value(
+        let content = self.tool_result_content(
             item.get("output")
                 .or_else(|| item.get("content"))
                 .or_else(|| item.get("delta")),
@@ -1110,6 +1195,24 @@ impl OpenAIResponsesProviderState {
         if item.get("type").and_then(Value::as_str) != Some("reasoning") {
             return;
         }
+        if self.terminal_only {
+            if item
+                .get("summary")
+                .and_then(Value::as_array)
+                .is_some_and(|summary| {
+                    summary.iter().any(|part| {
+                        part.get("type").and_then(Value::as_str) == Some("summary_text")
+                            && part
+                                .get("text")
+                                .and_then(Value::as_str)
+                                .is_some_and(|text| !text.is_empty())
+                    })
+                })
+            {
+                self.ensure_started(report_context, out);
+            }
+            return;
+        }
         let mut completed_reasoning = String::new();
         for raw_summary in item
             .get("summary")
@@ -1159,6 +1262,10 @@ impl OpenAIResponsesProviderState {
         if !has_image_payload {
             return;
         }
+        if self.terminal_only {
+            self.ensure_started(report_context, out);
+            return;
+        }
         let index = output_index.unwrap_or(self.image_item_keys.len());
         let key = item
             .get("id")
@@ -1178,6 +1285,42 @@ impl OpenAIResponsesProviderState {
                 item: Value::Object(item.clone()),
             },
         });
+    }
+
+    fn retained_output_item_key(&self, item: &Map<String, Value>) -> OpenAIResponsesOutputItemKey {
+        let item_type = item.get("type").and_then(Value::as_str).unwrap_or_default();
+        if self.terminal_only {
+            struct DigestWriter(Sha256);
+
+            impl std::io::Write for DigestWriter {
+                fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                    self.0.update(bytes);
+                    Ok(bytes.len())
+                }
+
+                fn flush(&mut self) -> std::io::Result<()> {
+                    Ok(())
+                }
+            }
+
+            // Hash exactly the normal key's bytes, without retaining or first
+            // serializing an entire encrypted/opaque output item into a string.
+            let mut writer = DigestWriter(Sha256::new());
+            writer.0.update(item_type.as_bytes());
+            if let Some(item_id) = item.get("id").and_then(Value::as_str) {
+                writer.0.update(b":id:");
+                writer.0.update(item_id.as_bytes());
+            } else if let Some(content) = item.get("encrypted_content").and_then(Value::as_str) {
+                writer.0.update(b":encrypted_content:");
+                writer.0.update(content.as_bytes());
+            } else {
+                writer.0.update(b":");
+                serde_json::to_writer(&mut writer, item)
+                    .expect("JSON value serialization into a digest cannot fail");
+            }
+            return OpenAIResponsesOutputItemKey::Digest(writer.0.finalize().into());
+        }
+        OpenAIResponsesOutputItemKey::Full(Self::output_item_key(item))
     }
 
     fn output_item_key(item: &Map<String, Value>) -> String {
@@ -1290,10 +1433,13 @@ impl OpenAIResponsesProviderState {
         }
 
         if final_item {
-            self.opaque_completed_item_keys
-                .insert(Self::output_item_key(item));
+            let key = self.retained_output_item_key(item);
+            self.opaque_completed_item_keys.insert(key);
         }
         self.ensure_started(report_context, out);
+        if self.terminal_only {
+            return;
+        }
         let (id, model) = self.identity(report_context);
         out.push(CanonicalStreamFrame {
             id,
@@ -1325,7 +1471,7 @@ impl OpenAIResponsesProviderState {
             if !self.emit_output_item(report_context, out, item, Some(output_index), true)
                 && !self
                     .opaque_completed_item_keys
-                    .contains(&Self::output_item_key(item))
+                    .contains(&self.retained_output_item_key(item))
             {
                 out.push(self.unknown_frame(report_context, Value::Object(item.clone())));
             }
@@ -1504,6 +1650,9 @@ impl OpenAIResponsesProviderState {
                         .map(|value| value as usize)
                         .unwrap_or(0);
                     self.ensure_started(report_context, &mut out);
+                    if self.terminal_only {
+                        return Ok(out);
+                    }
                     self.reasoning.push_str(piece);
                     self.reasoning_parts
                         .entry(summary_index)
@@ -1543,6 +1692,9 @@ impl OpenAIResponsesProviderState {
                     );
                 }
                 self.ensure_started(report_context, &mut out);
+                if self.terminal_only {
+                    return Ok(out);
+                }
                 let (id, model) = self.identity(report_context);
                 out.push(CanonicalStreamFrame {
                     id,
@@ -1595,7 +1747,9 @@ impl OpenAIResponsesProviderState {
                         .unwrap_or("custom_tool")
                         .to_string();
                 }
-                state.arguments.push_str(delta);
+                if !self.terminal_only {
+                    state.arguments.push_str(delta);
+                }
                 self.emit_ready_tool_call(report_context, &mut out, index);
             }
             "response.custom_tool_call_input.done" => {
@@ -1623,11 +1777,13 @@ impl OpenAIResponsesProviderState {
                         .unwrap_or("custom_tool")
                         .to_string();
                 }
-                let arguments = tool_arguments_from_maybe_json_string(
-                    Some(&Value::String(input.to_string())),
-                    "input",
-                );
-                Self::merge_tool_call_arguments(state, &arguments);
+                if !self.terminal_only {
+                    let arguments = tool_arguments_from_maybe_json_string(
+                        Some(&Value::String(input.to_string())),
+                        "input",
+                    );
+                    Self::merge_tool_call_arguments(state, &arguments);
+                }
                 self.emit_ready_tool_call(report_context, &mut out, index);
             }
             "response.function_call_arguments.delta" => {
@@ -1654,7 +1810,9 @@ impl OpenAIResponsesProviderState {
                 if let Some(call_id) = value.get("call_id").and_then(Value::as_str) {
                     state.call_id = call_id.to_string();
                 }
-                state.arguments.push_str(delta);
+                if !self.terminal_only {
+                    state.arguments.push_str(delta);
+                }
                 self.emit_ready_function_call(report_context, &mut out, index);
             }
             "response.function_call_arguments.done" => {
@@ -1722,7 +1880,9 @@ impl OpenAIResponsesProviderState {
                 if let Some(name) = incoming_chat_name {
                     state.name = name;
                 }
-                Self::merge_tool_call_arguments(state, arguments);
+                if !self.terminal_only {
+                    Self::merge_tool_call_arguments(state, arguments);
+                }
                 self.emit_ready_function_call(report_context, &mut out, index);
             }
             "response.function_call_output.delta" | "response.function_call_output.done" => {
@@ -1743,7 +1903,7 @@ impl OpenAIResponsesProviderState {
                     Some(format!("function_call_output:{tool_use_id}")),
                     output_index,
                 );
-                let content = openai_tool_result_content_from_value(
+                let content = self.tool_result_content(
                     value
                         .get("delta")
                         .or_else(|| value.get("output"))
@@ -1781,7 +1941,7 @@ impl OpenAIResponsesProviderState {
                     .map(|value| value as usize);
                 let index = self
                     .tool_index_for_key(Some(format!("{item_type}:{tool_use_id}")), output_index);
-                let content = openai_tool_result_content_from_value(
+                let content = self.tool_result_content(
                     value
                         .get("delta")
                         .or_else(|| value.get("output"))
@@ -1840,7 +2000,7 @@ impl OpenAIResponsesProviderState {
                 });
                 self.finished = true;
             }
-            "keepalive" => {}
+            "keepalive" | "ping" => {}
             event_type if openai_responses_stream_event_is_known_noop(event_type) => {
                 self.ensure_started(report_context, &mut out);
             }
@@ -2328,7 +2488,7 @@ impl OpenAIResponsesClientEmitter {
     fn message_item_id(&self) -> String {
         self.message_item_id
             .clone()
-            .unwrap_or_else(|| format!("{}_msg", self.response_id()))
+            .unwrap_or_else(|| openai_responses_message_item_id(self.response_id(), 0))
     }
 
     fn reasoning_item_id(&self) -> String {
@@ -2347,7 +2507,7 @@ impl OpenAIResponsesClientEmitter {
 
     fn ensure_message_item_id(&mut self) -> String {
         if self.message_item_id.is_none() {
-            self.message_item_id = Some(format!("{}_msg", self.response_id()));
+            self.message_item_id = Some(openai_responses_message_item_id(self.response_id(), 0));
         }
         self.message_item_id()
     }
@@ -3754,6 +3914,276 @@ mod tests {
         format!("data: {}\n", value).into_bytes()
     }
 
+    fn terminal_frames(frames: Vec<CanonicalStreamFrame>) -> Vec<CanonicalStreamFrame> {
+        frames
+            .into_iter()
+            .filter(|frame| {
+                matches!(
+                    frame.event,
+                    CanonicalStreamEvent::Start
+                        | CanonicalStreamEvent::UnknownEvent(_)
+                        | CanonicalStreamEvent::Finish { .. }
+                )
+            })
+            .collect()
+    }
+
+    fn assert_no_responses_observation_content(state: &OpenAIResponsesProviderState) {
+        assert!(state.text_parts.is_empty());
+        assert_eq!(state.reasoning.capacity(), 0);
+        assert!(state.reasoning_parts.is_empty());
+        assert!(state
+            .tool_calls
+            .values()
+            .all(|tool| tool.arguments.capacity() == 0));
+        assert!(state.tool_results.is_empty());
+        assert!(state.image_item_keys.is_empty());
+        assert!(state
+            .opaque_completed_item_keys
+            .iter()
+            .all(|key| matches!(key, OpenAIResponsesOutputItemKey::Digest(_))));
+    }
+
+    #[test]
+    fn openai_responses_terminal_observation_does_not_retain_long_stream_content() {
+        let context = json!({"provider_api_format": "openai:responses"});
+        let mut observed = OpenAIResponsesProviderState::terminal_observation();
+        let mut full = OpenAIResponsesProviderState::default();
+        let initial = json!({
+            "type": "response.output_item.added", "output_index": 0,
+            "item": {"type": "function_call", "id": "fc_1", "call_id": "call_1", "name": "read", "arguments": ""}
+        });
+        assert_eq!(
+            observed.push_event(&context, &initial).unwrap(),
+            terminal_frames(full.push_event(&context, &initial).unwrap())
+        );
+        let text = "x".repeat(1024);
+        let events = [
+            json!({"type": "response.output_text.delta", "delta": text, "output_index": 3}),
+            json!({"type": "response.reasoning_summary_text.delta", "delta": text, "summary_index": 0}),
+            json!({"type": "response.function_call_arguments.delta", "delta": text, "output_index": 0}),
+            json!({"type": "response.custom_tool_call_input.delta", "delta": text, "output_index": 1}),
+            json!({"type": "response.function_call_output.delta", "delta": text, "output_index": 2, "call_id": "call_1"}),
+        ];
+        for iteration in 0..2048 {
+            for event in &events {
+                let frames = observed.push_event(&context, event).unwrap();
+                assert!(frames.is_empty());
+                if iteration < 32 {
+                    assert_eq!(
+                        frames,
+                        terminal_frames(full.push_event(&context, event).unwrap())
+                    );
+                }
+            }
+            assert_no_responses_observation_content(&observed);
+        }
+        assert_eq!(observed.tool_calls.len(), 2);
+        assert_eq!(observed.tool_index_by_key, full.tool_index_by_key);
+        assert!(full.text_parts.values().any(|text| text.len() == 32 * 1024));
+        assert_eq!(full.reasoning.len(), 32 * 1024);
+        assert_eq!(full.reasoning_parts[&0].len(), 32 * 1024);
+        assert_eq!(full.tool_calls[&0].arguments.len(), 32 * 1024);
+        assert!(!full.tool_results.is_empty());
+        assert_eq!(
+            observed.finish(&context).unwrap(),
+            full.finish(&context).unwrap()
+        );
+    }
+
+    #[test]
+    fn openai_responses_terminal_observation_skips_completed_content_and_images() {
+        let context = json!({});
+        let text = "x".repeat(64 * 1024);
+        let items = [
+            json!({"type": "message", "content": [{"type": "output_text", "text": text}]}),
+            json!({"type": "reasoning", "summary": [{"type": "summary_text", "text": text}]}),
+            json!({"type": "custom_tool_call", "input": text, "name": "custom"}),
+            json!({"type": "shell_call", "action": {"command": text}}),
+            json!({"type": "apply_patch_call", "operation": {"patch": text}}),
+            json!({"type": "computer_call", "action": {"keys": [text]}}),
+            json!({"type": "function_call_output", "output": text}),
+            json!({"type": "custom_tool_call_output", "output": {"text": text}}),
+            json!({"type": "image_generation_call", "result": text, "status": "completed"}),
+        ];
+        let mut observed = OpenAIResponsesProviderState::terminal_observation();
+        let mut full = OpenAIResponsesProviderState::default();
+        for (index, item) in items.iter().enumerate() {
+            let event =
+                json!({"type": "response.output_item.done", "output_index": index, "item": item});
+            assert_eq!(
+                observed.push_event(&context, &event).unwrap(),
+                terminal_frames(full.push_event(&context, &event).unwrap())
+            );
+            assert_no_responses_observation_content(&observed);
+        }
+        let completed = json!({"type": "response.completed", "response": {
+            "id": "resp_complete", "model": "model", "service_tier": "Priority",
+            "output": items, "usage": {"input_tokens": 100, "output_tokens": 20, "input_tokens_details": {"cached_tokens": 0}}
+        }});
+        assert_eq!(
+            observed.push_event(&context, &completed).unwrap(),
+            terminal_frames(full.push_event(&context, &completed).unwrap())
+        );
+        assert_eq!(observed.actual_service_tier(), Some("priority"));
+        assert_no_responses_observation_content(&observed);
+    }
+
+    #[test]
+    fn openai_responses_terminal_observation_hashes_opaque_keys_without_changing_deduplication() {
+        let context = json!({});
+        let text = "x".repeat(64 * 1024);
+        let items = [
+            json!({"type": "future_item", "id": "id:with:separators", "encrypted_content": text}),
+            json!({"type": "compaction", "encrypted_content": text}),
+            json!({"type": "future_item", "payload": {"text": text, "escaped": "\n\"\\"}}),
+        ];
+        let mut observed = OpenAIResponsesProviderState::terminal_observation();
+        let mut full = OpenAIResponsesProviderState::default();
+        for item in &items {
+            let object = item.as_object().unwrap();
+            let normal_key = OpenAIResponsesProviderState::output_item_key(object);
+            let expected: [u8; 32] = Sha256::digest(normal_key.as_bytes()).into();
+            let OpenAIResponsesOutputItemKey::Digest(actual) =
+                observed.retained_output_item_key(object)
+            else {
+                panic!("observation must retain only an opaque item digest");
+            };
+            assert_eq!(actual, expected);
+            let event = json!({"type": "response.output_item.done", "item": item});
+            for _ in 0..2 {
+                assert_eq!(
+                    observed.push_event(&context, &event).unwrap(),
+                    terminal_frames(full.push_event(&context, &event).unwrap())
+                );
+            }
+        }
+        assert_eq!(observed.opaque_completed_item_keys.len(), items.len());
+        assert_no_responses_observation_content(&observed);
+        let mut final_items = items.to_vec();
+        final_items.push(json!({"type": "future_item", "id": "new_item"}));
+        let final_event =
+            json!({"type": "response.completed", "response": {"output": final_items}});
+        let frames = observed.push_event(&context, &final_event).unwrap();
+        assert_eq!(
+            frames,
+            terminal_frames(full.push_event(&context, &final_event).unwrap())
+        );
+        assert_eq!(
+            frames
+                .iter()
+                .filter(|frame| matches!(frame.event, CanonicalStreamEvent::UnknownEvent(_)))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn openai_responses_terminal_observation_preserves_tool_identity_validation() {
+        let context = json!({"original_request_body": {"tools": [{
+            "type": "namespace", "name": "reports", "description": "Reporting tools", "tools": [{
+                "type": "function", "name": "write_report", "parameters": {"type": "object"}
+            }]
+        }]}});
+        let expected_alias = NamespaceToolAliases::from_report_context(&context)
+            .chat_name("reports", "write_report")
+            .expect("fixture must contain a valid namespace tool")
+            .to_owned();
+        let mut observed = OpenAIResponsesProviderState::terminal_observation();
+        let mut full = OpenAIResponsesProviderState::default();
+        let events = [
+            json!({"type": "response.function_call_arguments.delta", "item_id": "fc_1", "output_index": 0, "delta": "{"}),
+            json!({"type": "response.output_item.added", "output_index": 0, "item": {
+                "type": "function_call", "id": "fc_1", "namespace": "reports", "name": "write_report", "arguments": ""
+            }}),
+            json!({"type": "response.function_call_arguments.done", "item_id": "fc_1", "call_id": "call_1", "namespace": "reports", "arguments": "{}"}),
+            json!({"type": "response.function_call_output.delta", "call_id": "call_1", "output_index": 7, "delta": "result"}),
+            json!({"type": "response.function_call_arguments.done", "item_id": "fc_other", "name": "ordinary", "arguments": "{}"}),
+            json!({"type": "response.function_call_arguments.done", "item_id": "fc_1", "namespace": "missing", "arguments": "{}"}),
+            json!({"type": "response.output_item.done", "item": {
+                "type": "function_call", "id": "invalid", "name": "read", "caller": {"type": "future"}, "arguments": "{}"
+            }}),
+            json!({"type": "response.output_item.done", "item": {"content": "missing type"}}),
+            json!({"type": "response.future.delta", "payload": "unsupported"}),
+        ];
+        let mut unknowns = 0;
+        for (step, event) in events.into_iter().enumerate() {
+            let frames = observed.push_event(&context, &event).unwrap();
+            assert_eq!(
+                frames,
+                terminal_frames(full.push_event(&context, &event).unwrap())
+            );
+            unknowns += frames
+                .iter()
+                .filter(|frame| matches!(frame.event, CanonicalStreamEvent::UnknownEvent(_)))
+                .count();
+            assert_eq!(observed.tool_index_by_key, full.tool_index_by_key);
+            assert_eq!(observed.last_tool_index, full.last_tool_index);
+            assert_eq!(observed.tool_calls.len(), full.tool_calls.len());
+            for (index, tool) in &observed.tool_calls {
+                assert_eq!(tool.name, full.tool_calls[index].name);
+                assert_eq!(tool.call_id, full.tool_calls[index].call_id);
+            }
+            if step == 1 || step == 2 {
+                assert_eq!(unknowns, 0);
+                assert_eq!(observed.tool_calls[&0].name, expected_alias);
+                assert_eq!(
+                    observed.tool_calls[&0].call_id,
+                    if step == 1 { "" } else { "call_1" }
+                );
+            }
+            assert_no_responses_observation_content(&observed);
+        }
+        assert_eq!(unknowns, 4);
+        assert_eq!(
+            observed.finish(&context).unwrap(),
+            full.finish(&context).unwrap()
+        );
+    }
+
+    #[test]
+    fn openai_chat_terminal_observation_does_not_buffer_arguments_before_identity() {
+        let context = json!({});
+        let mut observed = OpenAIChatProviderState::terminal_observation();
+        let mut full = OpenAIChatProviderState::default();
+        let delta = json!({"choices": [{"delta": {
+            "content": "x".repeat(1024), "reasoning_content": "r".repeat(1024),
+            "tool_calls": [{"index": 0, "function": {"arguments": "a".repeat(1024)}}]
+        }}]});
+        for iteration in 0..2048 {
+            let frames = observed
+                .push_line(&context, data_line(delta.clone()))
+                .unwrap();
+            if iteration < 32 {
+                assert_eq!(
+                    frames,
+                    terminal_frames(full.push_line(&context, data_line(delta.clone())).unwrap())
+                );
+            }
+            assert!(observed.tool_calls.is_empty());
+        }
+        assert_eq!(full.tool_calls[&0].pending_arguments.len(), 32 * 1024);
+        for event in [
+            json!({"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_1", "function": {"name": "read", "arguments": "end"}}]}}]}),
+            json!({"choices": [{"delta": {"future": "unknown"}}]}),
+            json!({"choices": [{"delta": {}, "finish_reason": "tool_calls"}]}),
+            json!({"choices": [], "usage": {"prompt_tokens": 100, "completion_tokens": 20, "prompt_tokens_details": {"cached_tokens": 0}}, "service_tier": "Flex"}),
+        ] {
+            assert_eq!(
+                observed
+                    .push_line(&context, data_line(event.clone()))
+                    .unwrap(),
+                terminal_frames(full.push_line(&context, data_line(event)).unwrap())
+            );
+        }
+        assert_eq!(observed.actual_service_tier(), Some("flex"));
+        assert!(observed.tool_calls.is_empty());
+        assert_eq!(
+            observed.finish(&context).unwrap(),
+            full.finish(&context).unwrap()
+        );
+    }
+
     fn response_sequence_numbers(sse: &str) -> Vec<u64> {
         let mut sequence_numbers = Vec::new();
         for payload in sse.lines().filter_map(|line| line.strip_prefix("data: ")) {
@@ -4357,7 +4787,7 @@ mod tests {
         assert!(sse.contains("event: response.output_item.done\n"));
         assert!(sse.contains("event: response.completed\n"));
         assert!(sse.contains("\"response_id\":\"resp_stream_123\""));
-        assert!(sse.contains("\"item_id\":\"resp_stream_123_msg\""));
+        assert!(sse.contains("\"item_id\":\"msg_aether_"));
         assert!(sse.contains("\"text\":\"Hello\""));
         assert!(sse.contains("\"output_text\":\"Hello\""));
         assert!(sse.contains("\"created_at\":"));
@@ -4421,8 +4851,8 @@ mod tests {
         );
 
         let sse = String::from_utf8(bytes).expect("sse should be utf8");
-        assert!(sse.contains("\"item_id\":\"msg_first_msg\""));
-        assert!(!sse.contains("\"item_id\":\"msg_second_msg\""));
+        assert!(sse.contains("\"item_id\":\"msg_aether_"));
+        assert!(!sse.contains("msg_second_msg"));
     }
 
     #[test]

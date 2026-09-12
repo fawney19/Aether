@@ -3,8 +3,12 @@ use super::{
     build_admin_billing_data_unavailable_response, build_admin_billing_not_found_response,
 };
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
+use crate::handlers::shared::normalize_payment_currency;
 use crate::{GatewayError, LocalMutationOutcome};
-use aether_data_contracts::repository::billing::{BillingPlanRecord, BillingPlanWriteInput};
+use aether_data_contracts::repository::billing::{
+    checked_plan_duration_days, parse_usage_policy_entitlements,
+    validate_entitlement_replacement_groups, BillingPlanRecord, BillingPlanWriteInput,
+};
 use axum::{
     body::{Body, Bytes},
     http,
@@ -172,11 +176,16 @@ fn validate_entitlements(value: &serde_json::Value) -> Result<(), String> {
                     }
                 }
             }
+            "usage_policy" => {}
             _ => return Err(format!("unsupported entitlement type: {kind}")),
         }
     }
+    validate_entitlement_replacement_groups(value).map_err(|error| error.to_string())?;
+    parse_usage_policy_entitlements(value).map_err(|error| error.to_string())?;
     if !entitlements_include_package_rights(items) {
-        return Err("套餐至少需要包含每日额度或会员分组；钱包充值请使用充值功能".to_string());
+        return Err(
+            "套餐至少需要包含每日额度、会员分组或使用限制；钱包充值请使用充值功能".to_string(),
+        );
     }
     Ok(())
 }
@@ -185,7 +194,7 @@ fn entitlements_include_package_rights(items: &[serde_json::Value]) -> bool {
     items.iter().any(|item| {
         matches!(
             item.get("type").and_then(|value| value.as_str()),
-            Some("daily_quota" | "membership_group")
+            Some("daily_quota" | "membership_group" | "usage_policy")
         )
     })
 }
@@ -204,6 +213,7 @@ fn normalize_plan_input(payload: BillingPlanRequest) -> Result<BillingPlanWriteI
     if !matches!(duration_unit.as_str(), "day" | "month" | "year" | "custom") {
         return Err("duration_unit must be day/month/year/custom".to_string());
     }
+    checked_plan_duration_days(&duration_unit, payload.duration_value)?;
     let purchase_limit_scope =
         normalize_text(payload.purchase_limit_scope, "purchase_limit_scope", 32)?;
     if !matches!(
@@ -213,11 +223,12 @@ fn normalize_plan_input(payload: BillingPlanRequest) -> Result<BillingPlanWriteI
         return Err("purchase_limit_scope must be active_period/lifetime/unlimited".to_string());
     }
     validate_entitlements(&payload.entitlements)?;
+    let price_currency = normalize_payment_currency(&payload.price_currency, "price_currency")?;
     Ok(BillingPlanWriteInput {
         title: normalize_text(payload.title, "title", 128)?,
         description: normalize_optional_text(payload.description, 2048)?,
         price_amount: payload.price_amount,
-        price_currency: normalize_text(payload.price_currency, "price_currency", 16)?,
+        price_currency,
         duration_unit,
         duration_value: payload.duration_value,
         enabled: payload.enabled,

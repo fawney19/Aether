@@ -1,8 +1,9 @@
 use super::{
     any, build_router, build_router_with_execution_runtime_override, json, start_server, Arc, Body,
     HeaderValue, Json, Mutex, Request, Response, Router, StatusCode, DEPENDENCY_REASON_HEADER,
-    EXECUTION_PATH_HEADER, EXECUTION_PATH_LOCAL_EXECUTION_RUNTIME_MISS,
-    LOCAL_EXECUTION_RUNTIME_MISS_REASON_HEADER, TRACE_ID_HEADER,
+    EXECUTION_PATH_HEADER, EXECUTION_PATH_LOCAL_AI_PUBLIC,
+    EXECUTION_PATH_LOCAL_EXECUTION_RUNTIME_MISS, LOCAL_EXECUTION_RUNTIME_MISS_REASON_HEADER,
+    TRACE_ID_HEADER,
 };
 
 #[tokio::test]
@@ -486,6 +487,8 @@ async fn assert_ai_route_locally_denied_after_execution_runtime_miss_with_reques
     let gateway = build_router_with_execution_runtime_override(execution_runtime_url);
     let (gateway_url, gateway_handle) = start_server(gateway).await;
 
+    let is_gemini_files_local_read =
+        method == reqwest::Method::GET && route_family == "gemini" && route_kind == "files";
     let mut request =
         reqwest::Client::new().request(method, format!("{gateway_url}{request_path}"));
     if let Some(request_body) = request_body {
@@ -495,7 +498,46 @@ async fn assert_ai_route_locally_denied_after_execution_runtime_miss_with_reques
     }
     let response = request.send().await.expect("request should succeed");
 
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        response.status(),
+        if is_gemini_files_local_read {
+            StatusCode::NOT_FOUND
+        } else {
+            StatusCode::SERVICE_UNAVAILABLE
+        }
+    );
+    if is_gemini_files_local_read {
+        assert_eq!(
+            response
+                .headers()
+                .get(EXECUTION_PATH_HEADER)
+                .and_then(|value| value.to_str().ok()),
+            Some(EXECUTION_PATH_LOCAL_AI_PUBLIC)
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(DEPENDENCY_REASON_HEADER)
+                .and_then(|value| value.to_str().ok()),
+            None
+        );
+        let payload: serde_json::Value = response.json().await.expect("body should parse");
+        assert_eq!(payload, json!({"detail": "File not found"}));
+        assert_eq!(*control_execute_hits.lock().expect("mutex should lock"), 0);
+        assert_eq!(*public_hits.lock().expect("mutex should lock"), 0);
+        assert_eq!(
+            public_execution_path
+                .lock()
+                .expect("mutex should lock")
+                .as_deref(),
+            None
+        );
+
+        gateway_handle.abort();
+        execution_runtime_handle.abort();
+        upstream_handle.abort();
+        return;
+    }
     assert_eq!(
         response
             .headers()

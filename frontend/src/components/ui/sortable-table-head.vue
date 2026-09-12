@@ -1,14 +1,16 @@
 <script setup lang="ts">
+import type { ClassValue } from 'clsx'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, useAttrs, useSlots } from 'vue'
 import { ArrowDown, ArrowUp, ArrowUpDown, ListFilter } from 'lucide-vue-next'
 
 import { cn } from '@/lib/utils'
+import { useI18n } from '@/i18n'
 import TableHead from './table-head.vue'
 
 type SortDirection = 'asc' | 'desc'
 
 const props = withDefaults(defineProps<{
-  class?: string
+  class?: ClassValue
   columnKey?: string
   sortable?: boolean
   activeKey?: string | null
@@ -29,7 +31,7 @@ const props = withDefaults(defineProps<{
   align: 'left',
   title: undefined,
   filterActive: false,
-  filterTitle: '筛选',
+  filterTitle: undefined,
   filterContentClass: undefined,
 })
 
@@ -42,6 +44,7 @@ defineOptions({
 })
 
 const attrs = useAttrs()
+const { t } = useI18n()
 const slots = useSlots()
 const rootRef = ref<HTMLElement | null>(null)
 const filterTriggerRef = ref<HTMLButtonElement | null>(null)
@@ -65,12 +68,12 @@ const ariaSort = computed(() => {
   return props.direction === 'asc' ? 'ascending' : 'descending'
 })
 const wrapperClass = computed(() => cn(
-  'relative flex w-full items-center gap-1.5',
+  'relative flex min-w-0 w-full items-center gap-1.5',
   props.align === 'center' && 'justify-center',
   props.align === 'right' && 'justify-end',
 ))
 const labelClass = computed(() => cn(
-  'inline-flex min-w-0 items-center gap-1.5 text-xs font-semibold text-muted-foreground',
+  'inline-flex min-w-0 items-center gap-1.5 whitespace-normal break-words text-left text-xs font-semibold leading-4 text-muted-foreground',
   props.align === 'center' && 'justify-center',
   props.align === 'right' && 'justify-end',
 ))
@@ -89,7 +92,7 @@ const filterButtonClass = computed(() => cn(
     : 'text-muted-foreground/60 hover:bg-muted/50 hover:text-foreground',
 ))
 const filterPanelClass = computed(() => cn(
-  'fixed z-[1000] w-64 rounded-md border bg-popover p-3 text-popover-foreground shadow-md outline-none',
+  'fixed z-[1000] w-64 max-w-[calc(100vw-1rem)] rounded-md border bg-popover p-3 text-popover-foreground shadow-md outline-none',
   props.filterContentClass,
 ))
 
@@ -185,7 +188,8 @@ onBeforeUnmount(() => {
           ref="filterTriggerRef"
           type="button"
           :class="filterButtonClass"
-          :title="filterTitle"
+          :title="filterTitle ?? t('common.filter')"
+          :aria-label="filterTitle ?? t('common.filter')"
           :aria-pressed="filterActive"
           @click.stop="toggleFilter"
         >
@@ -210,7 +214,7 @@ onBeforeUnmount(() => {
         v-if="canSort"
         type="button"
         :class="buttonClass"
-        :title="title || '排序'"
+        :title="title || t('common.sort')"
         @click="handleSort"
       >
         <slot />

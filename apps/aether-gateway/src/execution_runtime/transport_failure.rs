@@ -22,6 +22,7 @@ const TRANSPORT_ERROR_CLIENT_MESSAGE: &str =
 #[derive(Debug, Default)]
 pub(crate) struct StreamCandidateWatchdogProgress {
     terminal_started: AtomicBool,
+    abandoned: AtomicBool,
 }
 
 tokio::task_local! {
@@ -35,6 +36,24 @@ impl StreamCandidateWatchdogProgress {
 
     pub(crate) fn terminal_started(&self) -> bool {
         self.terminal_started.load(Ordering::Acquire)
+    }
+
+    /// The watchdog gave up waiting and settles this attempt itself.
+    ///
+    /// The attempt future is dropped once the watchdog returns, so its own
+    /// cancellation guard must stay out of the way instead of racing the
+    /// watchdog's terminal rows with a cancellation.
+    pub(crate) fn mark_abandoned(&self) {
+        self.abandoned.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn abandoned(&self) -> bool {
+        self.abandoned.load(Ordering::Acquire)
+    }
+
+    /// The watchdog watching the attempt on this task, if it runs under one.
+    pub(crate) fn current() -> Option<Arc<Self>> {
+        STREAM_CANDIDATE_WATCHDOG_PROGRESS.try_with(Arc::clone).ok()
     }
 
     pub(crate) async fn scope<F>(self: Arc<Self>, future: F) -> F::Output

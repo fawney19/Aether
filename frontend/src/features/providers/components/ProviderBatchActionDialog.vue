@@ -196,6 +196,7 @@ import {
 import { useConfirm } from '@/composables/useConfirm'
 import { useToast } from '@/composables/useToast'
 import { parseApiError } from '@/utils/errorParser'
+import { log } from '@/utils/logger'
 
 type ProviderBatchAction = 'enable' | 'disable' | 'delete'
 
@@ -390,8 +391,7 @@ async function executeBatchAction(): Promise<void> {
         successCount += 1
       } catch (err) {
         failedCount += 1
-        // eslint-disable-next-line no-console
-        console.error(`[ProviderBatchActionDialog] ${selectedAction.value} failed (${provider.id}):`, err)
+        log.error('Provider batch action failed', err)
       } finally {
         progressDone.value += 1
       }

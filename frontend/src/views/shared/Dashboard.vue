@@ -53,7 +53,7 @@
               <!-- 内容区域 -->
               <div>
                 <p
-                  class="text-[9px] sm:text-[11px] font-semibold uppercase tracking-[0.2em] sm:tracking-[0.4em] text-muted-foreground pr-10 sm:pr-14"
+                  class="min-h-10 text-xs font-semibold leading-snug tracking-normal break-words text-muted-foreground pr-10 sm:pr-14"
                 >
                   {{ stat.name }}
                 </p>
@@ -113,7 +113,7 @@
               </div>
               <div>
                 <p
-                  class="text-[9px] sm:text-[11px] font-semibold uppercase tracking-[0.2em] sm:tracking-[0.4em] text-muted-foreground pr-10 sm:pr-14"
+                  class="min-h-10 text-xs font-semibold leading-snug tracking-normal break-words text-muted-foreground pr-10 sm:pr-14"
                 >
                   {{ placeholder.name }}
                 </p>
@@ -155,7 +155,7 @@
               />
               <div class="pr-6">
                 <p
-                  class="text-[9px] sm:text-[10px] font-semibold uppercase tracking-[0.2em] sm:tracking-[0.3em] text-muted-foreground"
+                  class="text-xs font-semibold tracking-normal break-words text-muted-foreground"
                 >
                   平均响应
                 </p>
@@ -172,7 +172,7 @@
               />
               <div class="pr-6">
                 <p
-                  class="text-[9px] sm:text-[10px] font-semibold uppercase tracking-[0.2em] sm:tracking-[0.3em] text-muted-foreground"
+                  class="text-xs font-semibold tracking-normal break-words text-muted-foreground"
                 >
                   错误率
                 </p>
@@ -194,7 +194,7 @@
               />
               <div class="pr-6">
                 <p
-                  class="text-[9px] sm:text-[10px] font-semibold uppercase tracking-[0.2em] sm:tracking-[0.3em] text-muted-foreground"
+                  class="text-xs font-semibold tracking-normal break-words text-muted-foreground"
                 >
                   转移次数
                 </p>
@@ -214,7 +214,7 @@
               />
               <div class="pr-6">
                 <p
-                  class="text-[9px] sm:text-[10px] font-semibold uppercase tracking-[0.2em] sm:tracking-[0.3em] text-muted-foreground"
+                  class="text-xs font-semibold tracking-normal break-words text-muted-foreground"
                 >
                   本月费用
                 </p>
@@ -264,7 +264,7 @@
               />
               <div class="pr-6">
                 <p
-                  class="text-[9px] sm:text-[10px] font-semibold uppercase tracking-[0.2em] sm:tracking-[0.3em] text-muted-foreground"
+                  class="text-xs font-semibold tracking-normal break-words text-muted-foreground"
                 >
                   缓存命中率
                 </p>
@@ -284,7 +284,7 @@
               />
               <div class="pr-6">
                 <p
-                  class="text-[9px] sm:text-[10px] font-semibold uppercase tracking-[0.2em] sm:tracking-[0.3em] text-muted-foreground"
+                  class="text-xs font-semibold tracking-normal break-words text-muted-foreground"
                 >
                   缓存读取
                 </p>
@@ -304,7 +304,7 @@
               />
               <div class="pr-6">
                 <p
-                  class="text-[9px] sm:text-[10px] font-semibold uppercase tracking-[0.2em] sm:tracking-[0.3em] text-muted-foreground"
+                  class="text-xs font-semibold tracking-normal break-words text-muted-foreground"
                 >
                   缓存创建
                 </p>
@@ -324,7 +324,7 @@
               />
               <div class="pr-6">
                 <p
-                  class="text-[9px] sm:text-[10px] font-semibold uppercase tracking-[0.2em] sm:tracking-[0.3em] text-muted-foreground"
+                  class="text-xs font-semibold tracking-normal break-words text-muted-foreground"
                 >
                   本月费用
                 </p>
@@ -429,6 +429,7 @@
                   >
                     <div class="flex items-center gap-2 mb-1">
                       <h4
+                        translate="no"
                         class="text-xs font-medium text-foreground line-clamp-1 flex-1"
                       >
                         {{ announcement.title }}
@@ -441,6 +442,7 @@
                       </span>
                     </div>
                     <div
+                      translate="no"
                       class="text-[11px] text-muted-foreground leading-relaxed line-clamp-2 mb-1"
                     >
                       {{ getPlainText(announcement.content) }}
@@ -865,6 +867,7 @@
 
       <!-- eslint-disable vue/no-v-html -->
       <div
+        translate="no"
         class="prose prose-sm dark:prose-invert max-w-none"
         v-html="renderMarkdown(selectedAnnouncement.content)"
       />
@@ -884,6 +887,8 @@
 </template>
 
 <script setup lang="ts">
+import { getI18nLocale } from '@/i18n'
+import { formatRelativeTime } from '@/utils/format'
 import {
   ref,
   onMounted,
@@ -1275,7 +1280,7 @@ const dailyModelCostChartOptions = computed<ChartOptions<"bar">>(() => ({
       stacked: true,
       title: {
         display: true,
-        text: "费用 ($)",
+        text: getI18nLocale() === 'en-US' ? 'Cost ($)' : '费用 ($)',
         color: "rgb(107, 114, 128)",
         font: { size: 10 },
       },
@@ -1300,7 +1305,8 @@ const dailyModelCostChartOptions = computed<ChartOptions<"bar">>(() => ({
             const val = typeof item.raw === "number" ? item.raw : 0;
             return sum + val;
           }, 0);
-          return `Total: $${total.toFixed(4)}`;
+          const label = getI18nLocale() === 'en-US' ? 'Total' : '总计';
+          return `${label}: $${total.toFixed(4)}`;
         },
       },
     },
@@ -1380,7 +1386,7 @@ const dailyUsageTrendChartData = computed<ChartData<"line">>(() => {
     labels: dailyStats.value.map((stat) => formatDateForChart(stat.date)),
     datasets: [
       {
-        label: "请求数",
+        label: getI18nLocale() === 'en-US' ? 'Requests' : '请求数',
         data: dailyStats.value.map((stat) => stat.requests),
         borderColor: "rgba(59, 130, 246, 0.8)",
         backgroundColor: "rgba(59, 130, 246, 0.1)",
@@ -1423,7 +1429,7 @@ const dailyUsageTrendChartOptions = computed<ChartOptions<"line">>(() => {
         position: "left",
         title: {
           display: true,
-          text: "请求数",
+          text: getI18nLocale() === 'en-US' ? 'Requests' : '请求数',
           color: "rgb(107, 114, 128)",
           font: { size: 10 },
         },
@@ -1581,9 +1587,9 @@ function formatDate(dateString: string): string {
   const today = new Date();
   const yesterday = new Date(today);
   yesterday.setDate(yesterday.getDate() - 1);
-  if (date.toDateString() === today.toDateString()) return "今天";
-  if (date.toDateString() === yesterday.toDateString()) return "昨天";
-  return date.toLocaleDateString("zh-CN", {
+  if (date.toDateString() === today.toDateString()) return formatRelativeTime(0, 'day');
+  if (date.toDateString() === yesterday.toDateString()) return formatRelativeTime(-1, 'day');
+  return date.toLocaleDateString(getI18nLocale(), {
     month: "2-digit",
     day: "2-digit",
     weekday: "short",
@@ -1595,9 +1601,9 @@ function formatDateForChart(dateString: string): string {
   const today = new Date();
   const yesterday = new Date(today);
   yesterday.setDate(yesterday.getDate() - 1);
-  if (date.toDateString() === today.toDateString()) return "今天";
-  if (date.toDateString() === yesterday.toDateString()) return "昨天";
-  return date.toLocaleDateString("zh-CN", { month: "numeric", day: "numeric" });
+  if (date.toDateString() === today.toDateString()) return formatRelativeTime(0, 'day');
+  if (date.toDateString() === yesterday.toDateString()) return formatRelativeTime(-1, 'day');
+  return date.toLocaleDateString(getI18nLocale(), { month: "numeric", day: "numeric" });
 }
 
 function formatResponseTime(seconds: number): string {
@@ -1694,11 +1700,11 @@ function formatAnnouncementDate(dateString: string): string {
   const minutes = Math.floor(diff / (1000 * 60));
   const hours = Math.floor(diff / (1000 * 60 * 60));
   const days = Math.floor(diff / (1000 * 60 * 60 * 24));
-  if (minutes < 1) return "刚刚";
-  if (minutes < 60) return `${minutes}分钟前`;
-  if (hours < 24) return `${hours}小时前`;
-  if (days < 7) return `${days}天前`;
-  return date.toLocaleDateString("zh-CN", {
+  if (minutes < 1) return formatRelativeTime(0, 'second');
+  if (minutes < 60) return formatRelativeTime(-minutes, 'minute');
+  if (hours < 24) return formatRelativeTime(-hours, 'hour');
+  if (days < 7) return formatRelativeTime(-days, 'day');
+  return date.toLocaleDateString(getI18nLocale(), {
     month: "2-digit",
     day: "2-digit",
     hour: "2-digit",
@@ -1721,7 +1727,7 @@ function getAnnouncementDotColor(type: string): string {
 
 function formatFullDate(dateString: string): string {
   const date = new Date(dateString);
-  return date.toLocaleDateString("zh-CN", {
+  return date.toLocaleDateString(getI18nLocale(), {
     year: "numeric",
     month: "2-digit",
     day: "2-digit",

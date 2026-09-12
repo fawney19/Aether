@@ -2,6 +2,9 @@ use super::{
     AdminWalletMutationOutcome, AdminWalletRefundRecord, AdminWalletTransactionRecord, AppState,
     GatewayError,
 };
+use aether_data::repository::wallet::{
+    payment_order_refund_amounts_are_consistent, wallet_refund_proof_is_success,
+};
 
 impl AppState {
     pub(crate) async fn admin_process_wallet_refund(
@@ -39,6 +42,11 @@ impl AppState {
             else {
                 return Ok(AdminWalletMutationOutcome::NotFound);
             };
+            if !refund.amount_usd.is_finite() || refund.amount_usd <= 0.0 {
+                return Ok(AdminWalletMutationOutcome::Invalid(
+                    "refund amount must be finite and greater than zero".to_string(),
+                ));
+            }
             if !matches!(refund.status.as_str(), "approved" | "pending_approval") {
                 return Ok(AdminWalletMutationOutcome::Invalid(
                     "refund status is not approvable".to_string(),
@@ -49,8 +57,26 @@ impl AppState {
             let mut updated_wallet = wallet.clone();
             let before_recharge = updated_wallet.balance;
             let before_gift = updated_wallet.gift_balance;
+            let before_total_refunded = updated_wallet.total_refunded;
             let before_total = before_recharge + before_gift;
             let after_recharge = before_recharge - amount_usd;
+            let after_total = after_recharge + before_gift;
+            let after_total_refunded = before_total_refunded + amount_usd;
+            if !before_recharge.is_finite()
+                || before_recharge < 0.0
+                || !before_gift.is_finite()
+                || before_gift < 0.0
+                || !before_total_refunded.is_finite()
+                || before_total_refunded < 0.0
+                || !before_total.is_finite()
+                || !after_recharge.is_finite()
+                || !after_total.is_finite()
+                || !after_total_refunded.is_finite()
+            {
+                return Ok(AdminWalletMutationOutcome::Invalid(
+                    "wallet balance is invalid".to_string(),
+                ));
+            }
             if after_recharge < 0.0 {
                 return Ok(AdminWalletMutationOutcome::Invalid(
                     "refund amount exceeds refundable recharge balance".to_string(),
@@ -72,20 +98,41 @@ impl AppState {
                         "payment order not found".to_string(),
                     ));
                 };
-                if amount_usd > order.refundable_amount_usd {
+                if order.wallet_id != wallet_id || order.status != "credited" {
                     return Ok(AdminWalletMutationOutcome::Invalid(
-                        "refund amount exceeds refundable amount".to_string(),
+                        "payment order is not refundable for this wallet".to_string(),
+                    ));
+                }
+                let order_amount = order.amount_usd;
+                let refunded_before = order.refunded_amount_usd;
+                let refundable_before = order.refundable_amount_usd;
+                let refunded_after = refunded_before + amount_usd;
+                let refundable_after = refundable_before - amount_usd;
+                if !payment_order_refund_amounts_are_consistent(
+                    order_amount,
+                    refunded_before,
+                    refundable_before,
+                ) || !refunded_after.is_finite()
+                    || !refundable_after.is_finite()
+                    || amount_usd > refundable_before
+                    || refunded_after < 0.0
+                    || refunded_after > order_amount
+                    || refundable_after < 0.0
+                    || refundable_after > order_amount
+                {
+                    return Ok(AdminWalletMutationOutcome::Invalid(
+                        "payment order refund amounts are invalid".to_string(),
                     ));
                 }
                 let mut order = order;
-                order.refunded_amount_usd += amount_usd;
-                order.refundable_amount_usd -= amount_usd;
+                order.refunded_amount_usd = refunded_after;
+                order.refundable_amount_usd = refundable_after;
                 updated_order = Some(order);
             }
 
             let now_unix_secs = chrono::Utc::now().timestamp().max(0) as u64;
             updated_wallet.balance = after_recharge;
-            updated_wallet.total_refunded = (updated_wallet.total_refunded + amount_usd).max(0.0);
+            updated_wallet.total_refunded = after_total_refunded;
             updated_wallet.updated_at_unix_secs = now_unix_secs;
 
             let transaction = AdminWalletTransactionRecord {
@@ -95,7 +142,7 @@ impl AppState {
                 reason_code: "refund_out".to_string(),
                 amount: -amount_usd,
                 balance_before: before_total,
-                balance_after: after_recharge + before_gift,
+                balance_after: after_total,
                 recharge_balance_before: before_recharge,
                 recharge_balance_after: after_recharge,
                 gift_balance_before: before_gift,
@@ -129,6 +176,12 @@ impl AppState {
                     .lock()
                     .expect("admin wallet payment order store should lock")
                     .insert(updated_order.id.clone(), updated_order);
+            }
+            if let Some(transaction_store) = self.admin_wallet_transaction_store.as_ref() {
+                transaction_store
+                    .lock()
+                    .expect("admin wallet transaction store should lock")
+                    .insert(transaction.id.clone(), transaction.clone());
             }
 
             self.invalidate_auth_context_cache();
@@ -187,6 +240,23 @@ impl AppState {
             else {
                 return Ok(AdminWalletMutationOutcome::NotFound);
             };
+            if !refund.amount_usd.is_finite() || refund.amount_usd <= 0.0 {
+                return Ok(AdminWalletMutationOutcome::Invalid(
+                    "refund amount must be finite and greater than zero".to_string(),
+                ));
+            }
+            if let (Some(existing_id), Some(incoming_id)) =
+                (refund.gateway_refund_id.as_deref(), gateway_refund_id)
+            {
+                if existing_id != incoming_id {
+                    return Ok(AdminWalletMutationOutcome::Invalid(
+                        "gateway refund identifier conflicts with existing evidence".to_string(),
+                    ));
+                }
+            }
+            if refund.status == "succeeded" {
+                return Ok(AdminWalletMutationOutcome::Applied(refund));
+            }
             if refund.status != "processing" {
                 return Ok(AdminWalletMutationOutcome::Invalid(
                     "refund status must be processing before completion".to_string(),
@@ -195,9 +265,22 @@ impl AppState {
             let now_unix_secs = chrono::Utc::now().timestamp().max(0) as u64;
             let mut updated_refund = refund;
             updated_refund.status = "succeeded".to_string();
-            updated_refund.gateway_refund_id = gateway_refund_id.map(ToOwned::to_owned);
-            updated_refund.payout_reference = payout_reference.map(ToOwned::to_owned);
-            updated_refund.payout_proof = payout_proof;
+            updated_refund.gateway_refund_id = gateway_refund_id
+                .map(ToOwned::to_owned)
+                .or_else(|| updated_refund.gateway_refund_id.clone());
+            updated_refund.payout_reference = payout_reference
+                .map(ToOwned::to_owned)
+                .or_else(|| updated_refund.payout_reference.clone());
+            // Keep the durable provider response on ordinary retries.  A
+            // terminal success proof is the only completion payload allowed
+            // to upgrade an earlier processing proof.
+            if updated_refund.payout_proof.is_none()
+                || payout_proof
+                    .as_ref()
+                    .is_some_and(wallet_refund_proof_is_success)
+            {
+                updated_refund.payout_proof = payout_proof;
+            }
             updated_refund.completed_at_unix_secs = Some(now_unix_secs);
             updated_refund.updated_at_unix_secs = now_unix_secs;
             refund_store
@@ -269,6 +352,12 @@ impl AppState {
                 return Ok(AdminWalletMutationOutcome::NotFound);
             };
 
+            if !refund.amount_usd.is_finite() || refund.amount_usd <= 0.0 {
+                return Ok(AdminWalletMutationOutcome::Invalid(
+                    "refund amount must be finite and greater than zero".to_string(),
+                ));
+            }
+
             let now_unix_secs = chrono::Utc::now().timestamp().max(0) as u64;
             if matches!(refund.status.as_str(), "pending_approval" | "approved") {
                 let mut updated_refund = refund;
@@ -292,15 +381,95 @@ impl AppState {
                 )));
             }
 
+            // The in-memory implementation mirrors the database contract:
+            // only an explicitly offline payout without external evidence may
+            // release its reservation.
+            if refund.gateway_refund_id.is_some()
+                || refund.payout_proof.is_some()
+                || !refund
+                    .refund_mode
+                    .trim()
+                    .eq_ignore_ascii_case("offline_payout")
+            {
+                return Ok(AdminWalletMutationOutcome::Invalid(
+                    "cannot fail refund while gateway settlement is processing".to_string(),
+                ));
+            }
+
             let amount_usd = refund.amount_usd;
             let before_recharge = wallet.balance;
             let before_gift = wallet.gift_balance;
+            let before_total_refunded = wallet.total_refunded;
             let before_total = before_recharge + before_gift;
             let after_recharge = before_recharge + amount_usd;
+            let after_total = after_recharge + before_gift;
+            let after_total_refunded = before_total_refunded - amount_usd;
+            if !before_recharge.is_finite()
+                || before_recharge < 0.0
+                || !before_gift.is_finite()
+                || before_gift < 0.0
+                || !before_total_refunded.is_finite()
+                || before_total_refunded < 0.0
+                || before_total_refunded < amount_usd
+                || !before_total.is_finite()
+                || !after_recharge.is_finite()
+                || !after_total.is_finite()
+                || !after_total_refunded.is_finite()
+                || after_total_refunded < 0.0
+            {
+                return Ok(AdminWalletMutationOutcome::Invalid(
+                    "wallet balance is invalid for refund recovery".to_string(),
+                ));
+            }
+
+            let mut updated_order = None;
+            if let Some(payment_order_id) = refund.payment_order_id.clone() {
+                let Some(order_store) = self.admin_wallet_payment_order_store.as_ref() else {
+                    return Ok(AdminWalletMutationOutcome::Unavailable);
+                };
+                let Some(order) = order_store
+                    .lock()
+                    .expect("admin wallet payment order store should lock")
+                    .get(&payment_order_id)
+                    .cloned()
+                else {
+                    return Ok(AdminWalletMutationOutcome::Invalid(
+                        "payment order not found".to_string(),
+                    ));
+                };
+                if order.wallet_id != wallet_id || order.status != "credited" {
+                    return Ok(AdminWalletMutationOutcome::Invalid(
+                        "payment order is not refundable for this wallet".to_string(),
+                    ));
+                }
+                let refunded_before = order.refunded_amount_usd;
+                let refundable_before = order.refundable_amount_usd;
+                let refunded_after = refunded_before - amount_usd;
+                let refundable_after = refundable_before + amount_usd;
+                if !payment_order_refund_amounts_are_consistent(
+                    order.amount_usd,
+                    refunded_before,
+                    refundable_before,
+                ) || !refunded_before.is_finite()
+                    || refunded_before < amount_usd
+                    || !refunded_after.is_finite()
+                    || refunded_after < 0.0
+                    || refundable_after < 0.0
+                    || refundable_after > order.amount_usd
+                {
+                    return Ok(AdminWalletMutationOutcome::Invalid(
+                        "payment order refund amounts are invalid".to_string(),
+                    ));
+                }
+                let mut order = order;
+                order.refunded_amount_usd = refunded_after;
+                order.refundable_amount_usd = refundable_after;
+                updated_order = Some(order);
+            }
 
             let mut updated_wallet = wallet.clone();
             updated_wallet.balance = after_recharge;
-            updated_wallet.total_refunded = (updated_wallet.total_refunded - amount_usd).max(0.0);
+            updated_wallet.total_refunded = after_total_refunded;
             updated_wallet.updated_at_unix_secs = now_unix_secs;
 
             let transaction = AdminWalletTransactionRecord {
@@ -310,7 +479,7 @@ impl AppState {
                 reason_code: "refund_revert".to_string(),
                 amount: amount_usd,
                 balance_before: before_total,
-                balance_after: after_recharge + before_gift,
+                balance_after: after_total,
                 recharge_balance_before: before_recharge,
                 recharge_balance_after: after_recharge,
                 gift_balance_before: before_gift,
@@ -322,23 +491,13 @@ impl AppState {
                 created_at_unix_ms: now_unix_secs,
             };
 
-            if let Some(payment_order_id) = refund.payment_order_id.clone() {
-                let Some(order_store) = self.admin_wallet_payment_order_store.as_ref() else {
-                    return Ok(AdminWalletMutationOutcome::Unavailable);
-                };
-                let maybe_order = order_store
+            if let Some(updated_order) = updated_order {
+                self.admin_wallet_payment_order_store
+                    .as_ref()
+                    .expect("admin wallet payment order store should exist")
                     .lock()
                     .expect("admin wallet payment order store should lock")
-                    .get(&payment_order_id)
-                    .cloned();
-                if let Some(mut order) = maybe_order {
-                    order.refunded_amount_usd -= amount_usd;
-                    order.refundable_amount_usd += amount_usd;
-                    order_store
-                        .lock()
-                        .expect("admin wallet payment order store should lock")
-                        .insert(order.id.clone(), order);
-                }
+                    .insert(updated_order.id.clone(), updated_order);
             }
 
             let mut updated_refund = refund;
@@ -354,6 +513,12 @@ impl AppState {
                 .lock()
                 .expect("admin wallet refund store should lock")
                 .insert(updated_refund.id.clone(), updated_refund.clone());
+            if let Some(transaction_store) = self.admin_wallet_transaction_store.as_ref() {
+                transaction_store
+                    .lock()
+                    .expect("admin wallet transaction store should lock")
+                    .insert(transaction.id.clone(), transaction.clone());
+            }
 
             self.invalidate_auth_context_cache();
             return Ok(AdminWalletMutationOutcome::Applied((
@@ -444,5 +609,105 @@ fn stored_admin_wallet_transaction_to_gateway(
         operator_id: transaction.operator_id,
         description: transaction.description,
         created_at_unix_ms: transaction.created_at_unix_ms.unwrap_or_default(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn refund_with_proof(proof: serde_json::Value) -> AdminWalletRefundRecord {
+        AdminWalletRefundRecord {
+            id: "refund-proof-lifecycle".to_string(),
+            refund_no: "rf-proof-lifecycle".to_string(),
+            wallet_id: "wallet-proof-lifecycle".to_string(),
+            user_id: Some("user-proof-lifecycle".to_string()),
+            payment_order_id: None,
+            source_type: "manual".to_string(),
+            source_id: None,
+            refund_mode: "original_channel".to_string(),
+            amount_usd: 4.0,
+            status: "processing".to_string(),
+            reason: Some("proof lifecycle regression".to_string()),
+            failure_reason: None,
+            gateway_refund_id: Some("gateway-proof-lifecycle".to_string()),
+            payout_method: Some("wxpay".to_string()),
+            payout_reference: None,
+            payout_proof: Some(proof),
+            requested_by: Some("user-proof-lifecycle".to_string()),
+            approved_by: Some("admin-proof-lifecycle".to_string()),
+            processed_by: Some("admin-proof-lifecycle".to_string()),
+            created_at_unix_ms: 1_710_000_000,
+            updated_at_unix_secs: 1_710_000_000,
+            processed_at_unix_secs: Some(1_710_000_010),
+            completed_at_unix_secs: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn completion_preserves_processing_proof_on_non_terminal_retry() {
+        let processing_proof = json!({
+            "gateway": "wxpay",
+            "id": "gateway-proof-lifecycle",
+            "status": "processing"
+        });
+        let state = AppState::new()
+            .expect("gateway state should build")
+            .with_admin_wallet_refunds_for_tests([refund_with_proof(processing_proof.clone())]);
+
+        let outcome = state
+            .admin_complete_wallet_refund(
+                "wallet-proof-lifecycle",
+                "refund-proof-lifecycle",
+                Some("gateway-proof-lifecycle"),
+                None,
+                Some(json!({
+                    "gateway": "wxpay",
+                    "id": "gateway-proof-lifecycle",
+                    "status": "pending",
+                    "attempt": 2
+                })),
+            )
+            .await
+            .expect("completion should resolve");
+        let AdminWalletMutationOutcome::Applied(refund) = outcome else {
+            panic!("completion should apply");
+        };
+        assert_eq!(refund.status, "succeeded");
+        assert_eq!(refund.payout_proof, Some(processing_proof));
+    }
+
+    #[tokio::test]
+    async fn completion_allows_terminal_success_proof_to_upgrade_processing_evidence() {
+        let state = AppState::new()
+            .expect("gateway state should build")
+            .with_admin_wallet_refunds_for_tests([refund_with_proof(json!({
+                "gateway": "wxpay",
+                "id": "gateway-proof-lifecycle",
+                "status": "processing"
+            }))]);
+        let success_proof = json!({
+            "gateway": "wxpay",
+            "id": "gateway-proof-lifecycle",
+            "status": "succeeded",
+            "processed_at": "2026-08-29T00:00:00Z"
+        });
+
+        let outcome = state
+            .admin_complete_wallet_refund(
+                "wallet-proof-lifecycle",
+                "refund-proof-lifecycle",
+                Some("gateway-proof-lifecycle"),
+                None,
+                Some(success_proof.clone()),
+            )
+            .await
+            .expect("completion should resolve");
+        let AdminWalletMutationOutcome::Applied(refund) = outcome else {
+            panic!("completion should apply");
+        };
+        assert_eq!(refund.status, "succeeded");
+        assert_eq!(refund.payout_proof, Some(success_proof));
     }
 }

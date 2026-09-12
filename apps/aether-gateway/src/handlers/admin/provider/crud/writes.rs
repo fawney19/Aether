@@ -173,16 +173,17 @@ pub(crate) async fn maybe_build_local_admin_provider_writes_response(
                 .build_admin_provider_summary_payload(&provider_id)
                 .await
             {
-                Some(payload) => attach_admin_audit_response(
+                Ok(Some(payload)) => attach_admin_audit_response(
                     Json(payload).into_response(),
                     "admin_provider_updated",
                     "update_provider",
                     "provider",
                     &provider_id,
                 ),
-                None => build_admin_provider_not_found_response(format!(
+                Ok(None) => build_admin_provider_not_found_response(format!(
                     "Provider {provider_id} 不存在"
                 )),
+                Err(_) => build_admin_providers_data_unavailable_response(),
             },
         ));
     }

@@ -394,7 +394,7 @@ async fn resolve_admin_provider_oauth_batch_import_tokens(
                         });
                     }
                 }
-                return Err(format!("Token 验证失败: {detail}"));
+                return Err("Token 验证失败".to_string());
             }
         };
 

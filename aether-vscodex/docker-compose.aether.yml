@@ -1,0 +1,37 @@
+services:
+  app:
+    environment:
+      AETHER_VSCODEX_ENABLED: "true"
+      AETHER_VSCODEX_INTERNAL_URL: http://vscodex:8788
+      AETHER_VSCODEX_INTERNAL_TOKEN: ${AETHER_VSCODEX_INTERNAL_TOKEN:?set AETHER_VSCODEX_INTERNAL_TOKEN}
+      AETHER_VSCODEX_PUBLIC_WS_URL: ${AETHER_VSCODEX_PUBLIC_WS_URL:?set AETHER_VSCODEX_PUBLIC_WS_URL}
+    depends_on:
+      vscodex:
+        condition: service_healthy
+    volumes:
+      - ./aether-vscodex/web/dist:/opt/aether/releases/image/frontend/aether-vscodex:ro
+
+  vscodex:
+    build:
+      context: ./aether-vscodex
+    image: ${AETHER_VSCODEX_IMAGE:-aether-vscodex:local}
+    environment:
+      HOST: 0.0.0.0
+      PORT: 8788
+      AETHER_VSCODEX_INTERNAL_TOKEN: ${AETHER_VSCODEX_INTERNAL_TOKEN:?set AETHER_VSCODEX_INTERNAL_TOKEN}
+      AETHER_VSCODEX_PUBLIC_WS_URL: ${AETHER_VSCODEX_PUBLIC_WS_URL:?set AETHER_VSCODEX_PUBLIC_WS_URL}
+      AETHER_VSCODEX_ALLOWED_ORIGINS: ${AETHER_VSCODEX_ALLOWED_ORIGINS:?set AETHER_VSCODEX_ALLOWED_ORIGINS}
+      AETHER_VSCODEX_DATA_DIR: /var/lib/aether-vscodex
+    expose:
+      - "8788"
+    volumes:
+      - vscodex_data:/var/lib/aether-vscodex
+    logging:
+      driver: local
+      options:
+        max-size: "50m"
+        max-file: "3"
+    restart: unless-stopped
+
+volumes:
+  vscodex_data:

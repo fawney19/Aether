@@ -3,11 +3,9 @@ use crate::handlers::admin::provider::shared::support::{
     ADMIN_PROVIDER_MAPPING_PREVIEW_MAX_KEYS, ADMIN_PROVIDER_MAPPING_PREVIEW_MAX_MODELS,
 };
 use crate::handlers::admin::request::AdminAppState;
-use crate::handlers::admin::shared::{
-    decrypt_catalog_secret_with_fallbacks, json_string_list, parse_catalog_auth_config_json,
-    take_secret_prefix, take_secret_suffix,
-};
+use crate::handlers::admin::shared::{json_string_list, parse_catalog_auth_config_json};
 use crate::handlers::public::matches_model_mapping_for_models;
+use crate::handlers::shared::masked_secret_display;
 use crate::provider_key_auth::provider_key_auth_config_is_agent_identity;
 use crate::{GatewayError, LocalProviderDeleteTaskState};
 use aether_data_contracts::repository::global_models::{
@@ -182,21 +180,12 @@ pub(crate) fn mapping_preview_masked_catalog_api_key(
         return "***".to_string();
     }
 
-    decrypt_catalog_secret_with_fallbacks(state.encryption_key(), ciphertext)
-        .map(|value| {
-            let char_count = value.chars().count();
-            if char_count > 8 {
-                format!(
-                    "{}***{}",
-                    take_secret_prefix(&value, 4),
-                    take_secret_suffix(&value, 4)
-                )
-            } else if char_count >= 2 {
-                format!("{}***", take_secret_prefix(&value, 2))
-            } else {
-                "***".to_string()
-            }
-        })
+    state
+        .as_ref()
+        .decrypt_provider_catalog_key_api_key(key)
+        .ok()
+        .flatten()
+        .map(|value| masked_secret_display(&value, 4, 4, "***"))
         .unwrap_or_else(|| "***".to_string())
 }
 

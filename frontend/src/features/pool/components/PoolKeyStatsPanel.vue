@@ -108,7 +108,7 @@ function metricForGroup(
 
 const cycleMetricRows = computed(() => {
   const smallGroup = props.cycleGroups.length > 1 ? props.cycleGroups[0] : undefined
-  const largeGroup = props.cycleGroups.at(-1)
+  const largeGroup = props.cycleGroups[props.cycleGroups.length - 1]
   if (!largeGroup) return []
 
   return CYCLE_METRIC_KEYS.map((key) => {

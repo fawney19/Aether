@@ -13,6 +13,7 @@ use aether_contracts::tunnel::{MsgType, HEADER_SIZE};
 use aether_runtime::QueueSnapshot;
 use aether_runtime::{bounded_queue, BoundedQueueSender, QueueSendError};
 use futures_util::SinkExt;
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{debug, error, trace};
@@ -24,6 +25,8 @@ use aether_contracts::tunnel_security::SecureFrameCodec;
 
 const HIGH_PRIORITY_QUEUE_CAPACITY: usize = 64;
 const NORMAL_PRIORITY_QUEUE_CAPACITY: usize = 256;
+const WRITE_TIMEOUT: Duration = Duration::from_secs(15);
+const CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FramePriority {
@@ -43,9 +46,18 @@ pub struct FrameQueueSnapshots {
 pub struct FrameSender {
     high_tx: BoundedQueueSender<Frame>,
     normal_tx: BoundedQueueSender<Frame>,
+    close_tx: watch::Sender<bool>,
 }
 
 impl FrameSender {
+    pub fn close(&self) {
+        let _ = self.close_tx.send(true);
+    }
+
+    pub(super) fn subscribe_close(&self) -> watch::Receiver<bool> {
+        self.close_tx.subscribe()
+    }
+
     pub async fn send(&self, frame: Frame) -> Result<(), QueueSendError<Frame>> {
         match classify_frame_priority(&frame) {
             FramePriority::High => self.high_tx.send(frame).await,
@@ -73,7 +85,12 @@ impl FrameSender {
         high_tx: BoundedQueueSender<Frame>,
         normal_tx: BoundedQueueSender<Frame>,
     ) -> Self {
-        Self { high_tx, normal_tx }
+        let (close_tx, _) = watch::channel(false);
+        Self {
+            high_tx,
+            normal_tx,
+            close_tx,
+        }
     }
 }
 
@@ -113,15 +130,24 @@ where
 {
     let (high_tx, mut high_rx) = bounded_queue::<Frame>(HIGH_PRIORITY_QUEUE_CAPACITY);
     let (normal_tx, mut normal_rx) = bounded_queue::<Frame>(NORMAL_PRIORITY_QUEUE_CAPACITY);
-    let tx = FrameSender { high_tx, normal_tx };
+    let (close_tx, mut close_rx) = watch::channel(false);
+    let tx = FrameSender {
+        high_tx,
+        normal_tx,
+        close_tx,
+    };
 
     let handle = tokio::spawn(async move {
         let mut ping_ticker = tokio::time::interval(ping_interval);
         let mut high_open = true;
         let mut normal_open = true;
+        let mut close_open = true;
         ping_ticker.tick().await; // skip first immediate tick
 
         loop {
+            if *close_rx.borrow() {
+                break;
+            }
             if let Ok(frame) = high_rx.try_recv() {
                 if !write_frame(
                     &mut sink,
@@ -141,6 +167,10 @@ where
 
             tokio::select! {
                 biased;
+                changed = close_rx.changed(), if close_open => {
+                    if changed.is_err() { close_open = false; }
+                    if *close_rx.borrow() { break; }
+                },
                 frame = high_rx.recv(), if high_open => {
                     match frame {
                         Some(frame) => {
@@ -152,7 +182,7 @@ where
                     }
                 }
                 _ = ping_ticker.tick(), if high_open || normal_open => {
-                    if let Err(e) = sink.send(Message::Ping(vec![])).await {
+                    if let Err(e) = send_message(&mut sink, Message::Ping(vec![])).await {
                         error!(error = %e, "failed to send WebSocket ping");
                         if let Some(metrics) = tunnel_metrics.as_deref() {
                             metrics.record_error("ws_ping_error", &e.to_string());
@@ -174,7 +204,7 @@ where
             }
         }
         debug!("writer task exiting");
-        let _ = sink.close().await;
+        let _ = tokio::time::timeout(CLOSE_TIMEOUT, sink.close()).await;
     });
 
     (tx, handle)
@@ -228,7 +258,7 @@ where
         None => frame.encode(),
     };
     let wire_len = data.len().max(HEADER_SIZE);
-    if let Err(e) = sink.send(Message::Binary(data.into())).await {
+    if let Err(e) = send_message(sink, Message::Binary(data.into())).await {
         error!(
             stream_id = stream_id,
             msg_type = ?msg_type,
@@ -248,8 +278,92 @@ where
     true
 }
 
+async fn send_message<S>(
+    sink: &mut S,
+    message: Message,
+) -> Result<(), tokio_tungstenite::tungstenite::Error>
+where
+    S: SinkExt<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+{
+    tokio::time::timeout(WRITE_TIMEOUT, sink.send(message))
+        .await
+        .map_err(|_| {
+            tokio_tungstenite::tungstenite::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "tunnel WebSocket write timed out",
+            ))
+        })?
+}
+
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn dropping_last_sender_flushes_queued_body_and_end_frames() {
+        let sink = VecSink::default();
+        let sent = Arc::clone(&sink.sent);
+        let (sender, task) = spawn_writer(sink, Duration::from_secs(60));
+        sender
+            .send(Frame::new(
+                7,
+                MsgType::ResponseBody,
+                0,
+                bytes::Bytes::from_static(b"late"),
+            ))
+            .await
+            .unwrap();
+        sender
+            .send(Frame::new(7, MsgType::StreamEnd, 0, bytes::Bytes::new()))
+            .await
+            .unwrap();
+        drop(sender);
+        task.await.unwrap();
+        let frames = sent.lock().unwrap();
+        assert_eq!(frames.len(), 2);
+        let Message::Binary(body) = &frames[0] else {
+            panic!("expected body")
+        };
+        assert_eq!(
+            Frame::decode(body.clone().into()).unwrap().payload,
+            b"late".as_slice()
+        );
+    }
+
+    struct StalledSink;
+
+    impl futures_util::Sink<Message> for StalledSink {
+        type Error = Error;
+        fn poll_ready(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), Error>> {
+            Poll::Pending
+        }
+        fn start_send(self: Pin<&mut Self>, _: Message) -> Result<(), Error> {
+            Ok(())
+        }
+        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), Error>> {
+            Poll::Pending
+        }
+        fn poll_close(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), Error>> {
+            Poll::Pending
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stalled_socket_write_and_close_are_bounded() {
+        let (sender, task) = spawn_writer(StalledSink, Duration::from_secs(60));
+        sender
+            .send(Frame::new(
+                1,
+                MsgType::ResponseBody,
+                0,
+                bytes::Bytes::from_static(b"data"),
+            ))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(20), task)
+            .await
+            .expect("writer should time out")
+            .unwrap();
+    }
+
     use std::pin::Pin;
     use std::sync::{Arc, Mutex};
     use std::task::{Context, Poll};

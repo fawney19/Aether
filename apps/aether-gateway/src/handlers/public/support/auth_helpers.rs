@@ -52,8 +52,7 @@ pub(crate) async fn build_auth_registration_settings_payload(
             .filter(|value| !value.is_empty())
             .is_some();
     let enable_registration = system_config_bool(enable_registration.as_ref(), false);
-    let require_email_verification =
-        system_config_bool(require_email_verification.as_ref(), false) && email_configured;
+    let require_email_verification = system_config_bool(require_email_verification.as_ref(), false);
     let password_policy_level = match system_config_string(password_policy_level_config.as_ref()) {
         Some(value) if matches!(value.as_str(), "weak" | "medium" | "strong") => value,
         _ => "weak".to_string(),
@@ -127,6 +126,7 @@ pub(crate) fn build_auth_json_response(
     payload: serde_json::Value,
     set_cookie: Option<String>,
 ) -> Response<Body> {
+    let has_set_cookie = set_cookie.is_some();
     let mut response = (status, Json(payload)).into_response();
     if let Some(set_cookie) = set_cookie {
         if let Ok(value) = axum::http::HeaderValue::from_str(&set_cookie) {
@@ -135,6 +135,22 @@ pub(crate) fn build_auth_json_response(
                 .append(axum::http::header::SET_COOKIE, value);
         }
     }
+    if has_set_cookie {
+        mark_sensitive_response_no_store(response)
+    } else {
+        response
+    }
+}
+
+pub(crate) fn mark_sensitive_response_no_store(mut response: Response<Body>) -> Response<Body> {
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    response.headers_mut().insert(
+        axum::http::header::PRAGMA,
+        axum::http::HeaderValue::from_static("no-cache"),
+    );
     response
 }
 
@@ -143,29 +159,69 @@ pub(crate) fn build_auth_error_response(
     detail: impl Into<String>,
     clear_cookie: bool,
 ) -> Response<Body> {
+    let detail = detail.into();
+    let public_detail = if status.is_server_error() {
+        tracing::error!(
+            event_name = "public_api_internal_error",
+            %status,
+            "internal public API error hidden from client"
+        );
+        "服务暂不可用，请稍后重试".to_string()
+    } else {
+        detail
+    };
     let cookie = clear_cookie.then(build_auth_refresh_cookie_clear_header);
-    build_auth_json_response(status, json!({ "detail": detail.into() }), cookie)
+    build_auth_json_response(status, json!({ "detail": public_detail }), cookie)
 }
 
-fn auth_environment() -> String {
+#[cfg(test)]
+mod public_error_projection_tests {
+    use super::{build_auth_error_response, build_auth_json_response};
+    use axum::body::to_bytes;
+
+    #[tokio::test]
+    async fn public_server_errors_never_return_internal_details() {
+        let response = build_auth_error_response(
+            http::StatusCode::INTERNAL_SERVER_ERROR,
+            "database failed for https://user:password@db.example?token=secret",
+            false,
+        );
+        let body = to_bytes(response.into_body(), 4096).await.expect("body");
+        let encoded = String::from_utf8_lossy(&body);
+        assert!(encoded.contains("服务暂不可用"));
+        for secret in ["user", "password", "token", "db.example"] {
+            assert!(!encoded.contains(secret), "leaked {secret}");
+        }
+    }
+
+    #[test]
+    fn cookie_authenticated_responses_are_never_cacheable() {
+        let response = build_auth_json_response(
+            http::StatusCode::OK,
+            serde_json::json!({ "access_token": "secret" }),
+            Some("session=secret; HttpOnly".to_string()),
+        );
+
+        assert_eq!(
+            response.headers().get(http::header::CACHE_CONTROL),
+            Some(&http::HeaderValue::from_static("no-store"))
+        );
+        assert_eq!(
+            response.headers().get(http::header::PRAGMA),
+            Some(&http::HeaderValue::from_static("no-cache"))
+        );
+    }
+}
+
+fn auth_environment() -> Option<String> {
     std::env::var("ENVIRONMENT")
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "development".to_string())
 }
 
 pub(super) fn auth_jwt_secret() -> Result<String, String> {
-    if let Ok(value) = std::env::var("JWT_SECRET_KEY") {
-        let value = value.trim();
-        if !value.is_empty() {
-            return Ok(value.to_string());
-        }
-    }
-    if auth_environment().eq_ignore_ascii_case("production") {
-        return Err("JWT_SECRET_KEY 未配置".to_string());
-    }
-    Ok("aether-rust-dev-jwt-secret".to_string())
+    crate::local_auth_token::local_auth_jwt_secret()
 }
 
 pub(super) fn auth_access_token_expiry_hours() -> i64 {
@@ -192,7 +248,7 @@ pub(super) fn auth_verification_send_cooldown_seconds() -> i64 {
         .unwrap_or(60)
 }
 
-pub(super) fn auth_refresh_cookie_name() -> String {
+pub(crate) fn auth_refresh_cookie_name() -> String {
     std::env::var("AUTH_REFRESH_COOKIE_NAME")
         .ok()
         .map(|value| value.trim().to_string())
@@ -200,11 +256,28 @@ pub(super) fn auth_refresh_cookie_name() -> String {
         .unwrap_or_else(|| "aether_refresh_token".to_string())
 }
 
-fn auth_refresh_cookie_secure() -> bool {
-    std::env::var("AUTH_REFRESH_COOKIE_SECURE")
-        .ok()
-        .map(|value| value.trim().eq_ignore_ascii_case("true"))
-        .unwrap_or_else(|| auth_environment().eq_ignore_ascii_case("production"))
+pub(crate) fn auth_refresh_cookie_secure() -> bool {
+    auth_refresh_cookie_secure_from_values(
+        std::env::var("AUTH_REFRESH_COOKIE_SECURE").ok().as_deref(),
+        auth_environment().as_deref(),
+    )
+}
+
+fn auth_refresh_cookie_secure_from_values(
+    explicit_secure: Option<&str>,
+    environment: Option<&str>,
+) -> bool {
+    match explicit_secure.map(str::trim) {
+        Some(value) if value.eq_ignore_ascii_case("true") => true,
+        Some(value) if value.eq_ignore_ascii_case("false") => false,
+        Some(_) => true,
+        None => !environment.is_some_and(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "development" | "test" | "local"
+            )
+        }),
+    }
 }
 
 fn auth_refresh_cookie_samesite() -> &'static str {
@@ -212,7 +285,12 @@ fn auth_refresh_cookie_samesite() -> &'static str {
         Ok(value) if value.trim().eq_ignore_ascii_case("strict") => "Strict",
         Ok(value) if value.trim().eq_ignore_ascii_case("none") => "None",
         Ok(value) if value.trim().eq_ignore_ascii_case("lax") => "Lax",
-        _ if auth_environment().eq_ignore_ascii_case("production") => "None",
+        _ if auth_environment()
+            .as_deref()
+            .is_some_and(|value| value.eq_ignore_ascii_case("production")) =>
+        {
+            "None"
+        }
         _ => "Lax",
     }
 }
@@ -231,7 +309,7 @@ pub(super) fn build_auth_refresh_cookie_header(refresh_token: &str) -> String {
     cookie
 }
 
-pub(super) fn build_auth_refresh_cookie_clear_header() -> String {
+pub(crate) fn build_auth_refresh_cookie_clear_header() -> String {
     let mut cookie = format!(
         "{}=; Path=/api/auth; HttpOnly; SameSite={}; Max-Age=0",
         auth_refresh_cookie_name(),
@@ -254,23 +332,42 @@ fn auth_non_empty_string(value: Option<String>) -> Option<String> {
 }
 
 pub(super) fn extract_bearer_token(headers: &http::HeaderMap) -> Option<String> {
-    let value = crate::headers::header_value_str(headers, http::header::AUTHORIZATION.as_str())?;
+    let mut values = headers.get_all(http::header::AUTHORIZATION).iter();
+    let value = values.next()?.to_str().ok()?.trim();
+    if values.next().is_some() {
+        return None;
+    }
     let (scheme, token) = value.split_once(' ')?;
     if !scheme.eq_ignore_ascii_case("bearer") {
         return None;
     }
-    auth_non_empty_string(Some(token.to_string()))
+    let token = token.trim();
+    if token.is_empty()
+        || !token
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        return None;
+    }
+    Some(token.to_string())
 }
 
-pub(super) fn extract_cookie_value(headers: &http::HeaderMap, cookie_name: &str) -> Option<String> {
-    let header = crate::headers::header_value_str(headers, http::header::COOKIE.as_str())?;
-    for pair in header.split(';') {
-        let (name, value) = pair.trim().split_once('=')?;
-        if name.trim() == cookie_name {
-            return auth_non_empty_string(Some(value.to_string()));
+pub(crate) fn extract_cookie_value(headers: &http::HeaderMap, cookie_name: &str) -> Option<String> {
+    let mut found = None;
+    for header in headers.get_all(http::header::COOKIE).iter() {
+        let header = header.to_str().ok()?;
+        for pair in header.split(';') {
+            let (name, value) = pair.trim().split_once('=')?;
+            if name.trim() != cookie_name {
+                continue;
+            }
+            let value = auth_non_empty_string(Some(value.to_string()))?;
+            if found.replace(value).is_some() {
+                return None;
+            }
         }
     }
-    None
+    found
 }
 
 pub(crate) fn extract_client_device_id(
@@ -303,39 +400,30 @@ pub(crate) fn extract_client_device_id(
     Ok(candidate.to_string())
 }
 
+pub(crate) fn extract_client_device_id_header(
+    headers: &http::HeaderMap,
+) -> Result<String, Response<Body>> {
+    let candidate =
+        crate::headers::header_value_str(headers, "x-client-device-id").unwrap_or_default();
+    let candidate = candidate.trim();
+    if candidate.is_empty()
+        || candidate.len() > 128
+        || !candidate
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+    {
+        return Err(build_auth_error_response(
+            http::StatusCode::BAD_REQUEST,
+            "缺少或无效的设备标识",
+            false,
+        ));
+    }
+    Ok(candidate.to_string())
+}
+
 pub(super) fn auth_user_agent(headers: &http::HeaderMap) -> Option<String> {
     crate::headers::header_value_str(headers, http::header::USER_AGENT.as_str())
         .map(|value| value.chars().take(1000).collect())
-}
-
-pub(super) fn auth_client_ip(headers: &http::HeaderMap) -> Option<String> {
-    crate::headers::header_value_str(headers, "x-forwarded-for")
-        .and_then(|value| {
-            value
-                .split(',')
-                .next()
-                .map(|segment| segment.trim().to_string())
-        })
-        .filter(|value| !value.is_empty())
-        .map(|value| value.chars().take(45).collect())
-        .or_else(|| {
-            crate::headers::header_value_str(headers, "x-real-ip")
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(|value| value.chars().take(45).collect())
-        })
-}
-
-pub(super) fn auth_client_ip_with_cf(
-    headers: &http::HeaderMap,
-    cf_connecting_ip: Option<&str>,
-) -> Option<String> {
-    cf_connecting_ip
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|value| value.chars().take(45).collect())
-        .or_else(|| auth_client_ip(headers))
 }
 
 pub(super) fn normalize_auth_login_identifier(value: &str) -> String {
@@ -355,4 +443,91 @@ pub(super) fn validate_auth_login_password(password: &str) -> Result<(), String>
         return Err("密码长度不能超过72字节".to_string());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        auth_refresh_cookie_secure_from_values, extract_bearer_token, extract_cookie_value,
+    };
+    use axum::http::{header, HeaderMap, HeaderValue};
+
+    #[test]
+    fn bearer_token_requires_one_unambiguous_authorization_value() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("bEaReR abc.def_ghi-jkl"),
+        );
+        assert_eq!(
+            extract_bearer_token(&headers).as_deref(),
+            Some("abc.def_ghi-jkl")
+        );
+
+        headers.append(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer second-token"),
+        );
+        assert_eq!(extract_bearer_token(&headers), None);
+
+        headers.clear();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer first-token, Bearer second-token"),
+        );
+        assert_eq!(extract_bearer_token(&headers), None);
+    }
+
+    #[test]
+    fn cookie_value_rejects_duplicate_cookie_names() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_static("theme=dark; refresh=first-token"),
+        );
+        assert_eq!(
+            extract_cookie_value(&headers, "refresh").as_deref(),
+            Some("first-token")
+        );
+
+        headers.append(
+            header::COOKIE,
+            HeaderValue::from_static("refresh=second-token"),
+        );
+        assert_eq!(extract_cookie_value(&headers, "refresh"), None);
+
+        headers.clear();
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_static("refresh=first-token; refresh=second-token"),
+        );
+        assert_eq!(extract_cookie_value(&headers, "refresh"), None);
+    }
+
+    #[test]
+    fn refresh_cookie_secure_fails_closed_when_environment_is_missing_or_unknown() {
+        assert!(auth_refresh_cookie_secure_from_values(None, None));
+        assert!(auth_refresh_cookie_secure_from_values(
+            None,
+            Some("staging")
+        ));
+        assert!(auth_refresh_cookie_secure_from_values(
+            Some("invalid"),
+            Some("development")
+        ));
+    }
+
+    #[test]
+    fn refresh_cookie_secure_allows_only_explicit_local_or_override_opt_out() {
+        assert!(!auth_refresh_cookie_secure_from_values(
+            None,
+            Some("development")
+        ));
+        assert!(!auth_refresh_cookie_secure_from_values(None, Some("test")));
+        assert!(!auth_refresh_cookie_secure_from_values(Some("false"), None));
+        assert!(auth_refresh_cookie_secure_from_values(
+            Some("true"),
+            Some("development")
+        ));
+    }
 }

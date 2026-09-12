@@ -456,7 +456,7 @@ function hasRequestPricing(model: Model): boolean {
 function hasVideoPricing(model: Model): boolean {
   const priceByResolution = model.effective_config?.billing?.video?.price_per_second_by_resolution
     || model.config?.billing?.video?.price_per_second_by_resolution
-  return priceByResolution && typeof priceByResolution === 'object' && Object.keys(priceByResolution).length > 0
+  return !!priceByResolution && typeof priceByResolution === 'object' && Object.keys(priceByResolution).length > 0
 }
 
 // 获取视频计费的显示文本

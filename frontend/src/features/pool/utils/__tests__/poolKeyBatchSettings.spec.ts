@@ -35,6 +35,18 @@ describe('pool key batch settings', () => {
     })
   })
 
+  it('serializes a positive concurrency limit as a number', () => {
+    const selection = createPoolKeyBatchSettingSelection()
+    const draft = createPoolKeyBatchSettingsDraft()
+    selection.concurrent_limit = true
+    draft.concurrent_limit = 6
+
+    expect(validatePoolKeyBatchSettings(selection, draft)).toEqual([])
+    expect(buildPoolKeySettingsPatch(selection, draft)).toEqual({
+      concurrent_limit: 6,
+    })
+  })
+
   it('requires a selected field and a proxy node for set mode', () => {
     const selection = createPoolKeyBatchSettingSelection()
     const draft = createPoolKeyBatchSettingsDraft()

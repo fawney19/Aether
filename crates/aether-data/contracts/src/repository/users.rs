@@ -2,6 +2,21 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 
+fn redacted_optional_secret<T>(value: &Option<T>) -> Option<&'static str> {
+    value.as_ref().map(|_| "[REDACTED]")
+}
+
+pub const LAST_ACTIVE_ADMIN_UPDATE_DENIED: &str = "last_active_admin_update_denied";
+pub const LAST_ACTIVE_ADMIN_DELETE_DENIED: &str = "last_active_admin_delete_denied";
+
+pub fn is_last_active_admin_update_denied(error: &crate::DataLayerError) -> bool {
+    matches!(error, crate::DataLayerError::InvalidInput(message) if message == LAST_ACTIVE_ADMIN_UPDATE_DENIED)
+}
+
+pub fn is_last_active_admin_delete_denied(error: &crate::DataLayerError) -> bool {
+    matches!(error, crate::DataLayerError::InvalidInput(message) if message == LAST_ACTIVE_ADMIN_DELETE_DENIED)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct StoredUserSummary {
     pub id: String,
@@ -47,7 +62,7 @@ impl StoredUserSummary {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct StoredUserAuthRecord {
     pub id: String,
     pub email: Option<String>,
@@ -64,8 +79,39 @@ pub struct StoredUserAuthRecord {
     pub allowed_models_mode: String,
     pub is_active: bool,
     pub is_deleted: bool,
+    #[serde(default)]
+    pub security_version: i64,
     pub created_at: Option<DateTime<Utc>>,
     pub last_login_at: Option<DateTime<Utc>>,
+}
+
+impl std::fmt::Debug for StoredUserAuthRecord {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("StoredUserAuthRecord")
+            .field("id", &self.id)
+            .field("email", &self.email)
+            .field("email_verified", &self.email_verified)
+            .field("username", &self.username)
+            .field(
+                "password_hash",
+                &redacted_optional_secret(&self.password_hash),
+            )
+            .field("role", &self.role)
+            .field("auth_source", &self.auth_source)
+            .field("allowed_providers", &self.allowed_providers)
+            .field("allowed_providers_mode", &self.allowed_providers_mode)
+            .field("allowed_api_formats", &self.allowed_api_formats)
+            .field("allowed_api_formats_mode", &self.allowed_api_formats_mode)
+            .field("allowed_models", &self.allowed_models)
+            .field("allowed_models_mode", &self.allowed_models_mode)
+            .field("is_active", &self.is_active)
+            .field("is_deleted", &self.is_deleted)
+            .field("security_version", &self.security_version)
+            .field("created_at", &self.created_at)
+            .field("last_login_at", &self.last_login_at)
+            .finish()
+    }
 }
 
 impl StoredUserAuthRecord {
@@ -126,6 +172,7 @@ impl StoredUserAuthRecord {
             allowed_models_mode: "unrestricted".to_string(),
             is_active,
             is_deleted,
+            security_version: 0,
             created_at,
             last_login_at,
         })
@@ -147,6 +194,40 @@ impl StoredUserAuthRecord {
         self.allowed_models_mode =
             normalize_list_policy_mode(&allowed_models_mode, "users.allowed_models_mode")?;
         Ok(self)
+    }
+
+    pub fn with_security_version(
+        mut self,
+        security_version: i64,
+    ) -> Result<Self, crate::DataLayerError> {
+        if security_version < 0 {
+            return Err(crate::DataLayerError::UnexpectedValue(
+                "users.security_version is negative".to_string(),
+            ));
+        }
+        self.security_version = security_version;
+        Ok(self)
+    }
+
+    /// Compare the user fields that an aggregate import is allowed to restore.
+    /// Passwords, security versions, and timestamps are intentionally excluded:
+    /// password restoration has its own nullable CAS operation and the remaining
+    /// fields are server-managed concurrency markers.
+    pub fn matches_restore_state(&self, expected: &Self) -> bool {
+        self.id == expected.id
+            && self.email == expected.email
+            && self.email_verified == expected.email_verified
+            && self.username == expected.username
+            && self.role == expected.role
+            && self.auth_source == expected.auth_source
+            && self.allowed_providers == expected.allowed_providers
+            && self.allowed_providers_mode == expected.allowed_providers_mode
+            && self.allowed_api_formats == expected.allowed_api_formats
+            && self.allowed_api_formats_mode == expected.allowed_api_formats_mode
+            && self.allowed_models == expected.allowed_models
+            && self.allowed_models_mode == expected.allowed_models_mode
+            && self.is_active == expected.is_active
+            && self.is_deleted == expected.is_deleted
     }
 
     fn with_legacy_policy_modes(mut self) -> Self {
@@ -172,6 +253,127 @@ impl StoredUserAuthRecord {
 pub struct LdapAuthUserProvisioningOutcome {
     pub user: StoredUserAuthRecord,
     pub created: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeleteUserOAuthLinkOutcome {
+    Deleted,
+    NotFound,
+    LastOAuthBinding,
+    LastLoginMethod,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BindUserOAuthLinkOutcome {
+    Bound,
+    IdentityAlreadyBoundToUser,
+    IdentityBoundToAnotherUser,
+    UserAlreadyLinkedProvider,
+    UserNotFound,
+    SessionUnavailable,
+    ProviderNotFound,
+    ProviderDisabled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BindUserOAuthLinkSessionExpectation {
+    pub session_id: String,
+    pub client_device_id: String,
+    pub security_version: i64,
+    pub checked_at: DateTime<Utc>,
+}
+
+impl BindUserOAuthLinkSessionExpectation {
+    pub fn new(
+        session_id: impl Into<String>,
+        client_device_id: impl Into<String>,
+        security_version: i64,
+        checked_at: DateTime<Utc>,
+    ) -> Result<Self, crate::DataLayerError> {
+        let session_id = session_id.into();
+        let client_device_id = client_device_id.into();
+        if session_id.trim().is_empty()
+            || session_id != session_id.trim()
+            || client_device_id.trim().is_empty()
+            || client_device_id != client_device_id.trim()
+            || security_version < 0
+        {
+            return Err(crate::DataLayerError::InvalidInput(
+                "OAuth link session expectation is invalid".to_string(),
+            ));
+        }
+        Ok(Self {
+            session_id,
+            client_device_id,
+            security_version,
+            checked_at,
+        })
+    }
+}
+
+// Returning the full linked-user record avoids a second repository lookup and
+// is the established public contract. Keep the success value inline rather
+// than changing every adapter/caller to an allocated box.
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Clone, PartialEq)]
+pub enum ResolveOAuthLinkedUserOutcome {
+    Linked(StoredUserAuthRecord),
+    NotLinked,
+    ProviderUnavailable,
+}
+
+pub fn last_oauth_unbind_denial(
+    auth_source: &str,
+    password_hash: Option<&str>,
+    local_password_login_allowed: bool,
+) -> Option<DeleteUserOAuthLinkOutcome> {
+    if auth_source.eq_ignore_ascii_case("oauth") {
+        return Some(DeleteUserOAuthLinkOutcome::LastOAuthBinding);
+    }
+    if !auth_source.eq_ignore_ascii_case("local")
+        || !local_password_login_allowed
+        || !password_hash.is_some_and(is_valid_bcrypt_hash)
+    {
+        return Some(DeleteUserOAuthLinkOutcome::LastLoginMethod);
+    }
+    None
+}
+
+pub fn is_valid_bcrypt_hash(value: &str) -> bool {
+    use base64::Engine as _;
+    use std::str::FromStr;
+
+    let bytes = value.as_bytes();
+    if value.len() != 60
+        || !matches!(value.get(0..4), Some("$2a$") | Some("$2b$") | Some("$2y$"))
+        || !bytes.get(4).is_some_and(u8::is_ascii_digit)
+        || !bytes.get(5).is_some_and(u8::is_ascii_digit)
+        || bytes.get(6) != Some(&b'$')
+    {
+        return false;
+    }
+    let Ok(parts) = bcrypt::HashParts::from_str(value) else {
+        return false;
+    };
+    if !(4..=31).contains(&parts.get_cost()) {
+        return false;
+    }
+    let Some(payload) = value.get(7..) else {
+        return false;
+    };
+    if !payload.bytes().all(is_bcrypt_base64_byte) {
+        return false;
+    }
+    bcrypt::BASE_64
+        .decode(&payload[..22])
+        .is_ok_and(|salt| salt.len() == 16)
+        && bcrypt::BASE_64
+            .decode(&payload[22..])
+            .is_ok_and(|hash| hash.len() == 23)
+}
+
+fn is_bcrypt_base64_byte(value: u8) -> bool {
+    value.is_ascii_alphanumeric() || matches!(value, b'.' | b'/')
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -218,7 +420,7 @@ impl StoredUserOAuthLinkSummary {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct StoredUserExportRow {
     pub id: String,
     pub email: Option<String>,
@@ -238,6 +440,35 @@ pub struct StoredUserExportRow {
     pub model_capability_settings: Option<Value>,
     pub feature_settings: Option<Value>,
     pub is_active: bool,
+}
+
+impl std::fmt::Debug for StoredUserExportRow {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("StoredUserExportRow")
+            .field("id", &self.id)
+            .field("email", &self.email)
+            .field("email_verified", &self.email_verified)
+            .field("username", &self.username)
+            .field(
+                "password_hash",
+                &redacted_optional_secret(&self.password_hash),
+            )
+            .field("role", &self.role)
+            .field("auth_source", &self.auth_source)
+            .field("allowed_providers", &self.allowed_providers)
+            .field("allowed_providers_mode", &self.allowed_providers_mode)
+            .field("allowed_api_formats", &self.allowed_api_formats)
+            .field("allowed_api_formats_mode", &self.allowed_api_formats_mode)
+            .field("allowed_models", &self.allowed_models)
+            .field("allowed_models_mode", &self.allowed_models_mode)
+            .field("rate_limit", &self.rate_limit)
+            .field("rate_limit_mode", &self.rate_limit_mode)
+            .field("model_capability_settings", &self.model_capability_settings)
+            .field("feature_settings", &self.feature_settings)
+            .field("is_active", &self.is_active)
+            .finish()
+    }
 }
 
 impl StoredUserExportRow {
@@ -324,6 +555,25 @@ impl StoredUserExportRow {
         Ok(self)
     }
 
+    /// Compare the identity and policy fields that an aggregate import may
+    /// restore. Passwords, rate/settings payloads, and server timestamps are
+    /// checked separately by the rollback operation.
+    pub fn matches_restore_state(&self, expected: &Self) -> bool {
+        self.id == expected.id
+            && self.email == expected.email
+            && self.email_verified == expected.email_verified
+            && self.username == expected.username
+            && self.role == expected.role
+            && self.auth_source == expected.auth_source
+            && self.allowed_providers == expected.allowed_providers
+            && self.allowed_providers_mode == expected.allowed_providers_mode
+            && self.allowed_api_formats == expected.allowed_api_formats
+            && self.allowed_api_formats_mode == expected.allowed_api_formats_mode
+            && self.allowed_models == expected.allowed_models
+            && self.allowed_models_mode == expected.allowed_models_mode
+            && self.is_active == expected.is_active
+    }
+
     pub fn with_feature_settings(mut self, feature_settings: Option<Value>) -> Self {
         self.feature_settings = normalize_optional_json(feature_settings);
         self
@@ -342,7 +592,7 @@ impl StoredUserExportRow {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct StoredUserSessionRecord {
     pub id: String,
     pub user_id: String,
@@ -359,6 +609,35 @@ pub struct StoredUserSessionRecord {
     pub user_agent: Option<String>,
     pub created_at: Option<DateTime<Utc>>,
     pub updated_at: Option<DateTime<Utc>>,
+    #[serde(skip)]
+    pub security_version: i64,
+}
+
+impl std::fmt::Debug for StoredUserSessionRecord {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("StoredUserSessionRecord")
+            .field("id", &self.id)
+            .field("user_id", &self.user_id)
+            .field("client_device_id", &self.client_device_id)
+            .field("device_label", &self.device_label)
+            .field("refresh_token_hash", &"[REDACTED]")
+            .field(
+                "prev_refresh_token_hash",
+                &redacted_optional_secret(&self.prev_refresh_token_hash),
+            )
+            .field("rotated_at", &self.rotated_at)
+            .field("last_seen_at", &self.last_seen_at)
+            .field("expires_at", &self.expires_at)
+            .field("revoked_at", &self.revoked_at)
+            .field("revoke_reason", &self.revoke_reason)
+            .field("ip_address", &self.ip_address)
+            .field("user_agent", &self.user_agent)
+            .field("created_at", &self.created_at)
+            .field("updated_at", &self.updated_at)
+            .field("security_version", &self.security_version)
+            .finish()
+    }
 }
 
 impl StoredUserSessionRecord {
@@ -420,7 +699,21 @@ impl StoredUserSessionRecord {
             user_agent,
             created_at,
             updated_at,
+            security_version: 0,
         })
+    }
+
+    pub fn with_security_version(
+        mut self,
+        security_version: i64,
+    ) -> Result<Self, crate::DataLayerError> {
+        if security_version < 0 {
+            return Err(crate::DataLayerError::UnexpectedValue(
+                "user_sessions.security_version is negative".to_string(),
+            ));
+        }
+        self.security_version = security_version;
+        Ok(self)
     }
 
     pub fn hash_refresh_token(token: &str) -> String {
@@ -442,8 +735,10 @@ impl StoredUserSessionRecord {
         let Some(rotated_at) = self.rotated_at else {
             return (false, false);
         };
+        let age = now.signed_duration_since(rotated_at);
         if prev_hash == &token_hash
-            && now.signed_duration_since(rotated_at).num_seconds() <= Self::REFRESH_GRACE_SECONDS
+            && age >= chrono::Duration::zero()
+            && age <= chrono::Duration::seconds(Self::REFRESH_GRACE_SECONDS)
         {
             return (true, true);
         }
@@ -751,6 +1046,22 @@ pub trait UserReadRepository: Send + Sync {
         record: UpsertUserGroupRecord,
     ) -> Result<Option<StoredUserGroup>, crate::DataLayerError>;
 
+    /// Restore an existing user group only when its complete stored snapshot
+    /// still equals `expected`. The compare and replacement must be atomic so
+    /// an import rollback cannot overwrite a concurrent administrator update.
+    /// `false` means the row is missing, the identities differ, or the current
+    /// snapshot no longer matches the expected post-import state.
+    async fn restore_user_group_if_matches(
+        &self,
+        expected: &StoredUserGroup,
+        restored: &StoredUserGroup,
+    ) -> Result<bool, crate::DataLayerError> {
+        let _ = (expected, restored);
+        Err(crate::DataLayerError::InvalidInput(
+            "atomic user group restore is not available".to_string(),
+        ))
+    }
+
     async fn delete_user_group(&self, group_id: &str) -> Result<bool, crate::DataLayerError>;
 
     async fn list_user_group_members(
@@ -779,6 +1090,20 @@ pub trait UserReadRepository: Send + Sync {
         user_id: &str,
         group_ids: &[String],
     ) -> Result<Vec<StoredUserGroup>, crate::DataLayerError>;
+
+    /// Restore a user's group memberships only when the current set still
+    /// equals the post-import set. The compare and replacement are atomic.
+    async fn restore_user_groups_if_matches(
+        &self,
+        user_id: &str,
+        expected_group_ids: &[String],
+        restored_group_ids: &[String],
+    ) -> Result<bool, crate::DataLayerError> {
+        let _ = (user_id, expected_group_ids, restored_group_ids);
+        Err(crate::DataLayerError::InvalidInput(
+            "atomic user group restore is not available".to_string(),
+        ))
+    }
 
     async fn add_user_to_group(
         &self,
@@ -831,6 +1156,19 @@ pub trait UserReadRepository: Send + Sync {
         provider_user_id: &str,
     ) -> Result<Option<StoredUserAuthRecord>, crate::DataLayerError>;
 
+    #[allow(clippy::too_many_arguments)]
+    async fn resolve_enabled_oauth_linked_user(
+        &self,
+        provider_type: &str,
+        provider_user_id: &str,
+        provider_username: Option<&str>,
+        provider_email: Option<&str>,
+        extra_data: Option<Value>,
+        verified_email: Option<&str>,
+        touched_at: DateTime<Utc>,
+        provider_enabled_snapshot: bool,
+    ) -> Result<ResolveOAuthLinkedUserOutcome, crate::DataLayerError>;
+
     async fn touch_oauth_link(
         &self,
         provider_type: &str,
@@ -844,6 +1182,7 @@ pub trait UserReadRepository: Send + Sync {
     async fn create_oauth_auth_user(
         &self,
         email: Option<String>,
+        email_verified: bool,
         username: String,
         created_at: DateTime<Utc>,
     ) -> Result<Option<StoredUserAuthRecord>, crate::DataLayerError>;
@@ -862,8 +1201,22 @@ pub trait UserReadRepository: Send + Sync {
 
     async fn count_user_oauth_links(&self, user_id: &str) -> Result<u64, crate::DataLayerError>;
 
+    async fn has_oauth_links_for_provider(
+        &self,
+        provider_type: &str,
+    ) -> Result<bool, crate::DataLayerError>;
+
+    async fn count_locked_users_if_oauth_provider_disabled(
+        &self,
+        _provider_type: &str,
+        _enabled_provider_types_snapshot: &[String],
+        _ldap_exclusive: bool,
+    ) -> Result<usize, crate::DataLayerError> {
+        Ok(0)
+    }
+
     #[allow(clippy::too_many_arguments)]
-    async fn upsert_user_oauth_link(
+    async fn bind_user_oauth_link(
         &self,
         user_id: &str,
         provider_type: &str,
@@ -872,13 +1225,51 @@ pub trait UserReadRepository: Send + Sync {
         provider_email: Option<&str>,
         extra_data: Option<Value>,
         linked_at: DateTime<Utc>,
-    ) -> Result<(), crate::DataLayerError>;
+    ) -> Result<BindUserOAuthLinkOutcome, crate::DataLayerError> {
+        self.bind_user_oauth_link_if_provider_enabled(
+            user_id,
+            provider_type,
+            provider_user_id,
+            provider_username,
+            provider_email,
+            extra_data,
+            linked_at,
+            true,
+            None,
+        )
+        .await
+    }
 
+    #[allow(clippy::too_many_arguments)]
+    async fn bind_user_oauth_link_if_provider_enabled(
+        &self,
+        user_id: &str,
+        provider_type: &str,
+        provider_user_id: &str,
+        provider_username: Option<&str>,
+        provider_email: Option<&str>,
+        extra_data: Option<Value>,
+        linked_at: DateTime<Utc>,
+        provider_enabled_snapshot: bool,
+        session_expectation: Option<&BindUserOAuthLinkSessionExpectation>,
+    ) -> Result<BindUserOAuthLinkOutcome, crate::DataLayerError>;
+
+    /// Marks an email as verified only if the user's current normalized email still matches.
+    async fn upgrade_oauth_email_verification_if_matches(
+        &self,
+        user_id: &str,
+        verified_email: &str,
+        verified_at: DateTime<Utc>,
+    ) -> Result<bool, crate::DataLayerError>;
+
+    /// Atomically deletes the requested link only when doing so leaves a valid login method.
     async fn delete_user_oauth_link(
         &self,
         user_id: &str,
         provider_type: &str,
-    ) -> Result<bool, crate::DataLayerError>;
+        local_password_login_allowed: bool,
+        enabled_provider_types_snapshot: &[String],
+    ) -> Result<DeleteUserOAuthLinkOutcome, crate::DataLayerError>;
 
     async fn get_or_create_ldap_auth_user(
         &self,
@@ -898,9 +1289,43 @@ pub trait UserReadRepository: Send + Sync {
     async fn update_local_auth_user_profile(
         &self,
         user_id: &str,
+        email_present: bool,
         email: Option<String>,
+        email_verified: Option<bool>,
         username: Option<String>,
     ) -> Result<Option<StoredUserAuthRecord>, crate::DataLayerError>;
+
+    /// Restore all user fields represented by an aggregate import checkpoint in
+    /// one compare-and-write transaction. The password hash is deliberately
+    /// excluded and must be restored through the nullable password CAS method.
+    /// Implementations must not write anything when the current state differs
+    /// from `expected_auth` (or the exported rate/settings fields).
+    #[allow(clippy::too_many_arguments)]
+    async fn restore_local_auth_user_state_if_matches(
+        &self,
+        expected_auth: &StoredUserAuthRecord,
+        restored_auth: &StoredUserAuthRecord,
+        expected_export: &StoredUserExportRow,
+        restored_export: &StoredUserExportRow,
+        expected_model_capability_settings: Option<&Value>,
+        restored_model_capability_settings: Option<Value>,
+        expected_feature_settings: Option<&Value>,
+        restored_feature_settings: Option<Value>,
+    ) -> Result<bool, crate::DataLayerError> {
+        let _ = (
+            expected_auth,
+            restored_auth,
+            expected_export,
+            restored_export,
+            expected_model_capability_settings,
+            restored_model_capability_settings,
+            expected_feature_settings,
+            restored_feature_settings,
+        );
+        Err(crate::DataLayerError::InvalidInput(
+            "atomic user state restore is not available".to_string(),
+        ))
+    }
 
     async fn update_local_auth_user_password_hash(
         &self,
@@ -908,6 +1333,37 @@ pub trait UserReadRepository: Send + Sync {
         password_hash: String,
         updated_at: DateTime<Utc>,
     ) -> Result<Option<StoredUserAuthRecord>, crate::DataLayerError>;
+
+    /// Replace a user's password hash, including an explicit `NULL`, only when the current hash
+    /// still equals `expected_password_hash`. The compare and write must be atomic.
+    async fn restore_local_auth_user_password_hash_if_matches(
+        &self,
+        user_id: &str,
+        expected_password_hash: Option<&str>,
+        password_hash: Option<String>,
+        updated_at: DateTime<Utc>,
+    ) -> Result<bool, crate::DataLayerError> {
+        let _ = (user_id, expected_password_hash, password_hash, updated_at);
+        Err(crate::DataLayerError::InvalidInput(
+            "atomic nullable password restore is not available".to_string(),
+        ))
+    }
+
+    async fn reset_local_auth_user_password_and_revoke_sessions(
+        &self,
+        user_id: &str,
+        password_hash: String,
+        changed_at: DateTime<Utc>,
+    ) -> Result<bool, crate::DataLayerError>;
+
+    async fn change_local_auth_password_and_revoke_sessions(
+        &self,
+        user_id: &str,
+        current_session_id: &str,
+        expected_password_hash: Option<&str>,
+        next_password_hash: String,
+        changed_at: DateTime<Utc>,
+    ) -> Result<bool, crate::DataLayerError>;
 
     #[allow(clippy::too_many_arguments)]
     async fn update_local_auth_user_admin_fields(
@@ -970,6 +1426,23 @@ pub trait UserReadRepository: Send + Sync {
 
     async fn delete_local_auth_user(&self, user_id: &str) -> Result<bool, crate::DataLayerError>;
 
+    /// Delete a local-auth user only when no wallet currently belongs to the user.
+    ///
+    /// Authentication provisioning compensation uses this guard after removing a
+    /// wallet it can prove ownership of.  Implementations must evaluate the
+    /// wallet absence check in the same database transaction as the user delete;
+    /// a default implementation is deliberately fail-closed for repositories
+    /// that cannot provide that atomicity.
+    async fn delete_local_auth_user_if_wallet_absent(
+        &self,
+        user_id: &str,
+    ) -> Result<bool, crate::DataLayerError> {
+        let _ = user_id;
+        Err(crate::DataLayerError::InvalidInput(
+            "atomic user deletion without a wallet is not available".to_string(),
+        ))
+    }
+
     async fn read_user_preferences(
         &self,
         user_id: &str,
@@ -996,6 +1469,12 @@ pub trait UserReadRepository: Send + Sync {
         session: &StoredUserSessionRecord,
     ) -> Result<Option<StoredUserSessionRecord>, crate::DataLayerError>;
 
+    async fn create_user_session_if_password_matches(
+        &self,
+        session: &StoredUserSessionRecord,
+        expected_password_hash: &str,
+    ) -> Result<Option<StoredUserSessionRecord>, crate::DataLayerError>;
+
     async fn touch_user_session(
         &self,
         user_id: &str,
@@ -1018,7 +1497,7 @@ pub trait UserReadRepository: Send + Sync {
         &self,
         user_id: &str,
         session_id: &str,
-        previous_refresh_token_hash: &str,
+        expected_refresh_token_hash: &str,
         next_refresh_token_hash: &str,
         rotated_at: DateTime<Utc>,
         expires_at: DateTime<Utc>,
@@ -1169,7 +1648,9 @@ fn parse_string_list_value(
     field_name: &str,
 ) -> Result<Option<Vec<String>>, crate::DataLayerError> {
     match value {
-        Value::Null => Ok(None),
+        Value::Null => Err(crate::DataLayerError::UnexpectedValue(format!(
+            "{field_name} contains JSON null; use SQL NULL for an unset policy"
+        ))),
         Value::Array(array) => parse_string_list_array(array, field_name).map(Some),
         Value::String(raw) => parse_embedded_string_list(raw, field_name),
         _ => Err(crate::DataLayerError::UnexpectedValue(format!(
@@ -1183,8 +1664,15 @@ fn parse_embedded_string_list(
     field_name: &str,
 ) -> Result<Option<Vec<String>>, crate::DataLayerError> {
     let raw = raw.trim();
-    if raw.is_empty() || raw.eq_ignore_ascii_case("null") {
-        return Ok(None);
+    if raw.is_empty() {
+        return Err(crate::DataLayerError::UnexpectedValue(format!(
+            "{field_name} contains an empty string"
+        )));
+    }
+    if raw.eq_ignore_ascii_case("null") {
+        return Err(crate::DataLayerError::UnexpectedValue(format!(
+            "{field_name} contains stringified JSON null; use SQL NULL for an unset policy"
+        )));
     }
 
     if let Ok(decoded) = serde_json::from_str::<Value>(raw) {
@@ -1206,9 +1694,12 @@ fn parse_string_list_array(
             )));
         };
         let item = item.trim();
-        if !item.is_empty() {
-            items.push(item.to_string());
+        if item.is_empty() {
+            return Err(crate::DataLayerError::UnexpectedValue(format!(
+                "{field_name} contains an empty item"
+            )));
         }
+        items.push(item.to_string());
     }
     Ok(items)
 }
@@ -1219,7 +1710,8 @@ mod tests {
     use serde_json::Value;
 
     use super::{
-        legacy_list_policy_mode, StoredUserAuthRecord, StoredUserExportRow, StoredUserGroup,
+        is_valid_bcrypt_hash, last_oauth_unbind_denial, legacy_list_policy_mode,
+        DeleteUserOAuthLinkOutcome, StoredUserAuthRecord, StoredUserExportRow, StoredUserGroup,
         StoredUserPreferenceRecord, StoredUserSessionRecord,
     };
 
@@ -1271,6 +1763,49 @@ mod tests {
     }
 
     #[test]
+    fn classifies_last_oauth_unbind_by_remaining_login_method() {
+        let valid_hash =
+            bcrypt::hash("Secret123!", bcrypt::DEFAULT_COST).expect("bcrypt fixture should hash");
+
+        assert_eq!(
+            last_oauth_unbind_denial("oauth", None, false),
+            Some(DeleteUserOAuthLinkOutcome::LastOAuthBinding)
+        );
+        assert_eq!(
+            last_oauth_unbind_denial("local", None, true),
+            Some(DeleteUserOAuthLinkOutcome::LastLoginMethod)
+        );
+        assert_eq!(
+            last_oauth_unbind_denial("local", Some("not-a-password-hash"), true),
+            Some(DeleteUserOAuthLinkOutcome::LastLoginMethod)
+        );
+        assert_eq!(
+            last_oauth_unbind_denial("local", Some(&valid_hash), false),
+            Some(DeleteUserOAuthLinkOutcome::LastLoginMethod)
+        );
+        assert_eq!(
+            last_oauth_unbind_denial("local", Some(&valid_hash), true),
+            None
+        );
+    }
+
+    #[test]
+    fn validates_complete_bcrypt_encoding_and_cost() {
+        let valid_hash =
+            bcrypt::hash("Secret123!", bcrypt::DEFAULT_COST).expect("bcrypt fixture should hash");
+        assert!(is_valid_bcrypt_hash(&valid_hash));
+
+        for invalid in [
+            format!("$2b$99${}", &valid_hash[7..]),
+            format!("$2x$12${}", &valid_hash[7..]),
+            format!("$2b$12${}", "!".repeat(53)),
+            valid_hash[..59].to_string(),
+        ] {
+            assert!(!is_valid_bcrypt_hash(&invalid), "accepted {invalid}");
+        }
+    }
+
+    #[test]
     fn builds_user_export_row_with_allowed_lists() {
         let row = StoredUserExportRow::new(
             "user-1".to_string(),
@@ -1315,7 +1850,7 @@ mod tests {
             "user".to_string(),
             "local".to_string(),
             Some(serde_json::json!("[\"openai\"]")),
-            Some(serde_json::json!("null")),
+            None,
             Some(serde_json::json!("gpt-4.1")),
             None,
             Some(Value::Null),
@@ -1327,6 +1862,29 @@ mod tests {
         assert_eq!(row.allowed_api_formats, None);
         assert_eq!(row.allowed_models, Some(vec!["gpt-4.1".to_string()]));
         assert_eq!(row.model_capability_settings, None);
+    }
+
+    #[test]
+    fn stored_user_security_lists_distinguish_sql_null_from_malformed_json_null() {
+        assert_eq!(
+            super::parse_string_list(None, "users.allowed_providers")
+                .expect("SQL NULL should remain an unset policy"),
+            None
+        );
+        assert!(
+            super::parse_string_list(Some(serde_json::Value::Null), "users.allowed_providers")
+                .is_err()
+        );
+        assert!(super::parse_string_list(
+            Some(serde_json::json!("null")),
+            "users.allowed_providers"
+        )
+        .is_err());
+        assert!(super::parse_string_list(
+            Some(serde_json::json!([" "])),
+            "users.allowed_providers"
+        )
+        .is_err());
     }
 
     #[test]
@@ -1379,6 +1937,73 @@ mod tests {
     }
 
     #[test]
+    fn user_record_debug_output_redacts_password_and_refresh_hashes() {
+        let password_hash = "debug-secret-password-hash";
+        let auth = StoredUserAuthRecord::new(
+            "user-debug".to_string(),
+            Some("debug@example.com".to_string()),
+            true,
+            "debug-user".to_string(),
+            Some(password_hash.to_string()),
+            "user".to_string(),
+            "local".to_string(),
+            None,
+            None,
+            None,
+            true,
+            false,
+            None,
+            None,
+        )
+        .expect("auth record should build");
+        let export = StoredUserExportRow::new(
+            "user-debug".to_string(),
+            Some("debug@example.com".to_string()),
+            true,
+            "debug-user".to_string(),
+            Some(password_hash.to_string()),
+            "user".to_string(),
+            "local".to_string(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            true,
+        )
+        .expect("export record should build");
+        let current_hash = "debug-secret-current-refresh-hash";
+        let previous_hash = "debug-secret-previous-refresh-hash";
+        let session = StoredUserSessionRecord::new(
+            "session-debug".to_string(),
+            "user-debug".to_string(),
+            "device-debug".to_string(),
+            None,
+            current_hash.to_string(),
+            Some(previous_hash.to_string()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("session should build");
+
+        for rendered in [format!("{auth:?}"), format!("{export:?}")] {
+            assert!(!rendered.contains(password_hash));
+            assert!(rendered.contains("[REDACTED]"));
+        }
+        let rendered = format!("{session:?}");
+        assert!(!rendered.contains(current_hash));
+        assert!(!rendered.contains(previous_hash));
+        assert!(rendered.contains("[REDACTED]"));
+    }
+
+    #[test]
     fn legacy_policy_mode_treats_empty_lists_as_unrestricted() {
         assert_eq!(legacy_list_policy_mode(&None), "unrestricted");
         assert_eq!(legacy_list_policy_mode(&Some(Vec::new())), "unrestricted");
@@ -1417,6 +2042,29 @@ mod tests {
         assert_eq!(
             session.verify_refresh_token("current-token", now),
             (true, false)
+        );
+
+        let future_rotation = StoredUserSessionRecord::new(
+            "session-2".to_string(),
+            "user-1".to_string(),
+            "device-1".to_string(),
+            None,
+            StoredUserSessionRecord::hash_refresh_token("current-token"),
+            Some(StoredUserSessionRecord::hash_refresh_token("prev-token")),
+            Some(now + Duration::seconds(1)),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("session should build");
+        assert_eq!(
+            future_rotation.verify_refresh_token("prev-token", now),
+            (false, false)
         );
     }
 

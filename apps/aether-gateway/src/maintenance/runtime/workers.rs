@@ -279,7 +279,7 @@ pub(crate) fn spawn_stats_aggregation_worker(app: AppState) -> Option<tokio::tas
 }
 
 pub(crate) fn spawn_usage_cleanup_worker(app: AppState) -> Option<tokio::task::JoinHandle<()>> {
-    if !app.data.has_usage_writer() {
+    if !app.data.has_usage_writer() && !app.data.has_settlement_writer() {
         return None;
     }
 
@@ -595,7 +595,7 @@ pub(crate) fn spawn_gemini_file_mapping_cleanup_worker(
 }
 
 pub(crate) fn spawn_pending_cleanup_worker(app: AppState) -> Option<tokio::task::JoinHandle<()>> {
-    if !app.data.has_usage_writer() {
+    if !app.data.has_usage_writer() && !app.data.has_referral_data_backend() {
         return None;
     }
 
@@ -603,8 +603,8 @@ pub(crate) fn spawn_pending_cleanup_worker(app: AppState) -> Option<tokio::task:
         app,
         crate::task_runtime::TASK_KEY_PENDING_CLEANUP,
         |app| async move {
-            let data = app.data;
-            if let Err(err) = run_pending_cleanup_once(&data).await {
+            let data = app.data.clone();
+            if let Err(err) = run_pending_cleanup_once(&app).await {
                 log_maintenance_worker_failure("pending_cleanup", "startup", &err);
             }
             let mut interval = tokio::time::interval(PENDING_CLEANUP_INTERVAL);
@@ -617,7 +617,7 @@ pub(crate) fn spawn_pending_cleanup_worker(app: AppState) -> Option<tokio::task:
                 {
                     continue;
                 }
-                if let Err(err) = run_pending_cleanup_once(&data).await {
+                if let Err(err) = run_pending_cleanup_once(&app).await {
                     log_maintenance_worker_failure("pending_cleanup", "tick", &err);
                 }
             }

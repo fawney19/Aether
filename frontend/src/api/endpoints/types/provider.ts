@@ -12,6 +12,7 @@ export interface ProxyConfig {
   password?: string
   node_id?: string    // 代理节点 ID（aether-tunnel 注册的节点，与 url 互斥）
   enabled?: boolean   // 是否启用代理（false 时保留配置但不使用）
+  has_credentials?: boolean // 管理端脱敏响应：代理包含未返回的认证信息
 }
 
 export interface OAuthOrganizationInfo {
@@ -31,6 +32,7 @@ export interface HeaderRuleSet {
   action: 'set'
   key: string
   value: string
+  has_value?: boolean // value="***" 时表示保留服务端已有值
 }
 
 export interface HeaderRuleDrop {
@@ -60,6 +62,7 @@ export interface BodyRuleSet {
   action: 'set'
   path: string
   value: unknown
+  has_value?: boolean // value="***" 时表示保留服务端已有值
 }
 
 /**
@@ -95,6 +98,7 @@ export interface BodyRuleAppend {
   action: 'append'
   path: string
   value: unknown
+  has_value?: boolean
 }
 
 /**
@@ -109,6 +113,7 @@ export interface BodyRuleInsert {
   path: string
   index: number
   value: unknown
+  has_value?: boolean
 }
 
 /**
@@ -125,6 +130,8 @@ export interface BodyRuleRegexReplace {
   path: string
   pattern: string
   replacement: string
+  has_pattern?: boolean
+  has_replacement?: boolean
   flags?: string
   count?: number
 }
@@ -140,6 +147,7 @@ export interface BodyRuleConditionLeaf {
   path: string
   op: BodyRuleConditionOp
   value?: unknown  // exists / not_exists 不需要 value
+  has_value?: boolean // value="***" 时表示保留服务端已有条件值
   source?: 'body' | 'current' | 'original' | 'request_headers' | 'headers'
 }
 
@@ -573,7 +581,7 @@ export interface EndpointAPIKeyUpdate {
 
 export interface EndpointHealthDetail {
   api_format: string
-  health_score: number
+  health_score: number | null
   is_active: boolean
   total_keys?: number
   active_keys?: number
@@ -906,7 +914,7 @@ export interface ProviderWithEndpointsSummary {
   total_models: number
   active_models: number
   global_model_ids: string[]
-  avg_health_score: number
+  avg_health_score: number | null
   unhealthy_endpoints: number
   api_formats: string[]
   endpoint_health_details: EndpointHealthDetail[]

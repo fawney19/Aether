@@ -5,7 +5,7 @@ use serde_json::{Map, Value};
 use super::schedule::{BackupSchedule, BackupScheduleUnit};
 use super::scopes::BackupScope;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) struct S3BackupConfig {
     pub(crate) enabled: bool,
     pub(crate) scope: BackupScope,
@@ -20,6 +20,28 @@ pub(crate) struct S3BackupConfig {
     pub(crate) compression: String,
     pub(crate) schedule: BackupSchedule,
     pub(crate) retention_count: u32,
+}
+
+impl fmt::Debug for S3BackupConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let endpoint_origin = sanitized_endpoint_origin(&self.endpoint);
+        formatter
+            .debug_struct("S3BackupConfig")
+            .field("enabled", &self.enabled)
+            .field("scope", &self.scope)
+            .field("endpoint_origin", &endpoint_origin)
+            .field("region", &self.region)
+            .field("user_agent", &self.user_agent)
+            .field("bucket", &self.bucket)
+            .field("prefix", &self.prefix)
+            .field("has_access_key_id", &!self.access_key_id.is_empty())
+            .field("has_secret_access_key", &!self.secret_access_key.is_empty())
+            .field("path_style", &self.path_style)
+            .field("compression", &self.compression)
+            .field("schedule", &self.schedule)
+            .field("retention_count", &self.retention_count)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,6 +106,9 @@ impl S3BackupConfig {
             "Endpoint（S3 地址）",
             enabled,
         )?;
+        if enabled {
+            validate_s3_endpoint(&endpoint)?;
+        }
         let bucket =
             required_or_disabled_string(entries, "backup_s3_bucket", "Bucket（存储桶）", enabled)?;
         let access_key_id = required_or_disabled_string(
@@ -99,6 +124,11 @@ impl S3BackupConfig {
             enabled,
         )?;
 
+        let prefix = normalize_s3_prefix(
+            &optional_string(entries, "backup_s3_prefix")?
+                .unwrap_or_else(|| "aether/backups/".to_string()),
+        )?;
+
         Ok(Self {
             enabled,
             scope,
@@ -108,8 +138,7 @@ impl S3BackupConfig {
             user_agent: optional_string(entries, "backup_s3_user_agent")?
                 .unwrap_or_else(|| "rclone/v1.68.0".to_string()),
             bucket,
-            prefix: optional_string(entries, "backup_s3_prefix")?
-                .unwrap_or_else(|| "aether/backups/".to_string()),
+            prefix,
             access_key_id,
             secret_access_key,
             path_style: optional_bool(entries, "backup_s3_path_style")?.unwrap_or(true),
@@ -119,6 +148,48 @@ impl S3BackupConfig {
             retention_count,
         })
     }
+}
+
+fn normalize_s3_prefix(prefix: &str) -> Result<String, BackupConfigError> {
+    let prefix = prefix.trim().trim_matches('/');
+    if prefix.is_empty() {
+        return Ok(String::new());
+    }
+    if prefix
+        .split('/')
+        .any(|segment| segment.is_empty() || segment == "." || segment == "..")
+        || prefix.contains('\\')
+    {
+        return Err(BackupConfigError::new(
+            "Prefix（备份前缀）不能包含空路径段、相对路径段或反斜杠",
+        ));
+    }
+
+    Ok(format!("{prefix}/"))
+}
+
+fn validate_s3_endpoint(endpoint: &str) -> Result<(), BackupConfigError> {
+    let parsed = url::Url::parse(endpoint)
+        .map_err(|_| BackupConfigError::new("Endpoint（S3 地址）必须是有效的 HTTPS URL"))?;
+    if parsed.scheme() != "https"
+        || parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err(BackupConfigError::new(
+            "Endpoint（S3 地址）必须使用 HTTPS，且不能包含用户凭据、查询参数或片段",
+        ));
+    }
+    Ok(())
+}
+
+fn sanitized_endpoint_origin(endpoint: &str) -> String {
+    url::Url::parse(endpoint)
+        .ok()
+        .map(|parsed| parsed.origin().ascii_serialization())
+        .unwrap_or_else(|| "<invalid>".to_string())
 }
 
 fn validate_range(label: &str, value: u32, min: u32, max: u32) -> Result<(), BackupConfigError> {
@@ -372,6 +443,69 @@ mod tests {
             .expect_err("endpoint object should fail");
 
         assert!(err.to_string().contains("Endpoint"));
+    }
+
+    #[test]
+    fn rejects_insecure_or_credential_bearing_endpoints() {
+        for endpoint in [
+            "http://s3.example.com",
+            "https://user:password@s3.example.com",
+            "https://s3.example.com?token=secret",
+            "https://s3.example.com/#fragment",
+        ] {
+            let entries = serde_json::json!({
+                "backup_s3_enabled": true,
+                "backup_s3_endpoint": endpoint,
+                "backup_s3_bucket": "aether-backups",
+                "backup_s3_access_key_id": "access",
+                "backup_s3_secret_access_key": "secret"
+            });
+
+            let error = S3BackupConfig::from_json_map(entries.as_object().unwrap())
+                .expect_err("unsafe endpoint should fail closed");
+            assert!(error.to_string().contains("Endpoint"));
+        }
+    }
+
+    #[test]
+    fn debug_output_does_not_expose_s3_credentials() {
+        let entries = serde_json::json!({
+            "backup_s3_enabled": true,
+            "backup_s3_endpoint": "https://s3.example.com/path",
+            "backup_s3_bucket": "aether-backups",
+            "backup_s3_access_key_id": "access-key-value",
+            "backup_s3_secret_access_key": "secret-key-value"
+        });
+        let config = S3BackupConfig::from_json_map(entries.as_object().unwrap())
+            .expect("config should parse");
+
+        let debug = format!("{config:?}");
+        assert!(debug.contains("https://s3.example.com"));
+        assert!(!debug.contains("/path"));
+        assert!(!debug.contains("access-key-value"));
+        assert!(!debug.contains("secret-key-value"));
+    }
+
+    #[test]
+    fn canonicalizes_s3_backup_prefix_once() {
+        let entries = serde_json::json!({
+            "backup_s3_enabled": true,
+            "backup_s3_endpoint": "https://s3.example.com",
+            "backup_s3_bucket": "aether-backups",
+            "backup_s3_prefix": "/prod/backups//",
+            "backup_s3_access_key_id": "access",
+            "backup_s3_secret_access_key": "secret"
+        });
+        let config = S3BackupConfig::from_json_map(entries.as_object().unwrap())
+            .expect("prefix should be canonicalized");
+
+        assert_eq!(config.prefix, "prod/backups/");
+
+        for invalid_prefix in ["prod//backups", "prod/../backups", "prod\\backups"] {
+            let mut entries = entries.clone();
+            entries["backup_s3_prefix"] = serde_json::json!(invalid_prefix);
+            assert!(S3BackupConfig::from_json_map(entries.as_object().unwrap()).is_err());
+        }
     }
 
     #[test]

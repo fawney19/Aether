@@ -5,11 +5,13 @@
 //! 非法组合只能靠调用点的 if 和「记得同时改另外两个字段」来避免。这里把它收敛成
 //! 一个枚举：合法组合由类型保证，转换只能走受控 API。
 
+use aether_provider_transport::CodexFingerprintConvergenceContext;
 use serde_json::Value;
 
 use super::control::ResponsesWebSocketTurnControl;
 use super::lifecycle::ActiveProviderAttempt;
 use super::request::response_create_has_previous_response_id;
+use crate::plan_usage_policy::PlanUsagePolicySnapshot;
 
 /// 客户端一次 `response.create` 对应的 logical turn。
 ///
@@ -17,7 +19,7 @@ use super::request::response_create_has_previous_response_id;
 /// 换一条上游连接重放同一份客户端事件，但对客户端始终是同一轮请求。
 /// `client_event` 保存的必须是**已脱敏**的事件（见 `super::redaction`），
 /// 因为透明重试直接重放它。
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(super) struct LogicalTurn {
     pub(super) client_event: Value,
     /// Effective `store` after provider body rules and WebSocket framing. Only
@@ -26,6 +28,9 @@ pub(super) struct LogicalTurn {
     pub(super) provider_store: bool,
     pub(super) turn_index: u64,
     pub(super) logical_turn_id: String,
+    /// Immutable Codex client identity for every provider attempt belonging to
+    /// this logical turn. A transparent re-plan must never mint a new turn.
+    pub(super) codex_fingerprint_context: Option<CodexFingerprintConvergenceContext>,
     pub(super) turn_attempt: u32,
     pub(super) retry_attempted: bool,
     pub(super) retry_unsafe_reason: Option<&'static str>,
@@ -33,6 +38,14 @@ pub(super) struct LogicalTurn {
     /// this logical turn. Quota retries reuse it instead of falling back to the
     /// connection's Upgrade-time authorization snapshot.
     pub(super) turn_control: Option<ResponsesWebSocketTurnControl>,
+    /// Subscription-plan concurrency is per logical `response.create`, not per
+    /// provider attempt. Keeping the permit here makes transparent retries
+    /// retain the same slot through `Replanning` until the logical terminal.
+    pub(super) plan_usage_permit: Option<aether_runtime::AdmissionPermit>,
+    /// Cost limits are evaluated against the policy and entitlement window
+    /// that admitted this logical response.create. Every transparent provider
+    /// attempt reuses this snapshot while receiving its own reservation token.
+    pub(super) plan_usage_policy_snapshot: Option<PlanUsagePolicySnapshot>,
 }
 
 impl LogicalTurn {
@@ -42,15 +55,42 @@ impl LogicalTurn {
             provider_store: false,
             turn_index,
             logical_turn_id,
+            codex_fingerprint_context: None,
             turn_attempt: 1,
             retry_attempted: false,
             retry_unsafe_reason: None,
             turn_control: None,
+            plan_usage_permit: None,
+            plan_usage_policy_snapshot: None,
         }
     }
 
     pub(super) fn with_turn_control(mut self, turn_control: ResponsesWebSocketTurnControl) -> Self {
         self.turn_control = Some(turn_control);
+        self
+    }
+
+    pub(super) fn with_plan_usage_permit(
+        mut self,
+        permit: Option<aether_runtime::AdmissionPermit>,
+    ) -> Self {
+        self.plan_usage_permit = permit;
+        self
+    }
+
+    pub(super) fn with_plan_usage_policy_snapshot(
+        mut self,
+        snapshot: Option<PlanUsagePolicySnapshot>,
+    ) -> Self {
+        self.plan_usage_policy_snapshot = snapshot;
+        self
+    }
+
+    pub(super) fn with_codex_fingerprint_context(
+        mut self,
+        context: CodexFingerprintConvergenceContext,
+    ) -> Self {
+        self.codex_fingerprint_context = Some(context);
         self
     }
 

@@ -15,7 +15,8 @@ use super::super::super::state::{
     is_fixed_provider_type_for_provider_oauth, json_non_empty_string,
 };
 use super::shared::{
-    parse_admin_provider_oauth_complete_callback, parse_admin_provider_oauth_complete_request_body,
+    admin_provider_oauth_state_matches_principal, parse_admin_provider_oauth_complete_callback,
+    parse_admin_provider_oauth_complete_request_body,
 };
 use crate::handlers::admin::provider::shared::paths::admin_provider_oauth_complete_key_id;
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
@@ -23,7 +24,7 @@ use crate::handlers::shared::sync_provider_key_oauth_status_snapshot;
 use crate::provider_key_auth::provider_key_is_oauth_managed;
 use crate::GatewayError;
 use aether_data_contracts::repository::provider_catalog::{
-    ProviderCatalogKeyOAuthRuntimeStateCasUpdate,
+    ProviderCatalogKeyOAuthCredentialFence, ProviderCatalogKeyOAuthRuntimeStateCasUpdate,
     ProviderCatalogUpstreamMetadataNamespaceExpectation,
 };
 use axum::{
@@ -96,12 +97,18 @@ pub(super) async fn handle_admin_provider_oauth_complete_key(
         Err(response) => return Ok(response),
     };
 
-    let state_data = match state
-        .consume_provider_oauth_state(&callback.state_nonce)
-        .await
-    {
+    let preview = match state.load_provider_oauth_state(&callback.state_nonce).await {
         Ok(Some(state_data)) => state_data,
         Ok(None) => {
+            return Ok(build_internal_control_error_response(
+                http::StatusCode::BAD_REQUEST,
+                "state 无效或已过期",
+            ));
+        }
+        Err(GatewayError::Client {
+            status: http::StatusCode::BAD_REQUEST,
+            ..
+        }) => {
             return Ok(build_internal_control_error_response(
                 http::StatusCode::BAD_REQUEST,
                 "state 无效或已过期",
@@ -114,12 +121,41 @@ pub(super) async fn handle_admin_provider_oauth_complete_key(
             ));
         }
     };
-    if state_data.key_id != key_id {
+    if preview.key_id != key_id
+        || !admin_provider_oauth_state_matches_principal(&preview, request_context)
+    {
         return Ok(build_internal_control_error_response(
             http::StatusCode::BAD_REQUEST,
             "state 无效或已过期",
         ));
     }
+    let state_data = match state
+        .consume_provider_oauth_state(&callback.state_nonce)
+        .await
+    {
+        Ok(Some(state_data)) if state_data == preview => state_data,
+        Ok(Some(_)) | Ok(None) => {
+            return Ok(build_internal_control_error_response(
+                http::StatusCode::BAD_REQUEST,
+                "state 无效或已过期",
+            ));
+        }
+        Err(GatewayError::Client {
+            status: http::StatusCode::BAD_REQUEST,
+            ..
+        }) => {
+            return Ok(build_internal_control_error_response(
+                http::StatusCode::BAD_REQUEST,
+                "state 无效或已过期",
+            ));
+        }
+        Err(_) => {
+            return Ok(build_internal_control_error_response(
+                http::StatusCode::SERVICE_UNAVAILABLE,
+                "provider oauth redis unavailable",
+            ));
+        }
+    };
 
     let key = state
         .read_provider_catalog_keys_by_ids(std::slice::from_ref(&key_id))
@@ -248,7 +284,11 @@ pub(super) async fn handle_admin_provider_oauth_complete_key(
     }
     enrich_admin_provider_oauth_auth_config(&provider_type, &mut auth_config, &token_payload);
 
-    let Some(encrypted_api_key) = state.encrypt_catalog_secret_with_fallbacks(&access_token) else {
+    let Ok(encrypted_api_key) =
+        state
+            .app()
+            .seal_provider_catalog_key_api_key(&provider_id, &key_id, &access_token)
+    else {
         return Ok(build_internal_control_error_response(
             http::StatusCode::SERVICE_UNAVAILABLE,
             "provider oauth encryption unavailable",
@@ -256,8 +296,10 @@ pub(super) async fn handle_admin_provider_oauth_complete_key(
     };
     let auth_config_json = serde_json::to_string(&serde_json::Value::Object(auth_config.clone()))
         .map_err(|err| GatewayError::Internal(err.to_string()))?;
-    let Some(encrypted_auth_config) =
-        state.encrypt_catalog_secret_with_fallbacks(&auth_config_json)
+    let Ok(encrypted_auth_config) =
+        state
+            .app()
+            .seal_provider_catalog_key_auth_config(&provider_id, &key_id, &auth_config_json)
     else {
         return Ok(build_internal_control_error_response(
             http::StatusCode::SERVICE_UNAVAILABLE,
@@ -340,6 +382,12 @@ pub(super) async fn handle_admin_provider_oauth_complete_key(
         CODEX_CREDENTIAL_GENERATION_KEY: uuid::Uuid::now_v7().to_string()
     });
     let expected_encrypted_auth_config = state_data.expected_encrypted_auth_config.clone();
+    let expected_credential = ProviderCatalogKeyOAuthCredentialFence {
+        encrypted_api_key: key.encrypted_api_key.clone(),
+        auth_type: key.auth_type.clone(),
+        provider_id: key.provider_id.clone(),
+        provider_type: provider.provider_type.clone(),
+    };
     let updated_result: Result<bool, GatewayError> = async {
         let max_namespace_retries = if provider_type == "codex" {
             CODEX_OAUTH_COMPLETE_NAMESPACE_CAS_MAX_RETRIES
@@ -353,7 +401,7 @@ pub(super) async fn handle_admin_provider_oauth_complete_key(
                     &ProviderCatalogKeyOAuthRuntimeStateCasUpdate {
                         key_id: key_id.clone(),
                         expected_encrypted_auth_config: expected_encrypted_auth_config.clone(),
-                        expected_credential: None,
+                        expected_credential: Some(expected_credential.clone()),
                         expected_upstream_metadata_namespace: (provider_type == "codex").then(
                             || ProviderCatalogUpstreamMetadataNamespaceExpectation {
                                 namespace: "codex".to_string(),

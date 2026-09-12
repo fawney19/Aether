@@ -123,14 +123,10 @@ pub(super) async fn handle_user_audit_logs(
         .await
     {
         Ok(value) => value,
-        Err(err) => {
-            let detail = match err {
-                crate::GatewayError::Internal(message) => message,
-                other => format!("{other:?}"),
-            };
+        Err(_err) => {
             return build_auth_error_response(
                 http::StatusCode::INTERNAL_SERVER_ERROR,
-                detail,
+                "audit logs unavailable",
                 false,
             );
         }

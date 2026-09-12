@@ -53,7 +53,8 @@ impl InMemoryBackgroundTaskRepository {
         I: IntoIterator<Item = StoredBackgroundTaskRun>,
     {
         let mut index = InMemoryBackgroundTaskIndex::default();
-        for run in runs {
+        for mut run in runs {
+            run.sanitize_persisted_data();
             index.runs.insert(run.id.clone(), run);
         }
         Self {
@@ -164,8 +165,9 @@ impl BackgroundTaskReadRepository for InMemoryBackgroundTaskRepository {
 impl BackgroundTaskWriteRepository for InMemoryBackgroundTaskRepository {
     async fn upsert_run(
         &self,
-        run: UpsertBackgroundTaskRun,
+        mut run: UpsertBackgroundTaskRun,
     ) -> Result<StoredBackgroundTaskRun, DataLayerError> {
+        run.sanitize_for_persistence();
         run.validate()?;
         let stored = run.into_stored();
         self.index
@@ -192,8 +194,9 @@ impl BackgroundTaskWriteRepository for InMemoryBackgroundTaskRepository {
 
     async fn upsert_event(
         &self,
-        event: UpsertBackgroundTaskEvent,
+        mut event: UpsertBackgroundTaskEvent,
     ) -> Result<StoredBackgroundTaskEvent, DataLayerError> {
+        event.sanitize_for_persistence();
         event.validate()?;
         let stored = event.into_stored();
         let mut guard = self.index.write().expect("background task repository lock");

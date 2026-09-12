@@ -190,6 +190,16 @@ export interface RequestSettlementSnapshot {
   [key: string]: unknown
 }
 
+export type RequestBodyField = 'request_body' | 'provider_request_body' | 'response_body' | 'client_response_body'
+export type RequestBodyLoadErrorCode = 'too_large' | 'decode_failed' | 'missing' | 'storage_unavailable'
+
+export class RequestBodyProtocolError extends Error {
+  constructor() {
+    super('Invalid body response')
+    this.name = 'RequestBodyProtocolError'
+  }
+}
+
 export interface RequestDetail {
   id: string // UUID
   request_id: string
@@ -278,14 +288,14 @@ export interface RequestDetail {
   end_to_end_first_byte_time_ms?: number | null
   created_at: string
   updated_at?: string | null
-  request_headers?: Record<string, unknown>
-  request_body?: Record<string, unknown>
-  provider_request_headers?: Record<string, unknown>
-  provider_request_body?: Record<string, unknown>
-  response_headers?: Record<string, unknown>
-  client_response_headers?: Record<string, unknown>
-  response_body?: Record<string, unknown>
-  client_response_body?: Record<string, unknown>
+  request_headers?: Record<string, unknown> | null
+  request_body?: Record<string, unknown> | null
+  provider_request_headers?: Record<string, unknown> | null
+  provider_request_body?: Record<string, unknown> | null
+  response_headers?: Record<string, unknown> | null
+  client_response_headers?: Record<string, unknown> | null
+  response_body?: Record<string, unknown> | null
+  client_response_body?: Record<string, unknown> | null
   has_request_body?: boolean
   has_provider_request_body?: boolean
   has_response_body?: boolean
@@ -296,6 +306,7 @@ export interface RequestDetail {
     response_body?: boolean
     client_response_body?: boolean
   } | null
+  body_load_error_codes?: Partial<Record<RequestBodyField, RequestBodyLoadErrorCode>> | null
   metadata?: Record<string, unknown>
   routing?: Record<string, unknown>
   body_capture?: Record<string, unknown>
@@ -455,21 +466,33 @@ export const dashboardApi = {
   // NOTE: This method now calls the new RESTful API at /api/admin/usage/{id}
   async getRequestDetail(
     requestId: string,
-    options: { includeBodies?: boolean, cacheTtlMs?: number } = {}
+    options: { includeBodies?: boolean, cacheTtlMs?: number, signal?: AbortSignal } = {}
   ): Promise<RequestDetail> {
-    const includeBodies = options.includeBodies ?? true
+    const includeBodies = options.includeBodies ?? false
     const cacheTtlMs = options.cacheTtlMs ?? 0
     const cacheKey = buildCacheKey('dashboard:request-detail', { requestId, includeBodies })
-    return cachedRequest(
-      cacheKey,
-      async () => {
-        const response = await apiClient.get<RequestDetail>(`/api/admin/usage/${requestId}`, {
-          params: { include_bodies: includeBodies },
-        })
-        return response.data
-      },
-      cacheTtlMs
-    )
+    const fetchDetail = async () => {
+      const response = await apiClient.get<RequestDetail>(`/api/admin/usage/${requestId}`, {
+        params: { include_bodies: includeBodies },
+        ...(options.signal ? { signal: options.signal } : {}),
+      })
+      return response.data
+    }
+    return options.signal ? fetchDetail() : cachedRequest(cacheKey, fetchDetail, cacheTtlMs)
+  },
+
+  async getRequestBody(requestId: string, field: RequestBodyField, signal?: AbortSignal, onProgress?: (loaded: number) => void) {
+    const response = await apiClient.get<ArrayBuffer>(`/api/admin/usage/${requestId}`, {
+      params: { include_bodies: true, body_field: field, body_format: 'raw' },
+      responseType: 'arraybuffer',
+      signal,
+      ...(onProgress ? { onDownloadProgress: (event: { loaded: number }) => onProgress(event.loaded) } : {}),
+    })
+    const encoding = response.headers['x-aether-body-encoding']
+    if ((encoding !== 'gzip' && encoding !== 'json') || response.headers['x-aether-usage-id'] !== requestId || response.headers['x-aether-body-field'] !== field) {
+      throw new RequestBodyProtocolError()
+    }
+    return { bytes: response.data, encoding: encoding as 'gzip' | 'json' }
   },
 
   async prefetchRequestDetail(requestId: string): Promise<void> {

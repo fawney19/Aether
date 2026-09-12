@@ -1,8 +1,9 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createApp, defineComponent, h } from 'vue'
 
 import AntigravityQuotaDialog from '@/features/providers/components/AntigravityQuotaDialog.vue'
-import type { UpstreamMetadata } from '@/api/endpoints/types'
+import type { QuotaStatusSnapshot, UpstreamMetadata } from '@/api/endpoints/types'
+import { createI18n, setI18nLocale, type Locale } from '@/i18n'
 
 vi.mock('@/components/ui', async () => {
   const { defineComponent, h } = await import('vue')
@@ -77,7 +78,12 @@ vi.mock('@/utils/errorParser', () => ({
   parseApiError: (value: unknown) => String(value),
 }))
 
-function mount(metadata: UpstreamMetadata) {
+function mount(
+  metadata: UpstreamMetadata,
+  quotaSnapshot?: QuotaStatusSnapshot,
+  locale: Locale = 'zh-CN',
+) {
+  setI18nLocale(locale)
   const root = document.createElement('div')
   document.body.appendChild(root)
 
@@ -86,10 +92,12 @@ function mount(metadata: UpstreamMetadata) {
       return () => h(AntigravityQuotaDialog, {
         open: true,
         metadata,
+        quotaSnapshot,
         keyName: 'Key-1',
       })
     },
   }))
+  app.use(createI18n())
   app.mount(root)
 
   return {
@@ -102,105 +110,122 @@ function mount(metadata: UpstreamMetadata) {
 }
 
 describe('AntigravityQuotaDialog', () => {
-  it('renders opaque quota identifiers with concise visible labels', () => {
-    const rawIdentifier = 'RateLimitResetCredit_05cbb6eeeb9c81918e011d8300f9ebfb'
-    const { root, unmount } = mount({
-      antigravity: {
-        quota_by_model: {
-          [rawIdentifier]: {
-            display_name: rawIdentifier,
-            remaining_fraction: 0.25,
-            used_percent: 75,
-          },
-        },
-      },
-    })
+  afterEach(() => {
+    setI18nLocale('zh-CN')
+  })
 
-    expect(root.textContent).toContain('Key-1')
-    expect(root.textContent).not.toContain(rawIdentifier)
-    expect(root.textContent).toContain('25.0%')
+  it('renders only compact localized quota-group windows in Chinese', () => {
+    const { root, unmount } = mount({}, {
+      code: 'ok',
+      provider_type: 'antigravity',
+      exhausted: false,
+      windows: [{
+        code: 'group:0:gemini-weekly',
+        label: 'Gemini Models · Weekly Limit Remaining',
+        scope: 'quota_group',
+        quota_group_label: 'Gemini models',
+        bucket_id: 'gemini-weekly',
+        window: 'weekly',
+        used_ratio: 0.1,
+        remaining_ratio: 0.9,
+      }, {
+        code: 'group:1:3p-5h',
+        label: 'Claude and GPT models · 5 hour',
+        scope: 'quota_group',
+        quota_group_label: 'Claude and GPT models',
+        bucket_id: '3p-5h',
+        window: '5h',
+        used_ratio: 0.75,
+        remaining_ratio: 0.25,
+      }, {
+        code: 'group:1:3p-weekly',
+        label: 'Claude and GPT models · Weekly Limit Remaining',
+        scope: 'quota_group',
+        quota_group_label: 'Claude and GPT models',
+        bucket_id: '3p-weekly',
+        window: 'weekly',
+        used_ratio: 0.2,
+        remaining_ratio: 0.8,
+      }, {
+        code: 'model:gemini-3.7-flash-tiered',
+        label: 'Gemini 3.7 Flash',
+        scope: 'model',
+        model: 'gemini-3.7-flash-tiered',
+        used_ratio: 0.05,
+        remaining_ratio: 0.95,
+      }],
+    })
+    const text = root.textContent || ''
+
+    expect(text).toContain('Gemini Models · 周')
+    expect(text).toContain('90.0%')
+    expect(text).toContain('Claude and GPT models · 5小时')
+    expect(text).toContain('25.0%')
+    expect(text).toContain('Claude and GPT models · 周')
+    expect(text).toContain('80.0%')
+    expect(text).not.toContain('Weekly Limit Remaining')
+    expect(text).not.toContain('Gemini额度')
+    expect(text).not.toContain('Claude & ChatGPT')
+    expect(text).not.toContain('Gemini 3.7 Flash')
 
     unmount()
   })
 
-  it('orders important Gemini and Claude quota rows before low-priority rows', () => {
+  it('uses Weekly and 5 Hours for the English locale', () => {
+    const { root, unmount } = mount({}, {
+      code: 'ok',
+      provider_type: 'antigravity',
+      exhausted: false,
+      windows: [{
+        code: 'group:0:gemini-weekly',
+        label: 'Gemini Models · Weekly Limit Remaining',
+        scope: 'quota_group',
+        quota_group_label: 'Gemini Models',
+        bucket_id: 'gemini-weekly',
+        window: 'weekly',
+        remaining_ratio: 0.9,
+      }, {
+        code: 'group:1:3p-5h',
+        label: 'Claude and GPT models · 5 hour',
+        scope: 'quota_group',
+        quota_group_label: 'Claude and GPT models',
+        bucket_id: '3p-5h',
+        window: '5h',
+        remaining_ratio: 0.25,
+      }],
+    }, 'en-US')
+    const text = root.textContent || ''
+
+    expect(text).toContain('Gemini Models · Weekly')
+    expect(text).toContain('Claude and GPT models · 5 Hours')
+    expect(text).not.toContain('Weekly Limit Remaining')
+
+    unmount()
+  })
+
+  it('does not fall back to the removed model-family summaries', () => {
     const { root, unmount } = mount({
       antigravity: {
         quota_by_model: {
-          tab_flash_lite_preview: {
-            display_name: 'Tab Flash Lite Preview',
-            remaining_fraction: 0.01,
-            used_percent: 99,
-          },
           'gemini-3-flash-agent': {
             display_name: 'Gemini 3.5 Flash (High)',
             remaining_fraction: 0.9,
             used_percent: 10,
-          },
-          'gemini-pro-agent': {
-            display_name: 'gemini-pro-agent',
-            remaining_fraction: 0.95,
-            used_percent: 5,
-          },
-          'gemini-3.5-flash-low': {
-            display_name: 'Gemini 3.5 Flash (Medium)',
-            remaining_fraction: 0.8,
-            used_percent: 20,
           },
           'claude-opus-4-6-thinking': {
             display_name: 'Claude Opus 4.6 (Thinking)',
             remaining_fraction: 1,
             used_percent: 0,
           },
-          chat_20706: {
-            display_name: 'chat_20706',
-            remaining_fraction: 0,
-            used_percent: 100,
-          },
         },
       },
     })
-    const text = root.textContent || ''
 
-    expect(text).not.toContain('gemini-pro-agent')
-    expect(text).not.toContain('claude-opus-4-6-thinking')
-    expect(text.indexOf('Claude Opus 4.6 (Thinking)')).toBeLessThan(text.indexOf('Gemini 3.1 Pro (High)'))
-    expect(text.indexOf('Gemini 3.1 Pro (High)')).toBeLessThan(text.indexOf('Gemini 3.5 Flash (High)'))
-    expect(text.indexOf('Gemini 3.5 Flash (High)')).toBeLessThan(text.indexOf('Gemini 3.5 Flash (Medium)'))
-    expect(text.indexOf('Gemini 3.5 Flash (Medium)')).toBeLessThan(text.indexOf('Tab Flash Lite Preview'))
-    expect(text.indexOf('Tab Flash Lite Preview')).toBeLessThan(text.indexOf('chat_20706'))
-
-    unmount()
-  })
-
-  it('renders one row for duplicate quota labels and keeps the preferred active bucket', () => {
-    const { root, unmount } = mount({
-      antigravity: {
-        quota_by_model: {
-          'gemini-3.1-pro-high': {
-            display_name: 'Gemini 3.1 Pro (High)',
-            remaining_fraction: 0.95,
-            used_percent: 5,
-          },
-          'gemini-pro-agent': {
-            display_name: 'Gemini 3.1 Pro (High)',
-            remaining_fraction: 0.4,
-            used_percent: 60,
-          },
-          'gemini-3-flash-agent': {
-            display_name: 'Gemini 3.5 Flash (High)',
-            remaining_fraction: 0.9,
-            used_percent: 10,
-          },
-        },
-      },
-    })
-    const text = root.textContent || ''
-
-    expect(text.match(/Gemini 3\.1 Pro \(High\)/g)).toHaveLength(1)
-    expect(text).toContain('40.0%')
-    expect(text).not.toContain('95.0%')
-    expect(text.indexOf('Gemini 3.1 Pro (High)')).toBeLessThan(text.indexOf('Gemini 3.5 Flash (High)'))
+    expect(root.textContent).toContain('暂无配额数据')
+    expect(root.textContent).not.toContain('Gemini额度')
+    expect(root.textContent).not.toContain('Claude & ChatGPT')
+    expect(root.textContent).not.toContain('Gemini 3.5 Flash (High)')
+    expect(root.textContent).not.toContain('Claude Opus 4.6 (Thinking)')
 
     unmount()
   })

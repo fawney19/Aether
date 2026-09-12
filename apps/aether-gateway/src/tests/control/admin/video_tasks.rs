@@ -15,8 +15,8 @@ use http::{HeaderMap, HeaderValue, StatusCode};
 use serde_json::json;
 
 use super::super::{
-    build_router_with_state, build_state_with_execution_runtime_override, sample_endpoint,
-    sample_key, sample_provider, start_server, AppState,
+    build_router_with_state, build_state_with_execution_runtime_override, sample_bound_key,
+    sample_endpoint, sample_provider, start_server, AppState,
 };
 use crate::admin_api::{
     maybe_build_local_admin_video_tasks_response, AdminAppState, AdminRequestContext,
@@ -130,7 +130,7 @@ fn sample_admin_video_task(
         updated_at_unix_secs: created_at_unix_ms + 5,
         error_code: None,
         error_message: None,
-        video_url: Some(format!("https://example.com/{id}.mp4")),
+        video_url: Some(format!("https://8.8.8.8/{id}.mp4")),
         request_metadata: None,
     }
 }
@@ -224,9 +224,14 @@ async fn gateway_handles_admin_video_tasks_list_locally_with_trusted_admin_princ
     assert_eq!(payload["items"][0]["username"], "alice");
     assert_eq!(payload["items"][0]["provider_name"], "OpenAI");
     assert_eq!(payload["items"][0]["status"], "completed");
-    assert!(payload["items"][0]["prompt"]
-        .as_str()
-        .is_some_and(|value| value.ends_with("...")));
+    assert_eq!(
+        payload["items"][0]["prompt"],
+        format!("{}...", "x".repeat(100))
+    );
+    assert_eq!(
+        payload["items"][0]["video_url"],
+        "https://8.8.8.8/task-completed.mp4"
+    );
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();
@@ -392,6 +397,8 @@ async fn gateway_handles_admin_video_task_detail_locally_with_trusted_admin_prin
     assert_eq!(response.status(), StatusCode::OK);
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
     assert_eq!(payload["id"], "task-detail");
+    assert_eq!(payload["prompt"], "detail prompt");
+    assert_eq!(payload["video_url"], "https://8.8.8.8/task-detail.mp4");
     assert_eq!(payload["username"], "charlie");
     assert_eq!(payload["provider_name"], "OpenAI");
     assert_eq!(payload["endpoint"]["id"], "endpoint-1");
@@ -592,11 +599,36 @@ async fn gateway_cancels_admin_video_task_locally_with_trusted_admin_principal()
         .await
         .expect("upsert should succeed");
 
+    // The persisted task intentionally omits its request/transport snapshot.
+    // Reconstructing an admin cancellation must therefore resolve the current
+    // provider catalog, including a record-bound credential that a read-only
+    // fixture can decrypt without a migration writer.
+    let provider_catalog_repository: Arc<dyn ProviderCatalogReadRepository> =
+        Arc::new(InMemoryProviderCatalogReadRepository::seed(
+            vec![sample_provider("provider-openai", "OpenAI", 10)],
+            vec![sample_endpoint(
+                "endpoint-1",
+                "provider-openai",
+                "openai:video",
+                "https://api.openai.example/v1",
+            )],
+            vec![sample_bound_key(
+                "provider-key-1",
+                "provider-openai",
+                "openai:video",
+                "sk-upstream-openai-video",
+            )],
+        ));
+
     let (upstream_url, upstream_handle) = start_server(upstream).await;
     let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
     let gateway = build_router_with_state(
         build_state_with_execution_runtime_override(execution_runtime_url)
-            .with_video_task_data_repository_for_tests(Arc::clone(&repository)),
+            .with_video_task_repository_and_provider_transport_for_tests(
+                Arc::clone(&repository),
+                provider_catalog_repository,
+                DEVELOPMENT_ENCRYPTION_KEY,
+            ),
     );
     let (gateway_url, gateway_handle) = start_server(gateway).await;
 
@@ -639,10 +671,10 @@ async fn gateway_cancels_admin_video_task_locally_with_trusted_admin_principal()
     assert_eq!(detail.status(), StatusCode::OK);
     let detail_json: serde_json::Value = detail.json().await.expect("detail should parse");
     assert_eq!(detail_json["status"], "cancelled");
-    assert_eq!(
-        detail_json["request_metadata"]["rust_local_snapshot"]["OpenAi"]["status"],
-        "Cancelled"
-    );
+    assert!(detail_json["original_request_body"].is_null());
+    assert!(detail_json["progress_message"].is_null());
+    assert!(detail_json["error_message"].is_null());
+    assert!(detail_json["request_metadata"].is_null());
 
     let seen_execution_runtime_request = seen_execution_runtime
         .lock()
@@ -708,7 +740,7 @@ async fn local_admin_video_task_cancel_attaches_explicit_audit() {
 }
 
 #[tokio::test]
-async fn gateway_redirects_admin_video_task_video_locally_with_trusted_admin_principal() {
+async fn gateway_redirects_persisted_openai_video_url_without_forwarding_admin_request() {
     let upstream_hits = Arc::new(Mutex::new(0usize));
     let upstream_hits_clone = Arc::clone(&upstream_hits);
     let upstream = Router::new().route(
@@ -723,7 +755,7 @@ async fn gateway_redirects_admin_video_task_video_locally_with_trusted_admin_pri
     );
 
     let repository = Arc::new(InMemoryVideoTaskRepository::default());
-    repository
+    let stored = repository
         .upsert(sample_admin_video_task(
             "task-redirect",
             VideoTaskStatus::Completed,
@@ -736,8 +768,12 @@ async fn gateway_redirects_admin_video_task_video_locally_with_trusted_admin_pri
         ))
         .await
         .expect("task should upsert");
+    assert_eq!(
+        stored.video_url.as_deref(),
+        Some("https://8.8.8.8/task-redirect.mp4")
+    );
 
-    let (upstream_url, upstream_handle) = start_server(upstream).await;
+    let (_upstream_url, upstream_handle) = start_server(upstream).await;
     let gateway = build_router_with_state(
         AppState::new()
             .expect("gateway state should build")
@@ -767,7 +803,7 @@ async fn gateway_redirects_admin_video_task_video_locally_with_trusted_admin_pri
             .headers()
             .get(http::header::LOCATION)
             .and_then(|value| value.to_str().ok()),
-        Some("https://example.com/task-redirect.mp4")
+        stored.video_url.as_deref()
     );
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
@@ -776,21 +812,22 @@ async fn gateway_redirects_admin_video_task_video_locally_with_trusted_admin_pri
 }
 
 #[tokio::test]
-async fn local_admin_video_task_video_redirect_attaches_explicit_audit() {
+async fn local_admin_video_task_download_preserves_signed_url_and_attaches_audit() {
     let repository = Arc::new(InMemoryVideoTaskRepository::default());
-    repository
-        .upsert(sample_admin_video_task(
-            "task-video-audit",
-            VideoTaskStatus::Completed,
-            1_710_000_550,
-            "user-5",
-            "frank",
-            "provider-openai",
-            "gpt-video",
-            "video audit prompt",
-        ))
-        .await
-        .expect("task should upsert");
+    let mut task = sample_admin_video_task(
+        "task-video-audit",
+        VideoTaskStatus::Completed,
+        1_710_000_550,
+        "user-5",
+        "frank",
+        "provider-openai",
+        "gpt-video",
+        "video audit prompt",
+    );
+    task.video_url =
+        Some("https://8.8.8.8/video.mp4?signature=a%2Fb%2Bc%3D&part=2&part=1".to_string());
+    let stored = repository.upsert(task).await.expect("task should upsert");
+    assert_eq!(stored.prompt.as_deref(), Some("video audit prompt"));
 
     let state = AppState::new()
         .expect("gateway state should build")
@@ -805,19 +842,18 @@ async fn local_admin_video_task_video_redirect_attaches_explicit_audit() {
     .await;
 
     assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
-    let audit = response
-        .extensions()
-        .get::<AdminAuditEvent>()
-        .cloned()
-        .expect("video task video should attach audit");
-    assert_eq!(audit.event_name, "admin_video_task_video_viewed");
-    assert_eq!(audit.action, "view_video_task_video");
-    assert_eq!(audit.target_type, "video_task_video");
-    assert_eq!(audit.target_id, "task-video-audit");
+    assert_eq!(
+        response
+            .headers()
+            .get(http::header::LOCATION)
+            .and_then(|value| value.to_str().ok()),
+        stored.video_url.as_deref()
+    );
+    assert!(response.extensions().get::<AdminAuditEvent>().is_some());
 }
 
 #[tokio::test]
-async fn gateway_proxies_admin_video_task_video_locally_with_trusted_admin_principal() {
+async fn gateway_rejects_cross_origin_admin_gemini_video_without_sending_provider_key() {
     let upstream_hits = Arc::new(Mutex::new(0usize));
     let upstream_hits_clone = Arc::clone(&upstream_hits);
     let seen_api_key = Arc::new(Mutex::new(None::<String>));
@@ -887,7 +923,7 @@ async fn gateway_proxies_admin_video_task_video_locally_with_trusted_admin_princ
                 "gemini:video",
                 "https://generativelanguage.googleapis.com",
             )],
-            vec![sample_key(
+            vec![sample_bound_key(
                 "key-gemini",
                 "provider-gemini",
                 "gemini:video",
@@ -919,28 +955,10 @@ async fn gateway_proxies_admin_video_task_video_locally_with_trusted_admin_princ
         .await
         .expect("request should succeed");
 
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(
-        response
-            .headers()
-            .get(http::header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok()),
-        Some("video/mp4")
-    );
-    assert_eq!(
-        response
-            .headers()
-            .get(http::header::CONTENT_DISPOSITION)
-            .and_then(|value| value.to_str().ok()),
-        Some("inline; filename=\"video_task-proxy.mp4\"")
-    );
-    assert_eq!(
-        response.bytes().await.expect("body should read"),
-        Bytes::from_static(b"proxied-video-bytes")
-    );
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
     assert_eq!(
         seen_api_key.lock().expect("mutex should lock").as_deref(),
-        Some("gemini-upstream-secret")
+        None
     );
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 

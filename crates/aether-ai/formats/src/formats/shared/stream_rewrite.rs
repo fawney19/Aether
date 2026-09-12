@@ -19,6 +19,12 @@ use crate::provider_compat::surfaces::{
     provider_adaptation_should_unwrap_stream_envelope, KIRO_ENVELOPE_NAME,
 };
 
+// A stream record can legitimately contain a large tool payload, but a peer
+// must not be able to keep the rewriter allocating forever by withholding the
+// record separator. This is a parser carry-buffer bound, not a response-body
+// or stream-concurrency limit.
+const MAX_STREAM_REWRITE_BUFFER_BYTES: usize = 16 * 1024 * 1024;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FinalizeStreamRewriteMode {
     EnvelopeUnwrap,
@@ -294,7 +300,7 @@ impl AiSurfaceStreamRewriter<'_> {
             | AiSurfaceStreamRewriteState::ModelDirectiveDisplay
             | AiSurfaceStreamRewriteState::OpenAiResponsesCompat
             | AiSurfaceStreamRewriteState::Standard(_) => {
-                self.buffered.extend_from_slice(chunk);
+                append_bounded_stream_rewrite_chunk(&mut self.buffered, chunk)?;
                 let mut output = Vec::new();
                 while let Some(line_end) = self.buffered.iter().position(|byte| *byte == b'\n') {
                     let line = self.buffered.drain(..=line_end).collect::<Vec<_>>();
@@ -399,7 +405,7 @@ impl ClaudeReadToolStreamSanitizer {
         report_context: &Value,
         chunk: &[u8],
     ) -> Result<Vec<u8>, AiSurfaceFinalizeError> {
-        self.buffered.extend_from_slice(chunk);
+        append_bounded_stream_rewrite_chunk(&mut self.buffered, chunk)?;
         let mut output = Vec::new();
         while let Some(record) = drain_next_sse_record(&mut self.buffered) {
             output.extend(self.transform_record(report_context, record)?);
@@ -523,6 +529,18 @@ impl ClaudeReadToolStreamSanitizer {
             return Ok(original_record);
         }
         if let Some(partial_json) = partial_json {
+            let next_len = state
+                .buffered_input_json
+                .len()
+                .checked_add(partial_json.len())
+                .ok_or_else(|| {
+                    AiSurfaceFinalizeError::new("stream rewrite tool input buffer length overflow")
+                })?;
+            if next_len > MAX_STREAM_REWRITE_BUFFER_BYTES {
+                return Err(AiSurfaceFinalizeError::new(format!(
+                    "stream rewrite tool input buffer exceeds {MAX_STREAM_REWRITE_BUFFER_BYTES} bytes"
+                )));
+            }
             state.buffered_input_json.push_str(partial_json);
         }
         Ok(Vec::new())
@@ -566,6 +584,23 @@ impl ClaudeReadToolStreamSanitizer {
         }
         Ok(output)
     }
+}
+
+fn append_bounded_stream_rewrite_chunk(
+    buffered: &mut Vec<u8>,
+    chunk: &[u8],
+) -> Result<(), AiSurfaceFinalizeError> {
+    let next_len = buffered
+        .len()
+        .checked_add(chunk.len())
+        .ok_or_else(|| AiSurfaceFinalizeError::new("stream rewrite buffer length overflow"))?;
+    if next_len > MAX_STREAM_REWRITE_BUFFER_BYTES {
+        return Err(AiSurfaceFinalizeError::new(format!(
+            "stream rewrite buffer exceeds {MAX_STREAM_REWRITE_BUFFER_BYTES} bytes"
+        )));
+    }
+    buffered.extend_from_slice(chunk);
+    Ok(())
 }
 
 fn sanitize_claude_tool_input_object(block: &mut Map<String, Value>, name: &str) -> bool {
@@ -1342,6 +1377,48 @@ data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
         assert!(output.contains("\\\"limit\\\":20"));
         assert!(!output.contains("\\\"pages\\\":\\\"\\\""));
         assert!(output.contains("event: content_block_stop"));
+    }
+
+    #[test]
+    fn same_format_claude_stream_bounds_read_input_json_buffer() {
+        let report_context = json!({
+            "provider_api_format": "claude:messages",
+            "client_api_format": "claude:messages",
+            "needs_conversion": false,
+            "anthropic_compatibility_profile": "claude_code_legacy",
+        });
+        let mut rewriter = maybe_build_ai_surface_stream_rewriter(Some(&report_context))
+            .expect("same-format claude sanitizer should exist");
+        rewriter
+            .push_chunk(
+                b"event: content_block_start\n\
+data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"call_read_1\",\"name\":\"Read\",\"input\":{}}}\n\n",
+            )
+            .expect("start should rewrite");
+
+        let build_delta = |partial_json: &str| {
+            let payload = json!({
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {
+                    "type": "input_json_delta",
+                    "partial_json": partial_json,
+                }
+            });
+            let mut record = b"event: content_block_delta\ndata: ".to_vec();
+            record.extend(serde_json::to_vec(&payload).expect("delta should serialize"));
+            record.extend_from_slice(b"\n\n");
+            record
+        };
+        let first = "x".repeat(super::MAX_STREAM_REWRITE_BUFFER_BYTES / 2);
+        let second = "x".repeat(super::MAX_STREAM_REWRITE_BUFFER_BYTES / 2 + 1);
+        rewriter
+            .push_chunk(&build_delta(&first))
+            .expect("first partial JSON should fit");
+        let error = rewriter
+            .push_chunk(&build_delta(&second))
+            .expect_err("Read input JSON must be bounded across SSE records");
+        assert!(error.0.contains("tool input buffer exceeds"));
     }
 
     #[test]

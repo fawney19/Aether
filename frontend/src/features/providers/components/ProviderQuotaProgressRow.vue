@@ -11,7 +11,7 @@
         :class="meterClass"
         data-testid="provider-quota-progress-meter"
       >
-        {{ normalizedRemainingPercent.toFixed(1) }}%
+        {{ meterText || `${normalizedRemainingPercent.toFixed(1)}%` }}
       </span>
     </div>
     <div class="relative w-full h-1.5 bg-border rounded-full overflow-hidden">
@@ -47,6 +47,7 @@ const props = withDefaults(defineProps<{
   barClass?: string
   footerClass?: string
   resetText?: string | null
+  meterText?: string | null
 }>(), {
   usedPercent: null,
   remainingPercent: null,
@@ -55,6 +56,7 @@ const props = withDefaults(defineProps<{
   barClass: '',
   footerClass: '',
   resetText: null,
+  meterText: null,
 })
 
 function normalizePercent(value: number | null | undefined): number | null {

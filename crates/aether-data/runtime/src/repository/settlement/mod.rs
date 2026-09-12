@@ -1,11 +1,7 @@
 mod memory;
 pub use aether_data_contracts::repository::settlement::*;
-#[cfg(feature = "mysql")]
-pub use aether_data_mysql::MysqlSettlementRepository;
 #[cfg(feature = "postgres")]
 pub use aether_data_postgres::SqlxSettlementRepository;
-#[cfg(feature = "sqlite")]
-pub use aether_data_sqlite::SqliteSettlementRepository;
 pub use memory::InMemorySettlementRepository;
 
 #[cfg(test)]

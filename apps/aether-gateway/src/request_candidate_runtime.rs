@@ -363,7 +363,7 @@ pub(crate) async fn record_local_request_candidate_status(
     report_context: Option<&Value>,
     status_update: SchedulerRequestCandidateStatusUpdate,
 ) {
-    let Some(record) =
+    let Some(mut record) =
         build_local_request_candidate_status_record(LocalRequestCandidateStatusRecordInput {
             plan,
             report_context,
@@ -372,6 +372,8 @@ pub(crate) async fn record_local_request_candidate_status(
     else {
         return;
     };
+    record.skip_reason =
+        local_request_candidate_skip_reason(record.status, record.error_type.as_deref());
     persist_local_request_candidate_status_record(state, record).await;
 }
 
@@ -429,6 +431,7 @@ fn build_local_request_candidate_status_snapshot_record(
         started_at_unix_ms,
         finished_at_unix_ms,
     } = status_update;
+    let skip_reason = local_request_candidate_skip_reason(status, error_type.as_deref());
     UpsertRequestCandidateRecord {
         id: snapshot.candidate_id.clone(),
         request_id: snapshot.request_id.clone(),
@@ -442,7 +445,7 @@ fn build_local_request_candidate_status_snapshot_record(
         endpoint_id: Some(snapshot.endpoint_id.clone()),
         key_id: Some(snapshot.key_id.clone()),
         status,
-        skip_reason: None,
+        skip_reason,
         is_cached: None,
         status_code,
         error_type,
@@ -455,6 +458,17 @@ fn build_local_request_candidate_status_snapshot_record(
         started_at_unix_ms,
         finished_at_unix_ms,
     }
+}
+
+fn local_request_candidate_skip_reason(
+    status: RequestCandidateStatus,
+    error_type: Option<&str>,
+) -> Option<String> {
+    (status == RequestCandidateStatus::Skipped)
+        .then_some(error_type)
+        .flatten()
+        .filter(|reason| *reason == "provider_key_concurrency_limit_reached")
+        .map(ToOwned::to_owned)
 }
 
 pub(crate) fn try_enqueue_local_request_candidate_status_snapshot(
@@ -1078,6 +1092,40 @@ mod tests {
         assert_eq!(records[0].status_code, Some(200));
     }
 
+    #[test]
+    fn saturated_provider_key_snapshot_persists_capacity_skip_reason() {
+        let mut plan = sample_plan();
+        plan.candidate_id = Some("candidate-provider-key-saturated".to_string());
+        let snapshot = snapshot_local_request_candidate_status(&plan, None)
+            .expect("candidate snapshot should build");
+        let writer = SynchronousStatusWriter::default();
+
+        try_enqueue_local_request_candidate_status_snapshot(
+            &writer,
+            &snapshot,
+            SchedulerRequestCandidateStatusUpdate {
+                status: RequestCandidateStatus::Skipped,
+                status_code: Some(429),
+                error_type: Some("provider_key_concurrency_limit_reached".to_string()),
+                error_message: Some("provider key concurrency limit reached: 1".to_string()),
+                latency_ms: Some(0),
+                started_at_unix_ms: Some(123),
+                finished_at_unix_ms: Some(123),
+            },
+        )
+        .expect("saturated status should use the synchronous enqueue path");
+
+        let records = writer
+            .records
+            .lock()
+            .expect("synchronous status records lock");
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].skip_reason.as_deref(),
+            Some("provider_key_concurrency_limit_reached")
+        );
+    }
+
     fn sample_minimal_candidate() -> SchedulerMinimalCandidateSelectionCandidate {
         SchedulerMinimalCandidateSelectionCandidate {
             provider_id: "provider-1".to_string(),
@@ -1281,7 +1329,10 @@ mod tests {
         assert_eq!(stored[0].status, RequestCandidateStatus::Success);
         assert_eq!(stored[0].status_code, Some(200));
         assert_eq!(stored[0].latency_ms, Some(25));
-        assert_eq!(stored[0].started_at_unix_ms, Some(101));
+        // Report updates preserve the original attempt start timestamp from
+        // the persisted slot; the update's value is only used when no start
+        // timestamp has been recorded yet.
+        assert_eq!(stored[0].started_at_unix_ms, Some(100_000));
         assert_eq!(stored[0].finished_at_unix_ms, Some(102));
     }
 
