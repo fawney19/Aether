@@ -344,6 +344,11 @@ type = "json"
 nullable = true
 
 [[table.api_keys.columns]]
+name = "allowed_provider_keys"
+type = "json"
+nullable = true
+
+[[table.api_keys.columns]]
 name = "rate_limit"
 type = "int32"
 nullable = true

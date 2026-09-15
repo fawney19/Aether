@@ -841,6 +841,7 @@ fn converts_claude_cli_response_to_openai_responses_response() {
             "created_at": created_at,
             "completed_at": created_at,
             "output_text": "Hello Claude CLI",
+            "metadata": {},
             "output": [{
                 "type": "message",
                 "id": openai_responses_message_item_id("msg_cli_123", 0),
@@ -904,6 +905,7 @@ fn converts_claude_cli_tool_use_to_openai_responses_function_call() {
             "created_at": created_at,
             "completed_at": created_at,
             "output_text": "Running tool.",
+            "metadata": {},
             "output": [
                 {
                     "type": "message",

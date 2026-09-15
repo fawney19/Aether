@@ -420,6 +420,60 @@ async fn selects_by_global_key_priority_when_priority_mode_is_global_key() {
 }
 
 #[tokio::test]
+async fn auth_provider_key_constraints_override_same_format_key_priority() {
+    let mut pro_key = sample_row();
+    pro_key.provider_id = "provider-zzshu".to_string();
+    pro_key.provider_name = "zzshu".to_string();
+    pro_key.endpoint_id = "endpoint-openai-chat".to_string();
+    pro_key.key_id = "key-pro".to_string();
+    pro_key.key_name = "zzshu pro".to_string();
+    pro_key.provider_priority = 0;
+    pro_key.key_internal_priority = 0;
+    pro_key.key_global_priority_by_format = Some(json!({"openai:chat": 0}));
+
+    let mut plus_key = sample_row();
+    plus_key.provider_id = "provider-zzshu".to_string();
+    plus_key.provider_name = "zzshu".to_string();
+    plus_key.endpoint_id = "endpoint-openai-chat".to_string();
+    plus_key.key_id = "key-plus".to_string();
+    plus_key.key_name = "zzshu plus".to_string();
+    plus_key.provider_priority = 10;
+    plus_key.key_internal_priority = 10;
+    plus_key.key_global_priority_by_format = Some(json!({"openai:chat": 10}));
+
+    let candidates = Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
+        pro_key, plus_key,
+    ]));
+    let quotas = Arc::new(InMemoryProviderQuotaRepository::seed(vec![]));
+    let state = AppState::new()
+        .expect("state should build")
+        .with_data_state_for_tests(
+            GatewayDataState::with_candidate_selection_and_quota_for_tests(candidates, quotas)
+                .with_system_config_values_for_tests(vec![(
+                    "provider_priority_mode".to_string(),
+                    json!("global_key"),
+                )]),
+        );
+    let mut auth_snapshot = sample_auth_snapshot("plus-client-key");
+    auth_snapshot.api_key_allowed_provider_keys = Some(vec!["key-plus".to_string()]);
+
+    let selected = select_candidate(
+        state.data.as_ref(),
+        &state,
+        "openai:chat",
+        "gpt-4.1",
+        false,
+        Some(&auth_snapshot),
+        100,
+    )
+    .await
+    .expect("selection should succeed")
+    .expect("candidate should exist");
+
+    assert_eq!(selected.key_id, "key-plus");
+}
+
+#[tokio::test]
 async fn scheduler_selection_prefers_required_capability_matches_before_priority_fallback() {
     let mut higher_priority_missing_capability = sample_row();
     higher_priority_missing_capability.provider_id = "provider-a".to_string();

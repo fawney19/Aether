@@ -23,6 +23,7 @@ pub(super) struct AdminStandaloneApiKeyCreateRequest {
     pub(super) allowed_models: Option<Vec<String>>,
     #[serde(default, alias = "allowed_ips")]
     pub(super) ip_rules: Option<Vec<String>>,
+    pub(super) allowed_provider_keys: Option<Vec<String>>,
     pub(super) rate_limit: Option<i32>,
     pub(super) concurrent_limit: Option<i32>,
     pub(super) initial_balance_usd: Option<f64>,
@@ -45,6 +46,8 @@ pub(super) struct AdminStandaloneApiKeyUpdateRequest {
         deserialize_with = "deserialize_optional_string_list_patch"
     )]
     pub(super) ip_rules: Option<Option<Vec<String>>>,
+    #[serde(default, deserialize_with = "deserialize_optional_string_list_patch")]
+    pub(super) allowed_provider_keys: Option<Option<Vec<String>>>,
     pub(super) rate_limit: Option<i32>,
     pub(super) concurrent_limit: Option<i32>,
     pub(super) initial_balance_usd: Option<f64>,
@@ -174,6 +177,7 @@ pub(super) fn build_admin_api_key_list_item_payload(
         "allowed_api_formats": record.allowed_api_formats,
         "allowed_models": record.allowed_models,
         "ip_rules": record.ip_rules,
+        "allowed_provider_keys": record.allowed_provider_keys,
         "last_used_at": format_optional_unix_secs_iso8601(record.last_used_at_unix_secs),
         "expires_at": format_optional_unix_secs_iso8601(record.expires_at_unix_secs),
         "created_at": format_optional_unix_secs_iso8601(record.created_at_unix_secs),
@@ -205,6 +209,7 @@ pub(super) fn build_admin_api_key_detail_payload(
         "allowed_api_formats": record.allowed_api_formats,
         "allowed_models": record.allowed_models,
         "ip_rules": record.ip_rules,
+        "allowed_provider_keys": record.allowed_provider_keys,
         "last_used_at": format_optional_unix_secs_iso8601(record.last_used_at_unix_secs),
         "expires_at": format_optional_unix_secs_iso8601(record.expires_at_unix_secs),
         "created_at": format_optional_unix_secs_iso8601(record.created_at_unix_secs),

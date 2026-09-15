@@ -868,6 +868,9 @@ async fn data_state_reads_minimal_candidate_selection_with_auth_filters() {
         allowed_models: auth_snapshot
             .effective_allowed_models()
             .map(|items| items.to_vec()),
+        allowed_provider_keys: auth_snapshot
+            .effective_allowed_provider_keys()
+            .map(|items| items.to_vec()),
     };
 
     let selection =
