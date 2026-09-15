@@ -58,6 +58,10 @@ pub(crate) mod windsurf {
     pub(crate) use aether_provider_transport::windsurf::*;
 }
 
+pub(crate) mod xai {
+    pub(crate) use aether_provider_transport::xai::*;
+}
+
 pub(crate) use aether_provider_transport::{
     append_transport_diagnostics_to_value, apply_codex_fingerprint_convergence,
     apply_codex_fingerprint_convergence_with_context, apply_local_auth_config_header_overrides,

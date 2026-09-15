@@ -1,5 +1,5 @@
 use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine as _};
-use serde_json::Value;
+use serde_json::{json, Map, Value};
 
 pub mod codex;
 pub(crate) mod history;
@@ -7,6 +7,7 @@ pub mod request;
 pub mod response;
 pub mod spec;
 pub mod stream;
+pub mod xai;
 
 const TOOL_ERROR_PREFIX: &str = "[tool error]";
 const AETHER_REASONING_ITEM_ID_PREFIX: &str = "rs_aether_";
@@ -85,6 +86,8 @@ pub enum OpenAiResponsesReasoningReplayPolicy {
     #[default]
     OpenAiItemIds,
     DeepSeekOpaque,
+    /// xAI replays encrypted state without requiring OpenAI's item-ID prefix.
+    XaiEncrypted,
 }
 
 /// Builds a stable, wire-compatible ID for a reasoning item synthesized by Aether.
@@ -117,6 +120,58 @@ pub fn openai_responses_message_item_id(response_id: &str, output_index: usize) 
         "{AETHER_MESSAGE_ITEM_ID_PREFIX}{}",
         uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, seed.as_bytes()).simple()
     )
+}
+
+/// Builds Responses reasoning `content` / `summary` arrays from raw thinking text.
+///
+/// OpenAI Responses semantics:
+/// - `content` holds raw chain-of-thought as `reasoning_text` parts. Desktop UIs
+///   (for example Codex) hide the thinking panel when `content` is null.
+/// - `summary` holds `summary_text` parts for skim / CLI clients. When the
+///   upstream only exposes raw thinking (DeepSeek `reasoning_content`, Gemini
+///   thoughts, Claude thinking), the same text is copied into both so neither
+///   client family loses the panel.
+pub(crate) fn openai_responses_reasoning_text_fields(
+    texts: impl IntoIterator<Item = impl AsRef<str>>,
+) -> (Value, Value) {
+    let texts: Vec<String> = texts
+        .into_iter()
+        .map(|text| text.as_ref().to_string())
+        .filter(|text| !text.trim().is_empty())
+        .collect();
+    let content = texts
+        .iter()
+        .map(|text| json!({ "type": "reasoning_text", "text": text }))
+        .collect::<Vec<_>>();
+    let summary = texts
+        .iter()
+        .map(|text| json!({ "type": "summary_text", "text": text }))
+        .collect::<Vec<_>>();
+    (Value::Array(content), Value::Array(summary))
+}
+
+/// Writes raw thinking onto a Responses reasoning item without clobbering an
+/// existing structured summary or provider-owned content.
+pub(crate) fn apply_openai_responses_reasoning_text(item: &mut Map<String, Value>, text: &str) {
+    if text.trim().is_empty() {
+        return;
+    }
+    let (content, summary) = openai_responses_reasoning_text_fields(std::iter::once(text));
+    if reasoning_item_field_is_empty(item.get("content")) {
+        item.insert("content".to_string(), content);
+    }
+    if reasoning_item_field_is_empty(item.get("summary")) {
+        item.insert("summary".to_string(), summary);
+    }
+}
+
+fn reasoning_item_field_is_empty(value: Option<&Value>) -> bool {
+    match value {
+        None | Some(Value::Null) => true,
+        Some(Value::Array(parts)) => parts.is_empty(),
+        Some(Value::String(text)) => text.trim().is_empty(),
+        _ => false,
+    }
 }
 
 /// Repairs legacy/non-OpenAI message IDs in a Responses request in place.
@@ -234,6 +289,14 @@ fn openai_responses_reasoning_item_is_replayable(
     {
         return true;
     }
+    if policy == OpenAiResponsesReasoningReplayPolicy::XaiEncrypted
+        && object
+            .get("encrypted_content")
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty())
+    {
+        return true;
+    }
     let Some(id) = object
         .get("id")
         .and_then(Value::as_str)
@@ -335,6 +398,36 @@ mod tests {
     };
 
     #[test]
+    fn xai_encrypted_replay_accepts_native_ids_but_excludes_foreign_carriers() {
+        let body = serde_json::json!({"input": [
+            {"type": "reasoning", "id": "native-xai-id", "encrypted_content": "opaque-xai-state"},
+            {"type": "reasoning", "encrypted_content": "opaque-idless-state"},
+            {"type": "reasoning", "id": "rs_foreign", "encrypted_content": "cpa-gemini-responses-carrier-v1:foreign"},
+            {"type": "reasoning", "id": "foreign-id", "summary": []}
+        ]});
+        let mut xai = body.clone();
+        assert_eq!(
+            super::strip_incompatible_openai_responses_reasoning_items_with_policy(
+                &mut xai,
+                "openai:responses",
+                super::OpenAiResponsesReasoningReplayPolicy::XaiEncrypted,
+            ),
+            2
+        );
+        assert_eq!(xai["input"].as_array().unwrap().len(), 2);
+        assert_eq!(xai["input"][0], body["input"][0]);
+        assert_eq!(xai["input"][1], body["input"][1]);
+        let mut openai = body;
+        assert_eq!(
+            super::strip_incompatible_openai_responses_reasoning_items(
+                &mut openai,
+                "openai:responses"
+            ),
+            4
+        );
+    }
+
+    #[test]
     fn gemini_tool_signature_carrier_roundtrips_direction_and_exact_value() {
         let signature = "  opaque-signature-with-padding==  ";
         for direction in [
@@ -417,6 +510,36 @@ mod tests {
         assert!(first.starts_with("rs_aether_"));
         assert_eq!(first, second);
         assert_ne!(first, other);
+    }
+
+    #[test]
+    fn reasoning_text_fields_put_raw_thinking_in_content_and_summary() {
+        let (content, summary) = super::openai_responses_reasoning_text_fields(["raw chain"]);
+        assert_eq!(
+            content,
+            json!([{ "type": "reasoning_text", "text": "raw chain" }])
+        );
+        assert_eq!(
+            summary,
+            json!([{ "type": "summary_text", "text": "raw chain" }])
+        );
+
+        let mut item = serde_json::Map::new();
+        super::apply_openai_responses_reasoning_text(&mut item, "raw chain");
+        assert_eq!(item["content"], content);
+        assert_eq!(item["summary"], summary);
+
+        item.insert(
+            "summary".to_string(),
+            json!([{ "type": "summary_text", "text": "kept" }]),
+        );
+        item.insert("content".to_string(), json!([]));
+        super::apply_openai_responses_reasoning_text(&mut item, "replacement");
+        assert_eq!(
+            item["content"],
+            json!([{ "type": "reasoning_text", "text": "replacement" }])
+        );
+        assert_eq!(item["summary"][0]["text"], "kept");
     }
 
     #[test]

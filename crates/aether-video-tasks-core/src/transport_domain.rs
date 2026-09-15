@@ -71,8 +71,16 @@ impl LocalVideoTaskPersistence {
                 .unwrap_or_else(|| plan.request_id.clone()),
             username: context_text(report_context, "username"),
             api_key_name: context_text(report_context, "api_key_name"),
-            client_api_format: context_text(report_context, "client_api_format")
-                .unwrap_or_else(|| plan.client_api_format.clone()),
+            client_api_format: if report_context
+                .get("video_client_protocol")
+                .and_then(Value::as_str)
+                == Some("xai")
+            {
+                "xai:video".to_string()
+            } else {
+                context_text(report_context, "client_api_format")
+                    .unwrap_or_else(|| plan.client_api_format.clone())
+            },
             provider_api_format: context_text(report_context, "provider_api_format")
                 .unwrap_or_else(|| plan.provider_api_format.clone()),
             original_request_body: report_context

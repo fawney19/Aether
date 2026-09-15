@@ -49,6 +49,10 @@ pub fn resolve_execution_runtime_stream_plan_kind_with_client_surface(
     method: &Method,
     path: &str,
 ) -> Option<&'static str> {
+    let path = path
+        .strip_prefix("/openai")
+        .filter(|p| *p == "/v1/videos" || p.starts_with("/v1/videos/"))
+        .unwrap_or(path);
     if route_class != Some("ai_public") {
         return None;
     }
@@ -181,6 +185,10 @@ pub fn resolve_execution_runtime_sync_plan_kind_with_client_surface(
     method: &Method,
     path: &str,
 ) -> Option<&'static str> {
+    let path = path
+        .strip_prefix("/openai")
+        .filter(|p| *p == "/v1/videos" || p.starts_with("/v1/videos/"))
+        .unwrap_or(path);
     if route_class != Some("ai_public") {
         return None;
     }
@@ -206,7 +214,10 @@ pub fn resolve_execution_runtime_sync_plan_kind_with_client_surface(
     if route_family == Some("openai")
         && route_kind == Some("video")
         && *method == Method::POST
-        && path == "/v1/videos"
+        && matches!(
+            path,
+            "/v1/videos" | "/v1/videos/generations" | "/v1/videos/edits" | "/v1/videos/extensions"
+        )
     {
         return Some(OPENAI_VIDEO_CREATE_SYNC_PLAN_KIND);
     }

@@ -2,19 +2,58 @@
   <Card class="overflow-hidden">
     <!-- 标题头部 -->
     <div class="p-4 border-b border-border/60">
-      <div class="flex items-center justify-between">
-        <h3 class="text-sm font-semibold flex items-center gap-2">
-          模型列表
-        </h3>
-        <Button
-          variant="outline"
-          size="sm"
-          class="h-8"
-          @click="openBatchAssignDialog"
-        >
-          <Layers class="w-3.5 h-3.5 mr-1.5" />
-          关联模型
-        </Button>
+      <div class="flex items-center justify-between gap-3">
+        <div class="flex items-center gap-2 min-w-0">
+          <Checkbox
+            v-if="!isLoading && models.length > 0"
+            data-testid="models-tab-select-all"
+            class="shrink-0"
+            :checked="isAllSelected"
+            :indeterminate="isPartiallySelected"
+            :aria-label="selectAllLabel"
+            :title="selectAllLabel"
+            @update:checked="toggleSelectAll"
+          />
+          <h3 class="text-sm font-semibold flex items-center gap-2">
+            模型列表
+          </h3>
+          <span
+            v-if="selectedCount > 0"
+            class="text-xs text-muted-foreground tabular-nums"
+          >
+            已选 {{ selectedCount }} 个
+          </span>
+        </div>
+        <div class="flex items-center gap-2 shrink-0">
+          <Button
+            v-if="selectedCount > 0"
+            variant="destructive"
+            size="sm"
+            class="h-8"
+            data-testid="models-tab-delete-selected"
+            :disabled="deletingSelected"
+            @click="confirmDeleteSelected"
+          >
+            <Loader2
+              v-if="deletingSelected"
+              class="w-3.5 h-3.5 mr-1.5 animate-spin"
+            />
+            <Trash2
+              v-else
+              class="w-3.5 h-3.5 mr-1.5"
+            />
+            {{ deletingSelected ? '删除中...' : '删除选中' }}
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            class="h-8"
+            @click="openBatchAssignDialog"
+          >
+            <Layers class="w-3.5 h-3.5 mr-1.5" />
+            关联模型
+          </Button>
+        </div>
       </div>
     </div>
 
@@ -44,10 +83,19 @@
           <tr
             v-for="model in paginatedModels"
             :key="model.id"
-            class="border-b border-border/40 last:border-b-0 hover:bg-muted/30 transition-colors"
+            class="border-b border-border/40 last:border-b-0 transition-colors"
+            :class="isModelSelected(model.id) ? 'bg-primary/5' : 'hover:bg-muted/30'"
           >
             <td class="align-top px-4 py-3">
               <div class="flex items-center gap-2.5">
+                <Checkbox
+                  class="shrink-0"
+                  :data-testid="`models-tab-row-checkbox-${model.id}`"
+                  :checked="isModelSelected(model.id)"
+                  :aria-label="`选择 ${model.global_model_display_name || model.provider_model_name}`"
+                  @click.stop
+                  @update:checked="checked => toggleModelSelection(model.id, checked)"
+                />
                 <!-- 状态指示灯 -->
                 <div
                   class="w-2 h-2 rounded-full shrink-0"
@@ -171,7 +219,12 @@
         v-if="shouldPaginateModels"
         class="px-4 py-2 border-t border-border/40 flex items-center justify-between text-xs text-muted-foreground"
       >
-        <span>共 {{ sortedModels.length }} 个模型</span>
+        <span>
+          共 {{ sortedModels.length }} 个模型
+          <template v-if="selectedCount > 0">
+            · 已选 {{ selectedCount }} 个
+          </template>
+        </span>
         <div class="flex items-center gap-1.5">
           <Button
             variant="ghost"
@@ -251,18 +304,21 @@
 import { ref, computed, watch } from 'vue'
 import { useSmartPagination } from '@/composables/useSmartPagination'
 import { useModelTest } from '@/composables/useModelTest'
-import { Box, Edit, Layers, Power, Copy, Loader2, Play } from 'lucide-vue-next'
+import { Box, Edit, Layers, Power, Copy, Loader2, Play, Trash2 } from 'lucide-vue-next'
 import Card from '@/components/ui/card.vue'
 import Button from '@/components/ui/button.vue'
+import Checkbox from '@/components/ui/checkbox.vue'
 import { useToast } from '@/composables/useToast'
+import { useConfirm } from '@/composables/useConfirm'
 import { useClipboard } from '@/composables/useClipboard'
+import { useI18n } from '@/i18n'
 import { sortResolutionEntries } from '@/utils/form'
 import {
   type Model,
   type ProviderEndpoint,
 } from '@/api/endpoints'
 import { getProviderKeys, type EndpointAPIKey } from '@/api/endpoints/keys'
-import { updateModel } from '@/api/endpoints/models'
+import { deleteModel, updateModel } from '@/api/endpoints/models'
 import { parseApiError } from '@/utils/errorParser'
 import { formatApiFormat } from '@/api/endpoints/types/api-format'
 import type { ProviderWithEndpointsSummary } from '@/api/endpoints'
@@ -296,7 +352,9 @@ const emit = defineEmits<{
 }>()
 
 const { error: showError, success: showSuccess } = useToast()
+const { confirmDanger } = useConfirm()
 const { copyToClipboard } = useClipboard()
+const { legacyT } = useI18n()
 
 // 模型测试 composable
 const modelTest = useModelTest({ providerId: () => props.provider.id })
@@ -305,6 +363,8 @@ const modelTest = useModelTest({ providerId: () => props.provider.id })
 const localLoading = ref(false)
 const localModels = ref<Model[]>([])
 const togglingModelId = ref<string | null>(null)
+const selectedIds = ref<Set<string>>(new Set())
+const deletingSelected = ref(false)
 const pendingTestModel = ref<Model | null>(null)
 const selectedTestEndpoint = ref<ProviderEndpoint | null>(null)
 const testRequestHeadersDraft = ref('')
@@ -384,6 +444,16 @@ const sortedModels = computed(() => {
     return nameA.localeCompare(nameB)
   })
 })
+
+const selectedCount = computed(() => selectedIds.value.size)
+const isAllSelected = computed(() => (
+  sortedModels.value.length > 0
+  && sortedModels.value.every(model => selectedIds.value.has(model.id))
+))
+const isPartiallySelected = computed(() => (
+  selectedCount.value > 0 && !isAllSelected.value
+))
+const selectAllLabel = computed(() => (isAllSelected.value ? '取消全选' : '全选'))
 
 // ===== 模型列表智能分页 =====
 const modelsListRef = ref<HTMLElement | null>(null)
@@ -517,6 +587,71 @@ function editModel(model: Model) {
 // 打开批量关联对话框
 function openBatchAssignDialog() {
   emit('batchAssign')
+}
+
+function isModelSelected(modelId: string): boolean {
+  return selectedIds.value.has(modelId)
+}
+
+function toggleModelSelection(modelId: string, checked?: boolean) {
+  const next = new Set(selectedIds.value)
+  const shouldSelect = checked ?? !next.has(modelId)
+  if (shouldSelect) {
+    next.add(modelId)
+  } else {
+    next.delete(modelId)
+  }
+  selectedIds.value = next
+}
+
+function toggleSelectAll(checked: boolean) {
+  selectedIds.value = checked
+    ? new Set(sortedModels.value.map(model => model.id))
+    : new Set()
+}
+
+function pruneMissingSelection(validIds: Set<string>) {
+  if (selectedIds.value.size === 0) return
+  const next = new Set([...selectedIds.value].filter(id => validIds.has(id)))
+  if (next.size !== selectedIds.value.size) {
+    selectedIds.value = next
+  }
+}
+
+async function confirmDeleteSelected() {
+  const ids = Array.from(selectedIds.value)
+  if (ids.length === 0 || deletingSelected.value) return
+
+  const confirmed = await confirmDanger(
+    legacyT(`确定删除选中的 ${ids.length} 个模型吗？\n\n此操作不可撤销。`),
+    legacyT('批量删除模型'),
+  )
+  if (!confirmed) return
+
+  deletingSelected.value = true
+  try {
+    const results = await Promise.allSettled(
+      ids.map(id => deleteModel(props.provider.id, id)),
+    )
+    const successCount = results.filter(result => result.status === 'fulfilled').length
+    const failedCount = results.length - successCount
+
+    if (successCount > 0) {
+      showSuccess(legacyT(`成功删除 ${successCount} 个模型`))
+    }
+    if (failedCount > 0) {
+      showError(legacyT(`${failedCount} 个模型删除失败`), legacyT('部分失败'))
+    }
+
+    selectedIds.value = new Set()
+    if (successCount > 0) {
+      emit('refresh')
+    }
+  } catch (err: unknown) {
+    showError(parseApiError(err, '批量删除失败'), '错误')
+  } finally {
+    deletingSelected.value = false
+  }
 }
 
 // 切换模型启用状态
@@ -756,6 +891,14 @@ watch(
     modelTestProviderKeys.value = []
     modelTestKeysLoadedProviderId.value = null
     selectedTestKeyIds.value = []
+    selectedIds.value = new Set()
+  },
+)
+
+watch(
+  () => models.value.map(model => model.id),
+  (ids) => {
+    pruneMissingSelection(new Set(ids))
   },
 )
 

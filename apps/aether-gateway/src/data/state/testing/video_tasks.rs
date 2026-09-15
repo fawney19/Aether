@@ -123,6 +123,15 @@ impl GatewayDataState {
     }
 
     #[cfg(test)]
+    pub(crate) fn attach_video_task_repository_for_tests<T>(mut self, repository: Arc<T>) -> Self
+    where
+        T: VideoTaskRepository + 'static,
+    {
+        self.video_task_reader = Some(repository.clone());
+        self.video_task_writer = Some(repository);
+        self
+    }
+
     pub(crate) fn with_video_task_repository_for_tests<T>(repository: Arc<T>) -> Self
     where
         T: VideoTaskRepository + 'static,

@@ -42,6 +42,11 @@ pub fn apply_transport_request_body_semantics(
     {
         sanitize_claude_code_request_body(provider_request_body);
     }
+    aether_ai_formats::apply_xai_upstream_payload_edits(
+        provider_request_body,
+        transport.provider.provider_type.as_str(),
+        provider_api_format.as_str(),
+    );
     if provider_api_format == "gemini:embedding" && is_vertex_transport_context(transport) {
         apply_vertex_gemini_embedding_body_semantics(provider_request_body)?;
     }

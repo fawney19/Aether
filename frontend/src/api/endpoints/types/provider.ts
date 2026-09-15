@@ -462,6 +462,23 @@ export interface GrokUpstreamMetadata {
   account_user_id?: string | null
 }
 
+export interface XaiUpstreamMetadata {
+  updated_at?: number
+  subscription_title?: string
+  usage_percentage?: number
+  remaining_percentage?: number
+  usage_label?: string
+  usage_limit?: number
+  current_usage?: number
+  remaining?: number
+  next_reset_at?: number
+  prepaid_balance?: number
+  on_demand_cap?: number
+  on_demand_used?: number
+  on_demand_remaining?: number
+  period_type?: string
+}
+
 export interface GeminiCliTierMetadata {
   id?: string | null
   tierType?: string | null
@@ -520,6 +537,7 @@ export interface UpstreamMetadata {
   chatgpt_web?: ChatGPTWebUpstreamMetadata
   grok?: GrokUpstreamMetadata
   gemini_cli?: GeminiCliUpstreamMetadata
+  xai?: XaiUpstreamMetadata
 }
 
 // 按格式的健康度数据
@@ -758,7 +776,7 @@ export interface HealthRelatedMonitorResponse {
   related_providers: HealthRelatedMonitor[]
 }
 
-export type ProviderType = 'custom' | 'claude_code' | 'codex' | 'chatgpt_web' | 'gemini_cli' | 'antigravity' | 'kiro' | 'grok' | 'windsurf' | 'vertex_ai'
+export type ProviderType = 'custom' | 'claude_code' | 'codex' | 'chatgpt_web' | 'gemini_cli' | 'antigravity' | 'kiro' | 'grok' | 'xai' | 'windsurf' | 'vertex_ai'
 
 export interface ClaudeCodeAdvancedConfig {
   // 会话数量控制：null/undefined 表示不限制

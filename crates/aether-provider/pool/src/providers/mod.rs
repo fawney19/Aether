@@ -7,6 +7,7 @@ pub mod grok;
 pub mod kiro;
 pub mod unsupported;
 pub mod windsurf;
+pub mod xai;
 
 pub use antigravity::AntigravityProviderPoolAdapter;
 pub use antigravity::{
@@ -50,4 +51,8 @@ pub use windsurf::{
     build_windsurf_pool_rate_limit_request_with_base_url, WindsurfProviderPoolAdapter,
     WINDSURF_DEFAULT_BASE_URL, WINDSURF_MODEL_CONFIGS_PATH, WINDSURF_RATE_LIMIT_PATH,
     WINDSURF_USER_STATUS_PATH,
+};
+pub use xai::{
+    build_xai_pool_billing_request, build_xai_pool_user_request, XaiProviderPoolAdapter,
+    XAI_BILLING_PATH, XAI_USER_PATH,
 };

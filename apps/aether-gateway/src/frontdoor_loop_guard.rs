@@ -32,6 +32,10 @@ fn request_has_execution_runtime_via_guard(headers: &HeaderMap) -> bool {
 }
 
 pub(crate) fn frontdoor_self_loop_public_ai_path(path: &str) -> bool {
+    let path = path
+        .strip_prefix("/openai")
+        .filter(|p| *p == "/v1/videos" || p.starts_with("/v1/videos/"))
+        .unwrap_or(path);
     matches!(
         path,
         "/v1/messages"

@@ -84,6 +84,36 @@ afterEach(() => {
   }
 })
 
+function createGlobalModel(id: string, name: string, displayName = name) {
+  return {
+    id,
+    name,
+    display_name: displayName,
+    is_active: true,
+    default_tiered_pricing: { tiers: [] },
+    created_at: '2026-01-01T00:00:00Z',
+  }
+}
+
+function createProviderModel(id: string, globalModelId: string) {
+  return {
+    id,
+    provider_id: 'provider-1',
+    global_model_id: globalModelId,
+    provider_model_name: globalModelId,
+    is_active: true,
+    is_available: true,
+    created_at: '2026-01-01T00:00:00Z',
+    updated_at: '2026-01-01T00:00:00Z',
+  }
+}
+
+function visibleModelIds(root: HTMLElement): string[] {
+  return Array.from(root.querySelectorAll('[data-testid^="batch-assign-model-"]'))
+    .map(node => node.getAttribute('data-testid')?.replace('batch-assign-model-', '') ?? '')
+    .filter(Boolean)
+}
+
 describe('BatchAssignModelsDialog loading', () => {
   it('loads model choices when lazily mounted in the open state', async () => {
     const root = document.createElement('div')
@@ -106,5 +136,70 @@ describe('BatchAssignModelsDialog loading', () => {
     expect(globalModelMocks.getGlobalModels).toHaveBeenCalledWith({ limit: 1000 })
     expect(endpointMocks.getProviderModels).toHaveBeenCalledWith('provider-1')
     expect(endpointMocks.getProviderKeys).toHaveBeenCalledWith('provider-1')
+  })
+
+  it('pins already associated models to the top of the list', async () => {
+    globalModelMocks.getGlobalModels.mockResolvedValue({
+      models: [
+        createGlobalModel('gm-zeta', 'zeta-model', 'Zeta'),
+        createGlobalModel('gm-alpha', 'alpha-model', 'Alpha'),
+        createGlobalModel('gm-mu', 'mu-model', 'Mu'),
+      ],
+      total: 3,
+    })
+    endpointMocks.getProviderModels.mockResolvedValue([
+      createProviderModel('pm-mu', 'gm-mu'),
+    ])
+
+    const root = document.createElement('div')
+    document.body.appendChild(root)
+    const app = createApp(defineComponent({
+      setup() {
+        return () => h(BatchAssignModelsDialog, {
+          open: true,
+          providerId: 'provider-1',
+        })
+      },
+    }))
+    app.mount(root)
+    mountedApps.push({ app, root })
+    await settle()
+
+    expect(visibleModelIds(root)).toEqual(['gm-mu', 'gm-alpha', 'gm-zeta'])
+  })
+
+  it('keeps selected matches pinned above other search results', async () => {
+    globalModelMocks.getGlobalModels.mockResolvedValue({
+      models: [
+        createGlobalModel('gm-beta', 'beta-flash', 'Beta Flash'),
+        createGlobalModel('gm-alpha', 'alpha-flash', 'Alpha Flash'),
+        createGlobalModel('gm-other', 'other-model', 'Other'),
+      ],
+      total: 3,
+    })
+    endpointMocks.getProviderModels.mockResolvedValue([
+      createProviderModel('pm-beta', 'gm-beta'),
+    ])
+
+    const root = document.createElement('div')
+    document.body.appendChild(root)
+    const app = createApp(defineComponent({
+      setup() {
+        return () => h(BatchAssignModelsDialog, {
+          open: true,
+          providerId: 'provider-1',
+        })
+      },
+    }))
+    app.mount(root)
+    mountedApps.push({ app, root })
+    await settle()
+
+    const search = root.querySelector('input') as HTMLInputElement
+    search.value = 'flash'
+    search.dispatchEvent(new Event('input', { bubbles: true }))
+    await settle()
+
+    expect(visibleModelIds(root)).toEqual(['gm-beta', 'gm-alpha'])
   })
 })

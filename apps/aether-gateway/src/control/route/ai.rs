@@ -137,7 +137,11 @@ pub(super) fn classify_ai_public_route(
             .with_client_surface(detect_claude_client_surface(headers))
             .with_api_operation(ApiOperation::ClaudeMessagesCreate),
         )
-    } else if normalized_path.starts_with("/v1/videos") {
+    } else if normalized_path == "/v1/videos"
+        || normalized_path.starts_with("/v1/videos/")
+        || normalized_path == "/openai/v1/videos"
+        || normalized_path.starts_with("/openai/v1/videos/")
+    {
         Some(classified(
             "ai_public",
             "openai",

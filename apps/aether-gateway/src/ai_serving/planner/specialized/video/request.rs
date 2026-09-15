@@ -3,15 +3,23 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-use crate::ai_serving::planner::candidate_preparation::resolve_candidate_mapped_model;
+use crate::ai_serving::planner::candidate_preparation::{
+    prepare_header_authenticated_candidate, resolve_candidate_mapped_model, OauthPreparationContext,
+};
 use crate::ai_serving::planner::spec_metadata::local_video_create_spec_metadata;
+use crate::ai_serving::transport::xai::video::{
+    convert_openai_video_request, is_explicit_native_video_path, is_native_video_request,
+};
 use crate::ai_serving::transport::{
     build_video_create_headers, build_video_create_request_body, build_video_create_upstream_url,
     resolve_video_create_auth, video_create_transport_unsupported_reason,
     ProviderVideoCreateFamily, ProviderVideoCreateHeadersInput,
 };
-use crate::ai_serving::{CandidateFailureDiagnostic, GatewayProviderTransportSnapshot};
-use crate::AppState;
+use crate::ai_serving::{
+    apply_xai_upstream_payload_edits, CandidateFailureDiagnostic, GatewayProviderTransportSnapshot,
+    PlannerAppState,
+};
+use crate::{AppState, GatewayError};
 
 use super::support::{
     mark_skipped_local_video_candidate, mark_skipped_local_video_candidate_with_failure_diagnostic,
@@ -37,11 +45,16 @@ pub(super) async fn resolve_local_video_create_candidate_payload_parts(
     input: &LocalVideoCreateDecisionInput,
     attempt: &LocalVideoCreateCandidateAttempt,
     spec: LocalVideoCreateSpec,
-) -> Option<LocalVideoCreateCandidatePayloadParts> {
+) -> Result<Option<LocalVideoCreateCandidatePayloadParts>, GatewayError> {
     let spec_metadata = local_video_create_spec_metadata(spec);
     let candidate = &attempt.eligible.candidate;
     let transport = &attempt.eligible.transport;
     let effective_headers = input.effective_headers(&parts.headers);
+    if is_explicit_native_video_path(parts.uri.path())
+        && !transport.provider.provider_type.eq_ignore_ascii_case("xai")
+    {
+        return Ok(None);
+    }
 
     let provider_family = provider_video_create_family(spec.family);
     let transport_unsupported_reason = video_create_transport_unsupported_reason(
@@ -60,23 +73,39 @@ pub(super) async fn resolve_local_video_create_candidate_payload_parts(
             skip_reason,
         )
         .await;
-        return None;
+        return Ok(None);
     }
 
-    let auth = resolve_video_create_auth(transport, provider_family);
-    let Some((auth_header, auth_value)) = auth else {
-        mark_skipped_local_video_candidate(
-            state,
-            input,
+    let prepared_candidate = match prepare_header_authenticated_candidate(
+        PlannerAppState::new(state),
+        transport,
+        candidate,
+        resolve_video_create_auth(transport, provider_family),
+        OauthPreparationContext {
             trace_id,
-            candidate,
-            attempt.candidate_index,
-            &attempt.candidate_id,
-            "transport_auth_unavailable",
-        )
-        .await;
-        return None;
+            api_format: spec_metadata.api_format,
+            operation: "video_create_candidate_request",
+        },
+    )
+    .await
+    {
+        Ok(prepared) => prepared,
+        Err(skip_reason) => {
+            mark_skipped_local_video_candidate(
+                state,
+                input,
+                trace_id,
+                candidate,
+                attempt.candidate_index,
+                &attempt.candidate_id,
+                skip_reason,
+            )
+            .await;
+            return Ok(None);
+        }
     };
+    let auth_header = prepared_candidate.auth_header;
+    let auth_value = prepared_candidate.auth_value;
 
     let mapped_model = match resolve_candidate_mapped_model(candidate) {
         Ok(mapped_model) => mapped_model,
@@ -91,7 +120,7 @@ pub(super) async fn resolve_local_video_create_candidate_payload_parts(
                 skip_reason,
             )
             .await;
-            return None;
+            return Ok(None);
         }
     };
 
@@ -117,10 +146,10 @@ pub(super) async fn resolve_local_video_create_candidate_payload_parts(
             ),
         )
         .await;
-        return None;
+        return Ok(None);
     };
 
-    let Some(provider_request_body) = build_video_create_request_body(
+    let Some(mut provider_request_body) = build_video_create_request_body(
         body_json,
         provider_family,
         &mapped_model,
@@ -142,11 +171,28 @@ pub(super) async fn resolve_local_video_create_candidate_payload_parts(
             ),
         )
         .await;
-        return None;
+        return Ok(None);
     };
+    if transport.provider.provider_type.eq_ignore_ascii_case("xai")
+        && !is_native_video_request(&transport.provider.provider_type, parts.uri.path())
+    {
+        provider_request_body =
+            convert_openai_video_request(&provider_request_body).map_err(|message| {
+                GatewayError::Client {
+                    status: http::StatusCode::BAD_REQUEST,
+                    message: message.to_string(),
+                }
+            })?;
+    }
+    apply_xai_upstream_payload_edits(
+        &mut provider_request_body,
+        transport.provider.provider_type.as_str(),
+        spec_metadata.api_format,
+    );
 
     let Some(provider_request_headers) =
         build_video_create_headers(ProviderVideoCreateHeadersInput {
+            transport,
             headers: effective_headers,
             auth_header: &auth_header,
             auth_value: &auth_value,
@@ -170,10 +216,10 @@ pub(super) async fn resolve_local_video_create_candidate_payload_parts(
             ),
         )
         .await;
-        return None;
+        return Ok(None);
     };
 
-    Some(LocalVideoCreateCandidatePayloadParts {
+    Ok(Some(LocalVideoCreateCandidatePayloadParts {
         transport: Arc::clone(transport),
         auth_header,
         auth_value,
@@ -181,7 +227,7 @@ pub(super) async fn resolve_local_video_create_candidate_payload_parts(
         provider_request_headers,
         provider_request_body,
         upstream_url,
-    })
+    }))
 }
 
 fn provider_video_create_family(family: LocalVideoCreateFamily) -> ProviderVideoCreateFamily {

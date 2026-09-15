@@ -53,6 +53,8 @@ const AI_ANY_ROUTE_PATTERNS: &[&str] = &[
     "/v1beta/operations/{*operation_path}",
     "/v1/videos",
     "/v1/videos/{*video_path}",
+    "/openai/v1/videos",
+    "/openai/v1/videos/{*video_path}",
     "/upload/v1beta/files",
     "/v1beta/files",
     "/v1beta/files/{*file_path}",

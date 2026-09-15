@@ -488,6 +488,7 @@ impl ResponsesWebSocketBodyNormalization {
         digest.update([match self.reasoning_replay_policy {
             crate::ai_serving::OpenAiResponsesReasoningReplayPolicy::OpenAiItemIds => 0,
             crate::ai_serving::OpenAiResponsesReasoningReplayPolicy::DeepSeekOpaque => 1,
+            crate::ai_serving::OpenAiResponsesReasoningReplayPolicy::XaiEncrypted => 2,
         }]);
         update_normalization_optional_json_digest(&mut digest, self.model_directive_patch.as_ref());
         digest.finalize().into()

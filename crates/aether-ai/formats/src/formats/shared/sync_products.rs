@@ -9,7 +9,8 @@ use aether_ai_formats::formats::conversion::response::{
 };
 use aether_ai_formats::formats::openai::responses::response::ensure_modern_openai_responses_response_fields;
 use aether_ai_formats::formats::openai::responses::{
-    openai_responses_message_item_id, openai_responses_synthetic_reasoning_item_id,
+    openai_responses_message_item_id, openai_responses_reasoning_text_fields,
+    openai_responses_synthetic_reasoning_item_id,
 };
 use aether_ai_formats::formats::registry::{convert_response, FormatContext, FormatError};
 use aether_ai_formats::{
@@ -3117,19 +3118,27 @@ fn merge_openai_responses_tool_arguments(
 }
 
 fn extract_openai_responses_reasoning_text(item: &Map<String, Value>) -> Option<String> {
-    item.get("summary")
-        .and_then(Value::as_array)
+    extract_openai_responses_reasoning_parts(item.get("content"), "reasoning_text")
+        .or_else(|| extract_openai_responses_reasoning_parts(item.get("summary"), "summary_text"))
+}
+
+fn extract_openai_responses_reasoning_parts(
+    raw: Option<&Value>,
+    expected_type: &str,
+) -> Option<String> {
+    raw.and_then(Value::as_array)
         .into_iter()
         .flatten()
         .find_map(|part| {
             let part = part.as_object()?;
-            (part.get("type").and_then(Value::as_str) == Some("summary_text")).then(|| {
+            (part.get("type").and_then(Value::as_str) == Some(expected_type)).then(|| {
                 part.get("text")
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_string()
             })
         })
+        .filter(|text| !text.is_empty())
 }
 
 fn merge_openai_responses_message_item(
@@ -3276,15 +3285,24 @@ fn materialize_openai_responses_reasoning_item(
     item.entry("status".to_string())
         .or_insert_with(|| Value::String("completed".to_string()));
     if !state.summary_text.is_empty() {
-        item.insert(
-            "summary".to_string(),
-            Value::Array(vec![json!({
-                "type": "summary_text",
-                "text": state.summary_text,
-            })]),
-        );
+        let (content, summary) = openai_responses_reasoning_text_fields([&state.summary_text]);
+        if reasoning_item_field_missing_or_empty(item.get("content")) {
+            item.insert("content".to_string(), content);
+        }
+        if reasoning_item_field_missing_or_empty(item.get("summary")) {
+            item.insert("summary".to_string(), summary);
+        }
     }
     Value::Object(item)
+}
+
+fn reasoning_item_field_missing_or_empty(value: Option<&Value>) -> bool {
+    match value {
+        None | Some(Value::Null) => true,
+        Some(Value::Array(parts)) => parts.is_empty(),
+        Some(Value::String(text)) => text.trim().is_empty(),
+        _ => false,
+    }
 }
 
 fn materialize_openai_responses_tool_item(
@@ -5689,6 +5707,8 @@ mod tests {
             openai_responses_synthetic_reasoning_item_id("resp_summary_123", 0)
         );
         assert_eq!(materialized["summary"][0]["text"], "Need care");
+        assert_eq!(materialized["content"][0]["type"], "reasoning_text");
+        assert_eq!(materialized["content"][0]["text"], "Need care");
     }
 
     #[test]

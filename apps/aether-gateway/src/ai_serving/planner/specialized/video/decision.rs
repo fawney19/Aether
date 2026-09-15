@@ -8,6 +8,7 @@ use crate::ai_serving::planner::{
     build_ai_execution_decision_response, resolve_transport_request_encoding_policy,
     AiExecutionDecisionResponseParts,
 };
+use crate::ai_serving::transport::xai::video::is_native_video_request;
 use crate::ai_serving::transport::{
     resolve_transport_execution_timeouts, resolve_transport_profile,
 };
@@ -33,7 +34,7 @@ pub(super) async fn maybe_build_local_video_create_decision_payload_for_candidat
     let Some(resolved) = resolve_local_video_create_candidate_payload_parts(
         state, parts, body_json, trace_id, input, &attempt, spec,
     )
-    .await
+    .await?
     else {
         return Ok(None);
     };
@@ -52,8 +53,31 @@ pub(super) async fn maybe_build_local_video_create_decision_payload_for_candidat
         .await;
     let transport_profile = resolve_transport_profile(&transport);
     let mut extra_fields = serde_json::Map::new();
+    if is_native_video_request(&transport.provider.provider_type, parts.uri.path()) {
+        extra_fields.insert(
+            "video_client_protocol".to_string(),
+            serde_json::json!("xai"),
+        );
+    }
+
     if let Some(proxy_value) = build_request_trace_proxy_value(Some(&transport), proxy.as_ref()) {
         extra_fields.insert("proxy".to_string(), proxy_value);
+    }
+    if transport.provider.provider_type.eq_ignore_ascii_case("xai") {
+        extra_fields.insert("video_provider_xai".into(), serde_json::json!(true));
+        if let Some(duration) = resolved.provider_request_body.get("duration") {
+            extra_fields.insert("video_duration".into(), duration.clone());
+        }
+        if parts.uri.path() == "/openai/v1/videos" {
+            extra_fields.insert(
+                "video_size".into(),
+                body_json
+                    .get("size")
+                    .filter(|v| v.as_str().is_some_and(|s| !s.trim().is_empty()))
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!("720x1280")),
+            );
+        }
     }
     let effective_headers = input.effective_headers(&parts.headers);
     let report_context = build_local_execution_report_context(LocalExecutionReportContextParts {

@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 use crate::formats::openai::namespace::NamespaceToolAliases;
 use crate::formats::openai::responses::{
     encode_gemini_tool_signature_carrier_with_direction, openai_responses_message_item_id,
-    openai_responses_synthetic_reasoning_item_id,
+    openai_responses_reasoning_text_fields, openai_responses_synthetic_reasoning_item_id,
     response::{
         ensure_modern_openai_responses_response_fields, openai_responses_current_timestamp,
     },
@@ -2621,6 +2621,107 @@ impl OpenAIResponsesClientEmitter {
         self.reasoning_summary_parts.len()
     }
 
+    fn reasoning_texts(&self) -> Vec<String> {
+        if self.reasoning_summary_parts.is_empty() {
+            if self.reasoning.trim().is_empty() {
+                Vec::new()
+            } else {
+                vec![self.reasoning.clone()]
+            }
+        } else {
+            self.reasoning_summary_parts.clone()
+        }
+    }
+
+    fn reasoning_item_value(&self) -> Value {
+        let (content, summary) = openai_responses_reasoning_text_fields(self.reasoning_texts());
+        json!({
+            "type": "reasoning",
+            "id": self.reasoning_item_id(),
+            "status": "completed",
+            "summary": summary,
+            "content": content,
+        })
+    }
+
+    fn encode_reasoning_text_delta(
+        &mut self,
+        text: &str,
+    ) -> Result<Vec<u8>, AiSurfaceFinalizeError> {
+        let item_id = self.reasoning_item_id();
+        let output_index = self.reasoning_output_index.unwrap_or(0);
+        let part_index = self.current_reasoning_summary_index();
+        let mut out = self.encode_response_event(
+            "response.reasoning_text.delta",
+            json!({
+                "type": "response.reasoning_text.delta",
+                "response_id": self.response_id(),
+                "item_id": item_id.clone(),
+                "output_index": output_index,
+                "content_index": part_index,
+                "delta": text,
+            }),
+        )?;
+        out.extend(self.encode_response_event(
+            "response.reasoning_summary_text.delta",
+            json!({
+                "type": "response.reasoning_summary_text.delta",
+                "response_id": self.response_id(),
+                "item_id": item_id,
+                "output_index": output_index,
+                "summary_index": part_index,
+                "delta": text,
+            }),
+        )?);
+        Ok(out)
+    }
+
+    fn encode_reasoning_text_done_events(
+        &mut self,
+        item_id: &str,
+        output_index: usize,
+        part_index: usize,
+        part_text: &str,
+    ) -> Result<Vec<u8>, AiSurfaceFinalizeError> {
+        let mut out = self.encode_response_event(
+            "response.reasoning_text.done",
+            json!({
+                "type": "response.reasoning_text.done",
+                "response_id": self.response_id(),
+                "item_id": item_id,
+                "output_index": output_index,
+                "content_index": part_index,
+                "text": part_text,
+            }),
+        )?;
+        out.extend(self.encode_response_event(
+            "response.reasoning_summary_text.done",
+            json!({
+                "type": "response.reasoning_summary_text.done",
+                "response_id": self.response_id(),
+                "item_id": item_id,
+                "output_index": output_index,
+                "summary_index": part_index,
+                "text": part_text,
+            }),
+        )?);
+        out.extend(self.encode_response_event(
+            "response.reasoning_summary_part.done",
+            json!({
+                "type": "response.reasoning_summary_part.done",
+                "response_id": self.response_id(),
+                "item_id": item_id,
+                "output_index": output_index,
+                "summary_index": part_index,
+                "part": {
+                    "type": "summary_text",
+                    "text": part_text,
+                }
+            }),
+        )?);
+        Ok(out)
+    }
+
     fn ensure_message_output_index(&mut self) -> usize {
         if let Some(output_index) = self.message_output_index {
             return output_index;
@@ -2676,6 +2777,7 @@ impl OpenAIResponsesClientEmitter {
                         "type": "reasoning",
                         "id": item_id.clone(),
                         "summary": [],
+                        "content": [],
                     }
                 }),
             )?);
@@ -2812,66 +2914,23 @@ impl OpenAIResponsesClientEmitter {
         if self.reasoning_part_started {
             let summary_index = self.current_reasoning_summary_index();
             let part_text = self.reasoning_part.clone();
-            out.extend(self.encode_response_event(
-                "response.reasoning_summary_text.done",
-                json!({
-                    "type": "response.reasoning_summary_text.done",
-                    "response_id": self.response_id(),
-                    "item_id": item_id.clone(),
-                    "output_index": output_index,
-                    "summary_index": summary_index,
-                    "text": part_text.as_str(),
-                }),
-            )?);
-            out.extend(self.encode_response_event(
-                "response.reasoning_summary_part.done",
-                json!({
-                    "type": "response.reasoning_summary_part.done",
-                    "response_id": self.response_id(),
-                    "item_id": item_id.clone(),
-                    "output_index": output_index,
-                    "summary_index": summary_index,
-                    "part": {
-                        "type": "summary_text",
-                        "text": part_text.as_str(),
-                    }
-                }),
+            out.extend(self.encode_reasoning_text_done_events(
+                &item_id,
+                output_index,
+                summary_index,
+                part_text.as_str(),
             )?);
             self.reasoning_summary_parts.push(part_text);
             self.reasoning_part.clear();
             self.reasoning_part_started = false;
         }
-        let summary = if self.reasoning_summary_parts.is_empty() {
-            if self.reasoning.trim().is_empty() {
-                Vec::new()
-            } else {
-                vec![json!({
-                    "type": "summary_text",
-                    "text": self.reasoning.as_str(),
-                })]
-            }
-        } else {
-            self.reasoning_summary_parts
-                .iter()
-                .map(|text| {
-                    json!({
-                        "type": "summary_text",
-                        "text": text,
-                    })
-                })
-                .collect::<Vec<_>>()
-        };
         out.extend(self.encode_response_event(
             "response.output_item.done",
             json!({
                 "type": "response.output_item.done",
                 "response_id": self.response_id(),
                 "output_index": output_index,
-                "item": {
-                    "type": "reasoning",
-                    "id": item_id,
-                    "summary": summary,
-                }
+                "item": self.reasoning_item_value(),
             }),
         )?);
         Ok(out)
@@ -3035,35 +3094,10 @@ impl OpenAIResponsesClientEmitter {
         incomplete_reason: Option<&str>,
     ) -> Value {
         let mut ordered_output = Vec::new();
-        let summary = if self.reasoning_summary_parts.is_empty() {
-            if self.reasoning.trim().is_empty() {
-                Vec::new()
-            } else {
-                vec![json!({
-                    "type": "summary_text",
-                    "text": self.reasoning.as_str(),
-                })]
-            }
-        } else {
-            self.reasoning_summary_parts
-                .iter()
-                .map(|text| {
-                    json!({
-                        "type": "summary_text",
-                        "text": text,
-                    })
-                })
-                .collect::<Vec<_>>()
-        };
-        if !summary.is_empty() {
+        if !self.reasoning_texts().is_empty() {
             ordered_output.push((
                 self.reasoning_output_index.unwrap_or(0),
-                json!({
-                    "type": "reasoning",
-                    "id": self.reasoning_item_id(),
-                    "status": "completed",
-                    "summary": summary,
-                }),
+                self.reasoning_item_value(),
             ));
         }
         if self.text_item_started || !self.text.is_empty() {
@@ -3297,17 +3331,7 @@ impl OpenAIResponsesClientEmitter {
                 let mut out = self.ensure_reasoning_item_started()?;
                 self.reasoning.push_str(&text);
                 self.reasoning_part.push_str(&text);
-                out.extend(self.encode_response_event(
-                    "response.reasoning_summary_text.delta",
-                    json!({
-                        "type": "response.reasoning_summary_text.delta",
-                        "response_id": self.response_id(),
-                        "item_id": self.reasoning_item_id(),
-                        "output_index": self.reasoning_output_index.unwrap_or(0),
-                        "summary_index": self.current_reasoning_summary_index(),
-                        "delta": text,
-                    }),
-                )?);
+                out.extend(self.encode_reasoning_text_delta(&text)?);
                 Ok(out)
             }
             CanonicalStreamEvent::ReasoningSummaryDone => {
@@ -3320,32 +3344,12 @@ impl OpenAIResponsesClientEmitter {
                 let item_id = self.reasoning_item_id();
                 let summary_index = self.current_reasoning_summary_index();
                 let part_text = self.reasoning_part.clone();
-                let mut out = Vec::new();
-                out.extend(self.encode_response_event(
-                    "response.reasoning_summary_text.done",
-                    json!({
-                        "type": "response.reasoning_summary_text.done",
-                        "response_id": self.response_id(),
-                        "item_id": item_id.clone(),
-                        "output_index": output_index,
-                        "summary_index": summary_index,
-                        "text": part_text.as_str(),
-                    }),
-                )?);
-                out.extend(self.encode_response_event(
-                    "response.reasoning_summary_part.done",
-                    json!({
-                        "type": "response.reasoning_summary_part.done",
-                        "response_id": self.response_id(),
-                        "item_id": item_id,
-                        "output_index": output_index,
-                        "summary_index": summary_index,
-                        "part": {
-                            "type": "summary_text",
-                            "text": part_text.as_str(),
-                        }
-                    }),
-                )?);
+                let out = self.encode_reasoning_text_done_events(
+                    &item_id,
+                    output_index,
+                    summary_index,
+                    part_text.as_str(),
+                )?;
                 self.reasoning_summary_parts.push(part_text);
                 self.reasoning_part.clear();
                 self.reasoning_part_started = false;
@@ -6352,13 +6356,19 @@ mod tests {
 
         let sse = String::from_utf8(bytes).expect("sse should be utf8");
         assert!(sse.contains("event: response.reasoning_summary_part.added\n"));
+        assert!(sse.contains("event: response.reasoning_text.delta\n"));
         assert!(sse.contains("event: response.reasoning_summary_text.delta\n"));
+        assert!(sse.contains("event: response.reasoning_text.done\n"));
         assert!(sse.contains("event: response.reasoning_summary_text.done\n"));
         assert!(sse.contains("event: response.reasoning_summary_part.done\n"));
+        assert!(sse.contains("\"type\":\"reasoning_text\""));
         let reasoning_item_id = openai_responses_synthetic_reasoning_item_id("resp_456", 0);
         assert!(sse.contains(&format!("\"item_id\":\"{reasoning_item_id}\"")));
         assert!(sse.contains("\"type\":\"reasoning\""));
-        assert_eq!(response_sequence_numbers(&sse), (1..=9).collect::<Vec<_>>());
+        assert_eq!(
+            response_sequence_numbers(&sse),
+            (1..=11).collect::<Vec<_>>()
+        );
     }
 
     #[test]

@@ -50,6 +50,10 @@ describe('translation coverage', () => {
     ['1 维度', '1 dimension'],
     ['14天0时', '14d 0h'],
     ['5天 0:00:00', '5d 0:00:00'],
+    ['确定删除选中的 3 个模型吗？\n\n此操作不可撤销。', 'Delete the selected 3 models?\n\nThis cannot be undone.'],
+    ['确定删除选中的 1 个模型吗？\n\n此操作不可撤销。', 'Delete the selected 1 model?\n\nThis cannot be undone.'],
+    ['成功删除 2 个模型', 'Deleted 2 models'],
+    ['1 个模型删除失败', 'Failed to delete 1 model'],
   ])('translates %s as a complete message', (source, expected) => {
     expect(translateLegacyText(source, 'en-US')).toBe(expected)
   })

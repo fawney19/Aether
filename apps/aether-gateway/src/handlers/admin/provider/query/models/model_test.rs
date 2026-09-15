@@ -3511,6 +3511,11 @@ async fn provider_query_execute_standard_test_candidate(
             codex_model_capabilities.as_ref(),
         );
     }
+    crate::provider_transport::insert_cli_identity_headers_if_needed(
+        &transport,
+        provider_api_format,
+        &mut request_headers,
+    );
     if !uses_vertex_query_auth {
         if let (Some(auth_header), Some(auth_value)) =
             (auth_header.as_deref(), auth_value.as_deref())

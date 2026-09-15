@@ -514,6 +514,65 @@
                         </div>
                       </template>
                     </div>
+                    <!-- xAI / Grok Build 订阅额度 -->
+                    <div
+                      v-if="provider.provider_type === 'xai' && hasXaiQuotaDisplayData(key)"
+                      class="mt-2 p-2 rounded-md bg-muted/30"
+                    >
+                      <ProviderQuotaSectionHeader
+                        :title="legacyT('账号配额')"
+                        :loading="refreshingQuota"
+                        :updated-text="getXaiQuotaDisplay(key)?.updated_at ? formatKiroUpdatedAt(getXaiQuotaDisplay(key)?.updated_at || 0) : null"
+                      />
+                      <div class="space-y-2">
+                        <ProviderQuotaProgressRow
+                          v-if="getXaiQuotaDisplay(key)?.usage_percentage !== undefined || getXaiQuotaDisplay(key)?.remaining_percentage !== undefined"
+                          :label="legacyT(getXaiUsageLabel(key))"
+                          :used-percent="getXaiUsedPercent(key)"
+                          :remaining-percent="getXaiRemainingPercent(key)"
+                          :meter-class="getQuotaRemainingClass(getXaiUsedPercent(key))"
+                          :bar-class="getQuotaRemainingBarColor(getXaiUsedPercent(key))"
+                          :reset-text="getXaiQuotaDisplay(key)?.next_reset_at
+                            ? `${formatKiroResetTime(getXaiQuotaDisplay(key)?.next_reset_at)}${legacyT('重置')}`
+                            : null"
+                        >
+                          <template
+                            v-if="getXaiQuotaDisplay(key)?.usage_limit != null"
+                            #footer
+                          >
+                            <div class="flex items-center justify-between text-[9px] text-muted-foreground/70 mt-0.5">
+                              <span>
+                                {{ formatKiroUsage(getXaiQuotaDisplay(key)?.current_usage) }} /
+                                {{ formatKiroUsage(getXaiQuotaDisplay(key)?.usage_limit) }}
+                              </span>
+                              <span v-if="getXaiQuotaDisplay(key)?.next_reset_at">
+                                {{ formatKiroResetTime(getXaiQuotaDisplay(key)?.next_reset_at) }}{{ legacyT('重置') }}
+                              </span>
+                            </div>
+                          </template>
+                        </ProviderQuotaProgressRow>
+                        <div
+                          v-if="getXaiQuotaDisplay(key)?.prepaid_balance != null"
+                          class="text-[10px] text-muted-foreground"
+                        >
+                          {{ legacyT('预付额度') }}: {{ formatKiroUsage(getXaiQuotaDisplay(key)?.prepaid_balance) }}
+                        </div>
+                        <ProviderQuotaProgressRow
+                          v-if="getXaiQuotaDisplay(key)?.on_demand_cap"
+                          :label="legacyT('按需额度')"
+                          :used-percent="getXaiOnDemandUsedPercent(key)"
+                          :meter-class="getQuotaRemainingClass(getXaiOnDemandUsedPercent(key))"
+                          :bar-class="getQuotaRemainingBarColor(getXaiOnDemandUsedPercent(key))"
+                        >
+                          <template #footer>
+                            <div class="text-[9px] text-muted-foreground/70 mt-0.5">
+                              {{ formatKiroUsage(getXaiQuotaDisplay(key)?.on_demand_used) }} /
+                              {{ formatKiroUsage(getXaiQuotaDisplay(key)?.on_demand_cap) }}
+                            </div>
+                          </template>
+                        </ProviderQuotaProgressRow>
+                      </div>
+                    </div>
                     <!-- Windsurf 上游额度信息 -->
                     <div
                       v-if="provider.provider_type === 'windsurf' && (hasWindsurfQuotaDisplayData(key) || isWindsurfUnavailableKey(key) || isWindsurfExhaustedKey(key))"
@@ -1005,6 +1064,7 @@ import type {
   GrokUpstreamMetadata,
   KiroUpstreamMetadata,
   WindsurfUpstreamMetadata,
+  XaiUpstreamMetadata,
   QuotaResetCreditsSnapshot,
   QuotaStatusSnapshot,
   QuotaWindowSnapshot,
@@ -1858,7 +1918,7 @@ function quotaSnapshotHasDisplayData(quota: QuotaStatusSnapshot | null | undefin
 
 function getQuotaSnapshotForProvider(
   key: EndpointAPIKey,
-  providerType: 'codex' | 'kiro' | 'windsurf' | 'antigravity' | 'chatgpt_web' | 'gemini_cli' | 'grok',
+  providerType: 'codex' | 'kiro' | 'windsurf' | 'antigravity' | 'chatgpt_web' | 'gemini_cli' | 'grok' | 'xai',
 ): QuotaStatusSnapshot | null {
   const quota = key.status_snapshot?.quota
   if (!quota) return null
@@ -2177,6 +2237,90 @@ function getKiroQuotaDisplay(key: EndpointAPIKey): KiroUpstreamMetadata | null {
 function hasKiroQuotaDisplayData(key: EndpointAPIKey): boolean {
   const kiro = getKiroQuotaDisplay(key)
   return !!kiro && (kiro.usage_percentage !== undefined || kiro.usage_limit !== undefined)
+}
+
+function getXaiQuotaDisplay(key: EndpointAPIKey): XaiUpstreamMetadata | null {
+  const quota = getQuotaSnapshotForProvider(key, 'xai')
+  if (!quota) return null
+
+  const display: XaiUpstreamMetadata = {}
+  const updatedAt = getQuotaSnapshotUpdatedAt(quota)
+  if (updatedAt !== undefined) display.updated_at = updatedAt
+  if (quota.plan_type) display.subscription_title = quota.plan_type
+
+  const usageWindow =
+    getQuotaWindow(quota, 'usage')
+    ?? getQuotaWindowByScope(quota, 'account')[0]
+    ?? null
+  if (usageWindow) {
+    const usedPercent = getQuotaWindowUsedPercent(usageWindow)
+    const remainingPercent = getQuotaWindowRemainingPercent(usageWindow)
+    if (usedPercent !== undefined) display.usage_percentage = usedPercent
+    if (remainingPercent !== undefined) display.remaining_percentage = remainingPercent
+    const usageLabel = String(usageWindow.label || '').trim()
+    if (usageLabel) display.usage_label = usageLabel
+    if (typeof usageWindow.used_value === 'number') display.current_usage = usageWindow.used_value
+    if (typeof usageWindow.limit_value === 'number') display.usage_limit = usageWindow.limit_value
+    if (typeof usageWindow.remaining_value === 'number') display.remaining = usageWindow.remaining_value
+    const nextResetAt =
+      getQuotaWindowResetAt(usageWindow)
+      ?? (() => {
+        const resetSeconds = getQuotaWindowResetSeconds(usageWindow)
+        if (updatedAt === undefined || resetSeconds === undefined) return undefined
+        return updatedAt + resetSeconds
+      })()
+    if (nextResetAt !== undefined) display.next_reset_at = nextResetAt
+  }
+
+  const prepaidWindow = getQuotaWindow(quota, 'prepaid')
+  if (typeof prepaidWindow?.remaining_value === 'number') {
+    display.prepaid_balance = prepaidWindow.remaining_value
+  }
+
+  const onDemandWindow = getQuotaWindow(quota, 'on_demand')
+  if (typeof onDemandWindow?.limit_value === 'number') display.on_demand_cap = onDemandWindow.limit_value
+  if (typeof onDemandWindow?.used_value === 'number') display.on_demand_used = onDemandWindow.used_value
+  if (typeof onDemandWindow?.remaining_value === 'number') display.on_demand_remaining = onDemandWindow.remaining_value
+
+  return Object.keys(display).length > 0 ? display : null
+}
+
+function hasXaiQuotaDisplayData(key: EndpointAPIKey): boolean {
+  const xai = getXaiQuotaDisplay(key)
+  return !!xai && (
+    xai.usage_percentage !== undefined
+    || xai.remaining_percentage !== undefined
+    || xai.prepaid_balance !== undefined
+    || xai.on_demand_cap !== undefined
+  )
+}
+
+function getXaiUsageLabel(key: EndpointAPIKey): string {
+  const display = getXaiQuotaDisplay(key)
+  if (display?.usage_label) return display.usage_label
+  const title = display?.subscription_title
+  return title ? `使用额度 (${title})` : '使用额度'
+}
+
+function getXaiUsedPercent(key: EndpointAPIKey): number {
+  return Math.min(Math.max(100 - getXaiRemainingPercent(key), 0), 100)
+}
+
+function getXaiRemainingPercent(key: EndpointAPIKey): number {
+  const xai = getXaiQuotaDisplay(key)
+  if (xai?.remaining_percentage != null && Number.isFinite(xai.remaining_percentage)) {
+    return Math.min(Math.max(xai.remaining_percentage, 0), 100)
+  }
+  if (xai?.usage_percentage != null && Number.isFinite(xai.usage_percentage)) {
+    return Math.min(Math.max(100 - xai.usage_percentage, 0), 100)
+  }
+  return 0
+}
+
+function getXaiOnDemandUsedPercent(key: EndpointAPIKey): number {
+  const xai = getXaiQuotaDisplay(key)
+  if (!xai?.on_demand_cap || xai.on_demand_cap <= 0) return 0
+  return Math.max(Math.min(((xai.on_demand_used || 0) / xai.on_demand_cap) * 100, 100), 0)
 }
 
 type GrokQuotaDisplay = GrokUpstreamMetadata & {
@@ -2696,6 +2840,28 @@ function shouldAutoRefreshGrokQuota(): boolean {
   return false
 }
 
+function shouldAutoRefreshXaiQuota(): boolean {
+  if (provider.value?.provider_type !== 'xai') return false
+  const now = Math.floor(Date.now() / 1000)
+
+  for (const { key } of allKeys.value) {
+    if (!key.is_active) continue
+
+    if (isTokenExpiringSoon(key, now)) return true
+
+    if (!hasXaiQuotaDisplayData(key)) {
+      return true
+    }
+
+    const updatedAt = getXaiQuotaDisplay(key)?.updated_at
+    if (typeof updatedAt !== 'number' || (now - updatedAt) > AUTO_QUOTA_REFRESH_STALE_SECONDS) {
+      return true
+    }
+  }
+
+  return false
+}
+
 function shouldAutoRefreshWindsurfQuota(): boolean {
   if (provider.value?.provider_type !== 'windsurf') return false
   const now = Math.floor(Date.now() / 1000)
@@ -2824,7 +2990,7 @@ async function autoRefreshQuotaInBackground(): Promise<boolean> {
   if (refreshingQuota.value) return false
 
   const providerType = provider.value?.provider_type
-  if (providerType !== 'codex' && providerType !== 'gemini_cli' && providerType !== 'antigravity' && providerType !== 'kiro' && providerType !== 'windsurf' && providerType !== 'chatgpt_web' && providerType !== 'grok') return false
+  if (providerType !== 'codex' && providerType !== 'gemini_cli' && providerType !== 'antigravity' && providerType !== 'kiro' && providerType !== 'windsurf' && providerType !== 'chatgpt_web' && providerType !== 'grok' && providerType !== 'xai') return false
 
   // 检查是否需要刷新
   let shouldRefresh = false
@@ -2838,6 +3004,8 @@ async function autoRefreshQuotaInBackground(): Promise<boolean> {
     shouldRefresh = shouldAutoRefreshKiroQuota()
   } else if (providerType === 'grok') {
     shouldRefresh = shouldAutoRefreshGrokQuota()
+  } else if (providerType === 'xai') {
+    shouldRefresh = shouldAutoRefreshXaiQuota()
   } else if (providerType === 'windsurf') {
     shouldRefresh = shouldAutoRefreshWindsurfQuota()
   } else if (providerType === 'chatgpt_web') {
@@ -2856,6 +3024,8 @@ async function autoRefreshQuotaInBackground(): Promise<boolean> {
     hadCachedQuota = allKeys.value.some(({ key }) => key.is_active && hasKiroQuotaDisplayData(key))
   } else if (providerType === 'grok') {
     hadCachedQuota = allKeys.value.some(({ key }) => key.is_active && hasGrokQuotaDisplayData(key))
+  } else if (providerType === 'xai') {
+    hadCachedQuota = allKeys.value.some(({ key }) => key.is_active && hasXaiQuotaDisplayData(key))
   } else if (providerType === 'windsurf') {
     hadCachedQuota = allKeys.value.some(({ key }) => key.is_active && hasWindsurfQuotaDisplayData(key))
   } else if (providerType === 'chatgpt_web') {

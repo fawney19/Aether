@@ -290,6 +290,14 @@ impl provider_transport::VideoTaskTransportSnapshotLookup for AppState {
             .await
             .map_err(GatewayError::into_message)
     }
+
+    async fn resolve_video_task_proxy(
+        &self,
+        transport: &GatewayProviderTransportSnapshot,
+    ) -> Option<ProxySnapshot> {
+        self.resolve_transport_proxy_snapshot_with_tunnel_affinity(transport)
+            .await
+    }
 }
 
 #[async_trait]

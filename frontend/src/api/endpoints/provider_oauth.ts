@@ -376,7 +376,7 @@ function jsonValueContainsAgentIdentity(value: unknown): boolean {
 export interface DeviceAuthorizeRequest {
   start_url?: string
   region?: string
-  auth_type?: 'builder_id' | 'identity_center' | 'google' | 'github' | 'browser'
+  auth_type?: 'builder_id' | 'identity_center' | 'google' | 'github' | 'browser' | 'device'
   login_option?: 'google' | 'github' | 'default'
   redirect_uri?: string
   proxy_node_id?: string

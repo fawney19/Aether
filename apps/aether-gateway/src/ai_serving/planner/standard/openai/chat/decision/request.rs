@@ -2764,7 +2764,7 @@ mod tests {
             payload.provider_request_body["userAgent"],
             "vscode/1.X.X (Antigravity/4.3.0)"
         );
-        assert_eq!(payload.provider_request_body["requestType"], "agent");
+        assert!(payload.provider_request_body.get("requestType").is_none());
         assert!(payload.provider_request_body.get("contents").is_none());
         assert!(payload.provider_request_body["request"]
             .get("contents")

@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, VecDeque};
 
 use serde_json::{json, Map, Value};
 
-use super::encode_tool_result_error;
+use super::{apply_openai_responses_reasoning_text, encode_tool_result_error};
 
 use crate::{
     formats::context::FormatContext,
@@ -702,14 +702,7 @@ fn canonical_thinking_to_responses_reasoning_item(
         .unwrap_or_default();
     item.remove("item_type");
     item.insert("type".to_string(), Value::String("reasoning".to_string()));
-    if !text.trim().is_empty() {
-        item.entry("summary".to_string()).or_insert_with(|| {
-            json!([{
-                "type": "summary_text",
-                "text": text,
-            }])
-        });
-    }
+    apply_openai_responses_reasoning_text(&mut item, text);
     if let Some(value) = encrypted_content.filter(|value| !value.is_empty()) {
         item.insert(
             "encrypted_content".to_string(),

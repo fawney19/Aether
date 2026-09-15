@@ -93,6 +93,16 @@ impl AiCandidateResolutionPort for GatewayLocalCandidateResolutionPort<'_> {
         &self,
         candidate: Self::Candidate,
     ) -> Self::Skipped {
+        warn!(
+            event_name = "local_candidate_skipped",
+            log_type = "event",
+            provider_id = %candidate.provider_id,
+            endpoint_id = %candidate.endpoint_id,
+            key_id = %candidate.key_id,
+            api_format = %candidate.endpoint_api_format,
+            skip_reason = "transport_snapshot_missing",
+            "local execution candidate skipped during planning"
+        );
         SkippedLocalExecutionCandidate {
             candidate,
             skip_reason: "transport_snapshot_missing",
@@ -145,6 +155,16 @@ impl AiCandidateResolutionPort for GatewayLocalCandidateResolutionPort<'_> {
         transport: Self::Transport,
         skip_reason: &'static str,
     ) -> Self::Skipped {
+        warn!(
+            event_name = "local_candidate_skipped",
+            log_type = "event",
+            provider_id = %candidate.provider_id,
+            endpoint_id = %candidate.endpoint_id,
+            key_id = %candidate.key_id,
+            api_format = %candidate.endpoint_api_format,
+            skip_reason,
+            "local execution candidate skipped during planning"
+        );
         SkippedLocalExecutionCandidate {
             candidate,
             skip_reason,

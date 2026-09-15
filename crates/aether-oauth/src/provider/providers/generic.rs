@@ -150,6 +150,27 @@ pub const GENERIC_PROVIDER_OAUTH_TEMPLATES: &[GenericProviderOAuthTemplate] = &[
         uses_json_payload: false,
         include_scope_in_token_request: true,
     },
+    GenericProviderOAuthTemplate {
+        provider_type: "xai",
+        display_name: "xAI",
+        authorize_url: "https://auth.x.ai/oauth2/device/code",
+        token_url: "https://auth.x.ai/oauth2/token",
+        client_id: "b1a00492-073a-47ea-816f-4c329264a828",
+        client_id_env: None,
+        client_secret_env: None,
+        scopes: &[
+            "openid",
+            "profile",
+            "email",
+            "offline_access",
+            "grok-cli:access",
+            "api:access",
+        ],
+        redirect_uri: "",
+        use_pkce: false,
+        uses_json_payload: false,
+        include_scope_in_token_request: false,
+    },
 ];
 
 #[derive(Clone)]
@@ -210,6 +231,10 @@ impl GenericProviderOAuthAdapter {
     fn without_oauth_client_secret_for_tests(mut self) -> Self {
         self.client_secret_override = Some(String::new());
         self
+    }
+
+    pub(super) fn token_url_for_provider(&self) -> String {
+        self.token_url()
     }
 
     fn token_url(&self) -> String {
@@ -389,7 +414,10 @@ impl GenericProviderOAuthAdapter {
         self.token_set_from_payload(payload)
     }
 
-    fn token_set_from_payload(&self, payload: Value) -> Result<ProviderOAuthTokenSet, OAuthError> {
+    pub(super) fn token_set_from_payload(
+        &self,
+        payload: Value,
+    ) -> Result<ProviderOAuthTokenSet, OAuthError> {
         let token_set = OAuthTokenSet::from_token_payload(payload.clone())
             .ok_or_else(|| OAuthError::invalid_response("token response missing access_token"))?;
         let mut auth_config = serde_json::Map::new();
@@ -945,6 +973,7 @@ mod tests {
     fn resolves_generic_provider_templates() {
         assert!(template_for_provider_type("codex").is_some());
         assert!(template_for_provider_type("claude_code").is_some());
+        assert!(template_for_provider_type("xai").is_some());
         assert!(template_for_provider_type("kiro").is_none());
     }
 

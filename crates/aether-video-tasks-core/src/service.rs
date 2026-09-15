@@ -105,13 +105,8 @@ impl VideoTaskService {
         if self.truth_source_mode != VideoTaskTruthSourceMode::RustAuthoritative {
             return None;
         }
-        match route_family {
-            Some("openai") => extract_openai_task_id_from_path(request_path)
-                .and_then(|task_id| self.store.read_openai(task_id)),
-            Some("gemini") => extract_gemini_short_id_from_path(request_path)
-                .and_then(|short_id| self.store.read_gemini(short_id)),
-            _ => None,
-        }
+        self.snapshot_for_route(route_family, request_path)
+            .map(|snapshot| snapshot.read_response_for_path(request_path))
     }
 
     pub fn read_response_for_user(
@@ -126,7 +121,7 @@ impl VideoTaskService {
         let snapshot = self.snapshot_for_route(route_family, request_path)?;
         snapshot
             .belongs_to_user(user_id)
-            .then(|| snapshot.read_response())
+            .then(|| snapshot.read_response_for_path(request_path))
     }
 
     pub fn snapshot_for_route(

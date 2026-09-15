@@ -3198,13 +3198,18 @@ fn openai_responses_body(
     let response_id = format!("resp_{}", Uuid::new_v4());
     let mut output = Vec::new();
     if !collected.thinking.trim().is_empty() {
+        let thinking = collected.thinking.trim();
         output.push(json!({
             "id": openai_responses_synthetic_reasoning_item_id(&response_id, 0),
             "type": "reasoning",
             "status": "completed",
             "summary": [{
                 "type": "summary_text",
-                "text": collected.thinking.trim(),
+                "text": thinking,
+            }],
+            "content": [{
+                "type": "reasoning_text",
+                "text": thinking,
             }],
         }));
     }
@@ -4627,6 +4632,18 @@ mod tests {
             serde_json::json!(usage.reasoning_tokens)
         );
         assert_eq!(body["output"][0]["type"], serde_json::json!("reasoning"));
+        assert_eq!(
+            body["output"][0]["content"][0]["type"],
+            serde_json::json!("reasoning_text")
+        );
+        assert_eq!(
+            body["output"][0]["content"][0]["text"],
+            serde_json::json!("short reasoning")
+        );
+        assert_eq!(
+            body["output"][0]["summary"][0]["text"],
+            serde_json::json!("short reasoning")
+        );
         assert_eq!(body["output"][1]["type"], serde_json::json!("message"));
         assert!(body["output"][1]["id"]
             .as_str()

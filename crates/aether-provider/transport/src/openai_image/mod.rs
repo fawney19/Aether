@@ -84,6 +84,11 @@ fn is_dedicated_openai_image_provider(transport: &GatewayProviderTransportSnapsh
             .trim()
             .eq_ignore_ascii_case("codex")
         || is_grok_provider_transport(transport)
+        || transport
+            .provider
+            .provider_type
+            .trim()
+            .eq_ignore_ascii_case("xai")
 }
 
 pub fn resolve_openai_image_auth(
@@ -92,7 +97,10 @@ pub fn resolve_openai_image_auth(
     if is_grok_provider_transport(transport) {
         return resolve_grok_session_auth(transport);
     }
-    resolve_local_openai_bearer_auth(transport)
+    resolve_local_openai_bearer_auth(transport).or_else(|| {
+        crate::generic_oauth::resolve_local_generic_oauth_transport_authorization(transport)
+            .map(|value| ("authorization".to_string(), value))
+    })
 }
 
 pub fn build_openai_image_upstream_url(
@@ -100,7 +108,11 @@ pub fn build_openai_image_upstream_url(
     request_path: Option<&str>,
     request_query: Option<&str>,
 ) -> String {
-    build_openai_image_url(&transport.endpoint.base_url, request_path, request_query)
+    build_openai_image_url(
+        &crate::xai::resolved_xai_request_base_url(transport, "openai:image"),
+        request_path,
+        request_query,
+    )
 }
 
 pub fn build_openai_image_headers(
@@ -113,6 +125,11 @@ pub fn build_openai_image_headers(
         &BTreeMap::new(),
     );
     provider_request_headers.insert("content-type".to_string(), "application/json".to_string());
+    crate::xai::insert_cli_identity_headers_if_needed(
+        input.transport,
+        "openai:image",
+        &mut provider_request_headers,
+    );
     if let Some(accept) = input.accept {
         provider_request_headers.insert("accept".to_string(), accept.to_string());
     } else {
@@ -277,6 +294,48 @@ mod tests {
         assert_eq!(
             openai_image_transport_unsupported_reason(&transport, "openai:image"),
             None
+        );
+    }
+
+    #[test]
+    fn xai_oauth_image_uses_cli_proxy() {
+        let mut transport = sample_transport();
+        transport.provider.provider_type = "xai".to_string();
+        transport.endpoint.base_url = "https://cli-chat-proxy.grok.com/v1".to_string();
+        transport.key.auth_type = "oauth".to_string();
+        transport.key.decrypted_auth_config =
+            Some(r#"{"refresh_token":"rt","using_api":false}"#.to_string());
+
+        assert_eq!(
+            openai_image_transport_unsupported_reason(&transport, "openai:image"),
+            None
+        );
+        assert_eq!(
+            build_openai_image_upstream_url(&transport, Some("/v1/images/generations"), None),
+            "https://cli-chat-proxy.grok.com/v1/images/generations"
+        );
+        assert_eq!(
+            build_openai_image_upstream_url(&transport, Some("/v1/images/edits"), None),
+            "https://cli-chat-proxy.grok.com/v1/images/edits"
+        );
+        let headers = build_openai_image_headers(ProviderOpenAiImageHeadersInput {
+            transport: &transport,
+            headers: &HeaderMap::new(),
+            auth_header: "authorization",
+            auth_value: "Bearer test-token",
+            accept: None,
+            header_rules: None,
+            provider_request_body: &json!({"prompt": "A cat"}),
+            original_request_body: &json!({"prompt": "A cat"}),
+        })
+        .unwrap();
+        assert_eq!(
+            headers.get("x-xai-token-auth").map(String::as_str),
+            Some("xai-grok-cli")
+        );
+        assert_eq!(
+            headers.get("authorization").map(String::as_str),
+            Some("Bearer test-token")
         );
     }
 

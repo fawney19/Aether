@@ -2429,6 +2429,8 @@ function generateMockKeysForProvider(providerId: string, count: number = 2) {
   })
 }
 
+const deletedProviderModelIds = new Set<string>()
+
 // 为 provider 生成 models
 function generateMockModelsForProvider(providerId: string) {
   const provider = MOCK_PROVIDERS.find(p => p.id === providerId)
@@ -2607,7 +2609,7 @@ function generateMockModelsForProvider(providerId: string) {
     )
   }
 
-  return models
+  return models.filter(model => !deletedProviderModelIds.has(String(model.id)))
 }
 
 // ========== 注册动态路由 ==========
@@ -3355,9 +3357,10 @@ registerDynamicRoute('PATCH', '/api/admin/providers/:providerId/models/:modelId'
 })
 
 // 删除 Provider Model
-registerDynamicRoute('DELETE', '/api/admin/providers/:providerId/models/:modelId', async (_config, _params) => {
+registerDynamicRoute('DELETE', '/api/admin/providers/:providerId/models/:modelId', async (_config, params) => {
   await delay()
   requireAdmin()
+  deletedProviderModelIds.add(params.modelId)
   return createMockResponse({ message: '删除成功（演示模式）' })
 })
 

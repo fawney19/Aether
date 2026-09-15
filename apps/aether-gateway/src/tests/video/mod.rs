@@ -36,6 +36,7 @@ mod openai_sync_task;
 mod registry_poller;
 mod routing;
 mod stream;
+mod xai;
 
 /// Seed online manual proxy nodes for video execution fixtures.
 ///
@@ -44,6 +45,17 @@ mod stream;
 /// the same deployment-state record; the loopback URL is never contacted when
 /// the execution-runtime override is active.
 pub(super) fn video_proxy_node_repository<I, S>(node_ids: I) -> Arc<InMemoryProxyNodeRepository>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    video_proxy_node_repository_at_url(node_ids, "http://127.0.0.1:1")
+}
+
+pub(super) fn video_proxy_node_repository_at_url<I, S>(
+    node_ids: I,
+    proxy_url: &str,
+) -> Arc<InMemoryProxyNodeRepository>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
@@ -68,7 +80,7 @@ where
             1,
         )
         .expect("video test proxy node should build")
-        .with_manual_proxy_fields(Some("http://127.0.0.1:1".to_string()), None, None)
+        .with_manual_proxy_fields(Some(proxy_url.to_string()), None, None)
         .with_tunnel_generation(format!("video-test-generation-{node_id}"))
     });
     Arc::new(InMemoryProxyNodeRepository::seed(nodes))
@@ -86,6 +98,28 @@ pub(super) fn video_provider_catalog_repository(
     endpoint_base_url: &str,
     key_id: &str,
     upstream_api_key: &str,
+) -> Arc<InMemoryProviderCatalogReadRepository> {
+    video_provider_catalog_repository_with_proxy(
+        provider_id,
+        provider_type,
+        endpoint_id,
+        api_format,
+        endpoint_base_url,
+        key_id,
+        upstream_api_key,
+        None,
+    )
+}
+
+pub(super) fn video_provider_catalog_repository_with_proxy(
+    provider_id: &str,
+    provider_type: &str,
+    endpoint_id: &str,
+    api_format: &str,
+    endpoint_base_url: &str,
+    key_id: &str,
+    upstream_api_key: &str,
+    proxy: Option<serde_json::Value>,
 ) -> Arc<InMemoryProviderCatalogReadRepository> {
     fn seal_bound_credential(
         provider_id: &str,
@@ -117,7 +151,7 @@ pub(super) fn video_provider_catalog_repository(
         false,
         None,
         Some(2),
-        None,
+        proxy,
         Some(20.0),
         None,
         None,

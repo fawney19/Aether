@@ -359,4 +359,30 @@ describe('providerKeyQuota', () => {
       },
     }, 'windsurf')).toBe('可用模型 3 个')
   })
+
+  it('formats xAI weekly credits as remaining percent', () => {
+    expect(getQuotaDisplayText({
+      status_snapshot: {
+        oauth: { code: 'valid' },
+        account: { code: 'ok', blocked: false },
+        quota: {
+          provider_type: 'xai',
+          code: 'ok',
+          exhausted: false,
+          windows: [
+            {
+              code: 'usage',
+              scope: 'account',
+              used_ratio: 0.46,
+              remaining_ratio: 0.54,
+            },
+            {
+              code: 'prepaid',
+              remaining_value: 12.5,
+            },
+          ],
+        },
+      },
+    }, 'xai')).toBe('剩余 54.0% | 预付剩余 12.5')
+  })
 })

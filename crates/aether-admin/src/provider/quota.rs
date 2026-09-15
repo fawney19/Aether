@@ -3546,6 +3546,258 @@ pub fn parse_kiro_usage_response(
     Some(serde_json::Value::Object(result))
 }
 
+pub fn parse_xai_billing_response(
+    value: &serde_json::Value,
+    updated_at_unix_secs: u64,
+) -> Option<serde_json::Value> {
+    let root = value.as_object()?;
+    let config = root
+        .get("config")
+        .and_then(serde_json::Value::as_object)
+        .unwrap_or(root);
+
+    let usage_percentage = coerce_json_f64_from_map(config, "creditUsagePercent")
+        .or_else(|| extract_xai_product_usage_percent(config));
+    let period = config.get("currentPeriod");
+    let period_type = period
+        .and_then(|value| value.get("type").or_else(|| value.get("periodType")))
+        .and_then(normalize_xai_period_type);
+    let next_reset_at = period
+        .and_then(|value| value.get("end"))
+        .and_then(parse_xai_timestamp)
+        .or_else(|| config.get("billingPeriodEnd").and_then(parse_xai_timestamp));
+    let monthly_limit =
+        coerce_xai_cents_dollars(config.get("monthlyLimit")).filter(|value| *value > 0.0);
+    let current_usage = if monthly_limit.is_some() {
+        coerce_xai_cents_dollars(config.get("used"))
+    } else {
+        None
+    };
+    let remaining = monthly_limit
+        .zip(current_usage)
+        .map(|(limit, used)| (limit - used).max(0.0));
+    let usage_percentage = usage_percentage.or_else(|| {
+        monthly_limit
+            .zip(current_usage)
+            .map(|(limit, used)| ((used / limit) * 100.0).clamp(0.0, 100.0))
+    });
+    let usage_percentage = match usage_percentage {
+        Some(value) => Some(value.clamp(0.0, 100.0)),
+        None if period_type.is_some() || next_reset_at.is_some() => Some(0.0),
+        None => None,
+    };
+    let prepaid_balance = coerce_xai_cents_dollars(config.get("prepaidBalance"));
+    let on_demand_cap = coerce_xai_cents_dollars(config.get("onDemandCap"));
+    let on_demand_used = coerce_xai_cents_dollars(config.get("onDemandUsed"));
+    let on_demand_enabled = coerce_json_bool_from_map(root, "onDemandEnabled")
+        .or_else(|| coerce_json_bool_from_map(config, "onDemandEnabled"));
+    let subscription_title = first_json_string_by_paths(
+        value,
+        &[
+            &["subscriptionTier"],
+            &["subscription_tier"],
+            &["config", "subscriptionTier"],
+            &["config", "subscription_title"],
+        ],
+    );
+
+    if usage_percentage.is_none()
+        && monthly_limit.is_none()
+        && current_usage.is_none()
+        && prepaid_balance.is_none()
+        && on_demand_cap.is_none()
+        && next_reset_at.is_none()
+        && subscription_title.is_none()
+    {
+        return None;
+    }
+
+    let mut result = serde_json::Map::new();
+    result.insert("updated_at".to_string(), json!(updated_at_unix_secs));
+    if let Some(value) = usage_percentage {
+        result.insert("usage_percentage".to_string(), json!(value));
+    }
+    if let Some(value) = monthly_limit {
+        result.insert("usage_limit".to_string(), json!(value));
+    }
+    if let Some(value) = current_usage {
+        result.insert("current_usage".to_string(), json!(value));
+    }
+    if let Some(value) = remaining {
+        result.insert("remaining".to_string(), json!(value));
+    }
+    if let Some(value) = next_reset_at {
+        result.insert("next_reset_at".to_string(), json!(value));
+    }
+    if let Some(value) = period_type {
+        result.insert("period_type".to_string(), json!(value));
+    }
+    if let Some(value) = prepaid_balance {
+        result.insert("prepaid_balance".to_string(), json!(value));
+    }
+    if let Some(value) = on_demand_cap {
+        result.insert("on_demand_cap".to_string(), json!(value));
+    }
+    if let Some(value) = on_demand_used {
+        result.insert("on_demand_used".to_string(), json!(value));
+    }
+    if let Some(value) = on_demand_enabled {
+        result.insert("on_demand_enabled".to_string(), json!(value));
+    }
+    if let Some(value) = subscription_title {
+        result.insert("subscription_title".to_string(), json!(value));
+    }
+    Some(serde_json::Value::Object(result))
+}
+
+fn coerce_json_f64_from_map(
+    object: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Option<f64> {
+    object.get(key).and_then(coerce_json_f64)
+}
+
+fn coerce_json_bool_from_map(
+    object: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Option<bool> {
+    object.get(key).and_then(coerce_json_bool)
+}
+
+fn extract_xai_product_usage_percent(
+    config: &serde_json::Map<String, serde_json::Value>,
+) -> Option<f64> {
+    let items = config.get("productUsage")?.as_array()?;
+    let grok_build = items.iter().find(|item| {
+        item.get("product")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|product| product.eq_ignore_ascii_case("GrokBuild"))
+    });
+    grok_build
+        .or(items.first())
+        .and_then(|item| item.get("usagePercent").and_then(coerce_json_f64))
+}
+
+fn coerce_xai_cents_dollars(value: Option<&serde_json::Value>) -> Option<f64> {
+    let value = value?;
+    let cents = match value {
+        serde_json::Value::Object(object) => object.get("val").and_then(coerce_json_f64)?,
+        other => coerce_json_f64(other)?,
+    };
+    Some(cents / 100.0)
+}
+
+fn normalize_xai_period_type(value: &serde_json::Value) -> Option<String> {
+    let raw = value
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let lowered = raw.to_ascii_lowercase();
+    if lowered.contains("week") {
+        Some("weekly".to_string())
+    } else if lowered.contains("month") {
+        Some("monthly".to_string())
+    } else {
+        Some(raw.to_string())
+    }
+}
+
+fn parse_xai_timestamp(value: &serde_json::Value) -> Option<u64> {
+    if let Some(value) = coerce_json_u64(value) {
+        return Some(if value > 1_000_000_000_000 {
+            value / 1000
+        } else {
+            value
+        });
+    }
+    let raw = value.as_str()?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    chrono::DateTime::parse_from_rfc3339(raw)
+        .ok()
+        .and_then(|timestamp| u64::try_from(timestamp.timestamp()).ok())
+}
+
+#[cfg(test)]
+mod xai_quota_tests {
+    use super::parse_xai_billing_response;
+    use serde_json::json;
+
+    #[test]
+    fn parse_xai_credits_percent_and_weekly_period() {
+        let metadata = parse_xai_billing_response(
+            &json!({
+                "config": {
+                    "currentPeriod": {
+                        "type": "USAGE_PERIOD_TYPE_WEEKLY",
+                        "start": "2026-08-08T01:53:09.930537+00:00",
+                        "end": "2026-08-15T01:53:09.930537+00:00"
+                    },
+                    "creditUsagePercent": 46.0,
+                    "productUsage": [
+                        {"product": "GrokBuild", "usagePercent": 41.0},
+                        {"product": "GrokChat"}
+                    ],
+                    "onDemandCap": {"val": 0},
+                    "onDemandUsed": {"val": 0},
+                    "prepaidBalance": {"val": 0}
+                },
+                "subscriptionTier": "SuperGrok"
+            }),
+            1_775_000_000,
+        )
+        .expect("credits payload should parse");
+
+        assert_eq!(metadata["usage_percentage"], json!(46.0));
+        assert_eq!(metadata["period_type"], json!("weekly"));
+        assert_eq!(metadata["next_reset_at"], json!(1_786_758_789u64));
+        assert_eq!(metadata["prepaid_balance"], json!(0.0));
+        assert_eq!(metadata["on_demand_cap"], json!(0.0));
+        assert_eq!(metadata["subscription_title"], json!("SuperGrok"));
+    }
+
+    #[test]
+    fn parse_xai_omitted_percent_as_fresh_weekly_zero() {
+        let metadata = parse_xai_billing_response(
+            &json!({
+                "config": {
+                    "currentPeriod": {
+                        "type": "USAGE_PERIOD_TYPE_WEEKLY",
+                        "end": "2026-08-15T01:53:09.930537+00:00"
+                    },
+                    "isUnifiedBillingUser": true
+                }
+            }),
+            1_775_000_000,
+        )
+        .expect("fresh weekly period should parse");
+
+        assert_eq!(metadata["usage_percentage"], json!(0.0));
+        assert_eq!(metadata["period_type"], json!("weekly"));
+    }
+
+    #[test]
+    fn parse_xai_legacy_monthly_cents() {
+        let metadata = parse_xai_billing_response(
+            &json!({
+                "config": {
+                    "monthlyLimit": {"val": 2500},
+                    "used": {"val": 1000},
+                    "billingPeriodEnd": "2026-09-01T00:00:00Z"
+                }
+            }),
+            1_775_000_000,
+        )
+        .expect("legacy monthly payload should parse");
+
+        assert_eq!(metadata["usage_limit"], json!(25.0));
+        assert_eq!(metadata["current_usage"], json!(10.0));
+        assert_eq!(metadata["remaining"], json!(15.0));
+        assert_eq!(metadata["usage_percentage"], json!(40.0));
+    }
+}
+
 pub fn parse_windsurf_user_status_response(
     value: &serde_json::Value,
     updated_at_unix_secs: u64,

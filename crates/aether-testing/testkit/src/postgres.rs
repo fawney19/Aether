@@ -1,5 +1,8 @@
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static POSTGRES_WORKDIR_SEQ: AtomicU64 = AtomicU64::new(0);
 
 use aether_data::driver::postgres::PostgresPoolConfig;
 use aether_data::{DataBackends, DataLayerConfig};
@@ -21,10 +24,20 @@ pub struct ManagedPostgresServer {
 impl ManagedPostgresServer {
     pub async fn start() -> Result<Self, Box<dyn std::error::Error>> {
         let port = reserve_local_port()?;
+        // pid+port is not unique: cargo test shares one PID, and ephemeral ports
+        // are reused after the listener is dropped. Parallel e2e tests then hit
+        // create_dir AlreadyExists.
+        let seq = POSTGRES_WORKDIR_SEQ.fetch_add(1, Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
         let workdir = std::env::temp_dir().join(format!(
-            "aether-postgres-baseline-{}-{}",
+            "aether-postgres-baseline-{}-{}-{}-{}",
             std::process::id(),
-            port
+            port,
+            seq,
+            nanos
         ));
         let data_dir = workdir.join("data");
         std::fs::create_dir(&workdir)?;

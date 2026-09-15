@@ -13,7 +13,8 @@ use serde_json::json;
 
 use super::{
     build_state_with_execution_runtime_override, start_server, video_provider_catalog_repository,
-    AppState, VideoTaskTruthSourceMode,
+    video_provider_catalog_repository_with_proxy, video_proxy_node_repository_at_url, AppState,
+    VideoTaskTruthSourceMode,
 };
 
 fn sample_due_openai_task(upstream_base_url: &str) -> UpsertVideoTask {
@@ -279,13 +280,13 @@ async fn gateway_background_video_task_poller_refreshes_due_openai_task_from_rep
     );
 
     let (upstream_url, upstream_handle) = start_server(upstream).await;
-    let upstream_api_root = format!("{upstream_url}/v1");
+    let upstream_api_root = "http://video-provider.invalid/v1".to_string();
     let repository = Arc::new(InMemoryVideoTaskRepository::default());
     repository
         .upsert(sample_due_openai_task(&upstream_api_root))
         .await
         .expect("task upsert should succeed");
-    let provider_catalog_repository = video_provider_catalog_repository(
+    let provider_catalog_repository = video_provider_catalog_repository_with_proxy(
         "provider-openai-video-local-1",
         "openai",
         "endpoint-openai-video-local-1",
@@ -293,6 +294,7 @@ async fn gateway_background_video_task_poller_refreshes_due_openai_task_from_rep
         &upstream_api_root,
         "key-openai-video-local-1",
         "sk-upstream-openai-video",
+        Some(json!({"enabled":true,"node_id":"poller-video-proxy"})),
     );
 
     let gateway_state = AppState::new()
@@ -302,7 +304,7 @@ async fn gateway_background_video_task_poller_refreshes_due_openai_task_from_rep
                 Arc::clone(&repository),
                 provider_catalog_repository,
                 DEVELOPMENT_ENCRYPTION_KEY,
-            ),
+            ).attach_proxy_node_repository_for_tests(video_proxy_node_repository_at_url(["poller-video-proxy"], &upstream_url)),
         )
         .with_video_task_truth_source_mode(VideoTaskTruthSourceMode::RustAuthoritative)
         .with_video_task_poller_config(std::time::Duration::from_millis(25), 8);

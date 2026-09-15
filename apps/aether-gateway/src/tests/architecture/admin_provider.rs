@@ -1789,6 +1789,7 @@ fn admin_provider_oauth_quota_mod_stays_thin() {
         "pub(crate) mod dispatch;",
         "pub(crate) mod kiro;",
         "pub(crate) mod shared;",
+        "pub(crate) mod xai;",
     ] {
         assert!(
             quota_mod.contains(pattern),
@@ -1861,6 +1862,7 @@ fn admin_provider_oauth_quota_mod_stays_thin() {
         "refresh_antigravity_provider_quota_locally",
         "refresh_gemini_cli_provider_quota_locally",
         "refresh_chatgpt_web_provider_quota_locally",
+        "refresh_xai_provider_quota_locally",
     ] {
         assert!(
             quota_dispatch.contains(pattern),

@@ -186,6 +186,8 @@ fn frontend_path_bypasses_static(path: &str) -> bool {
         "/health" | "/test-connection" | crate::constants::READYZ_PATH
     ) || path.starts_with("/api/")
         || path.starts_with("/v1/")
+        || path == "/openai/v1/videos"
+        || path.starts_with("/openai/v1/videos/")
         || path.starts_with("/v1beta/")
         || path.starts_with("/upload/")
         || path.starts_with("/_gateway/")

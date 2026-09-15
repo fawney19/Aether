@@ -804,9 +804,40 @@ impl AppState {
         if updated.is_some() {
             self.invalidate_provider_routing_caches();
         }
+        if let Some(key) = updated.as_ref().filter(|key| !key.is_active) {
+            self.delete_inactive_provider_catalog_key_pool_scores(
+                key.provider_id.as_str(),
+                key.id.as_str(),
+            )
+            .await;
+        }
         match updated {
             Some(key) => self.open_provider_catalog_key(key).await.map(Some),
             None => Ok(None),
+        }
+    }
+
+    async fn delete_inactive_provider_catalog_key_pool_scores(
+        &self,
+        provider_id: &str,
+        key_id: &str,
+    ) {
+        if let Err(err) = self
+            .data
+            .delete_pool_member_scores_for_member(
+                &pool_scores::PoolMemberIdentity::provider_api_key(
+                    provider_id.to_string(),
+                    key_id.to_string(),
+                ),
+            )
+            .await
+        {
+            warn!(
+                provider_id,
+                key_id,
+                error = ?err,
+                "gateway provider catalog key deactivate: failed to delete pool member scores"
+            );
         }
     }
 
@@ -842,6 +873,15 @@ impl AppState {
             .map_err(|err| GatewayError::Internal(err.to_string()))?;
         if updated.as_ref().is_some_and(|keys| !keys.is_empty()) {
             self.invalidate_provider_routing_caches();
+        }
+        if let Some(keys) = updated.as_ref() {
+            for key in keys.iter().filter(|key| !key.is_active) {
+                self.delete_inactive_provider_catalog_key_pool_scores(
+                    key.provider_id.as_str(),
+                    key.id.as_str(),
+                )
+                .await;
+            }
         }
         match updated {
             Some(keys) => self.open_provider_catalog_keys(keys).await.map(Some),

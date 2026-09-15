@@ -98,6 +98,7 @@
                     v-for="model in filteredGlobalModels"
                     :key="model.id"
                     class="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-muted cursor-pointer"
+                    :data-testid="`batch-assign-model-${model.id}`"
                     @click="toggleGlobalModelSelection(model.id)"
                   >
                     <div
@@ -255,15 +256,29 @@ const existingGlobalModelIds = computed(() => {
   )
 })
 
-// 过滤后的全局模型
+function globalModelMatchesQuery(model: GlobalModelResponse, query: string): boolean {
+  if (!query) return true
+  return model.name.toLowerCase().includes(query) || model.display_name.toLowerCase().includes(query)
+}
+
+function compareGlobalModelsByName(left: GlobalModelResponse, right: GlobalModelResponse): number {
+  const nameA = (left.display_name || left.name || '').toLowerCase()
+  const nameB = (right.display_name || right.name || '').toLowerCase()
+  return nameA.localeCompare(nameB)
+}
+
+// 过滤后的全局模型：当前已勾选/已关联的排在可见结果顶部，便于取消关联
 const filteredGlobalModels = computed(() => {
   const query = searchQuery.value.toLowerCase().trim()
-  return allGlobalModels.value.filter(m => {
-    if (query && !m.name.toLowerCase().includes(query) && !m.display_name.toLowerCase().includes(query)) {
-      return false
-    }
-    return true
-  })
+  const selectedIds = selectedGlobalModelIds.value
+  const matched = allGlobalModels.value.filter(model => globalModelMatchesQuery(model, query))
+  const pinned = matched
+    .filter(model => selectedIds.has(model.id))
+    .sort(compareGlobalModelsByName)
+  const rest = matched
+    .filter(model => !selectedIds.has(model.id))
+    .sort(compareGlobalModelsByName)
+  return [...pinned, ...rest]
 })
 
 // 全局模型是否全选

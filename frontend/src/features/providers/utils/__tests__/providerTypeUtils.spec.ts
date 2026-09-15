@@ -16,6 +16,12 @@ describe('providerTypeUtils', () => {
     expect(isKeyManagedProviderType('grok')).toBe(false)
   })
 
+  it('treats xAI as an OAuth account provider', () => {
+    expect(isOAuthAccountProviderType('xai')).toBe(true)
+    expect(isOAuthAccountProviderType('xAI')).toBe(true)
+    expect(isKeyManagedProviderType('xai')).toBe(false)
+  })
+
   it('treats Windsurf as an OAuth account provider', () => {
     expect(isOAuthAccountProviderType('windsurf')).toBe(true)
     expect(isOAuthAccountProviderType('Windsurf')).toBe(true)

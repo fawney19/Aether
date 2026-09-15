@@ -479,6 +479,18 @@ pub(super) async fn handle_admin_provider_oauth_device_poll(
             )
             .await;
 
+        if provider_type == "xai" {
+            return super::xai::handle_admin_provider_oauth_xai_device_poll(
+                state,
+                &provider,
+                &endpoints,
+                request_proxy,
+                session_id,
+                session,
+            )
+            .await;
+        }
+
         if provider_type == "windsurf" {
             return handle_admin_provider_oauth_windsurf_browser_device_poll(
                 state,

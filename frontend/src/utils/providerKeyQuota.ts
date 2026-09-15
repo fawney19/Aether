@@ -265,6 +265,29 @@ function getKiroQuotaText(quota: QuotaStatusSnapshot): string | null {
   return normalizeText(quota.label)
 }
 
+function getXaiQuotaText(quota: QuotaStatusSnapshot): string | null {
+  const parts: string[] = []
+  const usageText = getKiroQuotaText(quota)
+  if (usageText) parts.push(usageText)
+
+  const prepaid = getQuotaWindow(quota, 'prepaid')
+  if (typeof prepaid?.remaining_value === 'number') {
+    parts.push(`预付剩余 ${formatQuotaValue(prepaid.remaining_value)}`)
+  }
+
+  const onDemand = getQuotaWindow(quota, 'on_demand')
+  const onDemandRemaining = getQuotaWindowRemainingPercent(onDemand)
+  if (onDemandRemaining != null) {
+    const valueText = getQuotaWindowValueText(onDemand)
+    parts.push(`按需剩余 ${formatPercent(onDemandRemaining)}${valueText ? ` (${valueText})` : ''}`)
+  } else if (typeof onDemand?.remaining_value === 'number') {
+    parts.push(`按需剩余 ${formatQuotaValue(onDemand.remaining_value)}`)
+  }
+
+  if (parts.length > 0) return parts.join(' | ')
+  return normalizeText(quota.label)
+}
+
 function getGrokQuotaText(quota: QuotaStatusSnapshot): string | null {
   const code = normalizeText(quota.code)?.toLowerCase()
   if (code === 'banned') {
@@ -452,6 +475,8 @@ export function getQuotaSnapshotFallbackText(
       return getCodexQuotaText(quota)
     case 'kiro':
       return getKiroQuotaText(quota)
+    case 'xai':
+      return getXaiQuotaText(quota)
     case 'grok':
       return getGrokQuotaText(quota)
     case 'windsurf':

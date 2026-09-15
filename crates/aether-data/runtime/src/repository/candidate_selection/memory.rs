@@ -346,6 +346,16 @@ fn key_auth_channel_matches(row: &StoredMinimalCandidateSelectionRow, api_format
                     "openai:chat" | "openai:responses" | "claude:messages" | "openai:image"
                 )
         }
+        "xai" => {
+            matches!(auth_type.as_str(), "oauth" | "bearer" | "api_key")
+                && matches!(
+                    api_format.as_str(),
+                    "openai:responses"
+                        | "openai:responses:compact"
+                        | "openai:image"
+                        | "openai:video"
+                )
+        }
         "windsurf" => {
             matches!(auth_type.as_str(), "oauth" | "api_key" | "bearer")
                 && api_format == "openai:chat"
@@ -589,6 +599,59 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].provider_type, "grok");
         assert_eq!(rows[0].global_model_name, "grok-4.20-0309-non-reasoning");
+    }
+
+    #[tokio::test]
+    async fn includes_xai_oauth_rows_for_responses_models() {
+        let mut row = sample_row("provider-xai", "openai:responses", "grok-4", 10);
+        row.provider_type = "xai".to_string();
+        row.provider_name = "xai".to_string();
+        row.key_auth_type = "oauth".to_string();
+        row.key_api_formats = Some(vec![
+            "openai:responses".to_string(),
+            "openai:responses:compact".to_string(),
+        ]);
+        let repository = InMemoryMinimalCandidateSelectionReadRepository::seed(vec![row]);
+
+        let rows = repository
+            .list_for_exact_api_format("openai:responses")
+            .await
+            .expect("list should succeed");
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].provider_type, "xai");
+        assert_eq!(rows[0].global_model_name, "grok-4");
+    }
+
+    #[tokio::test]
+    async fn includes_xai_oauth_rows_for_image_and_video_models() {
+        let mut image = sample_row("provider-xai", "openai:image", "grok-imagine-image", 10);
+        image.provider_type = "xai".to_string();
+        image.provider_name = "xai".to_string();
+        image.key_auth_type = "oauth".to_string();
+        image.key_api_formats = Some(vec!["openai:image".to_string(), "openai:video".to_string()]);
+
+        let mut video = image.clone();
+        video.endpoint_id = "endpoint-video".to_string();
+        video.endpoint_api_format = "openai:video".to_string();
+        video.global_model_name = "grok-imagine-video".to_string();
+        video.model_provider_model_name = "grok-imagine-video".to_string();
+
+        let repository = InMemoryMinimalCandidateSelectionReadRepository::seed(vec![image, video]);
+
+        let image_rows = repository
+            .list_for_exact_api_format("openai:image")
+            .await
+            .expect("list should succeed");
+        assert_eq!(image_rows.len(), 1);
+        assert_eq!(image_rows[0].global_model_name, "grok-imagine-image");
+
+        let video_rows = repository
+            .list_for_exact_api_format("openai:video")
+            .await
+            .expect("list should succeed");
+        assert_eq!(video_rows.len(), 1);
+        assert_eq!(video_rows[0].global_model_name, "grok-imagine-video");
     }
 
     #[tokio::test]

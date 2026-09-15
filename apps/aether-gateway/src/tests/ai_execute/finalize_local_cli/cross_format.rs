@@ -1570,7 +1570,7 @@ async fn gateway_executes_openai_responses_antigravity_cross_format_upstream_str
         seen_remote_execution_runtime_request.user_agent,
         aether_provider_transport::antigravity::ANTIGRAVITY_REQUEST_USER_AGENT
     );
-    assert_eq!(seen_remote_execution_runtime_request.request_type, "agent");
+    assert_eq!(seen_remote_execution_runtime_request.request_type, "");
     assert_eq!(seen_remote_execution_runtime_request.contents_len, 1);
     assert!(!seen_remote_execution_runtime_request.request_has_model);
 

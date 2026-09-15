@@ -6,8 +6,9 @@ use std::{
 use serde_json::{json, Map, Value};
 
 use super::{
-    encode_gemini_tool_signature_carrier, encode_tool_result_error,
-    history::record_converted_response_history, openai_responses_synthetic_reasoning_item_id,
+    apply_openai_responses_reasoning_text, encode_gemini_tool_signature_carrier,
+    encode_tool_result_error, history::record_converted_response_history,
+    openai_responses_synthetic_reasoning_item_id,
 };
 
 use crate::{
@@ -217,15 +218,7 @@ pub fn to_raw(canonical: &CanonicalResponse, report_context: &Value, compact: bo
                         Value::String(encrypted_content.clone()),
                     );
                 }
-                if !text.trim().is_empty() {
-                    item.insert(
-                        "summary".to_string(),
-                        Value::Array(vec![json!({
-                            "type": "summary_text",
-                            "text": text,
-                        })]),
-                    );
-                }
+                apply_openai_responses_reasoning_text(&mut item, text);
                 output.push(Value::Object(item));
             }
             CanonicalContentBlock::ToolUse {
@@ -820,6 +813,66 @@ mod tests {
             keys,
             std::collections::BTreeSet::from(["created_at", "id", "object", "output"])
         );
+    }
+
+    #[test]
+    fn responses_response_builder_puts_raw_thinking_in_content_and_summary() {
+        let response = CanonicalResponse {
+            id: "resp_think".to_string(),
+            model: "deepseek-reasoner".to_string(),
+            content: vec![
+                CanonicalContentBlock::Thinking {
+                    text: "first add one to one".to_string(),
+                    signature: None,
+                    encrypted_content: None,
+                    extensions: BTreeMap::new(),
+                },
+                CanonicalContentBlock::Text {
+                    text: "2".to_string(),
+                    extensions: BTreeMap::new(),
+                },
+            ],
+            outputs: Vec::new(),
+            stop_reason: Some(CanonicalStopReason::EndTurn),
+            usage: None,
+            extensions: BTreeMap::new(),
+        };
+
+        let body = to_raw(&response, &json!({}), false);
+        let item = &body["output"][0];
+
+        assert_eq!(item["type"], "reasoning");
+        assert_eq!(item["content"][0]["type"], "reasoning_text");
+        assert_eq!(item["content"][0]["text"], "first add one to one");
+        assert_eq!(item["summary"][0]["type"], "summary_text");
+        assert_eq!(item["summary"][0]["text"], "first add one to one");
+        assert!(!item["content"].is_null());
+        assert_eq!(body["output"][1]["type"], "message");
+        assert_eq!(body["output"][1]["content"][0]["text"], "2");
+    }
+
+    #[test]
+    fn responses_response_parser_prefers_content_over_summary_for_raw_reasoning() {
+        let body = json!({
+            "id": "resp_test",
+            "model": "gpt-5",
+            "status": "completed",
+            "output": [{
+                "type": "reasoning",
+                "id": "rs_1",
+                "status": "completed",
+                "summary": [{"type": "summary_text", "text": "short summary"}],
+                "content": [{"type": "reasoning_text", "text": "full chain of thought"}]
+            }]
+        });
+
+        let canonical = from_raw(&body).expect("response should parse");
+
+        assert!(matches!(
+            canonical.content.first(),
+            Some(CanonicalContentBlock::Thinking { text, .. })
+                if text == "full chain of thought"
+        ));
     }
 
     #[test]

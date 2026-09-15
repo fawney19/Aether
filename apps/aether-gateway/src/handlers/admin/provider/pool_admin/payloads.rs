@@ -932,6 +932,13 @@ fn admin_pool_build_account_quota(
                 return Some(account_quota);
             }
         }
+        "xai" => {
+            if let Some(account_quota) =
+                admin_pool_build_kiro_account_quota_from_snapshot(quota_snapshot)
+            {
+                return Some(account_quota);
+            }
+        }
         "chatgpt_web" => {
             if let Some(account_quota) =
                 admin_pool_build_chatgpt_web_account_quota_from_snapshot(quota_snapshot)
@@ -1589,6 +1596,31 @@ mod tests {
         assert_eq!(
             admin_pool_build_account_quota("grok", Some(quota_snapshot)),
             Some("Auto剩余 40.0% (60/150) | Heavy剩余 0.0% (0/20)".to_string())
+        );
+    }
+
+    #[test]
+    fn xai_account_quota_is_rendered_as_remaining_percent() {
+        let quota_snapshot = json!({
+            "provider_type": "xai",
+            "code": "ok",
+            "exhausted": false,
+            "plan_type": "SuperGrok",
+            "windows": [
+                {
+                    "code": "usage",
+                    "label": "周额度",
+                    "scope": "account",
+                    "used_ratio": 0.46,
+                    "remaining_ratio": 0.54
+                }
+            ]
+        });
+        let quota_snapshot = quota_snapshot.as_object().unwrap();
+
+        assert_eq!(
+            admin_pool_build_account_quota("xai", Some(quota_snapshot)),
+            Some("剩余 54.0%".to_string())
         );
     }
 }

@@ -285,6 +285,23 @@ pub fn enrich_admin_provider_oauth_auth_config(
         ],
     );
 
+    if provider_type.trim().eq_ignore_ascii_case("xai") {
+        auth_config.insert("auth_method".to_string(), json!("oauth"));
+        auth_config.insert("using_api".to_string(), json!(false));
+        if let Some(id_token) = ["id_token", "idToken"]
+            .iter()
+            .find_map(|field| json_non_empty_string(token_payload.get(field)))
+        {
+            auth_config
+                .entry("id_token".to_string())
+                .or_insert_with(|| json!(id_token.clone()));
+            if let Some(claims) = decode_jwt_claims(&id_token) {
+                merge_missing_auth_config_fields(auth_config, &claims, &["email", "sub"]);
+            }
+        }
+        return;
+    }
+
     if provider_type.trim().eq_ignore_ascii_case("claude_code") {
         if let Some(organization_uuid) = token_payload_object
             .get("organization")
@@ -552,6 +569,28 @@ mod tests {
         assert_eq!(auth_config.get("plan_type"), Some(&json!("plus")));
         assert_eq!(auth_config.get("user_id"), Some(&json!("user-image")));
         assert_eq!(auth_config.get("is_fedramp"), Some(&json!(true)));
+    }
+
+    #[test]
+    fn xai_enrichment_marks_oauth_and_extracts_id_token_identity() {
+        let id_token = sample_unsigned_jwt(json!({
+            "email": "grok@x.ai",
+            "sub": "user-xai-1",
+        }));
+        let token_payload = json!({
+            "access_token": "access-token",
+            "refresh_token": "refresh-token",
+            "id_token": id_token,
+        });
+        let mut auth_config = serde_json::Map::new();
+
+        enrich_admin_provider_oauth_auth_config("xai", &mut auth_config, &token_payload);
+
+        assert_eq!(auth_config.get("auth_method"), Some(&json!("oauth")));
+        assert_eq!(auth_config.get("using_api"), Some(&json!(false)));
+        assert_eq!(auth_config.get("email"), Some(&json!("grok@x.ai")));
+        assert_eq!(auth_config.get("sub"), Some(&json!("user-xai-1")));
+        assert_eq!(auth_config.get("id_token"), Some(&json!(id_token)));
     }
 
     #[test]

@@ -73,7 +73,7 @@ async fn read_openai_video_task_response(
         }
         None => state.find_stored_video_task(lookup).await?,
     };
-    let Some(task) = task else {
+    let Some(mut task) = task else {
         return Ok(None);
     };
 
@@ -81,6 +81,9 @@ async fn read_openai_video_task_response(
         return Ok(None);
     }
 
+    if request_path.starts_with("/openai/v1/videos/") {
+        task.client_api_format = Some("openai:video".into());
+    }
     Ok(Some(map_openai_stored_task_to_read_response(task)))
 }
 

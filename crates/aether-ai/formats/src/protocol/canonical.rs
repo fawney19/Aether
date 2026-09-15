@@ -2860,9 +2860,9 @@ fn openai_responses_reasoning_block_from_item(
 }
 
 fn openai_responses_reasoning_text(item_object: &Map<String, Value>) -> String {
-    let mut parts = openai_responses_reasoning_text_parts(item_object.get("summary"));
+    let mut parts = openai_responses_reasoning_text_parts(item_object.get("content"));
     if parts.is_empty() {
-        parts = openai_responses_reasoning_text_parts(item_object.get("content"));
+        parts = openai_responses_reasoning_text_parts(item_object.get("summary"));
     }
     parts.join("\n")
 }
@@ -2961,38 +2961,47 @@ pub(crate) fn openai_responses_output_to_canonical(
                     .and_then(Value::as_str)
                     .filter(|value| !value.is_empty())
                     .map(ToOwned::to_owned);
-                if let Some(summary_items) = item_object.get("summary").and_then(Value::as_array) {
-                    for summary in summary_items {
-                        let Some(summary_object) = summary.as_object() else {
-                            continue;
-                        };
-                        let text = summary_object
-                            .get("text")
-                            .and_then(Value::as_str)
-                            .unwrap_or_default();
-                        if text.trim().is_empty() {
-                            continue;
-                        }
-                        let mut extensions = openai_responses_extensions(
-                            item_object,
-                            &["type", "id", "status", "summary", "encrypted_content"],
-                        );
-                        canonical_extension_object_mut(&mut extensions, "openai")
-                            .insert("omit_reasoning_parts".to_string(), Value::Bool(true));
-                        let extensions = openai_thinking_extensions(extensions);
-                        blocks.push(CanonicalContentBlock::Thinking {
-                            text: text.to_string(),
-                            signature: None,
-                            encrypted_content: encrypted_content.clone(),
-                            extensions,
-                        });
-                        emitted = true;
+                let mut texts = openai_responses_reasoning_text_parts(item_object.get("content"));
+                if texts.is_empty() {
+                    texts = openai_responses_reasoning_text_parts(item_object.get("summary"));
+                }
+                for text in texts {
+                    if text.trim().is_empty() {
+                        continue;
                     }
+                    let mut extensions = openai_responses_extensions(
+                        item_object,
+                        &[
+                            "type",
+                            "id",
+                            "status",
+                            "summary",
+                            "content",
+                            "encrypted_content",
+                        ],
+                    );
+                    canonical_extension_object_mut(&mut extensions, "openai")
+                        .insert("omit_reasoning_parts".to_string(), Value::Bool(true));
+                    let extensions = openai_thinking_extensions(extensions);
+                    blocks.push(CanonicalContentBlock::Thinking {
+                        text,
+                        signature: None,
+                        encrypted_content: encrypted_content.clone(),
+                        extensions,
+                    });
+                    emitted = true;
                 }
                 if !emitted && encrypted_content.is_some() {
                     let mut extensions = openai_responses_extensions(
                         item_object,
-                        &["type", "id", "status", "summary", "encrypted_content"],
+                        &[
+                            "type",
+                            "id",
+                            "status",
+                            "summary",
+                            "content",
+                            "encrypted_content",
+                        ],
                     );
                     canonical_extension_object_mut(&mut extensions, "openai")
                         .insert("omit_reasoning_parts".to_string(), Value::Bool(true));

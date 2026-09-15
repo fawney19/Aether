@@ -646,7 +646,9 @@ impl<'a> PoolKeyCursor<'a> {
 
         if !self.score_phase_exhausted {
             if let Some(score_candidates) = self.next_score_candidates().await {
-                return Some(score_candidates);
+                if !score_candidates.is_empty() {
+                    return Some(score_candidates);
+                }
             }
         }
 
@@ -4273,6 +4275,115 @@ mod tests {
             cursor.skip_reason_counts.get("pool_score_member_missing"),
             Some(&128)
         );
+    }
+
+    #[tokio::test]
+    async fn inactive_pool_key_with_stale_score_does_not_exhaust_pool() {
+        let provider_config = Some(json!({
+            "pool_advanced": {
+                "score_top_n": 128,
+                "scheduling_presets": [
+                    {"preset": "single_account", "enabled": true},
+                    {"preset": "priority_first", "enabled": true}
+                ]
+            }
+        }));
+        let (provider, endpoint, mut keys, mut rows) =
+            large_pool_fixture(2, provider_config.clone());
+        keys[1].is_active = false;
+        rows.retain(|row| row.key_id != "key-00001");
+        let scores = vec![
+            sample_provider_key_pool_score("provider-pool", "key-00000", 5.0),
+            sample_provider_key_pool_score("provider-pool", "key-00001", 20.0),
+        ];
+        let data_state =
+            GatewayDataState::with_provider_catalog_and_minimal_candidate_selection_for_tests(
+                Arc::new(InMemoryProviderCatalogReadRepository::seed(
+                    vec![provider],
+                    vec![endpoint],
+                    keys,
+                )),
+                Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(rows)),
+            )
+            .with_pool_score_repository_for_tests(Arc::new(
+                InMemoryPoolMemberScoreRepository::seed(scores),
+            ))
+            .with_encryption_key_for_tests(aether_crypto::DEVELOPMENT_ENCRYPTION_KEY);
+        let app = AppState::new()
+            .expect("state should build")
+            .with_data_state_for_tests(data_state);
+        let group = sample_eligible_candidate(
+            "provider-pool",
+            "endpoint-1",
+            "pool-group",
+            10,
+            provider_config,
+        );
+        let mut cursor = PoolKeyCursor::new(PlannerAppState::new(&app), group, None, None, None);
+
+        let candidate = cursor
+            .next_key()
+            .await
+            .expect("active key must stay schedulable beside a stale inactive score");
+
+        assert_eq!(candidate.candidate.key_id, "key-00000");
+        assert_eq!(
+            cursor.skip_reason_counts.get("pool_score_member_missing"),
+            Some(&1)
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_inactive_score_only_does_not_exhaust_pool() {
+        let provider_config = Some(json!({
+            "pool_advanced": {
+                "score_top_n": 128,
+                "scheduling_presets": [
+                    {"preset": "single_account", "enabled": true},
+                    {"preset": "priority_first", "enabled": true}
+                ]
+            }
+        }));
+        let (provider, endpoint, mut keys, mut rows) =
+            large_pool_fixture(2, provider_config.clone());
+        keys[1].is_active = false;
+        rows.retain(|row| row.key_id != "key-00001");
+        let scores = vec![sample_provider_key_pool_score(
+            "provider-pool",
+            "key-00001",
+            20.0,
+        )];
+        let data_state =
+            GatewayDataState::with_provider_catalog_and_minimal_candidate_selection_for_tests(
+                Arc::new(InMemoryProviderCatalogReadRepository::seed(
+                    vec![provider],
+                    vec![endpoint],
+                    keys,
+                )),
+                Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(rows)),
+            )
+            .with_pool_score_repository_for_tests(Arc::new(
+                InMemoryPoolMemberScoreRepository::seed(scores),
+            ))
+            .with_encryption_key_for_tests(aether_crypto::DEVELOPMENT_ENCRYPTION_KEY);
+        let app = AppState::new()
+            .expect("state should build")
+            .with_data_state_for_tests(data_state);
+        let group = sample_eligible_candidate(
+            "provider-pool",
+            "endpoint-1",
+            "pool-group",
+            10,
+            provider_config,
+        );
+        let mut cursor = PoolKeyCursor::new(PlannerAppState::new(&app), group, None, None, None);
+
+        let candidate = cursor
+            .next_key()
+            .await
+            .expect("catalog rows must remain schedulable when the only score is stale");
+
+        assert_eq!(candidate.candidate.key_id, "key-00000");
     }
 
     #[tokio::test]

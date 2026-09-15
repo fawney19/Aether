@@ -9,7 +9,8 @@ use serde_json::{json, Value};
 use crate::formats::{
     context::FormatContext,
     openai::responses::{
-        openai_responses_message_item_id, openai_responses_synthetic_reasoning_item_id,
+        openai_responses_message_item_id, openai_responses_reasoning_text_fields,
+        openai_responses_synthetic_reasoning_item_id,
         response::ensure_modern_openai_responses_response_fields,
     },
     registry,
@@ -205,14 +206,13 @@ pub fn build_openai_responses_response_with_content(
         if trimmed.is_empty() {
             continue;
         }
+        let (content, summary) = openai_responses_reasoning_text_fields(std::iter::once(trimmed));
         output.push(json!({
             "type": "reasoning",
             "id": openai_responses_synthetic_reasoning_item_id(response_id, index),
             "status": "completed",
-            "summary": [{
-                "type": "summary_text",
-                "text": trimmed,
-            }]
+            "summary": summary,
+            "content": content,
         }));
     }
     if !content.is_empty() {
@@ -291,6 +291,32 @@ mod tests {
     }
 
     #[test]
+    fn manual_responses_response_builder_puts_reasoning_in_content() {
+        let response = super::build_openai_responses_response_with_reasoning(
+            "resp_manual_reason",
+            "gpt-5",
+            "answer",
+            vec!["raw thinking".to_string()],
+            Vec::new(),
+            super::OpenAiResponsesResponseUsage {
+                prompt_tokens: 1,
+                output_tokens: 2,
+                total_tokens: 3,
+            },
+        );
+
+        assert_eq!(response["output"][0]["type"], "reasoning");
+        assert_eq!(
+            response["output"][0]["content"][0]["type"],
+            "reasoning_text"
+        );
+        assert_eq!(response["output"][0]["content"][0]["text"], "raw thinking");
+        assert_eq!(response["output"][0]["summary"][0]["type"], "summary_text");
+        assert_eq!(response["output"][0]["summary"][0]["text"], "raw thinking");
+        assert_eq!(response["output"][1]["content"][0]["text"], "answer");
+    }
+
+    #[test]
     fn manual_responses_response_builder_emits_modern_fields() {
         let response = super::build_openai_responses_response(
             "resp_manual_123",
@@ -305,6 +331,41 @@ mod tests {
         assert_eq!(response["output_text"], "Hello manual");
         assert!(response["created_at"].as_i64().is_some());
         assert!(response["completed_at"].as_i64().is_some());
+    }
+
+    #[test]
+    fn chat_reasoning_content_maps_to_responses_content_and_summary() {
+        let body = json!({
+            "id": "chatcmpl-reason",
+            "object": "chat.completion",
+            "model": "deepseek-reasoner",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "reasoning_content": "compare the decimals",
+                    "content": "9.80 is larger"
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3}
+        });
+
+        let converted = convert_openai_chat_response_to_openai_responses(&body, &json!({}), false)
+            .expect("responses response");
+        let item = &converted["output"][0];
+
+        assert_eq!(item["type"], "reasoning");
+        assert_eq!(item["content"][0]["type"], "reasoning_text");
+        assert_eq!(item["content"][0]["text"], "compare the decimals");
+        assert_eq!(item["summary"][0]["type"], "summary_text");
+        assert_eq!(item["summary"][0]["text"], "compare the decimals");
+        assert!(!item.get("content").unwrap().is_null());
+        assert_eq!(converted["output"][1]["type"], "message");
+        assert_eq!(
+            converted["output"][1]["content"][0]["text"],
+            "9.80 is larger"
+        );
     }
 
     #[test]

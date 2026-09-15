@@ -214,7 +214,12 @@ fn extract_admin_provider_oauth_batch_import_entry(
             } else {
                 let sso_from_cookie = grok_cookie_session_token(provider_type, raw_token);
                 let token_input = sso_from_cookie.as_deref().unwrap_or(raw_token);
-                let (refresh_token, access_token) = import_tokens_from_raw_token(token_input);
+                let (refresh_token, access_token) =
+                    if provider_type.trim().eq_ignore_ascii_case("xai") {
+                        (None, Some(token_input.to_string()))
+                    } else {
+                        import_tokens_from_raw_token(token_input)
+                    };
                 let (refresh_token, access_token) = normalize_provider_import_tokens(
                     provider_type,
                     refresh_token.as_deref(),
@@ -262,6 +267,7 @@ fn extract_admin_provider_oauth_batch_import_entry(
             let object = normalized_claude_object.as_ref().unwrap_or(object);
             let is_grok = provider_type.trim().eq_ignore_ascii_case("grok");
             let is_windsurf = provider_type.trim().eq_ignore_ascii_case("windsurf");
+            let is_xai = provider_type.trim().eq_ignore_ascii_case("xai");
             let is_codex_agent_identity = provider_type.trim().eq_ignore_ascii_case("codex")
                 && aether_provider_transport::is_codex_agent_identity_auth_config_value(item);
             if is_codex_agent_identity {
@@ -336,14 +342,6 @@ fn extract_admin_provider_oauth_batch_import_entry(
             } else {
                 None
             };
-            let (refresh_token, access_token) = normalize_provider_import_tokens(
-                provider_type,
-                refresh_token.as_deref(),
-                access_token
-                    .as_deref()
-                    .or(session_token.as_deref())
-                    .or(header_bearer_token.as_deref()),
-            );
             let windsurf_api_key = is_windsurf
                 .then(|| {
                     coerce_admin_provider_oauth_import_str(
@@ -351,6 +349,22 @@ fn extract_admin_provider_oauth_batch_import_entry(
                     )
                 })
                 .flatten();
+            let xai_api_key = is_xai
+                .then(|| {
+                    coerce_admin_provider_oauth_import_str(
+                        object.get("api_key").or_else(|| object.get("apiKey")),
+                    )
+                })
+                .flatten();
+            let (refresh_token, access_token) = normalize_provider_import_tokens(
+                provider_type,
+                refresh_token.as_deref(),
+                access_token
+                    .as_deref()
+                    .or(session_token.as_deref())
+                    .or(header_bearer_token.as_deref())
+                    .or(xai_api_key.as_deref()),
+            );
             let windsurf_token = is_windsurf
                 .then(|| {
                     coerce_admin_provider_oauth_import_str(
@@ -1576,5 +1590,24 @@ mod tests {
         assert!(entries[1].refresh_token.is_none());
         assert!(entries[1].access_token.is_none());
         assert!(entries[1].raw_credentials.is_none());
+    }
+
+    #[test]
+    fn parses_xai_api_key_json_and_raw_lines_as_access_token() {
+        let entries = parse_admin_provider_oauth_batch_import_entries(
+            "xai",
+            r#"{"api_key":"xai-api-key","email":"a@x.ai"}
+{"refresh_token":"xai-refresh"}
+xai-raw-api-key"#,
+        );
+
+        assert_eq!(entries.len(), 3);
+        assert!(entries[0].refresh_token.is_none());
+        assert_eq!(entries[0].access_token.as_deref(), Some("xai-api-key"));
+        assert_eq!(entries[0].email.as_deref(), Some("a@x.ai"));
+        assert_eq!(entries[1].refresh_token.as_deref(), Some("xai-refresh"));
+        assert!(entries[1].access_token.is_none());
+        assert!(entries[2].refresh_token.is_none());
+        assert_eq!(entries[2].access_token.as_deref(), Some("xai-raw-api-key"));
     }
 }

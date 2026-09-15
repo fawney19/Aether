@@ -54,6 +54,24 @@ describe('provider quota display components', () => {
     unmount()
   })
 
+  it('fills the remaining bar even when used percent is zero', () => {
+    const { root, unmount } = mount(ProviderQuotaProgressRow, {
+      label: '周额度',
+      usedPercent: 0,
+      remainingPercent: 86,
+      meterClass: 'text-green-600',
+      barClass: 'bg-green-500',
+      resetText: '5天0小时后重置',
+    })
+
+    expect(root.querySelector('[data-testid="provider-quota-progress-meter"]')?.textContent?.trim()).toBe('86.0%')
+    expect((root.querySelector('[data-testid="provider-quota-progress-bar"]') as HTMLElement).style.width).toBe('86%')
+    expect(root.textContent).toContain('周额度')
+    expect(root.querySelector('[data-testid="provider-quota-progress-reset"]')?.textContent).toBe('5天0小时后重置')
+
+    unmount()
+  })
+
   it('renders section loading and updated state', () => {
     const Probe = defineComponent({
       setup() {

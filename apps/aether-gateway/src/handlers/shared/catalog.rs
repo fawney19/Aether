@@ -1388,6 +1388,168 @@ fn build_kiro_quota_status_snapshot(
     }))
 }
 
+fn build_xai_quota_status_snapshot(
+    upstream_metadata: Option<&Value>,
+    source: &str,
+) -> Option<Value> {
+    let metadata = provider_quota_metadata_bucket(upstream_metadata, "xai")?;
+    let observed_at_unix_secs = provider_quota_timestamp_unix_secs(metadata.get("updated_at"));
+    let usage_limit = metadata
+        .get("usage_limit")
+        .and_then(admin_provider_quota_pure::coerce_json_f64);
+    let current_usage = metadata
+        .get("current_usage")
+        .and_then(admin_provider_quota_pure::coerce_json_f64);
+    let remaining = metadata
+        .get("remaining")
+        .and_then(admin_provider_quota_pure::coerce_json_f64);
+    let usage_ratio = metadata
+        .get("usage_percentage")
+        .and_then(admin_provider_quota_pure::coerce_json_f64)
+        .map(|value| (value / 100.0).clamp(0.0, 1.0))
+        .or_else(|| {
+            current_usage
+                .zip(usage_limit)
+                .and_then(|(current_usage, usage_limit)| {
+                    (usage_limit > 0.0).then_some((current_usage / usage_limit).clamp(0.0, 1.0))
+                })
+        });
+    let remaining_ratio = usage_ratio.map(|value| (1.0 - value).max(0.0));
+    let next_reset_at = provider_quota_timestamp_unix_secs(metadata.get("next_reset_at"));
+    let reset_seconds = quota_window_reset_seconds(observed_at_unix_secs, next_reset_at);
+    let plan_type = metadata
+        .get("subscription_title")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    let period_type = metadata
+        .get("period_type")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    let usage_label = match period_type.as_deref() {
+        Some("monthly") => "月额度",
+        Some("weekly") => "周额度",
+        _ => "额度",
+    };
+
+    let mut windows = Vec::new();
+    if usage_ratio.is_some()
+        || remaining.is_some()
+        || usage_limit.is_some()
+        || current_usage.is_some()
+        || next_reset_at.is_some()
+    {
+        windows.push(json!({
+            "code": "usage",
+            "label": usage_label,
+            "scope": "account",
+            "unit": if usage_limit.is_some() { "usd" } else { "percent" },
+            "used_ratio": usage_ratio,
+            "remaining_ratio": remaining_ratio,
+            "used_value": current_usage,
+            "remaining_value": remaining,
+            "limit_value": usage_limit,
+            "reset_at": next_reset_at,
+            "reset_seconds": reset_seconds,
+        }));
+    }
+
+    let prepaid_balance = metadata
+        .get("prepaid_balance")
+        .and_then(admin_provider_quota_pure::coerce_json_f64);
+    if prepaid_balance.is_some_and(|value| value > 0.0) {
+        windows.push(json!({
+            "code": "prepaid",
+            "label": "预付额度",
+            "scope": "account",
+            "unit": "usd",
+            "used_ratio": serde_json::Value::Null,
+            "remaining_ratio": serde_json::Value::Null,
+            "remaining_value": prepaid_balance,
+            "reset_at": serde_json::Value::Null,
+            "reset_seconds": serde_json::Value::Null,
+        }));
+    }
+
+    let on_demand_cap = metadata
+        .get("on_demand_cap")
+        .and_then(admin_provider_quota_pure::coerce_json_f64);
+    let on_demand_used = metadata
+        .get("on_demand_used")
+        .and_then(admin_provider_quota_pure::coerce_json_f64);
+    let on_demand_enabled = metadata
+        .get("on_demand_enabled")
+        .and_then(admin_provider_quota_pure::coerce_json_bool)
+        != Some(false);
+    if on_demand_enabled && on_demand_cap.is_some_and(|value| value > 0.0) {
+        let on_demand_remaining = on_demand_cap
+            .zip(on_demand_used)
+            .map(|(cap, used)| (cap - used).max(0.0));
+        let on_demand_ratio = on_demand_cap
+            .zip(on_demand_used)
+            .and_then(|(cap, used)| (cap > 0.0).then_some((used / cap).clamp(0.0, 1.0)));
+        windows.push(json!({
+            "code": "on_demand",
+            "label": "按需额度",
+            "scope": "account",
+            "unit": "usd",
+            "used_ratio": on_demand_ratio,
+            "remaining_ratio": on_demand_ratio.map(|value| (1.0 - value).max(0.0)),
+            "used_value": on_demand_used,
+            "remaining_value": on_demand_remaining,
+            "limit_value": on_demand_cap,
+            "reset_at": serde_json::Value::Null,
+            "reset_seconds": serde_json::Value::Null,
+        }));
+    }
+
+    if windows.is_empty() && plan_type.is_none() && observed_at_unix_secs.is_none() {
+        return None;
+    }
+
+    let prepaid_available = prepaid_balance.is_some_and(|value| value > 0.0);
+    let on_demand_available = on_demand_enabled
+        && on_demand_cap.is_some_and(|value| value > 0.0)
+        && on_demand_used
+            .zip(on_demand_cap)
+            .is_some_and(|(used, cap)| used < cap);
+    let usage_exhausted = remaining.is_some_and(|value| value <= 0.0)
+        || usage_ratio.is_some_and(|value| value >= 1.0 - 1e-6);
+    let exhausted = usage_exhausted && !prepaid_available && !on_demand_available;
+    let reason = if exhausted {
+        Some("额度已耗尽".to_string())
+    } else {
+        None
+    };
+    let label = if exhausted {
+        Some("额度耗尽")
+    } else {
+        None
+    };
+    let code = if exhausted { "exhausted" } else { "ok" };
+
+    Some(json!({
+        "version": 2,
+        "provider_type": "xai",
+        "code": code,
+        "label": label,
+        "reason": reason,
+        "freshness": "fresh",
+        "source": source,
+        "observed_at": observed_at_unix_secs,
+        "exhausted": exhausted,
+        "usage_ratio": usage_ratio,
+        "updated_at": observed_at_unix_secs,
+        "reset_at": next_reset_at,
+        "reset_seconds": reset_seconds,
+        "plan_type": plan_type,
+        "windows": windows,
+    }))
+}
+
 fn build_chatgpt_web_quota_status_snapshot(
     upstream_metadata: Option<&Value>,
     source: &str,
@@ -2255,6 +2417,7 @@ pub(crate) fn sync_provider_key_quota_status_snapshot(
     let mut quota = match normalized_provider_type.as_str() {
         "codex" => build_codex_quota_status_snapshot(upstream_metadata, source),
         "kiro" => build_kiro_quota_status_snapshot(upstream_metadata, source),
+        "xai" => build_xai_quota_status_snapshot(upstream_metadata, source),
         "chatgpt_web" => build_chatgpt_web_quota_status_snapshot(upstream_metadata, source),
         "windsurf" => build_windsurf_quota_status_snapshot(upstream_metadata, source),
         "antigravity" => build_antigravity_quota_status_snapshot(upstream_metadata, source),
@@ -3620,6 +3783,43 @@ mod tests {
         assert_eq!(auto.get("remaining_value"), Some(&json!(60.0)));
         assert_eq!(auto.get("limit_value"), Some(&json!(150.0)));
         assert_eq!(auto.get("used_value"), Some(&json!(90.0)));
+    }
+
+    #[test]
+    fn provider_key_status_snapshot_payload_backfills_xai_weekly_credits() {
+        let mut key = sample_catalog_key();
+        key.upstream_metadata = Some(json!({
+            "xai": {
+                "updated_at": 1_778_067_246u64,
+                "usage_percentage": 46.0,
+                "period_type": "weekly",
+                "next_reset_at": 1_778_157_172u64,
+                "subscription_title": "SuperGrok",
+                "prepaid_balance": 0.0,
+                "on_demand_cap": 0.0,
+                "on_demand_used": 0.0
+            }
+        }));
+
+        let payload = provider_key_status_snapshot_payload(&key, "xai");
+        let quota = payload
+            .get("quota")
+            .and_then(Value::as_object)
+            .expect("quota snapshot should be object");
+        let windows = quota
+            .get("windows")
+            .and_then(Value::as_array)
+            .expect("xai quota windows should exist");
+
+        assert_eq!(quota.get("provider_type"), Some(&json!("xai")));
+        assert_eq!(quota.get("code"), Some(&json!("ok")));
+        assert_eq!(quota.get("exhausted"), Some(&json!(false)));
+        assert_eq!(quota.get("plan_type"), Some(&json!("SuperGrok")));
+        assert_eq!(quota.get("usage_ratio"), Some(&json!(0.46)));
+        assert_eq!(quota.get("reset_at"), Some(&json!(1_778_157_172u64)));
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].get("code"), Some(&json!("usage")));
+        assert_eq!(windows[0].get("label"), Some(&json!("周额度")));
     }
 
     #[test]

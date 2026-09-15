@@ -8,6 +8,7 @@ use super::gemini_cli::refresh_gemini_cli_provider_quota_locally;
 use super::grok::refresh_grok_provider_quota_locally;
 use super::kiro::refresh_kiro_provider_quota_locally;
 use super::windsurf::refresh_windsurf_provider_quota_locally;
+use super::xai::refresh_xai_provider_quota_locally;
 use crate::handlers::admin::request::AdminAppState;
 use crate::GatewayError;
 use aether_contracts::ProxySnapshot;
@@ -43,6 +44,7 @@ const PROVIDER_QUOTA_REFRESH_HANDLERS: &[(&str, ProviderQuotaRefreshHandler)] = 
     ("grok", refresh_grok_provider_quota_locally_boxed),
     ("kiro", refresh_kiro_provider_quota_locally_boxed),
     ("windsurf", refresh_windsurf_provider_quota_locally_boxed),
+    ("xai", refresh_xai_provider_quota_locally_boxed),
 ];
 
 pub(crate) async fn refresh_provider_pool_quota_locally(
@@ -167,6 +169,22 @@ fn refresh_windsurf_provider_quota_locally_boxed<'a>(
     proxy_override: Option<ProxySnapshot>,
 ) -> ProviderQuotaRefreshFuture<'a> {
     Box::pin(refresh_windsurf_provider_quota_locally(
+        state,
+        provider,
+        endpoint,
+        keys,
+        proxy_override,
+    ))
+}
+
+fn refresh_xai_provider_quota_locally_boxed<'a>(
+    state: &'a AdminAppState<'a>,
+    provider: &'a StoredProviderCatalogProvider,
+    endpoint: &'a StoredProviderCatalogEndpoint,
+    keys: Vec<StoredProviderCatalogKey>,
+    proxy_override: Option<ProxySnapshot>,
+) -> ProviderQuotaRefreshFuture<'a> {
+    Box::pin(refresh_xai_provider_quota_locally(
         state,
         provider,
         endpoint,

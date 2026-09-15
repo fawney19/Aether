@@ -29,6 +29,7 @@ impl LocalVideoTaskSnapshot {
         // contain stale identity fields after a task import or repair.
         match &mut snapshot {
             Self::OpenAi(seed) => {
+                seed.local_short_id = task.short_id.clone();
                 seed.user_id = task.user_id.clone();
                 seed.api_key_id = task.api_key_id.clone();
             }
@@ -51,6 +52,9 @@ impl LocalVideoTaskSnapshot {
             "openai:video" => {
                 let upstream_task_id = non_empty_owned(task.external_task_id.as_ref())?;
                 Some(Self::OpenAi(OpenAiVideoTaskSeed {
+                    local_short_id: task.short_id.clone(),
+                    native_response: None,
+                    xai_provider: persistence.client_api_format == "xai:video",
                     local_task_id: task.id.clone(),
                     upstream_task_id,
                     created_at_unix_ms: task.created_at_unix_ms,
@@ -140,6 +144,19 @@ impl LocalVideoTaskSnapshot {
                 changed
             }
         }
+    }
+
+    pub fn read_response_for_path(&self, path: &str) -> LocalVideoTaskReadResponse {
+        if let Self::OpenAi(seed) = self {
+            let mut seed = seed.clone();
+            if path.starts_with("/openai/v1/videos/") {
+                seed.persistence.client_api_format = "openai:video".to_string();
+            } else if path.starts_with("/v1/videos/") && seed.uses_xai_provider() {
+                seed.persistence.client_api_format = "xai:video".to_string();
+            }
+            return Self::OpenAi(seed).read_response();
+        }
+        self.read_response()
     }
 
     pub fn read_response(&self) -> LocalVideoTaskReadResponse {

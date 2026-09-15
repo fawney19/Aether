@@ -201,6 +201,13 @@ pub struct LocalVideoTaskPersistence {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OpenAiVideoTaskSeed {
+    /// Preserve existing database identity; older snapshots derive it from the local task ID.
+    #[serde(default)]
+    pub local_short_id: Option<String>,
+    #[serde(default)]
+    pub native_response: Option<Value>,
+    #[serde(default)]
+    pub xai_provider: bool,
     pub local_task_id: String,
     pub upstream_task_id: String,
     pub created_at_unix_ms: u64,

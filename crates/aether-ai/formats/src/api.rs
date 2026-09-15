@@ -208,6 +208,10 @@ pub use crate::formats::{
                 resolve_stream_spec as resolve_openai_responses_stream_spec,
                 resolve_sync_spec as resolve_openai_responses_sync_spec, LocalOpenAiResponsesSpec,
             },
+            xai::{
+                apply_xai_upstream_payload_edits, apply_xai_upstream_payload_edits_with_client,
+                xai_supports_native_image_generation,
+            },
         },
     },
     shared::{

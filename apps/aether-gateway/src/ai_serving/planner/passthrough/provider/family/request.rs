@@ -583,6 +583,11 @@ pub(crate) async fn resolve_local_same_format_provider_candidate_payload_parts(
         source_model,
         codex_model_capabilities.as_ref(),
     );
+    crate::ai_serving::transport::xai::insert_cli_identity_headers_if_needed(
+        transport.as_ref(),
+        prepared.provider_api_format.as_str(),
+        &mut provider_request_headers,
+    );
     request_identity_response_encoding_when_redacted(
         &mut provider_request_headers,
         redaction.redacted,

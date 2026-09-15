@@ -83,17 +83,21 @@ pub fn build_antigravity_safe_v1internal_request(
         let request_id = non_empty_string_field(source, "requestId").unwrap_or(request_id);
         let user_agent =
             non_empty_string_field(source, "userAgent").unwrap_or(ANTIGRAVITY_REQUEST_USER_AGENT);
-        let request_type =
-            existing_v1internal_request_type(source).unwrap_or_else(|| request_type.as_str());
+        let existing_request_type = existing_v1internal_request_type(source);
 
-        return AntigravityRequestEnvelopeSupport::Supported(serde_json::json!({
+        let mut envelope = serde_json::json!({
             "project": auth.project_id,
             "requestId": request_id,
             "request": Value::Object(inner_request),
             "model": model,
             "userAgent": user_agent,
-            "requestType": request_type,
-        }));
+        });
+        if let Some(existing_request_type) = existing_request_type {
+            envelope["requestType"] = Value::String(existing_request_type.to_string());
+        } else if request_type != AntigravityEnvelopeRequestType::Agent {
+            envelope["requestType"] = Value::String(request_type.as_str().to_string());
+        }
+        return AntigravityRequestEnvelopeSupport::Supported(envelope);
     }
 
     let mut inner_request: Map<String, Value> = source.clone();
@@ -103,14 +107,17 @@ pub fn build_antigravity_safe_v1internal_request(
     normalize_antigravity_builtin_tool_names(&mut inner_request);
     normalize_antigravity_function_declaration_parameters(&mut inner_request);
 
-    AntigravityRequestEnvelopeSupport::Supported(serde_json::json!({
+    let mut envelope = serde_json::json!({
         "project": auth.project_id,
         "requestId": request_id,
         "request": Value::Object(inner_request),
         "model": model,
         "userAgent": ANTIGRAVITY_REQUEST_USER_AGENT,
-        "requestType": request_type.as_str(),
-    }))
+    });
+    if request_type != AntigravityEnvelopeRequestType::Agent {
+        envelope["requestType"] = Value::String(request_type.as_str().to_string());
+    }
+    AntigravityRequestEnvelopeSupport::Supported(envelope)
 }
 
 /// Antigravity's private v1internal Gemini surface still uses the legacy
@@ -298,7 +305,7 @@ mod tests {
         assert_eq!(envelope["requestId"], "request-ant-agent-123");
         assert_eq!(envelope["model"], "gemini-3.5-flash-low");
         assert_eq!(envelope["userAgent"], ANTIGRAVITY_REQUEST_USER_AGENT);
-        assert_eq!(envelope["requestType"], "agent");
+        assert!(envelope.get("requestType").is_none());
         assert!(envelope["request"].get("model").is_none());
         assert!(envelope["request"].get("safetySettings").is_none());
         assert_eq!(

@@ -121,6 +121,9 @@ pub(super) fn normalize_provider_import_tokens(
     if provider_type == "grok" {
         return (None, access_token.or(refresh_token));
     }
+    if provider_type == "xai" {
+        return (refresh_token, access_token);
+    }
     if provider_type == "claude_code" {
         if access_token.is_none() && refresh_token.as_deref().is_some_and(is_claude_access_token) {
             return (None, refresh_token);
@@ -237,7 +240,7 @@ pub(super) fn provider_oauth_import_authorization_bearer_token_from_object(
 pub(super) fn provider_type_supports_access_token_import(provider_type: &str) -> bool {
     matches!(
         provider_type.trim().to_ascii_lowercase().as_str(),
-        "claude_code" | "codex" | "chatgpt_web" | "grok"
+        "claude_code" | "codex" | "chatgpt_web" | "grok" | "xai"
     )
 }
 
@@ -330,6 +333,15 @@ pub(super) fn build_provider_access_token_import_auth_config(
     if provider_type.trim().eq_ignore_ascii_case("grok") {
         auth_config.insert("sso_token".to_string(), json!(access_token));
         auth_config.insert("auth_method".to_string(), json!("sso_token"));
+    }
+    if provider_type.trim().eq_ignore_ascii_case("xai") {
+        if refresh_token.is_some() {
+            auth_config.insert("auth_method".to_string(), json!("oauth"));
+            auth_config.insert("using_api".to_string(), json!(false));
+        } else {
+            auth_config.insert("auth_method".to_string(), json!("api_key"));
+            auth_config.insert("using_api".to_string(), json!(true));
+        }
     }
 
     auth_config.insert(
@@ -529,6 +541,41 @@ mod tests {
         assert_eq!(
             auth_config.get("expires_at"),
             Some(&json!(2_200_000_000u64))
+        );
+    }
+
+    #[test]
+    fn normalize_xai_import_keeps_refresh_token_separate_from_api_key() {
+        let (refresh_token, access_token) =
+            normalize_provider_import_tokens("xai", Some("xai-refresh-token"), None);
+        assert_eq!(refresh_token.as_deref(), Some("xai-refresh-token"));
+        assert!(access_token.is_none());
+
+        let (refresh_token, access_token) =
+            normalize_provider_import_tokens("xai", None, Some("xai-api-key"));
+        assert!(refresh_token.is_none());
+        assert_eq!(access_token.as_deref(), Some("xai-api-key"));
+    }
+
+    #[test]
+    fn builds_xai_auth_config_from_api_key_and_oauth_tokens() {
+        let (api_key_config, _) =
+            build_provider_access_token_import_auth_config("xai", "xai-api-key", None, None, None);
+        assert_eq!(api_key_config.get("auth_method"), Some(&json!("api_key")));
+        assert_eq!(api_key_config.get("using_api"), Some(&json!(true)));
+
+        let (oauth_config, _) = build_provider_access_token_import_auth_config(
+            "xai",
+            "xai-access-token",
+            Some("xai-refresh-token"),
+            None,
+            None,
+        );
+        assert_eq!(oauth_config.get("auth_method"), Some(&json!("oauth")));
+        assert_eq!(oauth_config.get("using_api"), Some(&json!(false)));
+        assert_eq!(
+            oauth_config.get("refresh_token"),
+            Some(&json!("xai-refresh-token"))
         );
     }
 

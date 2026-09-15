@@ -60,6 +60,9 @@
                   <SelectItem value="grok">
                     Grok
                   </SelectItem>
+                  <SelectItem value="xai">
+                    xAI
+                  </SelectItem>
                   <SelectItem value="kiro">
                     Kiro
                   </SelectItem>
@@ -92,6 +95,9 @@
                   </SelectItem>
                   <SelectItem value="grok">
                     Grok
+                  </SelectItem>
+                  <SelectItem value="xai">
+                    xAI
                   </SelectItem>
                   <SelectItem value="kiro">
                     Kiro

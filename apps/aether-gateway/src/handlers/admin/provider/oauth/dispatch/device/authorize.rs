@@ -186,10 +186,10 @@ pub(super) async fn handle_admin_provider_oauth_device_authorize(
         ));
     };
     let provider_type = provider.provider_type.trim().to_ascii_lowercase();
-    if provider_type != "kiro" && provider_type != "windsurf" {
+    if provider_type != "kiro" && provider_type != "windsurf" && provider_type != "xai" {
         return Ok(build_internal_control_error_response(
             http::StatusCode::BAD_REQUEST,
-            "设备授权仅支持 Kiro / Windsurf provider",
+            "设备授权仅支持 Kiro / Windsurf / xAI provider",
         ));
     }
     let Some(principal) = request_context
@@ -218,6 +218,19 @@ pub(super) async fn handle_admin_provider_oauth_device_authorize(
             ],
         )
         .await;
+
+    if provider_type == "xai" {
+        return super::xai::handle_admin_provider_oauth_xai_device_authorize(
+            state,
+            &provider_id,
+            &provider,
+            principal,
+            runtime_endpoint.as_ref(),
+            request_proxy,
+            payload.proxy_node_id.as_deref(),
+        )
+        .await;
+    }
 
     if provider_type == "windsurf" {
         let session_id = generate_provider_oauth_nonce();

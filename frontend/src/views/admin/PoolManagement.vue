@@ -1700,6 +1700,7 @@ const showAccountQuotaColumn = computed(() => {
     || selectedProviderType.value === 'antigravity'
     || selectedProviderType.value === 'grok'
     || selectedProviderType.value === 'chatgpt_web'
+    || selectedProviderType.value === 'xai'
 })
 
 const desktopColumnWidths = computed(() => {
@@ -2149,6 +2150,7 @@ const quotaRefreshSupported = computed(() => {
     || selectedProviderType.value === 'antigravity'
     || selectedProviderType.value === 'grok'
     || selectedProviderType.value === 'chatgpt_web'
+    || selectedProviderType.value === 'xai'
 })
 
 function canResetCycleStats(_key: PoolKeyDetail): boolean {
@@ -3480,8 +3482,10 @@ function normalizeQuotaLabel(label: string): string {
   if (/spark/i.test(normalized) && normalized.includes('周')) return 'Spark周'
   if (normalized.includes('5H')) return '5H'
   if (normalized.includes('周')) return '周'
+  if (normalized.includes('月')) return '月'
   if (normalized.includes('最低剩余')) return '最低'
   if (normalized === '剩余' || normalized.includes('剩余')) return '剩余'
+  if (normalized === '额度') return '额度'
   return normalized
 }
 
@@ -3490,6 +3494,9 @@ function getQuotaProgressLabel(label: string): string {
   if (label === '5H') return '5H'
   if (label === '周') return '周'
   if (label === '月') return '月'
+  if (label === '周额度') return '周'
+  if (label === '月额度') return '月'
+  if (label === '额度') return '额度'
   if (label === 'Spark5H') return 'Spark5H'
   if (label === 'Spark周') return 'Spark周'
   if (label === '最低') return '最低'
@@ -3498,7 +3505,7 @@ function getQuotaProgressLabel(label: string): string {
 }
 
 function getQuotaProgressCountdown(item: QuotaProgressItem) {
-  const staticResetLabels = ['日', '5H', '周', '月', 'Spark5H', 'Spark周', 'Spark月', 'Auto', 'Fast', 'Expert', 'Heavy', 'Grok 4.3', '生图']
+  const staticResetLabels = ['日', '5H', '周', '月', '周额度', '月额度', '额度', 'Spark5H', 'Spark周', 'Spark月', 'Auto', 'Fast', 'Expert', 'Heavy', 'Grok 4.3', '生图']
   if (!item.allowDynamicReset && !staticResetLabels.includes(item.label)) return null
   if (item.resetAtSeconds == null && item.resetSeconds == null) return null
   return getCodexResetCountdown(
@@ -3567,6 +3574,7 @@ function getQuotaLabelOrder(label: string): number {
   if (label === 'Prompt') return 12
   if (label === 'Flex') return 13
   if (label === '剩余') return 14
+  if (label === '额度') return 14
   if (label === '最低') return 15
   if (label === '生图') return 16
   if (label === '速率') return 17
@@ -3758,7 +3766,7 @@ function buildQuotaProgressItemsFromSnapshot(key: PoolKeyDetail): QuotaProgressI
       .filter((item): item is QuotaProgressItem => item != null)
   }
 
-  if (providerType === 'kiro') {
+  if (providerType === 'kiro' || providerType === 'xai') {
     const quotaResetAtSeconds = getQuotaSnapshotResetAtSeconds(quota)
     const quotaResetSeconds = getQuotaSnapshotResetSeconds(quota)
     const window = getQuotaSnapshotWindow(quota, 'usage')
@@ -3772,12 +3780,13 @@ function buildQuotaProgressItemsFromSnapshot(key: PoolKeyDetail): QuotaProgressI
       : undefined
 
     return [{
-      label: '剩余',
+      label: normalizeQuotaLabel(String(window?.label || '').trim() || '剩余'),
       remainingPercent,
       detail,
       resetAtSeconds: normalizeUnixSeconds(window?.reset_at ?? quotaResetAtSeconds ?? null),
       resetSeconds: normalizeRemainingSeconds(window?.reset_seconds ?? quotaResetSeconds ?? null),
       updatedAtSeconds: getQuotaSnapshotUpdatedAtSeconds(quota),
+      allowDynamicReset: true,
     }]
   }
 

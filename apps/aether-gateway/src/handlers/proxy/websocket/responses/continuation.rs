@@ -90,6 +90,8 @@ pub(super) struct ResponsesWebSocketContinuationRecord {
     /// request JSON can never set it.
     #[serde(default)]
     deepseek_opaque_reasoning_replay: bool,
+    #[serde(default)]
+    xai_encrypted_reasoning_replay: bool,
     /// A prior turn stored PII sentinels whose restore mapping exists only on
     /// the original downstream socket. Such a chain cannot safely resume on a
     /// new socket without leaking sentinels, so lookup succeeds but bootstrap
@@ -121,6 +123,10 @@ impl ResponsesWebSocketContinuationRecord {
             deepseek_opaque_reasoning_replay: matches!(
                 normalization.reasoning_replay_policy(),
                 crate::ai_serving::OpenAiResponsesReasoningReplayPolicy::DeepSeekOpaque
+            ),
+            xai_encrypted_reasoning_replay: matches!(
+                normalization.reasoning_replay_policy(),
+                crate::ai_serving::OpenAiResponsesReasoningReplayPolicy::XaiEncrypted
             ),
             has_connection_local_redaction,
             responses_lite_static_config,
@@ -156,7 +162,9 @@ impl ResponsesWebSocketContinuationRecord {
     pub(super) fn reasoning_replay_policy(
         &self,
     ) -> crate::ai_serving::OpenAiResponsesReasoningReplayPolicy {
-        if self.deepseek_opaque_reasoning_replay {
+        if self.xai_encrypted_reasoning_replay {
+            crate::ai_serving::OpenAiResponsesReasoningReplayPolicy::XaiEncrypted
+        } else if self.deepseek_opaque_reasoning_replay {
             crate::ai_serving::OpenAiResponsesReasoningReplayPolicy::DeepSeekOpaque
         } else {
             crate::ai_serving::OpenAiResponsesReasoningReplayPolicy::OpenAiItemIds
@@ -476,6 +484,7 @@ mod tests {
             binding_fingerprint: [7; 32],
             normalization_fingerprint: [9; 32],
             deepseek_opaque_reasoning_replay: false,
+            xai_encrypted_reasoning_replay: false,
             has_connection_local_redaction: false,
             responses_lite_static_config: Some(ResponsesLiteStaticConfig::from_response_create(
                 &json!({
@@ -712,6 +721,29 @@ mod tests {
         let decoded: ResponsesWebSocketContinuationRecord =
             serde_json::from_str(&serialized).expect("deserialize");
         assert_eq!(decoded, record());
+    }
+
+    #[test]
+    fn serialized_record_preserves_xai_replay_policy_and_reads_legacy_records() {
+        let mut expected = record();
+        expected.xai_encrypted_reasoning_replay = true;
+        let mut serialized = serde_json::to_value(&expected).unwrap();
+        let decoded: ResponsesWebSocketContinuationRecord =
+            serde_json::from_value(serialized.clone()).unwrap();
+        assert_eq!(
+            decoded.reasoning_replay_policy(),
+            crate::ai_serving::OpenAiResponsesReasoningReplayPolicy::XaiEncrypted
+        );
+        serialized
+            .as_object_mut()
+            .unwrap()
+            .remove("xai_encrypted_reasoning_replay");
+        let legacy: ResponsesWebSocketContinuationRecord =
+            serde_json::from_value(serialized).unwrap();
+        assert_eq!(
+            legacy.reasoning_replay_policy(),
+            crate::ai_serving::OpenAiResponsesReasoningReplayPolicy::OpenAiItemIds
+        );
     }
 
     #[test]

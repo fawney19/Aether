@@ -951,6 +951,10 @@ mod tests {
         let sse = String::from_utf8(output).expect("reasoning SSE should be utf8");
 
         assert!(
+            sse.contains("event: response.reasoning_text.delta\n"),
+            "{sse}"
+        );
+        assert!(
             sse.contains("event: response.reasoning_summary_text.delta\n"),
             "{sse}"
         );

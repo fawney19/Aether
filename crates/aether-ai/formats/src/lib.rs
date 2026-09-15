@@ -56,6 +56,10 @@ pub use formats::openai::responses::codex::{
 pub use formats::openai::responses::request::{
     validate_openai_responses_request_contract, OpenAiResponsesRequestContractViolation,
 };
+pub use formats::openai::responses::xai::{
+    apply_xai_upstream_payload_edits, apply_xai_upstream_payload_edits_with_client,
+    xai_model_supports_reasoning_effort, xai_supports_native_image_generation,
+};
 pub use formats::openai::responses::{
     normalize_openai_responses_message_item_ids, openai_responses_message_item_id,
     openai_responses_request_operation, openai_responses_synthetic_reasoning_item_id,

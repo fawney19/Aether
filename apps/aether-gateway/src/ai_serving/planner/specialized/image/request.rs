@@ -17,8 +17,8 @@ use crate::ai_serving::transport::{
     ProviderOpenAiImageHeadersInput, StandardProviderRequestHeadersInput, GROK_CHAT_PATH,
 };
 use crate::ai_serving::{
-    apply_codex_openai_special_headers, build_chatgpt_web_image_request_body,
-    build_codex_openai_image_api_provider_request_body,
+    apply_codex_openai_special_headers, apply_xai_upstream_payload_edits,
+    build_chatgpt_web_image_request_body, build_codex_openai_image_api_provider_request_body,
     build_gemini_image_request_body_from_openai_image_request,
     build_openai_image_api_provider_request_body, build_openai_image_provider_request_body,
     default_model_for_openai_image_operation, normalize_openai_image_request,
@@ -211,7 +211,7 @@ pub(super) async fn resolve_local_openai_image_candidate_payload_parts(
             upstream_is_stream,
         )
     };
-    let Some(provider_request_body) = provider_request_body else {
+    let Some(mut provider_request_body) = provider_request_body else {
         mark_skipped_local_openai_image_candidate_with_failure_diagnostic(
             state,
             input,
@@ -229,6 +229,11 @@ pub(super) async fn resolve_local_openai_image_candidate_payload_parts(
         .await;
         return None;
     };
+    apply_xai_upstream_payload_edits(
+        &mut provider_request_body,
+        transport.provider.provider_type.as_str(),
+        provider_api_format,
+    );
     let Some(mut provider_request_headers) = (if is_grok {
         build_grok_browser_headers(GrokHeaderInput {
             transport,

@@ -8,7 +8,9 @@ use uuid::Uuid;
 use crate::{LocalVideoTaskRegistryMutation, LocalVideoTaskStatus, VideoTaskTruthSourceMode};
 
 pub fn extract_openai_task_id_from_path(path: &str) -> Option<&str> {
-    let suffix = path.strip_prefix("/v1/videos/")?;
+    let suffix = path
+        .strip_prefix("/v1/videos/")
+        .or_else(|| path.strip_prefix("/openai/v1/videos/"))?;
     if suffix.is_empty()
         || suffix.contains('/')
         || suffix.ends_with(":cancel")
@@ -29,21 +31,27 @@ pub fn extract_gemini_short_id_from_path(path: &str) -> Option<&str> {
 }
 
 pub fn extract_openai_task_id_from_cancel_path(path: &str) -> Option<&str> {
-    let suffix = path.strip_prefix("/v1/videos/")?;
+    let suffix = path
+        .strip_prefix("/v1/videos/")
+        .or_else(|| path.strip_prefix("/openai/v1/videos/"))?;
     suffix
         .strip_suffix("/cancel")
         .filter(|value| !value.is_empty())
 }
 
 pub fn extract_openai_task_id_from_remix_path(path: &str) -> Option<&str> {
-    let suffix = path.strip_prefix("/v1/videos/")?;
+    let suffix = path
+        .strip_prefix("/v1/videos/")
+        .or_else(|| path.strip_prefix("/openai/v1/videos/"))?;
     suffix
         .strip_suffix("/remix")
         .filter(|value| !value.is_empty())
 }
 
 pub fn extract_openai_task_id_from_content_path(path: &str) -> Option<&str> {
-    let suffix = path.strip_prefix("/v1/videos/")?;
+    let suffix = path
+        .strip_prefix("/v1/videos/")
+        .or_else(|| path.strip_prefix("/openai/v1/videos/"))?;
     suffix
         .strip_suffix("/content")
         .filter(|value| !value.is_empty())
