@@ -190,6 +190,7 @@ fn aggregates_openai_responses_stream_completed_event_to_final_response() {
             "created_at": created_at,
             "completed_at": created_at,
             "output_text": "Hello",
+            "metadata": {},
             "output": [{
                 "type": "message",
                 "id": openai_responses_message_item_id("resp_123", 0),
@@ -239,6 +240,7 @@ fn aggregates_openai_responses_stream_tool_call_events_to_final_response() {
             "created_at": created_at,
             "completed_at": created_at,
             "output_text": "",
+            "metadata": {},
             "output": [{
                 "type": "function_call",
                 "id": "call_123",
@@ -977,6 +979,7 @@ fn converts_gemini_cli_response_to_openai_responses_response() {
             "created_at": created_at,
             "completed_at": created_at,
             "output_text": "Hello Gemini CLI",
+            "metadata": {},
             "output": [{
                 "type": "message",
                 "id": openai_responses_message_item_id("resp_cli_123", 0),
@@ -1045,6 +1048,7 @@ fn converts_gemini_cli_function_call_to_openai_responses_function_call() {
             "created_at": created_at,
             "completed_at": created_at,
             "output_text": "Need a tool.",
+            "metadata": {},
             "output": [
                 {
                     "type": "message",

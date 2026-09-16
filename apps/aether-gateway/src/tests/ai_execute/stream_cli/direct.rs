@@ -678,7 +678,8 @@ async fn gateway_executes_codex_cli_stream_via_local_decision_gate_after_oauth_r
                 "output": [],
                 "created_at": created_at,
                 "completed_at": created_at,
-                "output_text": ""
+                "output_text": "",
+                "metadata": {},
             }
         })
     );

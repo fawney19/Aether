@@ -32,8 +32,7 @@ use crate::ai_serving::{
     provider_key_pool_score_scope, read_candidate_transport_snapshot,
     record_local_runtime_candidate_skip_reason, CandidateTransportPolicyFacts,
     EligibleLocalExecutionCandidate, GatewayAuthApiKeySnapshot, LocalExecutionCandidateKind,
-    PlannerAppState,
-    SkippedLocalExecutionCandidate,
+    PlannerAppState, SkippedLocalExecutionCandidate,
 };
 use crate::clock::current_unix_ms;
 use crate::handlers::shared::provider_pool::{
@@ -1124,13 +1123,14 @@ impl<'a> PoolKeyCursor<'a> {
             return false;
         }
         self.record_skip_reason("auth_snapshot_disallowed_key");
-        self.skipped_candidates.push(SkippedLocalExecutionCandidate {
-            candidate: candidate.candidate.clone(),
-            skip_reason: "auth_snapshot_disallowed_key",
-            transport: Some(candidate.transport.clone()),
-            ranking: candidate.ranking.clone(),
-            extra_data: None,
-        });
+        self.skipped_candidates
+            .push(SkippedLocalExecutionCandidate {
+                candidate: candidate.candidate.clone(),
+                skip_reason: "auth_snapshot_disallowed_key",
+                transport: Some(candidate.transport.clone()),
+                ranking: candidate.ranking.clone(),
+                extra_data: None,
+            });
         true
     }
 
@@ -2067,8 +2067,8 @@ mod tests {
     };
     use crate::ai_serving::{
         apply_local_runtime_candidate_terminal_reason, provider_key_pool_score_id,
-        provider_key_pool_score_scope, EligibleLocalExecutionCandidate,
-        GatewayAuthApiKeySnapshot, LocalExecutionCandidateKind, PlannerAppState,
+        provider_key_pool_score_scope, EligibleLocalExecutionCandidate, GatewayAuthApiKeySnapshot,
+        LocalExecutionCandidateKind, PlannerAppState,
     };
     use crate::data::GatewayDataState;
     use crate::handlers::shared::provider_pool::{
@@ -3333,8 +3333,14 @@ mod tests {
             10,
             Some(json!({ "pool_advanced": { "lru_enabled": true } })),
         );
-        let lru_cursor =
-            PoolKeyCursor::new(PlannerAppState::new(&app), lru_group, None, None, None, None);
+        let lru_cursor = PoolKeyCursor::new(
+            PlannerAppState::new(&app),
+            lru_group,
+            None,
+            None,
+            None,
+            None,
+        );
         assert_eq!(lru_cursor.pool_key_order, StoredPoolKeyCandidateOrder::Lru);
     }
 
@@ -3498,8 +3504,9 @@ mod tests {
             10,
             Some(json!({ "pool_advanced": { "lru_enabled": true } })),
         );
-        let mut cursor = PoolKeyCursor::new(PlannerAppState::new(&app), group, None, None, None, None)
-            .with_runtime_miss_diagnostic(trace_id, true);
+        let mut cursor =
+            PoolKeyCursor::new(PlannerAppState::new(&app), group, None, None, None, None)
+                .with_runtime_miss_diagnostic(trace_id, true);
         cursor.record_skip_reason("pool_cooldown");
         cursor.record_skip_reason("pool_cooldown");
         cursor.record_skip_reason("transport_snapshot_missing");
@@ -3534,8 +3541,14 @@ mod tests {
             10,
             provider_config.clone(),
         );
-        let mut cursor =
-            PoolKeyCursor::new(PlannerAppState::new(&app), group.clone(), None, None, None, None);
+        let mut cursor = PoolKeyCursor::new(
+            PlannerAppState::new(&app),
+            group.clone(),
+            None,
+            None,
+            None,
+            None,
+        );
         cursor.queued_candidates = VecDeque::from([
             sample_eligible_candidate(
                 "provider-pool",
@@ -3867,7 +3880,9 @@ mod tests {
         assert_eq!(candidate.candidate.key_id, "key-plus");
         assert_eq!(candidate.orchestration.pool_key_index, Some(0));
         assert_eq!(
-            cursor.skip_reason_counts.get("auth_snapshot_disallowed_key"),
+            cursor
+                .skip_reason_counts
+                .get("auth_snapshot_disallowed_key"),
             Some(&1)
         );
         let skipped = cursor.take_skipped_candidates();
@@ -3966,7 +3981,8 @@ mod tests {
             provider_config.clone(),
         );
         let pool_config = pool_config_for_candidate(&group).expect("pool config should parse");
-        let mut cursor = PoolKeyCursor::new(PlannerAppState::new(&app), group, None, None, None, None);
+        let mut cursor =
+            PoolKeyCursor::new(PlannerAppState::new(&app), group, None, None, None, None);
         cursor.queued_candidates = VecDeque::from([
             sample_eligible_candidate(
                 "provider-pool",
@@ -4045,7 +4061,8 @@ mod tests {
             provider_config,
         );
 
-        let mut cursor = PoolKeyCursor::new(PlannerAppState::new(&app), group, None, None, None, None);
+        let mut cursor =
+            PoolKeyCursor::new(PlannerAppState::new(&app), group, None, None, None, None);
         cursor.window_size = 2;
         cursor.page_size = 2;
         cursor.max_scanned_keys = 4;
@@ -4117,7 +4134,8 @@ mod tests {
             provider_config,
         );
 
-        let mut cursor = PoolKeyCursor::new(PlannerAppState::new(&app), group, None, None, None, None);
+        let mut cursor =
+            PoolKeyCursor::new(PlannerAppState::new(&app), group, None, None, None, None);
         assert_eq!(
             cursor.max_scanned_keys,
             aether_dispatch_core::DEFAULT_POOL_MAX_SCAN
@@ -4183,7 +4201,8 @@ mod tests {
             provider_config,
         );
 
-        let mut cursor = PoolKeyCursor::new(PlannerAppState::new(&app), group, None, None, None, None);
+        let mut cursor =
+            PoolKeyCursor::new(PlannerAppState::new(&app), group, None, None, None, None);
         assert_eq!(
             cursor.max_scanned_keys,
             aether_dispatch_core::DEFAULT_POOL_MAX_SCAN
@@ -4262,7 +4281,8 @@ mod tests {
             provider_config,
         );
 
-        let mut cursor = PoolKeyCursor::new(PlannerAppState::new(&app), group, None, None, None, None);
+        let mut cursor =
+            PoolKeyCursor::new(PlannerAppState::new(&app), group, None, None, None, None);
         let candidate = cursor
             .next_key()
             .await
@@ -4319,7 +4339,8 @@ mod tests {
             10,
             provider_config,
         );
-        let mut cursor = PoolKeyCursor::new(PlannerAppState::new(&app), group, None, None, None);
+        let mut cursor =
+            PoolKeyCursor::new(PlannerAppState::new(&app), group, None, None, None, None);
 
         let candidate = cursor
             .next_key()
@@ -4376,7 +4397,8 @@ mod tests {
             10,
             provider_config,
         );
-        let mut cursor = PoolKeyCursor::new(PlannerAppState::new(&app), group, None, None, None);
+        let mut cursor =
+            PoolKeyCursor::new(PlannerAppState::new(&app), group, None, None, None, None);
 
         let candidate = cursor
             .next_key()
@@ -4427,7 +4449,8 @@ mod tests {
             10,
             provider_config,
         );
-        let mut cursor = PoolKeyCursor::new(PlannerAppState::new(&app), group, None, None, None, None);
+        let mut cursor =
+            PoolKeyCursor::new(PlannerAppState::new(&app), group, None, None, None, None);
 
         let mut returned_key_ids = Vec::new();
         while let Some(candidate) = cursor.next_key().await {
@@ -4480,7 +4503,8 @@ mod tests {
             10,
             provider_config,
         );
-        let mut cursor = PoolKeyCursor::new(PlannerAppState::new(&app), group, None, None, None, None);
+        let mut cursor =
+            PoolKeyCursor::new(PlannerAppState::new(&app), group, None, None, None, None);
 
         let mut returned_key_ids = vec![
             cursor
@@ -4792,7 +4816,8 @@ mod tests {
             .await;
         }
 
-        let mut cursor = PoolKeyCursor::new(PlannerAppState::new(&app), group, None, None, None, None);
+        let mut cursor =
+            PoolKeyCursor::new(PlannerAppState::new(&app), group, None, None, None, None);
         assert_eq!(
             cursor.window_size,
             aether_dispatch_core::DEFAULT_POOL_WINDOW_SIZE

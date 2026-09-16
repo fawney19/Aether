@@ -211,7 +211,6 @@ fn empty_database_snapshot_covers_current_cutoff_versions() {
             20260528000000,
             20260528010000,
             20260528020000,
-            20260615000000,
             20260711000000,
             20260715000000,
             20260715130000,
@@ -1552,7 +1551,6 @@ fn pending_migrations_from_applied_skips_versions_already_applied() {
             20260528000000,
             20260528010000,
             20260528020000,
-            20260615000000,
             20260711000000,
             20260715000000,
             20260715130000,
@@ -1577,6 +1575,7 @@ fn pending_migrations_from_applied_skips_versions_already_applied() {
             20260901000000,
             20260903000000,
             20260908000000,
+            20260910000000,
         ]
     );
 }
