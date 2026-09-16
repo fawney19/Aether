@@ -1498,6 +1498,7 @@ CREATE TABLE IF NOT EXISTS public.user_groups (
     priority integer DEFAULT 0 NOT NULL,
     allowed_providers json,
     allowed_providers_mode text DEFAULT 'inherit'::text NOT NULL,
+    provider_key_policies jsonb,
     allowed_api_formats json,
     allowed_api_formats_mode text DEFAULT 'inherit'::text NOT NULL,
     allowed_models json,

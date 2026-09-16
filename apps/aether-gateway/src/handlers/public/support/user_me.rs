@@ -2,7 +2,8 @@ use super::{
     auth_email_is_verified, auth_password_policy_level, base_url_from_request,
     build_auth_error_response, build_auth_json_response, build_auth_refresh_cookie_clear_header,
     build_auth_wallet_summary_payload, consume_auth_email_registration_proof,
-    decrypt_catalog_secret_with_fallbacks, encrypt_catalog_secret_with_fallbacks, handle_auth_me,
+    decrypt_catalog_secret_with_fallbacks, encrypt_catalog_secret_with_fallbacks,
+    filter_eligible_model_rows_for_state, handle_auth_me,
     handle_users_me_api_key_install_session_create, handle_users_me_vscodex_request,
     query_param_optional_bool, query_param_value, resolve_authenticated_local_user,
     sanitize_public_model_capabilities, sanitize_public_model_config_for_user,
@@ -18,6 +19,21 @@ use crate::handlers::shared::{
 };
 
 const USERS_ME_AVAILABLE_MODELS_FETCH_LIMIT: usize = 1000;
+const USERS_ME_CATALOG_API_FORMATS: &[&str] = &[
+    "openai:chat",
+    "openai:responses",
+    "openai:responses:compact",
+    "openai:image",
+    "openai:embedding",
+    "openai:rerank",
+    "claude:messages",
+    "gemini:generate_content",
+    "gemini:embedding",
+    "jina:embedding",
+    "jina:rerank",
+    "doubao:embedding",
+    "aliyun:multimodal_embedding",
+];
 
 #[path = "user_me_management_tokens.rs"]
 mod user_me_management_tokens;

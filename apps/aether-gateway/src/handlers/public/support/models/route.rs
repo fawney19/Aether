@@ -17,7 +17,7 @@ use super::models_responses::{
     build_openai_model_detail_response, build_openai_models_list_response,
 };
 use super::models_shared::{
-    filter_eligible_model_rows, filter_rows_for_models, models_api_format, models_detail_id,
+    filter_eligible_model_rows_for_state, models_api_format, models_detail_id,
     models_query_api_formats,
 };
 use super::{query_param_value, AppState, GatewayPublicRequestContext};
@@ -259,11 +259,11 @@ async fn list_model_rows_for_client_format(
             state.list_minimal_candidate_selection_rows_for_api_format(query_format),
         )
         .await?;
-        let mut filtered = if is_codex_models_api_format(api_format) {
-            filter_eligible_model_rows(rows, auth_snapshot, query_format)
-        } else {
-            filter_rows_for_models(rows, auth_snapshot, query_format)
-        };
+        let mut filtered = await_models_route_read(
+            "candidate_selection_pool_key_policy",
+            filter_eligible_model_rows_for_state(state, rows, auth_snapshot, query_format),
+        )
+        .await?;
         collected.append(&mut filtered);
     }
     if is_codex_models_api_format(api_format) {
@@ -297,7 +297,11 @@ async fn list_model_rows_for_client_format_and_global_model(
             ),
         )
         .await?;
-        let mut filtered = filter_rows_for_models(rows, auth_snapshot, query_format);
+        let mut filtered = await_models_route_read(
+            "candidate_selection_pool_key_policy",
+            filter_eligible_model_rows_for_state(state, rows, auth_snapshot, query_format),
+        )
+        .await?;
         collected.append(&mut filtered);
     }
     Some(sort_and_dedup_model_rows(collected))

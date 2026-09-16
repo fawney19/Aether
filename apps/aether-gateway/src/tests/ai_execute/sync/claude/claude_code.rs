@@ -106,6 +106,7 @@ async fn gateway_executes_claude_code_cli_sync_via_local_decision_gate_with_loca
             provider_type: "claude_code".to_string(),
             provider_priority: 10,
             provider_is_active: true,
+            provider_pool_enabled: false,
             endpoint_id: "endpoint-claude-code-cli-local-1".to_string(),
             endpoint_api_format: "claude:messages".to_string(),
             endpoint_api_family: Some("claude".to_string()),

@@ -243,6 +243,7 @@ fn sample_candidate_row(spec: ProviderSpec) -> StoredMinimalCandidateSelectionRo
         provider_type: "custom".to_string(),
         provider_priority: 10,
         provider_is_active: true,
+        provider_pool_enabled: false,
         endpoint_id: spec.endpoint_id.to_string(),
         endpoint_api_format: spec.api_format.to_string(),
         endpoint_api_family: Some(api_family.clone()),
