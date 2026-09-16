@@ -1453,6 +1453,18 @@ pub(crate) fn auth_snapshot_allows_cross_format_candidate(
         }
     }
 
+    if let Some(allowed_provider_keys) = auth_snapshot.effective_allowed_provider_keys() {
+        let key_allowed = allowed_provider_keys.iter().any(|value| {
+            let value = value.trim();
+            !value.is_empty()
+                && (value.eq_ignore_ascii_case(candidate.key_id.trim())
+                    || value.eq_ignore_ascii_case(candidate.key_name.trim()))
+        });
+        if !key_allowed {
+            return false;
+        }
+    }
+
     true
 }
 
@@ -1692,6 +1704,7 @@ mod tests {
             api_key_allowed_api_formats: None,
             api_key_allowed_models: None,
             api_key_ip_rules: None,
+            api_key_allowed_provider_keys: None,
             currently_usable: true,
         }
     }

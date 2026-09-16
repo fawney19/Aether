@@ -707,6 +707,10 @@ impl<'a> AdminAppState<'a> {
                 "allowed_models".to_string(),
                 json!(key.allowed_models.clone()),
             ),
+            (
+                "allowed_provider_keys".to_string(),
+                json!(key.allowed_provider_keys.clone()),
+            ),
             ("ip_rules".to_string(), json!(key.ip_rules.clone())),
             ("rate_limit".to_string(), json!(key.rate_limit)),
             ("concurrent_limit".to_string(), json!(key.concurrent_limit)),

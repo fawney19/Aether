@@ -17,7 +17,8 @@ pub use affinity::{
 pub use auth::{
     api_format_matches_allowed_value, auth_constraints_allow_api_format,
     auth_constraints_allow_model, auth_constraints_allow_model_with_model_directives,
-    auth_constraints_allow_provider, provider_matches_allowed_value, SchedulerAuthConstraints,
+    auth_constraints_allow_provider, auth_constraints_allow_provider_key,
+    provider_matches_allowed_value, SchedulerAuthConstraints,
 };
 pub use candidate::{
     auth_api_key_concurrency_limit_reached, candidate_is_selectable_with_runtime_state,

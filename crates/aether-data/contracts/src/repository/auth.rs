@@ -29,6 +29,7 @@ pub struct StoredAuthApiKeySnapshot {
     pub api_key_allowed_api_formats: Option<Vec<String>>,
     pub api_key_allowed_models: Option<Vec<String>>,
     pub api_key_ip_rules: Option<Vec<String>>,
+    pub api_key_allowed_provider_keys: Option<Vec<String>>,
 }
 
 impl StoredAuthApiKeySnapshot {
@@ -103,6 +104,7 @@ impl StoredAuthApiKeySnapshot {
                 "api_keys.allowed_models",
             )?,
             api_key_ip_rules: None,
+            api_key_allowed_provider_keys: None,
         })
     }
 
@@ -111,6 +113,15 @@ impl StoredAuthApiKeySnapshot {
         api_key_ip_rules: Option<serde_json::Value>,
     ) -> Result<Self, crate::DataLayerError> {
         self.api_key_ip_rules = parse_string_list(api_key_ip_rules, "api_keys.ip_rules")?;
+        Ok(self)
+    }
+
+    pub fn with_allowed_provider_keys(
+        mut self,
+        allowed_provider_keys: Option<serde_json::Value>,
+    ) -> Result<Self, crate::DataLayerError> {
+        self.api_key_allowed_provider_keys =
+            parse_string_list(allowed_provider_keys, "api_keys.allowed_provider_keys")?;
         Ok(self)
     }
 
@@ -163,6 +174,7 @@ pub struct ResolvedAuthApiKeySnapshot {
     pub api_key_allowed_api_formats: Option<Vec<String>>,
     pub api_key_allowed_models: Option<Vec<String>>,
     pub api_key_ip_rules: Option<Vec<String>>,
+    pub api_key_allowed_provider_keys: Option<Vec<String>>,
     pub currently_usable: bool,
 }
 
@@ -193,6 +205,7 @@ impl ResolvedAuthApiKeySnapshot {
             api_key_allowed_api_formats: snapshot.api_key_allowed_api_formats,
             api_key_allowed_models: snapshot.api_key_allowed_models,
             api_key_ip_rules: snapshot.api_key_ip_rules,
+            api_key_allowed_provider_keys: snapshot.api_key_allowed_provider_keys,
             currently_usable,
         };
         resolved.constrain_non_standalone_api_key_policy_to_user_policy();
@@ -227,6 +240,10 @@ impl ResolvedAuthApiKeySnapshot {
         self.api_key_allowed_models
             .as_deref()
             .or(self.user_allowed_models.as_deref())
+    }
+
+    pub fn effective_allowed_provider_keys(&self) -> Option<&[String]> {
+        non_empty_allowed_list(self.api_key_allowed_provider_keys.as_deref())
     }
 
     pub fn apply_user_policy(
@@ -365,6 +382,7 @@ pub struct StoredAuthApiKeyExportRecord {
     pub allowed_api_formats: Option<Vec<String>>,
     pub allowed_models: Option<Vec<String>>,
     pub ip_rules: Option<Vec<String>>,
+    pub allowed_provider_keys: Option<Vec<String>>,
     pub rate_limit: Option<i32>,
     pub concurrent_limit: Option<i32>,
     pub force_capabilities: Option<serde_json::Value>,
@@ -453,6 +471,7 @@ impl StoredAuthApiKeyExportRecord {
             )?,
             allowed_models: parse_string_list(allowed_models, "api_keys.allowed_models")?,
             ip_rules: None,
+            allowed_provider_keys: None,
             rate_limit,
             concurrent_limit,
             force_capabilities,
@@ -502,6 +521,15 @@ impl StoredAuthApiKeyExportRecord {
         self.ip_rules = parse_string_list(ip_rules, "api_keys.ip_rules")?;
         Ok(self)
     }
+
+    pub fn with_allowed_provider_keys(
+        mut self,
+        allowed_provider_keys: Option<serde_json::Value>,
+    ) -> Result<Self, crate::DataLayerError> {
+        self.allowed_provider_keys =
+            parse_string_list(allowed_provider_keys, "api_keys.allowed_provider_keys")?;
+        Ok(self)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
@@ -528,6 +556,7 @@ pub struct CreateUserApiKeyRecord {
     pub allowed_api_formats: Option<Vec<String>>,
     pub allowed_models: Option<Vec<String>>,
     pub ip_rules: Option<Vec<String>>,
+    pub allowed_provider_keys: Option<Vec<String>>,
     pub rate_limit: i32,
     pub concurrent_limit: Option<i32>,
     pub force_capabilities: Option<serde_json::Value>,
@@ -573,6 +602,7 @@ pub struct UpdateUserApiKeyBasicRecord {
     /// Whether `concurrent_limit` is an explicit replacement, including an explicit `NULL`.
     pub concurrent_limit_present: bool,
     pub ip_rules: Option<Option<Vec<String>>>,
+    pub allowed_provider_keys: Option<Option<Vec<String>>>,
     /// `Some(Some(value))` replaces the settings; `Some(None)` clears them; `None` leaves them
     /// unchanged. Keeping this patch in the basic mutation record lets repositories apply the
     /// complete user-key update in one atomic write.
@@ -605,6 +635,7 @@ pub struct CreateStandaloneApiKeyRecord {
     pub allowed_api_formats: Option<Vec<String>>,
     pub allowed_models: Option<Vec<String>>,
     pub ip_rules: Option<Vec<String>>,
+    pub allowed_provider_keys: Option<Vec<String>>,
     pub rate_limit: Option<i32>,
     pub concurrent_limit: Option<i32>,
     pub force_capabilities: Option<serde_json::Value>,
@@ -653,6 +684,7 @@ pub struct UpdateStandaloneApiKeyBasicRecord {
     pub allowed_api_formats: Option<Option<Vec<String>>>,
     pub allowed_models: Option<Option<Vec<String>>>,
     pub ip_rules: Option<Option<Vec<String>>>,
+    pub allowed_provider_keys: Option<Option<Vec<String>>>,
     pub expires_at_present: bool,
     pub expires_at_unix_secs: Option<u64>,
     pub auto_delete_on_expiry_present: bool,

@@ -427,6 +427,7 @@ async fn gateway_executes_openai_responses_sync_upstream_stream_via_local_finali
             "created_at": created_at,
             "completed_at": created_at,
             "output_text": "Hello",
+            "metadata": {},
             "output": [{
                 "type": "message",
                 "id": openai_responses_message_item_id("resp_stream_001", 0),

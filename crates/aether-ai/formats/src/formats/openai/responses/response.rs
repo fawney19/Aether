@@ -464,6 +464,10 @@ pub(crate) fn ensure_modern_openai_responses_response_fields(
         response.insert("output".to_string(), Value::Array(Vec::new()));
         changed = true;
     }
+    if !response.contains_key("metadata") {
+        response.insert("metadata".to_string(), Value::Object(Map::new()));
+        changed = true;
+    }
     if !response.contains_key("created_at") {
         let created_at = response
             .get("created")
@@ -624,6 +628,7 @@ mod tests {
         assert_eq!(body["output"][0]["action"]["type"], "search");
         assert_eq!(body["output"][0]["action"]["query"], "today tech");
         assert_eq!(body["output_text"], "");
+        assert_eq!(body["metadata"], json!({}));
         assert!(body["created_at"].as_i64().is_some());
         assert!(body["completed_at"].as_i64().is_some());
     }
@@ -747,6 +752,31 @@ mod tests {
         assert_eq!(item["call_id"], "call_error");
         assert_eq!(item["output"], "[tool error]\ncommand failed");
         assert!(item.get("is_error").is_none());
+    }
+
+    #[test]
+    fn responses_response_builder_preserves_request_metadata() {
+        let response = CanonicalResponse {
+            id: "resp_metadata".to_string(),
+            model: "gpt-5".to_string(),
+            content: Vec::new(),
+            outputs: Vec::new(),
+            stop_reason: Some(CanonicalStopReason::EndTurn),
+            usage: None,
+            extensions: BTreeMap::new(),
+        };
+
+        let body = to_raw(
+            &response,
+            &json!({
+                "original_request_body": {
+                    "metadata": {"trace_id": "trace-123"}
+                }
+            }),
+            false,
+        );
+
+        assert_eq!(body["metadata"], json!({"trace_id": "trace-123"}));
     }
 
     #[test]

@@ -219,6 +219,30 @@
                 </div>
               </div>
 
+              <!-- Provider Key -->
+              <div class="space-y-2">
+                <Label class="text-sm font-medium">允许的 Provider Key</Label>
+                <div class="flex items-center gap-3">
+                  <div class="flex-1 min-w-0">
+                    <MultiSelect
+                      v-model="form.allowed_provider_keys"
+                      :options="providerKeyOptions"
+                      :search-threshold="0"
+                      teleport
+                      :disabled="form.provider_key_unrestricted || loadingProviderKeys"
+                      :placeholder="providerKeyPlaceholder"
+                      empty-text="暂无可用 Provider Key"
+                      no-results-text="未找到匹配的 Provider Key"
+                      search-placeholder="搜索 Provider Key..."
+                    />
+                  </div>
+                  <Switch
+                    v-model="form.provider_key_unrestricted"
+                    class="shrink-0"
+                  />
+                </div>
+              </div>
+
               <!-- 模型 -->
               <div class="space-y-2">
                 <Label class="text-sm font-medium">允许的模型</Label>
@@ -363,6 +387,7 @@ import { ChevronDown, Plus, SquarePen, X } from 'lucide-vue-next'
 import { useFormDialog } from '@/composables/useFormDialog'
 import { MultiSelect } from '@/components/common'
 import { getProvidersSummary } from '@/api/endpoints/providers'
+import { getProviderKeys, type EndpointAPIKey } from '@/api/endpoints/keys'
 import { getGlobalModels } from '@/api/global-models'
 import { adminApi } from '@/api/admin'
 import { log } from '@/utils/logger'
@@ -386,6 +411,7 @@ export interface StandaloneKeyFormData {
   allowed_providers?: string[] | null
   allowed_api_formats?: string[] | null
   allowed_models?: string[] | null
+  allowed_provider_keys?: string[] | null
   ip_rules?: string[] | null
   feature_settings?: Record<string, unknown> | null
 }
@@ -407,6 +433,8 @@ interface StandaloneKeyFormState {
   model_unrestricted: boolean
   allowed_providers: string[]
   allowed_api_formats: string[]
+  provider_key_unrestricted: boolean
+  allowed_provider_keys: string[]
   allowed_models: string[]
   ip_rules_text: string
   chat_pii_redaction_enabled: boolean
@@ -429,6 +457,8 @@ const accessRestrictionsExpanded = ref(false)
 
 // 选项数据
 const providers = ref<ProviderWithEndpointsSummary[]>([])
+const providerKeys = ref<EndpointAPIKey[]>([])
+const loadingProviderKeys = ref(false)
 const globalModels = ref<GlobalModelResponse[]>([])
 const allApiFormats = ref<string[]>([])
 
@@ -450,6 +480,23 @@ const modelOptions = computed(() =>
     label: model.name,
   }))
 )
+const providerNameById = computed(() => new Map(
+  providers.value.map((provider) => [provider.id, provider.name])
+))
+const providerKeyOptions = computed(() =>
+  providerKeys.value.map((key) => {
+    const providerName = providerNameById.value.get(key.provider_id) ?? key.provider_id
+    return {
+      value: key.id,
+      label: `${providerName} / ${key.name}`,
+    }
+  })
+)
+const providerKeyPlaceholder = computed(() => {
+  if (form.value.provider_key_unrestricted) return '不限制'
+  if (loadingProviderKeys.value) return '加载 Provider Key...'
+  return '未选择（全部禁用）'
+})
 
 // 表单数据
 const form = ref<StandaloneKeyFormState>({
@@ -469,6 +516,8 @@ const form = ref<StandaloneKeyFormState>({
   allowed_providers: [],
   allowed_api_formats: [],
   allowed_models: [],
+  provider_key_unrestricted: true,
+  allowed_provider_keys: [],
   ip_rules_text: '',
   chat_pii_redaction_enabled: false,
   chat_pii_redaction_placeholder_notice: true,
@@ -520,6 +569,8 @@ function resetForm() {
     allowed_models: [],
     ip_rules_text: '',
     chat_pii_redaction_enabled: false,
+    provider_key_unrestricted: true,
+    allowed_provider_keys: [],
     chat_pii_redaction_placeholder_notice: true,
   } as typeof form.value
 }
@@ -546,6 +597,8 @@ function loadKeyData() {
     allowed_api_formats: props.apiKey.allowed_api_formats ? [...props.apiKey.allowed_api_formats] : [],
     allowed_models: props.apiKey.allowed_models ? [...props.apiKey.allowed_models] : [],
     ip_rules_text: props.apiKey.ip_rules?.join(', ') ?? '',
+    provider_key_unrestricted: props.apiKey.allowed_provider_keys == null,
+    allowed_provider_keys: props.apiKey.allowed_provider_keys ? [...props.apiKey.allowed_provider_keys] : [],
     chat_pii_redaction_enabled: redactionFeature.enabled,
     chat_pii_redaction_placeholder_notice: redactionFeature.inject_model_instruction,
   } as typeof form.value
@@ -576,6 +629,44 @@ async function loadAccessRestrictionOptions() {
   }
 }
 
+
+async function loadProviderKeyOptions() {
+  if (form.value.provider_key_unrestricted) {
+    providerKeys.value = []
+    return
+  }
+
+  const providerIds = form.value.provider_unrestricted
+    ? providers.value.map((provider) => provider.id)
+    : form.value.allowed_providers
+  if (providerIds.length === 0) {
+    providerKeys.value = []
+    return
+  }
+
+  loadingProviderKeys.value = true
+  try {
+    const settled = await Promise.allSettled(
+      providerIds.map((providerId) => getProviderKeys(providerId))
+    )
+    const merged = new Map<string, EndpointAPIKey>()
+    for (const result of settled) {
+      if (result.status !== 'fulfilled') continue
+      for (const key of result.value) {
+        merged.set(key.id, key)
+      }
+    }
+    providerKeys.value = Array.from(merged.values())
+    const available = new Set(providerKeys.value.map((key) => key.id))
+    form.value.allowed_provider_keys = form.value.allowed_provider_keys.filter((keyId) =>
+      available.has(keyId)
+    )
+  } catch (err) {
+    log.error('加载 Provider Key 选项失败:', err)
+  } finally {
+    loadingProviderKeys.value = false
+  }
+}
 // 清空过期日期（同时清空到期删除选项）
 function clearExpiryDate() {
   form.value.expires_at = undefined
@@ -596,6 +687,7 @@ function handleSubmit() {
     allowed_providers: form.value.provider_unrestricted ? null : [...form.value.allowed_providers],
     allowed_api_formats: form.value.api_format_unrestricted ? null : [...form.value.allowed_api_formats],
     allowed_models: form.value.model_unrestricted ? null : [...form.value.allowed_models],
+    allowed_provider_keys: form.value.provider_key_unrestricted ? null : [...form.value.allowed_provider_keys],
     ip_rules: parseIpRulesInput(form.value.ip_rules_text),
     feature_settings: mergeChatPiiRedactionFeatureSettings(props.apiKey?.feature_settings, {
       enabled: form.value.chat_pii_redaction_enabled,
@@ -624,6 +716,20 @@ watch(isOpen, (val) => {
     loadAccessRestrictionOptions()
   }
 })
+
+watch(
+  [
+    () => form.value.provider_key_unrestricted,
+    () => form.value.provider_unrestricted,
+    () => form.value.allowed_providers.join('\u0000'),
+    () => providers.value.map((provider) => provider.id).join('\u0000'),
+  ],
+  () => {
+    if (isOpen.value) {
+      loadProviderKeyOptions()
+    }
+  }
+)
 
 watch(
   () => form.value.unlimited_balance,

@@ -668,6 +668,7 @@ mod tests {
             allowed_api_formats: None,
             allowed_models: None,
             ip_rules: None,
+            allowed_provider_keys: None,
             rate_limit: 0,
             concurrent_limit: None,
             force_capabilities: None,

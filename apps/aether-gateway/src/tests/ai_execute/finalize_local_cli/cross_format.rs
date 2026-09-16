@@ -411,6 +411,7 @@ async fn gateway_executes_openai_responses_cross_format_upstream_stream_via_loca
             "created_at": created_at,
             "completed_at": created_at,
             "output_text": "Hello Gemini CLI",
+            "metadata": {},
             "output": [{
                 "type": "message",
                 "id": openai_responses_message_item_id("upstream-cli-stream-123", 0),
@@ -879,6 +880,7 @@ async fn gateway_executes_openai_responses_cross_format_function_call_upstream_s
             "created_at": created_at,
             "completed_at": created_at,
             "output_text": "Need a tool.",
+            "metadata": {},
             "output": [
                 {
                     "type": "message",
@@ -1470,6 +1472,7 @@ async fn gateway_executes_openai_responses_antigravity_cross_format_upstream_str
             "created_at": created_at,
             "completed_at": created_at,
             "output_text": "Hello Antigravity",
+            "metadata": {},
             "output": [{
                 "type": "message",
                 "id": openai_responses_message_item_id("resp-local-stream", 0),
