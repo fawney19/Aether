@@ -6,7 +6,7 @@ use aether_routing_core::ResolvedRoutingPolicy;
 use aether_runtime::ConcurrencyPermit;
 use aether_scheduler_core::{
     enumerate_minimal_candidate_selection_with_model_directives, normalize_api_format,
-    resolve_requested_global_model_name_with_model_directives_and_request_operation,
+    resolve_requested_global_model_name_with_reserved_global_model,
     row_supports_requested_model_with_model_directives_and_request_operation,
     ClientSessionAffinity, EnumerateMinimalCandidateSelectionInput,
     SchedulerMinimalCandidateSelectionCandidate,
@@ -378,6 +378,7 @@ pub(crate) struct LocalCandidatePreselectionPageCursor<'a> {
     requested_name_offsets: BTreeMap<String, u32>,
     scanned_rows_by_format: BTreeMap<String, u32>,
     resolved_global_model_names: BTreeMap<String, String>,
+    reserved_global_model_names: BTreeMap<String, Option<String>>,
     fallback_offsets: BTreeMap<String, u32>,
     fallback_scan_epoch: u32,
     exhausted_api_formats: BTreeSet<String>,
@@ -457,6 +458,7 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
             requested_name_offsets: BTreeMap::new(),
             scanned_rows_by_format: BTreeMap::new(),
             resolved_global_model_names: BTreeMap::new(),
+            reserved_global_model_names: BTreeMap::new(),
             fallback_offsets: BTreeMap::new(),
             fallback_scan_epoch: 0,
             exhausted_api_formats: BTreeSet::new(),
@@ -555,6 +557,7 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
         self.requested_name_offsets.clear();
         self.scanned_rows_by_format.clear();
         self.resolved_global_model_names.clear();
+        self.reserved_global_model_names.clear();
         self.fallback_offsets.clear();
         self.fallback_scan_epoch = self.fallback_scan_epoch.wrapping_add(1);
         self.exhausted_api_formats.clear();
@@ -1185,6 +1188,34 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
             || self.exhausted_api_formats.contains(&normalized_api_format)
     }
 
+    /// Global model names are a reserved routing namespace, so a request that
+    /// names one must not be answered by a provider whose own model merely
+    /// carries that name as an upstream alias. Cached per routing model: the
+    /// answer does not change between pages or API formats.
+    async fn reserved_global_model_name(
+        &mut self,
+        rows: &[StoredMinimalCandidateSelectionRow],
+        routing_model: &str,
+    ) -> Result<Option<String>, GatewayError> {
+        if let Some(cached) = self.reserved_global_model_names.get(routing_model) {
+            return Ok(cached.clone());
+        }
+        let state = self.state;
+        let reserved_global_model_name =
+            crate::data::candidate_selection::resolve_reserved_global_model_name(
+                state.app().data.as_ref(),
+                rows,
+                routing_model,
+            )
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        self.reserved_global_model_names.insert(
+            routing_model.to_string(),
+            reserved_global_model_name.clone(),
+        );
+        Ok(reserved_global_model_name)
+    }
+
     async fn build_page_outcome_from_rows(
         &mut self,
         candidate_api_format: &str,
@@ -1216,15 +1247,17 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
             if let Some(value) = self.resolved_global_model_names.get(normalized_api_format) {
                 value.clone()
             } else {
-                let Some(value) =
-                    resolve_requested_global_model_name_with_model_directives_and_request_operation(
-                        &rows,
-                        &routing_model,
-                        normalized_api_format,
-                        false,
-                        self.request_operation.as_deref(),
-                    )
-                else {
+                let reserved_global_model_name = self
+                    .reserved_global_model_name(&rows, &routing_model)
+                    .await?;
+                let Some(value) = resolve_requested_global_model_name_with_reserved_global_model(
+                    &rows,
+                    &routing_model,
+                    normalized_api_format,
+                    false,
+                    self.request_operation.as_deref(),
+                    reserved_global_model_name.as_deref(),
+                ) else {
                     return Ok(None);
                 };
                 self.resolved_global_model_names
@@ -1475,12 +1508,16 @@ mod tests {
     use crate::AppState;
     use aether_crypto::DEVELOPMENT_ENCRYPTION_KEY;
     use aether_data::repository::candidate_selection::InMemoryMinimalCandidateSelectionReadRepository;
+    use aether_data::repository::global_models::InMemoryGlobalModelReadRepository;
     use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
     use aether_data::DataLayerError;
     use aether_data_contracts::repository::candidate_selection::{
         MinimalCandidateSelectionReadRepository, StoredApiFormatCandidateRowsQuery,
         StoredPoolKeyCandidateRowsByKeyIdsQuery, StoredPoolKeyCandidateRowsQuery,
         StoredProviderModelMapping, StoredRequestedModelCandidateRowsQuery,
+    };
+    use aether_data_contracts::repository::global_models::{
+        GlobalModelReadRepository, StoredPublicGlobalModel,
     };
     use aether_data_contracts::repository::provider_catalog::{
         StoredProviderCatalogEndpoint, StoredProviderCatalogKey, StoredProviderCatalogProvider,
@@ -2088,6 +2125,96 @@ mod tests {
             model_is_active: true,
             model_is_available: true,
         }
+    }
+
+    fn public_global_model(name: &str) -> StoredPublicGlobalModel {
+        StoredPublicGlobalModel {
+            id: format!("global-model-{name}"),
+            name: name.to_string(),
+            display_name: None,
+            is_active: true,
+            default_price_per_request: None,
+            default_tiered_pricing: None,
+            supported_capabilities: None,
+            config: None,
+            usage_count: 0,
+        }
+    }
+
+    /// The cursor provider reaches its upstream under a name that belongs to another
+    /// global model. A `claude:messages` client asking for `gemini-3.8-flash` has to
+    /// land on the provider bound to that global model — format conversion and all —
+    /// rather than on the one that only borrows the name on the way out, which is the
+    /// one an API-format-ordered scan reaches first.
+    #[tokio::test]
+    async fn paged_preselection_keeps_a_global_model_name_from_a_provider_alias() {
+        let mut aliasing = standard_candidate_row("ursor", "claude:messages", 1);
+        aliasing.global_model_id = "global-model-gemini-3.8-flash-cursor".to_string();
+        aliasing.global_model_name = "gemini-3.8-flash-cursor".to_string();
+        aliasing.model_provider_model_name = "gemini-3.8-flash-cursor".to_string();
+        aliasing.model_provider_model_mappings = Some(vec![StoredProviderModelMapping {
+            name: "gemini-3.8-flash".to_string(),
+            priority: 1,
+            api_formats: None,
+            endpoint_ids: None,
+            operations: None,
+        }]);
+
+        let mut bound = standard_candidate_row("anti", "gemini:generate_content", 2);
+        bound.global_model_id = "global-model-gemini-3.8-flash".to_string();
+        bound.global_model_name = "gemini-3.8-flash".to_string();
+        bound.model_provider_model_name = "gemini-3.8-flash".to_string();
+
+        let repository: Arc<dyn MinimalCandidateSelectionReadRepository> =
+            Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed([
+                aliasing, bound,
+            ]));
+        let global_models: Arc<dyn GlobalModelReadRepository> =
+            Arc::new(InMemoryGlobalModelReadRepository::seed([
+                public_global_model("gemini-3.8-flash"),
+                public_global_model("gemini-3.8-flash-cursor"),
+            ]));
+        let data_state =
+            GatewayDataState::with_minimal_candidate_selection_reader_for_tests(repository)
+                .with_global_model_reader(global_models);
+        let app = AppState::new()
+            .expect("gateway state should build")
+            .with_data_state_for_tests(data_state);
+        let auth_snapshot = unrestricted_auth_snapshot();
+        let model_directive_policy =
+            crate::system_features::ModelDirectivePolicySnapshot::load(&app).await;
+        let mut cursor = LocalCandidatePreselectionPageCursor::new(
+            PlannerAppState::new(&app),
+            &model_directive_policy,
+            "claude:messages",
+            "gemini-3.8-flash",
+            None,
+            false,
+            None,
+            &auth_snapshot,
+            None,
+            None,
+            None,
+            true,
+            LocalCandidatePreselectionKeyMode::ProviderEndpointKeyModelAndApiFormat,
+            true,
+            None,
+        )
+        .await;
+
+        let page = cursor
+            .next_page()
+            .await
+            .expect("preselection should succeed")
+            .expect("the bound provider should still be reachable");
+
+        assert_eq!(page.candidates.len(), 1);
+        assert_eq!(page.candidates[0].provider_name, "anti");
+        assert_eq!(page.candidates[0].global_model_name, "gemini-3.8-flash");
+        assert_eq!(
+            page.candidates[0].endpoint_api_format,
+            "gemini:generate_content"
+        );
     }
 
     fn standard_candidate_row(
