@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
@@ -6,8 +6,9 @@ use sha2::{Digest, Sha256};
 use crate::formats::openai::chat::response::openai_chat_reasoning_texts;
 use crate::formats::openai::namespace::NamespaceToolAliases;
 use crate::formats::openai::responses::{
-    encode_gemini_tool_signature_carrier_with_direction, openai_responses_message_item_id,
-    openai_responses_reasoning_text_parts, openai_responses_synthetic_reasoning_item_id,
+    decode_gemini_tool_signature_carrier, encode_gemini_tool_signature_carrier_with_direction,
+    openai_responses_message_item_id, openai_responses_reasoning_text_parts,
+    openai_responses_synthetic_reasoning_item_id,
     response::{
         ensure_modern_openai_responses_response_fields, openai_responses_current_timestamp,
     },
@@ -78,6 +79,8 @@ pub struct OpenAIResponsesProviderState {
     tool_index_by_key: BTreeMap<String, usize>,
     image_item_keys: BTreeSet<String>,
     opaque_completed_item_keys: BTreeSet<OpenAIResponsesOutputItemKey>,
+    seen_tool_signature_carriers: BTreeSet<String>,
+    pending_tool_signatures: VecDeque<String>,
     last_tool_index: Option<usize>,
 }
 
@@ -870,6 +873,7 @@ impl OpenAIResponsesProviderState {
                 return;
             }
         };
+        self.emit_pending_tool_signature(report_context, out, index);
         let state = self.tool_calls.entry(index).or_default();
         state.call_id = item
             .get("call_id")
@@ -1204,6 +1208,68 @@ impl OpenAIResponsesProviderState {
         }
     }
 
+    fn capture_tool_signature_carrier(
+        &mut self,
+        report_context: &Value,
+        out: &mut Vec<CanonicalStreamFrame>,
+        item: &Map<String, Value>,
+    ) {
+        if self.terminal_only {
+            return;
+        }
+        let Some(carrier) = item
+            .get("encrypted_content")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+        else {
+            return;
+        };
+        let Some((signature, direction)) = decode_gemini_tool_signature_carrier(carrier) else {
+            return;
+        };
+        if !self
+            .seen_tool_signature_carriers
+            .insert(Self::output_item_key(item))
+        {
+            return;
+        }
+        match direction {
+            GeminiToolSignatureCarrierDirection::Next => {
+                self.pending_tool_signatures.push_back(signature);
+            }
+            GeminiToolSignatureCarrierDirection::Previous => {
+                let Some(index) = self.last_tool_index else {
+                    return;
+                };
+                self.ensure_started(report_context, out);
+                let (id, model) = self.identity(report_context);
+                out.push(CanonicalStreamFrame {
+                    id,
+                    model,
+                    event: CanonicalStreamEvent::ToolCallSignature { index, signature },
+                });
+            }
+        }
+    }
+
+    fn emit_pending_tool_signature(
+        &mut self,
+        report_context: &Value,
+        out: &mut Vec<CanonicalStreamFrame>,
+        index: usize,
+    ) {
+        let Some(signature) = self.pending_tool_signatures.pop_front() else {
+            return;
+        };
+        self.ensure_started(report_context, out);
+        let (id, model) = self.identity(report_context);
+        out.push(CanonicalStreamFrame {
+            id,
+            model,
+            event: CanonicalStreamEvent::ToolCallSignature { index, signature },
+        });
+    }
+
     fn emit_reasoning_item(
         &mut self,
         report_context: &Value,
@@ -1336,7 +1402,14 @@ impl OpenAIResponsesProviderState {
         output_index: Option<usize>,
         final_item: bool,
     ) -> bool {
-        match item.get("type").and_then(Value::as_str).unwrap_or_default() {
+        let item_type = item.get("type").and_then(Value::as_str).unwrap_or_default();
+        if item_type == "reasoning" {
+            // Aether carries Gemini function-call signatures through Responses as
+            // encrypted reasoning items. Recover the carrier before the following
+            // function item is emitted so Gemini clients can replay it verbatim.
+            self.capture_tool_signature_carrier(report_context, out, item);
+        }
+        match item_type {
             "function_call" => {
                 self.emit_tool_call_item(report_context, out, item, output_index);
                 true
@@ -3931,6 +4004,7 @@ fn openai_responses_incomplete_finish_reason(payload: &Value) -> String {
 mod tests {
     use super::*;
     use crate::formats::claude::messages::stream::ClaudeClientEmitter;
+    use crate::formats::gemini::generate_content::stream::GeminiClientEmitter;
     use crate::formats::openai::responses::encode_gemini_tool_signature_carrier;
 
     fn data_line(value: Value) -> Vec<u8> {
@@ -5392,6 +5466,100 @@ mod tests {
             })
             .collect::<String>();
         assert_eq!(text, "First message.Second message.");
+    }
+
+    #[test]
+    fn openai_responses_provider_state_replays_gemini_signature_carrier_to_client() {
+        let mut state = OpenAIResponsesProviderState::default();
+        let report_context = json!({});
+        let signature = "skip_thought_signature_validator";
+        let carrier = encode_gemini_tool_signature_carrier(signature)
+            .expect("signature carrier should encode");
+        let reasoning_item = json!({
+            "type": "reasoning",
+            "id": "rs_signature_0",
+            "status": "completed",
+            "encrypted_content": carrier,
+            "summary": []
+        });
+        let events = [
+            json!({
+                "type": "response.output_item.added",
+                "response_id": "resp_signed_fallback",
+                "output_index": 0,
+                "item": reasoning_item
+            }),
+            json!({
+                "type": "response.output_item.done",
+                "response_id": "resp_signed_fallback",
+                "output_index": 0,
+                "item": reasoning_item
+            }),
+            json!({
+                "type": "response.output_item.added",
+                "response_id": "resp_signed_fallback",
+                "output_index": 1,
+                "item": {
+                    "type": "function_call",
+                    "id": "fc_signed_1",
+                    "call_id": "call_signed_1",
+                    "name": "fabric_exec",
+                    "arguments": "{\"code\":\"return 1\"}",
+                    "status": "completed"
+                }
+            }),
+        ];
+        let mut frames = Vec::new();
+        for event in events {
+            frames.extend(
+                state
+                    .push_line(&report_context, data_line(event))
+                    .expect("Responses event should parse"),
+            );
+        }
+
+        let signature_index = frames
+            .iter()
+            .position(|frame| {
+                matches!(
+                    frame.event,
+                    CanonicalStreamEvent::ToolCallSignature {
+                        index: 1,
+                        ref signature
+                    } if signature == "skip_thought_signature_validator"
+                )
+            })
+            .expect("signature event should be restored");
+        let call_index = frames
+            .iter()
+            .position(|frame| {
+                matches!(
+                    frame.event,
+                    CanonicalStreamEvent::ToolCallStart { index: 1, .. }
+                )
+            })
+            .expect("tool call should be emitted");
+        assert!(signature_index < call_index);
+        assert_eq!(
+            frames
+                .iter()
+                .filter(|frame| matches!(
+                    frame.event,
+                    CanonicalStreamEvent::ToolCallSignature { .. }
+                ))
+                .count(),
+            1,
+            "added and done snapshots must not duplicate the signature"
+        );
+
+        let mut emitter = GeminiClientEmitter::default();
+        let mut bytes = Vec::new();
+        for frame in frames {
+            bytes.extend(emitter.emit(frame).expect("Gemini frame should encode"));
+        }
+        let sse = String::from_utf8(bytes).expect("Gemini SSE should be UTF-8");
+        assert!(sse.contains("\"name\":\"fabric_exec\""));
+        assert!(sse.contains("\"thoughtSignature\":\"skip_thought_signature_validator\""));
     }
 
     #[test]
