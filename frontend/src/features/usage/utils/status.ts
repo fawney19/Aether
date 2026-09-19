@@ -49,6 +49,16 @@ export function hasUsageRetry(
   return record.has_retry === true
 }
 
+/**
+ * 是否有候选在调度阶段被跳过（请求从未发往该候选）。
+ * 与 hasUsageFallback 互补：后者要求"更靠前的候选确实尝试并失败"。
+ */
+export function hasUsageSkippedCandidate(
+  record: Pick<UsageRecord, 'has_skipped_candidate'>
+): boolean {
+  return record.has_skipped_candidate === true
+}
+
 export function isUsageWebSocket(
   record: Pick<UsageRecord, 'is_websocket'>
 ): boolean {

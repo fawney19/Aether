@@ -149,32 +149,14 @@
             <SelectValue placeholder="状态" />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value="__all__">
-              全部类型
-            </SelectItem>
-            <SelectItem value="stream">
-              HTTP 流式
-            </SelectItem>
-            <SelectItem value="standard">
-              HTTP 标准
-            </SelectItem>
-            <SelectItem value="websocket">
-              WebSocket (WS)
-            </SelectItem>
-            <SelectItem value="active">
-              活跃
-            </SelectItem>
-            <SelectItem value="failed">
-              失败
-            </SelectItem>
-            <SelectItem value="cancelled">
-              已取消
-            </SelectItem>
-            <SelectItem value="has_retry">
-              发生重试
-            </SelectItem>
-            <SelectItem value="has_fallback">
-              发生转移
+            <!-- 手机与桌面共用状态选项，避免新增筛选时漏掉手机入口。 -->
+            <SelectItem
+              v-for="option in statusFilterOptions"
+              :key="option.value"
+              :value="option.value"
+              :disabled="option.disabled"
+            >
+              {{ option.label }}
             </SelectItem>
           </SelectContent>
         </Select>
@@ -362,6 +344,28 @@
           </span>
           <span class="shrink-0 text-muted-foreground/40">·</span>
           <span class="min-w-0 truncate">{{ formatRecordProviderSegment(record) }}</span>
+          <!-- 手机与桌面保持相同的标记优先级：发生故障转移时优先显示转移标记。 -->
+          <Shuffle
+            v-if="record.has_fallback"
+            data-usage-attempt-marker="fallback"
+            class="w-3.5 h-3.5 text-amber-600 dark:text-amber-400 flex-shrink-0"
+            title="此请求发生了 Provider 故障转移"
+            aria-label="发生 Provider 故障转移"
+          />
+          <Ban
+            v-if="record.has_skipped_candidate && !record.has_fallback"
+            data-usage-attempt-marker="skipped-candidate"
+            class="w-3.5 h-3.5 text-slate-500 dark:text-slate-400 flex-shrink-0"
+            :title="skippedCandidateTooltip(record)"
+            :aria-label="skippedCandidateAriaLabel(record)"
+          />
+          <RefreshCcw
+            v-if="record.has_retry"
+            data-usage-attempt-marker="retry"
+            class="w-3.5 h-3.5 text-blue-600 dark:text-blue-400 flex-shrink-0"
+            title="此请求发生了重试"
+            aria-label="发生重试"
+          />
         </div>
 
         <!-- 第四行：性能指标 -->
@@ -791,6 +795,18 @@
                 title="此请求发生了 Provider 故障转移"
                 aria-label="发生 Provider 故障转移"
               />
+              <!--
+                被跳过的更高优先级候选：与"故障转移"区分开。
+                它表示候选在调度阶段就被排除、请求从未发出，因此不会有任何上游报错，
+                是"无报错却换了提供商"这一现象的直接解释。
+              -->
+              <Ban
+                v-if="record.has_skipped_candidate && !record.has_fallback"
+                data-usage-attempt-marker="skipped-candidate"
+                class="w-3.5 h-3.5 text-slate-500 dark:text-slate-400 flex-shrink-0"
+                :title="skippedCandidateTooltip(record)"
+                :aria-label="skippedCandidateAriaLabel(record)"
+              />
               <RefreshCcw
                 v-if="record.has_retry"
                 data-usage-attempt-marker="retry"
@@ -1093,7 +1109,7 @@ import {
   SortableTableHead,
   TableFilterMenu,
 } from '@/components/ui'
-import { EyeOff, RefreshCcw, Search, Shuffle } from 'lucide-vue-next'
+import { Ban, EyeOff, RefreshCcw, Search, Shuffle } from 'lucide-vue-next'
 import { formatTokens, formatCurrency } from '@/utils/format'
 import { getCacheCreationTokens, getCacheReadTokens, getEffectiveInputTokens } from '../token-normalization'
 import {
@@ -1115,6 +1131,7 @@ import { useDarkMode } from '@/composables/useDarkMode'
 import { API_FORMAT_ORDER, formatApiFormat } from '@/api/endpoints/types/api-format'
 import { formatClientFamily } from '@/features/usage/utils/clientFamily'
 import { formatServiceTierFact } from '../utils/service-tier'
+import { formatCandidateSkipReason } from '../utils/skipReason'
 import { isCyberPolicyError } from '../utils/cyberError'
 import { formatUsageWebSocketTransportTitle as getWebSocketTransportTitle } from '../utils/websocketTransport'
 import type { DateRangeParams, UsageRecord } from '../types'
@@ -1370,6 +1387,8 @@ const statusFilterOptions: FilterOption[] = [
   { value: 'cancelled', label: '已取消' },
   { value: 'has_retry', label: '发生重试' },
   { value: 'has_fallback', label: '发生转移' },
+  // 与"发生转移"区分：候选在调度阶段就被排除，请求从未发出（无上游报错）
+  { value: 'has_skipped_candidate', label: '有候选被调度跳过' },
 ]
 
 const timeRangeModel = computed({
@@ -1600,6 +1619,23 @@ function shouldShowFormatConversion(record: UsageRecord): boolean {
   }
   // 同族格式差异（精确字符串比较，不区分大小写）
   return record.api_format.trim().toLowerCase() !== record.endpoint_api_format.trim().toLowerCase()
+}
+
+// 被跳过候选的提示文案：把"调度阶段排除"和"上游失败"讲清楚，
+// 避免用户把"无报错换提供商"误判成调度 bug 或提供商静默出错。
+function skippedCandidateTooltip(record: UsageRecord): string {
+  const reasons = (record.skipped_candidate_reasons ?? [])
+    .map(formatCandidateSkipReason)
+    .filter((reason, index, all) => reason && all.indexOf(reason) === index)
+
+  const header = '本次有候选在调度阶段被跳过，请求未发往该候选（因此不会有上游报错）'
+  if (!reasons.length) return header
+  return `${header}\n跳过原因：${reasons.join('；')}`
+}
+
+function skippedCandidateAriaLabel(record: UsageRecord): string {
+  const reasons = (record.skipped_candidate_reasons ?? []).map(formatCandidateSkipReason)
+  return reasons.length ? `有候选被调度跳过：${reasons.join('；')}` : '有候选被调度跳过'
 }
 
 // 获取 API 格式的 tooltip（包含转换信息）

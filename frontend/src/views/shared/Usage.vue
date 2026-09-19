@@ -441,6 +441,8 @@ const filteredRecords = computed(() => {
         records = records.filter(record => hasUsageFallback(record))
       } else if (filterStatus.value === 'has_retry') {
         records = records.filter(record => record.has_retry === true)
+      } else if (filterStatus.value === 'has_skipped_candidate') {
+        records = records.filter(record => record.has_skipped_candidate === true)
       }
     }
 

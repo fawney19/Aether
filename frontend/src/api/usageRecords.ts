@@ -65,5 +65,13 @@ export interface UsageRecord {
   response_time_updated_at?: string | null
   has_fallback?: boolean
   has_retry?: boolean
+  /**
+   * 是否存在被调度跳过的候选（候选在调度阶段即被判定不可用，从未向上游发起请求）。
+   * 与 has_fallback 的区别：has_fallback 代表"更靠前的候选真的失败了"，
+   * 本字段代表"更靠前的候选压根没被发出去"，用于解释"无报错却换了提供商"。
+   */
+  has_skipped_candidate?: boolean
+  /** 被跳过候选的原因列表（后端已按候选顺序去重） */
+  skipped_candidate_reasons?: string[]
   image_progress?: ImageProgress | null
 }

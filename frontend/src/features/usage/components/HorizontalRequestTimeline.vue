@@ -36,6 +36,21 @@
               <Badge :variant="getFinalStatusBadgeVariant(computedFinalStatus)">
                 {{ getFinalStatusLabel(computedFinalStatus) }}
               </Badge>
+              <!-- 被跳过的候选可以收起，避免长时间线上排查时干扰视线 -->
+              <button
+                v-if="skippedTraceCandidates.length > 0"
+                type="button"
+                class="skipped-toggle"
+                :class="{ active: showSkippedCandidates }"
+                :aria-pressed="showSkippedCandidates"
+                :title="showSkippedCandidates
+                  ? '隐藏被跳过的候选'
+                  : '被跳过的候选在调度阶段就被判定本次不可用，从未向上游发起请求'"
+                data-timeline-skipped-toggle
+                @click="showSkippedCandidates = !showSkippedCandidates"
+              >
+                {{ showSkippedCandidates ? '隐藏' : '显示' }}被跳过候选（{{ skippedTraceCandidates.length }}）
+              </button>
             </div>
             <div class="text-sm text-muted-foreground">
               {{ formatLatency(totalTraceLatency) }}
@@ -449,7 +464,7 @@
                   v-if="currentAttemptSkipReasonDisplay"
                   class="skip-reason"
                 >
-                  <span class="reason-label">跳过原因</span>
+                  <span class="reason-label">{{ currentAttemptSkipReasonLabel }}</span>
                   <span class="reason-content">
                     <span class="reason-value">{{ currentAttemptSkipReasonDisplay }}</span>
                     <span
@@ -586,6 +601,7 @@ import { resolveTimelineFinalStatus } from '../utils/status'
 import { useClipboard } from '@/composables/useClipboard'
 import { buildFailureDiagnosticBundle, diagnosticPathFromMessage, visibleFailureRecords } from '../utils/failureDiagnostic'
 import { prepareDiagnosticExport, sanitizeDiagnostic } from '../utils/diagnosticExport'
+import { formatCandidateSkipReason } from '../utils/skipReason'
 import {
   buildPoolGroupVisibleAttempts,
   buildPoolParticipatedCandidates,
@@ -841,11 +857,28 @@ const compareBySchedulingOrder = (a: CandidateRecord, b: CandidateRecord): numbe
 }
 
 // 候选时间线（按调度顺序排序；lazy 加载的跳过候选通常没有 started_at）
-const rawTimeline = computed<CandidateRecord[]>(() => {
+const allTraceCandidates = computed<CandidateRecord[]>(() => {
   if (!trace.value) return []
   return [...trace.value.candidates]
     .filter(c => TIMELINE_STATUS.includes(c.status))
     .sort(compareBySchedulingOrder)
+})
+
+/**
+ * 被跳过的候选：调度阶段就判定"这次不能用"，从未真正向上游发起请求。
+ *
+ * 默认展示：它是"为什么这次没用优先级更高的提供商"的直接答案，
+ * 隐藏后容易让人误以为该提供商从未参与调度。开关供长时间排查时收起。
+ */
+const showSkippedCandidates = ref(true)
+
+const skippedTraceCandidates = computed<CandidateRecord[]>(
+  () => allTraceCandidates.value.filter(c => c.status === 'skipped'),
+)
+
+const rawTimeline = computed<CandidateRecord[]>(() => {
+  if (showSkippedCandidates.value) return allTraceCandidates.value
+  return allTraceCandidates.value.filter(c => c.status !== 'skipped')
 })
 
 
@@ -1233,7 +1266,12 @@ const latestTraceAttemptForState = computed<CandidateRecord | null>(() => {
   const candidates = rawTimeline.value
   for (let index = candidates.length - 1; index >= 0; index -= 1) {
     const candidate = candidates[index]
-    if (candidate.status !== 'available' && candidate.status !== 'unused') {
+    // 跳过/未使用候选没有状态码与错误信息，不能代表本次请求的最终结果。
+    if (
+      candidate.status !== 'available' &&
+      candidate.status !== 'unused' &&
+      candidate.status !== 'skipped'
+    ) {
       return candidate
     }
   }
@@ -1418,35 +1456,30 @@ const currentAttemptKeyFormatsDisplay = computed(() => {
     .map(format => formatApiFormat(format))
     .join(' / ')
 })
-const SKIP_REASON_LABELS: Record<string, string> = {
-  auth_api_key_concurrency_limit_reached: '调用方 API Key 并发已达上限',
-  api_key_concurrency_limit_reached: '调用方 API Key 并发已达上限',
-  pool_key_lease_busy: '池内账号正被其他请求占用',
-  provider_concurrency_limit_reached: '上游提供商并发已达上限',
-  provider_key_concurrency_limit_reached: '上游账号并发已达上限',
-  provider_request_body_build_failed: '上游请求体转换失败',
-  provider_request_body_missing: '无法构建上游请求体',
-}
 const currentAttemptSkipReasonDisplay = computed(() => {
   const attempt = currentAttempt.value
   if (!attempt?.skip_reason) return ''
 
-  const skipReasonLabel = SKIP_REASON_LABELS[attempt.skip_reason]
-  if (skipReasonLabel) {
-    return skipReasonLabel
+  // transport_unsupported 这类"泛化原因"优先展示后端采集到的具体细节，便于排查。
+  if (attempt.skip_reason === 'transport_unsupported') {
+    const transportDiagnostics = resolveTransportDiagnostics(attempt)
+    const requestPair = extractObject(transportDiagnostics?.request_pair)
+    const detailedReason = typeof requestPair?.transport_unsupported_reason === 'string'
+      ? requestPair.transport_unsupported_reason.trim()
+      : ''
+    return detailedReason || formatCandidateSkipReason(attempt.skip_reason)
   }
 
-  if (attempt.skip_reason !== 'transport_unsupported') {
-    return attempt.skip_reason
-  }
+  return formatCandidateSkipReason(attempt.skip_reason)
+})
 
-  const transportDiagnostics = resolveTransportDiagnostics(attempt)
-  const requestPair = extractObject(transportDiagnostics?.request_pair)
-  const detailedReason = typeof requestPair?.transport_unsupported_reason === 'string'
-    ? requestPair.transport_unsupported_reason.trim()
-    : ''
-
-  return detailedReason || attempt.skip_reason
+/**
+ * 区分"跳过"与"尝试失败"：被跳过的候选从未发到上游，
+ * 不写清楚容易被误读成"上游返回了错误"。
+ */
+const currentAttemptSkipReasonLabel = computed(() => {
+  const status = currentAttempt.value?.status
+  return status === 'skipped' ? '跳过原因（未向上游发起请求）' : '跳过原因'
 })
 
 const currentAttemptFailureDiagnostic = computed<{
@@ -2212,7 +2245,9 @@ const loadTrace = async (silent = false) => {
     error.value = null
 
     try {
-      internalTrace.value = await requestTraceApi.getRequestTrace(requestId, { attemptedOnly: true })
+      // 始终拉取全部候选：被跳过的候选是"为什么没用某个提供商"的关键证据，
+      // 是否显示由前端开关控制，避免再发一次请求。
+      internalTrace.value = await requestTraceApi.getRequestTrace(requestId, { attemptedOnly: false })
     } catch (err: unknown) {
       if (isAxiosError(err) && err.response?.status === 404) {
         internalTrace.value = null
@@ -2796,6 +2831,30 @@ function getDisplayStatus(attempt: CandidateRecord | null | undefined): string {
 .nav-btn:disabled {
   opacity: 0.4;
   cursor: not-allowed;
+}
+
+/* 「显示/隐藏被跳过候选」开关：低调的描边小按钮，不抢主状态徽标的视觉重心 */
+.skipped-toggle {
+  padding: 0.125rem 0.5rem;
+  border: 1px dashed hsl(var(--border));
+  border-radius: 9999px;
+  background: transparent;
+  color: hsl(var(--muted-foreground));
+  font-size: 0.75rem;
+  line-height: 1.5;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.skipped-toggle:hover {
+  color: hsl(var(--foreground));
+  border-color: hsl(var(--muted-foreground) / 0.5);
+}
+
+.skipped-toggle.active {
+  border-style: solid;
+  border-color: hsl(var(--primary) / 0.5);
+  color: hsl(var(--primary));
 }
 
 .nav-info {

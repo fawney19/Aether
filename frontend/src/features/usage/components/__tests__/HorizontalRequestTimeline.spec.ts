@@ -425,6 +425,56 @@ describe('HorizontalRequestTimeline', () => {
     expect(nodeDots[2].classList.contains('status-pending')).toBe(true)
   })
 
+  it('shows a skipped candidate with a Chinese reason and can collapse it', async () => {
+    const trace = buildTrace([
+      buildCandidate({
+        id: 'cand-skipped-rpm',
+        provider_id: 'provider-1',
+        provider_name: 'Provider 1',
+        key_id: 'key-1',
+        key_name: 'Key 1',
+        candidate_index: 0,
+        status: 'skipped',
+        skip_reason: 'key_rpm_exhausted',
+        started_at: undefined,
+        finished_at: undefined,
+      }),
+      buildCandidate({
+        id: 'cand-success-2',
+        provider_id: 'provider-2',
+        provider_name: 'Provider 2',
+        key_id: 'key-2',
+        key_name: 'Key 2',
+        candidate_index: 1,
+        status: 'success',
+      }),
+    ])
+
+    const root = mountTimeline(trace)
+    await nextTick()
+
+    // 被跳过的候选默认可见：它是"为什么没用这个提供商"的答案
+    expect([...root.querySelectorAll<HTMLElement>('.node-label')]
+      .map(label => label.textContent?.trim()))
+      .toEqual(['Provider 1', 'Provider 2'])
+
+    // 点击第一个节点查看详情，应看到中文跳过原因
+    root.querySelector<HTMLElement>('.minimal-node-group')?.click()
+    await nextTick()
+    expect(root.textContent).toContain('密钥本分钟请求数已达上限')
+    // 必须点明"没有向上游发起请求"，否则会被误读成上游报错
+    expect(root.textContent).toContain('未向上游发起请求')
+
+    // 开关可把跳过候选整体收起
+    const toggle = root.querySelector<HTMLButtonElement>('.skipped-toggle')
+    expect(toggle).not.toBeNull()
+    toggle?.click()
+    await nextTick()
+    expect([...root.querySelectorAll<HTMLElement>('.node-label')]
+      .map(label => label.textContent?.trim()))
+      .toEqual(['Provider 2'])
+  })
+
   it('keeps successful runtime pool key visible when only pool_key_index is recorded', async () => {
     const trace = buildTrace([
       buildCandidate({

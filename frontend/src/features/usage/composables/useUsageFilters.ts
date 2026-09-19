@@ -3,6 +3,7 @@ import type { UsageRecord, FilterStatusValue } from '../types'
 import {
   hasUsageFallback,
   hasUsageRetry,
+  hasUsageSkippedCandidate,
   isUsageRecordFailed,
   isUsageUpstreamStream,
   isUsageWebSocket,
@@ -97,6 +98,8 @@ export function useUsageFilters(options: UseUsageFiltersOptions) {
         records = records.filter(record => hasUsageFallback(record))
       } else if (filterStatus.value === 'has_retry') {
         records = records.filter(record => hasUsageRetry(record))
+      } else if (filterStatus.value === 'has_skipped_candidate') {
+        records = records.filter(record => hasUsageSkippedCandidate(record))
       }
     }
 

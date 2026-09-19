@@ -4,6 +4,7 @@ import {
   formatUsageStreamLabel,
   hasUsageFallback,
   hasUsageRetry,
+  hasUsageSkippedCandidate,
   isUsageRecordFailed,
   isUsageRecordSuccessful,
   isUsageWebSocket,
@@ -176,6 +177,19 @@ describe('usage status helpers', () => {
     expect(hasUsageRetry(buildUsageRecord({ has_retry: true }))).toBe(true)
     expect(hasUsageRetry(buildUsageRecord({ has_retry: false }))).toBe(false)
     expect(hasUsageRetry(buildUsageRecord({ has_retry: undefined }))).toBe(false)
+  })
+
+  it('uses explicit has_skipped_candidate flag for scheduling-skip filtering', () => {
+    expect(hasUsageSkippedCandidate(buildUsageRecord({ has_skipped_candidate: true }))).toBe(true)
+    expect(hasUsageSkippedCandidate(buildUsageRecord({ has_skipped_candidate: false }))).toBe(false)
+    expect(hasUsageSkippedCandidate(buildUsageRecord({ has_skipped_candidate: undefined }))).toBe(false)
+  })
+
+  it('keeps skipped-candidate signal independent from fallback signal', () => {
+    // 被调度跳过 ≠ 故障转移：前者请求从未发出，因此不应被 hasUsageFallback 认领
+    const skippedOnly = buildUsageRecord({ has_skipped_candidate: true, has_fallback: false })
+    expect(hasUsageSkippedCandidate(skippedOnly)).toBe(true)
+    expect(hasUsageFallback(skippedOnly)).toBe(false)
   })
 
   it('recognizes persisted WebSocket usage records', () => {

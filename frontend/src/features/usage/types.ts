@@ -100,7 +100,8 @@ export type FilterStatusValue =
   'failed' |
   'cancelled' |
   'has_fallback' |
-  'has_retry'
+  'has_retry' |
+  'has_skipped_candidate'
 
 // 默认统计状态
 export function createDefaultStats(): UsageStatsState {

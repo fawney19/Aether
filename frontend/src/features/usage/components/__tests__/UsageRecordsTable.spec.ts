@@ -92,6 +92,7 @@ vi.mock('lucide-vue-next', async () => {
     EyeOff: Icon,
     Search: Icon,
     Shuffle: Icon,
+    Ban: Icon,
     ChevronDown: Icon,
     Check: Icon,
   }
@@ -678,5 +679,38 @@ describe('UsageRecordsTable', () => {
 
     expect(root.querySelector('[data-usage-attempt-marker="fallback"]')).not.toBeNull()
     expect(root.querySelector('[data-usage-attempt-marker="retry"]')).not.toBeNull()
+  })
+
+  it('shows the skipped-candidate marker when a candidate was skipped by scheduling', () => {
+    const root = mountUsageRecordsTable([buildRecord({
+      has_skipped_candidate: true,
+      skipped_candidate_reasons: ['key_rpm_exhausted'],
+    })])
+
+    const marker = root.querySelector('[data-usage-attempt-marker="skipped-candidate"]')
+    expect(marker).not.toBeNull()
+    // tooltip 必须说明"请求未发往该候选"，否则用户会以为上游报了错
+    const title = marker?.getAttribute('title') ?? ''
+    expect(title).toContain('调度阶段被跳过')
+    expect(title).toContain('不会有上游报错')
+    expect(title).toContain('密钥本分钟请求数已达上限')
+  })
+
+  it('prefers the fallback marker over the skipped-candidate marker', () => {
+    // 真正发生过故障转移时，琥珀色转移图标信息量更大，不再叠加灰色角标
+    const root = mountUsageRecordsTable([buildRecord({
+      has_fallback: true,
+      has_skipped_candidate: true,
+      skipped_candidate_reasons: ['key_rpm_exhausted'],
+    })])
+
+    expect(root.querySelector('[data-usage-attempt-marker="fallback"]')).not.toBeNull()
+    expect(root.querySelector('[data-usage-attempt-marker="skipped-candidate"]')).toBeNull()
+  })
+
+  it('hides the skipped-candidate marker when no candidate was skipped', () => {
+    const root = mountUsageRecordsTable([buildRecord({ has_skipped_candidate: false })])
+
+    expect(root.querySelector('[data-usage-attempt-marker="skipped-candidate"]')).toBeNull()
   })
 })
