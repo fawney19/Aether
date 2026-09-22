@@ -407,6 +407,13 @@ pub(crate) async fn read_global_model_names_for_api_format(
         ) {
             continue;
         }
+        if !aether_scheduler_core::auth_constraints_allow_provider_key(
+            auth_constraints.as_ref(),
+            &row.key_id,
+            &row.key_name,
+        ) {
+            continue;
+        }
         if !aether_scheduler_core::auth_constraints_allow_model(
             auth_constraints.as_ref(),
             &row.global_model_name,
@@ -432,6 +439,9 @@ pub(crate) fn auth_snapshot_constraints(
             .map(|items| items.to_vec()),
         allowed_models: snapshot
             .effective_allowed_models()
+            .map(|items| items.to_vec()),
+        allowed_provider_keys: snapshot
+            .effective_allowed_provider_keys()
             .map(|items| items.to_vec()),
     }
 }

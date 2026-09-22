@@ -195,6 +195,7 @@ mod tests {
             allowed_providers: Some(vec!["provider-1".to_string()]),
             allowed_api_formats: Some(vec!["OPENAI:CHAT".to_string()]),
             allowed_models: Some(vec!["gpt-5".to_string()]),
+            allowed_provider_keys: None,
         };
         let candidates =
             super::enumerate_minimal_candidate_selection(EnumerateMinimalCandidateSelectionInput {
@@ -239,6 +240,7 @@ mod tests {
             allowed_providers: Some(vec!["codex".to_string()]),
             allowed_api_formats: Some(vec!["codex:live".to_string()]),
             allowed_models: Some(vec!["live-future-alias".to_string()]),
+            allowed_provider_keys: None,
         };
         let candidates =
             super::enumerate_minimal_candidate_selection(EnumerateMinimalCandidateSelectionInput {
@@ -337,6 +339,7 @@ mod tests {
             allowed_providers: Some(vec!["provider-1".to_string()]),
             allowed_api_formats: Some(vec!["openai:chat".to_string()]),
             allowed_models: Some(vec!["gpt-5".to_string()]),
+            allowed_provider_keys: None,
         };
         let model_names = collect_global_model_names_for_required_capability(
             vec![sample_row("1"), disallowed],

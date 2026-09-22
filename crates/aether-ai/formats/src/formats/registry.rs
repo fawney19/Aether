@@ -758,6 +758,10 @@ fn validate_openai_responses_cross_format_response_extensions(
                 || (key == "output_text" && value.is_string())
                 || (matches!(key, "created_at" | "completed_at")
                     && (value.is_number() || value.is_null()))
+                || (key == "metadata"
+                    && value
+                        .as_object()
+                        .is_some_and(|metadata| metadata.is_empty()))
                 || (key == "error" && value.is_null())
                 || (target == FormatId::OpenAiChat && key == "service_tier")
         },
@@ -6676,6 +6680,47 @@ mod tests {
                     if field.ends_with(".caller")
             ));
         }
+    }
+
+    #[test]
+    fn openai_responses_metadata_is_droppable_only_when_empty() {
+        let response_body = |metadata: serde_json::Value| {
+            json!({
+                "id": "resp_metadata",
+                "object": "response",
+                "model": "gpt-5",
+                "status": "completed",
+                "metadata": metadata,
+                "output": [{
+                    "type": "message",
+                    "id": "msg_metadata",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "hi", "annotations": []}]
+                }]
+            })
+        };
+
+        let converted = convert_response_pure(
+            "openai:responses",
+            "claude:messages",
+            &response_body(json!({})),
+        )
+        .expect("an empty Responses metadata object carries no provider payload")
+        .value;
+        assert!(converted.get("metadata").is_none());
+
+        let error = convert_response_pure(
+            "openai:responses",
+            "claude:messages",
+            &response_body(json!({"user_id": "u_1"})),
+        )
+        .expect_err("Responses provider metadata must not be dropped silently");
+        assert!(matches!(
+            error,
+            super::FormatError::LossyConversionBlocked { ref field, .. }
+                if field.ends_with(".metadata")
+        ));
     }
 
     #[test]

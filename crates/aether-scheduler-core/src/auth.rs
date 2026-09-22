@@ -3,6 +3,7 @@ pub struct SchedulerAuthConstraints {
     pub allowed_providers: Option<Vec<String>>,
     pub allowed_api_formats: Option<Vec<String>>,
     pub allowed_models: Option<Vec<String>>,
+    pub allowed_provider_keys: Option<Vec<String>>,
 }
 
 pub fn provider_matches_allowed_value(
@@ -32,6 +33,29 @@ pub fn auth_constraints_allow_provider(
 
     allowed.iter().any(|value| {
         provider_matches_allowed_value(value, provider_id, provider_name, provider_type)
+    })
+}
+
+pub fn auth_constraints_allow_provider_key(
+    constraints: Option<&SchedulerAuthConstraints>,
+    key_id: &str,
+    key_name: &str,
+) -> bool {
+    let Some(allowed) =
+        constraints.and_then(|constraints| constraints.allowed_provider_keys.as_deref())
+    else {
+        return true;
+    };
+
+    if allowed.is_empty() {
+        return true;
+    }
+
+    allowed.iter().any(|value| {
+        let value = value.trim();
+        !value.is_empty()
+            && (value.eq_ignore_ascii_case(key_id.trim())
+                || value.eq_ignore_ascii_case(key_name.trim()))
     })
 }
 
@@ -100,7 +124,8 @@ mod tests {
     use super::{
         api_format_matches_allowed_value, auth_constraints_allow_api_format,
         auth_constraints_allow_model, auth_constraints_allow_model_with_model_directives,
-        auth_constraints_allow_provider, provider_matches_allowed_value, SchedulerAuthConstraints,
+        auth_constraints_allow_provider, auth_constraints_allow_provider_key,
+        provider_matches_allowed_value, SchedulerAuthConstraints,
     };
 
     fn sample_constraints() -> SchedulerAuthConstraints {
@@ -108,6 +133,7 @@ mod tests {
             allowed_providers: Some(vec!["provider-1".to_string(), "OpenAI".to_string()]),
             allowed_api_formats: Some(vec!["OPENAI:CHAT".to_string()]),
             allowed_models: Some(vec!["gpt-5".to_string()]),
+            allowed_provider_keys: None,
         }
     }
 
@@ -218,6 +244,30 @@ mod tests {
             Some(&constraints),
             "gpt-4.1",
             "gpt-4.1"
+        ));
+    }
+
+    #[test]
+    fn constraints_allow_matching_provider_key_identifier_or_name() {
+        let constraints = SchedulerAuthConstraints {
+            allowed_provider_keys: Some(vec!["key-1".to_string(), "prod-key".to_string()]),
+            ..Default::default()
+        };
+
+        assert!(auth_constraints_allow_provider_key(
+            Some(&constraints),
+            "key-1",
+            "other",
+        ));
+        assert!(auth_constraints_allow_provider_key(
+            Some(&constraints),
+            "other",
+            "PROD-KEY",
+        ));
+        assert!(!auth_constraints_allow_provider_key(
+            Some(&constraints),
+            "key-2",
+            "other",
         ));
     }
 

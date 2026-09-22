@@ -80,6 +80,7 @@ CREATE TABLE IF NOT EXISTS public.api_keys (
     allowed_providers jsonb,
     allowed_api_formats jsonb,
     ip_rules jsonb,
+    allowed_provider_keys jsonb,
     rate_limit integer DEFAULT 100,
     concurrent_limit integer,
     force_capabilities jsonb,
