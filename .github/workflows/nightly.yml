@@ -63,6 +63,8 @@ jobs:
     name: Rust CI
     needs: source
     uses: ./.github/workflows/rust-ci.yml
+    with:
+      full_scope: true
 
   rust_extended:
     name: Rust extended checks

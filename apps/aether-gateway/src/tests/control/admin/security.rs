@@ -387,6 +387,42 @@ async fn gateway_handles_admin_security_blacklist_add_locally_with_trusted_admin
     assert_eq!(upstream_count, 0);
 }
 
+/// 真实 TCP 冒烟测试：其余安全用例已改为进程内 Router 调用以提速，这里保留一条
+/// 覆盖网络层装配（真实监听端口、HTTP 请求头传递、JSON 收发）的端到端路径。
+///
+/// `/api/admin/security/*` 在路由分类中是本地管理端点
+/// （`execution_runtime_candidate: false`），架构上不经过任何可注入 base_url 的上游，
+/// 因此这里不构造无意义的“上游计数器”，只验证真实链路下本地处理结果正确。
+#[tokio::test]
+async fn gateway_serves_admin_security_blacklist_over_real_tcp() {
+    let gateway = build_router_with_state(AppState::new().expect("gateway should build"));
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{gateway_url}/api/admin/security/ip/blacklist"))
+        .header(GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({ "ip_address": "1.2.3.4", "reason": "manual", "ttl": 60 }))
+        .send()
+        .await
+        .expect("request should reach the gateway over TCP");
+
+    let status = response.status();
+    let payload: serde_json::Value = response
+        .json()
+        .await
+        .expect("gateway response should be json");
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(payload["success"], true);
+    assert_eq!(payload["message"], "IP 1.2.3.4 已加入黑名单");
+    assert_eq!(payload["reason"], "manual");
+    assert_eq!(payload["ttl"], 60);
+
+    gateway_handle.abort();
+}
+
 #[tokio::test]
 async fn gateway_rejects_invalid_admin_security_blacklist_ip() {
     let gateway = build_router_with_state(AppState::new().expect("gateway should build"));
