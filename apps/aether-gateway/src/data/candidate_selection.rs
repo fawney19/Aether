@@ -1,7 +1,8 @@
 use aether_data::DataLayerError;
 use aether_data_contracts::repository::candidate_selection::{
     StoredApiFormatCandidateRowsQuery, StoredMinimalCandidateSelectionRow,
-    StoredPoolKeyCandidateRowsQuery, StoredRequestedModelCandidateRowsQuery,
+    StoredPoolKeyCandidateRowsByKeyIdsQuery, StoredPoolKeyCandidateRowsQuery,
+    StoredRequestedModelCandidateRowsQuery,
 };
 use aether_scheduler_core::{
     auth_constraints_allow_api_format, collect_global_model_names_for_required_capability,
@@ -56,6 +57,28 @@ pub(crate) trait MinimalCandidateSelectionRowSource {
         &self,
         query: &StoredPoolKeyCandidateRowsQuery,
     ) -> Result<Vec<StoredMinimalCandidateSelectionRow>, DataLayerError>;
+
+    async fn read_pool_key_candidate_rows_for_group_key_ids(
+        &self,
+        query: &StoredPoolKeyCandidateRowsByKeyIdsQuery,
+    ) -> Result<Vec<StoredMinimalCandidateSelectionRow>, DataLayerError> {
+        let allowed_key_ids = query.key_ids.iter().collect::<BTreeSet<_>>();
+        Ok(self
+            .read_pool_key_candidate_rows_for_group(&StoredPoolKeyCandidateRowsQuery {
+                api_format: query.api_format.clone(),
+                provider_id: query.provider_id.clone(),
+                endpoint_id: query.endpoint_id.clone(),
+                model_id: query.model_id.clone(),
+                selected_provider_model_name: query.selected_provider_model_name.clone(),
+                order: Default::default(),
+                offset: 0,
+                limit: u32::MAX,
+            })
+            .await?
+            .into_iter()
+            .filter(|row| allowed_key_ids.contains(&row.key_id))
+            .collect())
+    }
 }
 
 pub(crate) const REQUESTED_MODEL_CANDIDATE_PAGE_SIZE: u32 = 256;
@@ -362,6 +385,13 @@ pub(crate) async fn read_global_model_names_for_required_capability(
         .read_minimal_candidate_selection_rows_for_api_format(&normalized_api_format)
         .await?;
     let auth_constraints = auth_snapshot.map(auth_snapshot_constraints);
+    let rows = materialize_pool_candidate_rows_for_auth(
+        state,
+        rows,
+        &normalized_api_format,
+        auth_constraints.as_ref(),
+    )
+    .await?;
     Ok(collect_global_model_names_for_required_capability(
         rows,
         &normalized_api_format,
@@ -393,6 +423,13 @@ pub(crate) async fn read_global_model_names_for_api_format(
         .read_minimal_candidate_selection_rows_for_api_format(&normalized_api_format)
         .await?;
     let auth_constraints = auth_snapshot.map(auth_snapshot_constraints);
+    let rows = materialize_pool_candidate_rows_for_auth(
+        state,
+        rows,
+        &normalized_api_format,
+        auth_constraints.as_ref(),
+    )
+    .await?;
     let mut model_names = BTreeSet::new();
 
     for row in rows {
@@ -404,6 +441,12 @@ pub(crate) async fn read_global_model_names_for_api_format(
             &row.provider_id,
             &row.provider_name,
             &row.provider_type,
+        ) {
+            continue;
+        }
+        if !aether_scheduler_core::auth_constraints_allow_candidate_row_key(
+            auth_constraints.as_ref(),
+            &row,
         ) {
             continue;
         }
@@ -420,6 +463,79 @@ pub(crate) async fn read_global_model_names_for_api_format(
     Ok(model_names.into_iter().collect())
 }
 
+pub(crate) async fn materialize_pool_candidate_rows_for_auth(
+    state: &(impl MinimalCandidateSelectionRowSource + Sync),
+    rows: Vec<StoredMinimalCandidateSelectionRow>,
+    api_format: &str,
+    auth_constraints: Option<&SchedulerAuthConstraints>,
+) -> Result<Vec<StoredMinimalCandidateSelectionRow>, DataLayerError> {
+    let mut materialized = Vec::with_capacity(rows.len());
+    for row in rows {
+        if !row.provider_pool_enabled {
+            materialized.push(row);
+            continue;
+        }
+        if !aether_scheduler_core::auth_constraints_allow_provider(
+            auth_constraints,
+            &row.provider_id,
+            &row.provider_name,
+            &row.provider_type,
+        ) {
+            continue;
+        }
+
+        let allowed_key_ids = auth_constraints
+            .and_then(|constraints| constraints.provider_key_policies.get(&row.provider_id));
+        let pool_rows = if let Some(allowed_key_ids) = allowed_key_ids {
+            if allowed_key_ids.is_empty() {
+                continue;
+            }
+            state
+                .read_pool_key_candidate_rows_for_group_key_ids(
+                    &StoredPoolKeyCandidateRowsByKeyIdsQuery {
+                        api_format: api_format.to_string(),
+                        provider_id: row.provider_id.clone(),
+                        endpoint_id: row.endpoint_id.clone(),
+                        model_id: row.model_id.clone(),
+                        selected_provider_model_name: row.model_provider_model_name.clone(),
+                        key_ids: allowed_key_ids.clone(),
+                    },
+                )
+                .await?
+        } else {
+            state
+                .read_pool_key_candidate_rows_for_group(&StoredPoolKeyCandidateRowsQuery {
+                    api_format: api_format.to_string(),
+                    provider_id: row.provider_id.clone(),
+                    endpoint_id: row.endpoint_id.clone(),
+                    model_id: row.model_id.clone(),
+                    selected_provider_model_name: row.model_provider_model_name.clone(),
+                    order: Default::default(),
+                    offset: 0,
+                    limit: u32::MAX,
+                })
+                .await?
+        };
+
+        for mut pool_row in pool_rows {
+            let belongs_to_group = pool_row.provider_pool_enabled
+                && pool_row.provider_id == row.provider_id
+                && pool_row.endpoint_id == row.endpoint_id
+                && pool_row.model_id == row.model_id;
+            let is_allowed = allowed_key_ids
+                .is_none_or(|key_ids| key_ids.iter().any(|key_id| key_id == &pool_row.key_id));
+            if !belongs_to_group || !is_allowed {
+                continue;
+            }
+            // The representative has now been expanded to a concrete key, so
+            // every downstream authorization check must treat it as such.
+            pool_row.provider_pool_enabled = false;
+            materialized.push(pool_row);
+        }
+    }
+    Ok(materialized)
+}
+
 pub(crate) fn auth_snapshot_constraints(
     snapshot: &GatewayAuthApiKeySnapshot,
 ) -> SchedulerAuthConstraints {
@@ -427,6 +543,14 @@ pub(crate) fn auth_snapshot_constraints(
         allowed_providers: snapshot
             .effective_allowed_providers()
             .map(|items| items.to_vec()),
+        // Standalone keys carry their own provider/model policy and are not
+        // members of user groups, so a group-level key whitelist must not
+        // constrain them.
+        provider_key_policies: if snapshot.api_key_is_standalone {
+            Default::default()
+        } else {
+            snapshot.user_provider_key_policies.clone()
+        },
         allowed_api_formats: snapshot
             .effective_allowed_api_formats()
             .map(|items| items.to_vec()),
@@ -525,6 +649,7 @@ mod tests {
             provider_type: "custom".to_string(),
             provider_priority: 10,
             provider_is_active: true,
+            provider_pool_enabled: false,
             endpoint_id: "endpoint-1".to_string(),
             endpoint_api_format: "openai:chat".to_string(),
             endpoint_api_family: Some("openai".to_string()),

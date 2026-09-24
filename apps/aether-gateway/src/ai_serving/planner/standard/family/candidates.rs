@@ -239,8 +239,10 @@ pub(super) async fn build_local_standard_candidate_attempt_source<'a>(
         let (attempts, candidate_count) =
             materialize_local_standard_candidate_attempts(state, trace_id, input, body_json, spec)
                 .await?;
-        let source =
-            LocalExecutionCandidateAttemptSource::from_static_attempts_for_image_bridge(attempts);
+        let source = LocalExecutionCandidateAttemptSource::from_static_attempts_for_image_bridge(
+            attempts,
+            Some(&input.auth_snapshot),
+        );
         return Ok((source, candidate_count));
     }
 

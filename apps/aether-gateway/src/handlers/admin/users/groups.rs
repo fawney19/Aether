@@ -14,7 +14,7 @@ use axum::{
     Json,
 };
 use serde_json::json;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, serde::Deserialize)]
 struct AdminUserGroupPayload {
@@ -25,6 +25,8 @@ struct AdminUserGroupPayload {
     allowed_providers: Option<Vec<String>>,
     #[serde(default = "default_list_mode")]
     allowed_providers_mode: String,
+    #[serde(default)]
+    provider_key_policies: BTreeMap<String, Vec<String>>,
     #[serde(default)]
     allowed_api_formats: Option<Vec<String>>,
     #[serde(default = "default_list_mode")]
@@ -80,6 +82,13 @@ pub(in super::super) async fn build_admin_create_user_group_response(
         Ok(value) => value,
         Err(detail) => return Ok(bad_request_owned(detail)),
     };
+    let record = match state
+        .normalize_user_group_provider_access_record(record)
+        .await?
+    {
+        Ok(value) => value,
+        Err(detail) => return Ok(bad_request_owned(detail)),
+    };
     let group = match state.create_user_group(record).await {
         Ok(Some(group)) => group,
         Ok(None) => {
@@ -116,6 +125,13 @@ pub(in super::super) async fn build_admin_update_user_group_response(
         return Ok(build_admin_users_bad_request_response("缺少 group_id"));
     };
     let record = match parse_group_record(request_body) {
+        Ok(value) => value,
+        Err(detail) => return Ok(bad_request_owned(detail)),
+    };
+    let record = match state
+        .normalize_user_group_provider_access_record(record)
+        .await?
+    {
         Ok(value) => value,
         Err(detail) => return Ok(bad_request_owned(detail)),
     };
@@ -372,6 +388,8 @@ fn parse_group_record(
     }
     let allowed_providers =
         normalize_admin_user_string_list(payload.allowed_providers, "allowed_providers")?;
+    let allowed_providers_mode = normalize_list_mode(&payload.allowed_providers_mode)?;
+    let provider_key_policies = normalize_provider_key_policy_input(payload.provider_key_policies)?;
     let allowed_api_formats = normalize_admin_user_api_formats(payload.allowed_api_formats)?;
     let allowed_models =
         normalize_admin_user_string_list(payload.allowed_models, "allowed_models")?;
@@ -383,7 +401,8 @@ fn parse_group_record(
             .filter(|value| !value.is_empty()),
         priority: 0,
         allowed_providers,
-        allowed_providers_mode: normalize_list_mode(&payload.allowed_providers_mode)?,
+        allowed_providers_mode,
+        provider_key_policies,
         allowed_api_formats,
         allowed_api_formats_mode: normalize_list_mode(&payload.allowed_api_formats_mode)?,
         allowed_models,
@@ -414,6 +433,7 @@ fn user_group_payload(
         "description": group.description,
         "allowed_providers": group.allowed_providers,
         "allowed_providers_mode": group.allowed_providers_mode,
+        "provider_key_policies": group.provider_key_policies,
         "allowed_api_formats": group.allowed_api_formats,
         "allowed_api_formats_mode": group.allowed_api_formats_mode,
         "allowed_models": group.allowed_models,
@@ -424,6 +444,202 @@ fn user_group_payload(
         "created_at": format_optional_datetime_iso8601(group.created_at),
         "updated_at": format_optional_datetime_iso8601(group.updated_at),
     })
+}
+
+fn normalize_provider_key_policy_input(
+    policies: BTreeMap<String, Vec<String>>,
+) -> Result<BTreeMap<String, Vec<String>>, String> {
+    policies
+        .into_iter()
+        .map(|(provider_id, key_ids)| {
+            let provider_id = provider_id.trim();
+            if provider_id.is_empty() {
+                return Err("provider_key_policies 包含空 Provider 标识".to_string());
+            }
+            let mut normalized_key_ids = BTreeSet::new();
+            for key_id in key_ids {
+                let key_id = key_id.trim();
+                if key_id.is_empty() {
+                    return Err(format!("Provider {provider_id} 的 Key 白名单包含空标识"));
+                }
+                normalized_key_ids.insert(key_id.to_string());
+            }
+            Ok((
+                provider_id.to_string(),
+                normalized_key_ids.into_iter().collect(),
+            ))
+        })
+        .collect()
+}
+
+impl AdminAppState<'_> {
+    pub(crate) async fn normalize_user_group_provider_access_record(
+        &self,
+        mut record: aether_data::repository::users::UpsertUserGroupRecord,
+    ) -> Result<Result<aether_data::repository::users::UpsertUserGroupRecord, String>, GatewayError>
+    {
+        if record.allowed_providers_mode != "specific" {
+            record.provider_key_policies.clear();
+            return Ok(Ok(record));
+        }
+        if !self.has_provider_catalog_data_reader() {
+            if record.provider_key_policies.is_empty() {
+                return Ok(Ok(record));
+            }
+            return Err(GatewayError::Internal(
+                "provider catalog unavailable while validating user group key policies".to_string(),
+            ));
+        }
+
+        let providers = self.list_provider_catalog_providers(false).await?;
+        let allowed_provider_ids = match resolve_allowed_provider_ids(
+            record.allowed_providers.as_deref().unwrap_or_default(),
+            &providers,
+        ) {
+            Ok(value) => value,
+            Err(detail) => return Ok(Err(detail)),
+        };
+        if record.provider_key_policies.is_empty() {
+            return Ok(Ok(record));
+        }
+        let policies = match canonicalize_provider_key_policy_providers(
+            std::mem::take(&mut record.provider_key_policies),
+            &allowed_provider_ids,
+            &providers,
+        ) {
+            Ok(value) => value,
+            Err(detail) => return Ok(Err(detail)),
+        };
+        let policy_provider_ids = policies.keys().cloned().collect::<Vec<_>>();
+        let keys = self
+            .list_provider_catalog_keys_by_provider_ids(&policy_provider_ids)
+            .await?;
+        let policies = match canonicalize_provider_key_policy_keys(policies, &keys) {
+            Ok(value) => value,
+            Err(detail) => return Ok(Err(detail)),
+        };
+
+        record.provider_key_policies = policies;
+        Ok(Ok(record))
+    }
+}
+
+fn resolve_allowed_provider_ids(
+    allowed_providers: &[String],
+    providers: &[aether_data_contracts::repository::provider_catalog::StoredProviderCatalogProvider],
+) -> Result<BTreeSet<String>, String> {
+    let mut provider_ids = BTreeSet::new();
+    for reference in allowed_providers {
+        let matches = matching_providers(reference, providers);
+        if matches.is_empty() {
+            return Err(format!("允许的 Provider 不存在: {}", reference.trim()));
+        }
+        provider_ids.extend(matches.into_iter().map(|provider| provider.id.clone()));
+    }
+    Ok(provider_ids)
+}
+
+fn canonicalize_provider_key_policy_providers(
+    policies: BTreeMap<String, Vec<String>>,
+    allowed_provider_ids: &BTreeSet<String>,
+    providers: &[aether_data_contracts::repository::provider_catalog::StoredProviderCatalogProvider],
+) -> Result<BTreeMap<String, Vec<String>>, String> {
+    let mut canonical = BTreeMap::new();
+    for (provider_reference, key_ids) in policies {
+        let mut matches = matching_providers(&provider_reference, providers);
+        if matches.is_empty() {
+            return Err(format!(
+                "Key 策略引用的 Provider 不存在: {provider_reference}"
+            ));
+        }
+        if matches.len() != 1 {
+            return Err(format!(
+                "Key 策略的 Provider 标识不唯一，请使用 Provider ID: {provider_reference}"
+            ));
+        }
+        let provider_id = matches.remove(0).id.clone();
+        if !allowed_provider_ids.contains(&provider_id) {
+            return Err(format!(
+                "Key 策略引用了未授权的 Provider: {provider_reference}"
+            ));
+        }
+        if canonical.insert(provider_id.clone(), key_ids).is_some() {
+            return Err(format!("Provider {provider_id} 存在重复的 Key 策略"));
+        }
+    }
+    Ok(canonical)
+}
+
+fn matching_providers<'a>(
+    reference: &str,
+    providers: &'a [aether_data_contracts::repository::provider_catalog::StoredProviderCatalogProvider],
+) -> Vec<&'a aether_data_contracts::repository::provider_catalog::StoredProviderCatalogProvider> {
+    let reference = reference.trim();
+    let exact_ids = providers
+        .iter()
+        .filter(|provider| provider.id.eq_ignore_ascii_case(reference))
+        .collect::<Vec<_>>();
+    if !exact_ids.is_empty() {
+        return exact_ids;
+    }
+    let exact_names = providers
+        .iter()
+        .filter(|provider| provider.name.eq_ignore_ascii_case(reference))
+        .collect::<Vec<_>>();
+    if !exact_names.is_empty() {
+        return exact_names;
+    }
+    providers
+        .iter()
+        .filter(|provider| provider.provider_type.eq_ignore_ascii_case(reference))
+        .collect()
+}
+
+fn canonicalize_provider_key_policy_keys(
+    policies: BTreeMap<String, Vec<String>>,
+    keys: &[aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey],
+) -> Result<BTreeMap<String, Vec<String>>, String> {
+    let mut canonical = BTreeMap::new();
+    for (provider_id, key_references) in policies {
+        let provider_keys = keys
+            .iter()
+            .filter(|key| key.provider_id == provider_id)
+            .collect::<Vec<_>>();
+        let mut key_ids = BTreeSet::new();
+        for key_reference in key_references {
+            if let Some(key) = keys
+                .iter()
+                .find(|key| key.id.eq_ignore_ascii_case(&key_reference))
+            {
+                if key.provider_id != provider_id {
+                    return Err(format!(
+                        "Provider Key {key_reference} 不属于 Provider {provider_id}"
+                    ));
+                }
+                key_ids.insert(key.id.clone());
+                continue;
+            }
+
+            let name_matches = provider_keys
+                .iter()
+                .filter(|key| key.name.eq_ignore_ascii_case(&key_reference))
+                .copied()
+                .collect::<Vec<_>>();
+            match name_matches.as_slice() {
+                [] => return Err(format!("Provider Key 不存在: {key_reference}")),
+                [key] => {
+                    key_ids.insert(key.id.clone());
+                }
+                _ => {
+                    return Err(format!(
+                        "Provider Key 名称不唯一，请使用 Key ID: {key_reference}"
+                    ));
+                }
+            }
+        }
+        canonical.insert(provider_id, key_ids.into_iter().collect());
+    }
+    Ok(canonical)
 }
 
 fn normalize_list_mode(value: &str) -> Result<String, String> {
@@ -506,5 +722,91 @@ fn is_duplicate_group_name_error(err: &GatewayError) -> bool {
     match err {
         GatewayError::Internal(message) => message.contains("duplicate user group name"),
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use aether_data_contracts::repository::provider_catalog::{
+        StoredProviderCatalogKey, StoredProviderCatalogProvider,
+    };
+
+    use super::{
+        canonicalize_provider_key_policy_keys, canonicalize_provider_key_policy_providers,
+        resolve_allowed_provider_ids,
+    };
+
+    fn provider(id: &str, name: &str) -> StoredProviderCatalogProvider {
+        StoredProviderCatalogProvider::new(
+            id.to_string(),
+            name.to_string(),
+            None,
+            "custom".to_string(),
+        )
+        .expect("provider should build")
+    }
+
+    fn key(id: &str, provider_id: &str, name: &str) -> StoredProviderCatalogKey {
+        StoredProviderCatalogKey::new(
+            id.to_string(),
+            provider_id.to_string(),
+            name.to_string(),
+            "api_key".to_string(),
+            None,
+            true,
+        )
+        .expect("key should build")
+    }
+
+    #[test]
+    fn key_policy_rejects_provider_outside_the_group_allowlist() {
+        let providers = vec![provider("provider-a", "A"), provider("provider-b", "B")];
+        let error = canonicalize_provider_key_policy_providers(
+            BTreeMap::from([("provider-b".to_string(), vec!["key-b".to_string()])]),
+            &BTreeSet::from(["provider-a".to_string()]),
+            &providers,
+        )
+        .expect_err("policy provider must already be authorized");
+
+        assert!(error.contains("未授权的 Provider"));
+    }
+
+    #[test]
+    fn key_policy_rejects_key_owned_by_another_provider() {
+        let policies = BTreeMap::from([("provider-a".to_string(), vec!["key-b".to_string()])]);
+        let keys = vec![key("key-b", "provider-b", "B key")];
+
+        let error = canonicalize_provider_key_policy_keys(policies, &keys)
+            .expect_err("cross-provider key references must fail");
+
+        assert!(error.contains("不属于 Provider provider-a"));
+    }
+
+    #[test]
+    fn empty_key_allowlist_remains_an_explicit_deny_all_policy() {
+        let policies = BTreeMap::from([("provider-a".to_string(), Vec::new())]);
+
+        let canonical = canonicalize_provider_key_policy_keys(policies, &[])
+            .expect("empty allowlist should be valid");
+
+        assert_eq!(
+            canonical,
+            BTreeMap::from([("provider-a".to_string(), Vec::new())])
+        );
+    }
+
+    #[test]
+    fn allowed_provider_reference_resolves_all_matching_provider_types() {
+        let providers = vec![provider("provider-a", "A"), provider("provider-b", "B")];
+
+        let resolved = resolve_allowed_provider_ids(&["custom".to_string()], &providers)
+            .expect("provider types remain valid group allowlist references");
+
+        assert_eq!(
+            resolved,
+            BTreeSet::from(["provider-a".to_string(), "provider-b".to_string()])
+        );
     }
 }

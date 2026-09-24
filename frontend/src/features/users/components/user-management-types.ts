@@ -22,6 +22,7 @@ export interface UserGroupFormState {
   allowed_api_formats_mode: ListPolicyMode
   allowed_models_mode: ListPolicyMode
   allowed_providers: string[]
+  provider_key_policies: Record<string, string[]>
   allowed_api_formats: string[]
   allowed_models: string[]
   rate_limit_mode: RateLimitPolicyMode

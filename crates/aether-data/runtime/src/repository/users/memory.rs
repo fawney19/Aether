@@ -288,6 +288,10 @@ fn memory_group_from_record(
         record.priority,
         record.allowed_providers.map(serde_json::Value::from),
         record.allowed_providers_mode,
+        Some(
+            serde_json::to_value(record.provider_key_policies)
+                .map_err(|err| DataLayerError::UnexpectedValue(err.to_string()))?,
+        ),
         record.allowed_api_formats.map(serde_json::Value::from),
         record.allowed_api_formats_mode,
         record.allowed_models.map(serde_json::Value::from),
@@ -310,6 +314,7 @@ fn memory_update_group_from_record(
     group.priority = record.priority;
     group.allowed_providers = record.allowed_providers;
     group.allowed_providers_mode = record.allowed_providers_mode;
+    group.provider_key_policies = record.provider_key_policies;
     group.allowed_api_formats = record.allowed_api_formats;
     group.allowed_api_formats_mode = record.allowed_api_formats_mode;
     group.allowed_models = record.allowed_models;
@@ -325,6 +330,10 @@ fn memory_update_group_from_record(
         group.priority,
         group.allowed_providers.map(serde_json::Value::from),
         group.allowed_providers_mode,
+        Some(
+            serde_json::to_value(group.provider_key_policies)
+                .map_err(|err| DataLayerError::UnexpectedValue(err.to_string()))?,
+        ),
         group.allowed_api_formats.map(serde_json::Value::from),
         group.allowed_api_formats_mode,
         group.allowed_models.map(serde_json::Value::from),
@@ -2715,6 +2724,7 @@ mod tests {
             allowed_models_mode: "specific".to_string(),
             rate_limit: Some(10),
             rate_limit_mode: "custom".to_string(),
+            provider_key_policies: Default::default(),
         }
     }
 
