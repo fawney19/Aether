@@ -502,6 +502,13 @@ fn usage_matches_summary_query(
             return false;
         }
     }
+    if query
+        .provider_names
+        .as_ref()
+        .is_some_and(|names| !names.contains(&item.provider_name))
+    {
+        return false;
+    }
     if let Some(provider_name) = query.provider_name.as_deref() {
         if item.provider_name != provider_name {
             return false;
@@ -537,6 +544,13 @@ fn usage_matches_time_series_query(
         {
             return false;
         }
+    }
+    if query
+        .provider_names
+        .as_ref()
+        .is_some_and(|names| !names.contains(&item.provider_name))
+    {
+        return false;
     }
     if let Some(provider_name) = query.provider_name.as_deref() {
         if item.provider_name != provider_name {
@@ -917,6 +931,13 @@ fn usage_matches_leaderboard_query(
         {
             return false;
         }
+    }
+    if query
+        .provider_names
+        .as_ref()
+        .is_some_and(|names| !names.contains(&item.provider_name))
+    {
+        return false;
     }
     if let Some(provider_name) = query.provider_name.as_deref() {
         if item.provider_name != provider_name {

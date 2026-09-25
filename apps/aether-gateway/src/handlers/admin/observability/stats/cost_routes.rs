@@ -72,6 +72,7 @@ pub(super) async fn maybe_build_local_admin_stats_cost_response(
         };
         let buckets = state
             .summarize_usage_time_series(&UsageTimeSeriesQuery {
+                provider_names: None,
                 created_from_unix_secs,
                 created_until_unix_secs,
                 granularity: UsageTimeSeriesGranularity::Day,

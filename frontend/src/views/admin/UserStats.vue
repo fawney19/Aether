@@ -297,7 +297,8 @@ let ready = false
 
 const allEntities = computed<SelectableEntity[]>(() => scope.value === 'user'
   ? users.value.map(user => ({ id: user.id, name: user.username || user.email || user.id }))
-  : userGroups.value.map(group => ({ id: group.id, name: group.name })))
+  : [...userGroups.value.map(group => ({ id: group.id, name: group.name })),
+    { id: '__ungrouped__', name: t('userStats.ungrouped') }])
 
 const selectedEntityId = computed({
   get: () => scope.value === 'user' ? selectedUserId.value : selectedUserGroupId.value,
@@ -417,7 +418,7 @@ async function loadPanels() {
         limit: PAGE_SIZE
       })
       : Promise.resolve({ items: [] })
-    const groupMembersPromise: Promise<UserGroupMember[]> = scope.value === 'user_group'
+    const groupMembersPromise: Promise<UserGroupMember[]> = scope.value === 'user_group' && selectedId !== '__ungrouped__'
       ? usersApi.listUserGroupMembers(selectedId)
       : Promise.resolve([])
 
@@ -433,10 +434,12 @@ async function loadPanels() {
     series.value = primarySeries
     comparisonSeries.value = compareSeries
     memberLeaderboard.value = members.items
-    groupMemberCount.value = groupMembers.filter(member => !member.is_deleted).length
-    activeGroupMemberCount.value = groupMembers.filter(
-      member => !member.is_deleted && member.is_active
-    ).length
+    const ungroupedUsers = users.value.filter(user => user.groups?.length === 0)
+    groupMemberCount.value = selectedId === '__ungrouped__'
+      ? ungroupedUsers.length : groupMembers.filter(member => !member.is_deleted).length
+    activeGroupMemberCount.value = selectedId === '__ungrouped__'
+      ? ungroupedUsers.filter(user => user.is_active).length
+      : groupMembers.filter(member => !member.is_deleted && member.is_active).length
   } finally {
     if (requestId === panelRequestId) {
       summaryLoading.value = false

@@ -169,6 +169,7 @@ pub(super) async fn build_admin_monitoring_system_status_response(
 
     let today_usage = state
         .summarize_usage_audits(&UsageAuditSummaryQuery {
+            provider_names: None,
             created_from_unix_secs: today_start.timestamp().max(0) as u64,
             created_until_unix_secs: now_unix_secs.saturating_add(1),
             user_id: None,

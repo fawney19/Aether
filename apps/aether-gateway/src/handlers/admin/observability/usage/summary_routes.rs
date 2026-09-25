@@ -758,6 +758,8 @@ pub(super) async fn maybe_build_local_admin_usage_summary_response(
             };
             let summary = state
                 .summarize_usage_audits(&UsageAuditSummaryQuery {
+                    provider_names: super::super::resolve_usage_group_provider_names(state, query)
+                        .await?,
                     created_from_unix_secs,
                     created_until_unix_secs,
                     user_id: query_param_value(query, "user_id"),

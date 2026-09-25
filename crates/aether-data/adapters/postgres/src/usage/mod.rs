@@ -3711,13 +3711,15 @@ FROM "#,
 
     async fn summarize_usage_audits_raw(
         &self,
-        created_from_unix_secs: u64,
-        created_until_unix_secs: u64,
-        user_id: Option<&str>,
-        user_ids: Option<&[String]>,
-        provider_name: Option<&str>,
-        model: Option<&str>,
+        query: &UsageAuditSummaryQuery,
     ) -> Result<StoredUsageAuditSummary, DataLayerError> {
+        let created_from_unix_secs = query.created_from_unix_secs;
+        let created_until_unix_secs = query.created_until_unix_secs;
+        let user_id = query.user_id.as_deref();
+        let user_ids = query.user_ids.as_deref();
+        let provider_names = query.provider_names.as_deref();
+        let provider_name = query.provider_name.as_deref();
+        let model = query.model.as_deref();
         if created_from_unix_secs >= created_until_unix_secs {
             return Ok(StoredUsageAuditSummary::default());
         }
@@ -3770,6 +3772,12 @@ FROM usage_billing_facts AS "usage"
             .push_bind(created_until_unix_secs as f64)
             .push("::double precision)");
         push_usage_user_scope(&mut builder, "\"usage\".user_id", user_id, user_ids);
+        if let Some(names) = provider_names {
+            builder
+                .push(" AND \"usage\".provider_name = ANY(")
+                .push_bind(names.to_vec())
+                .push("::text[])");
+        }
         if let Some(provider_name) = provider_name {
             builder.push(if has_where { " AND " } else { " WHERE " });
             has_where = true;
@@ -3796,59 +3804,32 @@ FROM usage_billing_facts AS "usage"
         &self,
         query: &UsageAuditSummaryQuery,
     ) -> Result<StoredUsageAuditSummary, DataLayerError> {
-        if query.provider_name.is_some() || query.model.is_some() {
-            return self
-                .summarize_usage_audits_raw(
-                    query.created_from_unix_secs,
-                    query.created_until_unix_secs,
-                    query.user_id.as_deref(),
-                    query.user_ids.as_deref(),
-                    query.provider_name.as_deref(),
-                    query.model.as_deref(),
-                )
-                .await;
+        // Provider rollups lack cache-cost/error detail required by this response.
+        // Keep these scopes on canonical facts rather than inventing missing daily totals.
+        if query.provider_names.is_some() || query.provider_name.is_some() || query.model.is_some()
+        {
+            return self.summarize_usage_audits_raw(query).await;
         }
         let Some(cutoff_utc) = self.read_stats_daily_cutoff_date().await? else {
-            return self
-                .summarize_usage_audits_raw(
-                    query.created_from_unix_secs,
-                    query.created_until_unix_secs,
-                    query.user_id.as_deref(),
-                    query.user_ids.as_deref(),
-                    None,
-                    None,
-                )
-                .await;
+            return self.summarize_usage_audits_raw(query).await;
         };
 
         let start_utc = dashboard_unix_secs_to_utc(query.created_from_unix_secs);
         let end_utc = dashboard_unix_secs_to_utc(query.created_until_unix_secs);
         let split = split_dashboard_daily_aggregate_range(start_utc, end_utc, cutoff_utc);
         let Some(_) = split.aggregate else {
-            return self
-                .summarize_usage_audits_raw(
-                    query.created_from_unix_secs,
-                    query.created_until_unix_secs,
-                    query.user_id.as_deref(),
-                    query.user_ids.as_deref(),
-                    None,
-                    None,
-                )
-                .await;
+            return self.summarize_usage_audits_raw(query).await;
         };
 
         let mut summary = StoredUsageAuditSummary::default();
         if let Some((raw_start, raw_end)) = split.raw_leading {
             absorb_usage_audit_summary(
                 &mut summary,
-                self.summarize_usage_audits_raw(
-                    dashboard_utc_to_unix_secs(raw_start),
-                    dashboard_utc_to_unix_secs(raw_end),
-                    query.user_id.as_deref(),
-                    query.user_ids.as_deref(),
-                    None,
-                    None,
-                )
+                self.summarize_usage_audits_raw(&UsageAuditSummaryQuery {
+                    created_from_unix_secs: dashboard_utc_to_unix_secs(raw_start),
+                    created_until_unix_secs: dashboard_utc_to_unix_secs(raw_end),
+                    ..query.clone()
+                })
                 .await?,
             );
         }
@@ -3867,14 +3848,11 @@ FROM usage_billing_facts AS "usage"
         if let Some((raw_start, raw_end)) = split.raw_trailing {
             absorb_usage_audit_summary(
                 &mut summary,
-                self.summarize_usage_audits_raw(
-                    dashboard_utc_to_unix_secs(raw_start),
-                    dashboard_utc_to_unix_secs(raw_end),
-                    query.user_id.as_deref(),
-                    query.user_ids.as_deref(),
-                    None,
-                    None,
-                )
+                self.summarize_usage_audits_raw(&UsageAuditSummaryQuery {
+                    created_from_unix_secs: dashboard_utc_to_unix_secs(raw_start),
+                    created_until_unix_secs: dashboard_utc_to_unix_secs(raw_end),
+                    ..query.clone()
+                })
                 .await?,
             );
         }
@@ -6821,6 +6799,12 @@ FROM usage_billing_facts AS "usage"
             query.user_id.as_deref(),
             query.user_ids.as_deref(),
         );
+        if let Some(names) = query.provider_names.as_ref() {
+            builder
+                .push(" AND \"usage\".provider_name = ANY(")
+                .push_bind(names.clone())
+                .push("::text[])");
+        }
         if let Some(provider_name) = query.provider_name.as_deref() {
             builder.push(if has_where { " AND " } else { " WHERE " });
             has_where = true;
@@ -6861,6 +6845,7 @@ FROM usage_billing_facts AS "usage"
         end_day_utc: DateTime<Utc>,
         user_id: Option<&str>,
         user_ids: Option<&[String]>,
+        provider_names: Option<&[String]>,
     ) -> Result<Vec<StoredUsageTimeSeriesBucket>, DataLayerError> {
         if start_day_utc >= end_day_utc {
             return Ok(Vec::new());
@@ -6881,7 +6866,9 @@ SELECT
     AS total_response_time_ms
 FROM "#,
         );
-        builder.push(if scoped_to_users {
+        builder.push(if provider_names.is_some() {
+            "stats_user_daily_provider"
+        } else if scoped_to_users {
             "stats_user_daily"
         } else {
             "stats_daily"
@@ -6893,6 +6880,12 @@ FROM "#,
             .push_bind(end_day_utc);
         if scoped_to_users {
             push_usage_user_scope(&mut builder, "user_id", user_id, user_ids);
+        }
+        if let Some(names) = provider_names {
+            builder
+                .push(" AND provider_name = ANY(")
+                .push_bind(names.to_vec())
+                .push("::text[])");
         }
         builder.push(" GROUP BY date ORDER BY date ASC");
 
@@ -6979,6 +6972,7 @@ WHERE is_complete IS TRUE
                             &mut grouped,
                             self.summarize_usage_time_series_raw(
                                 &UsageTimeSeriesQuery {
+                                    provider_names: query.provider_names.clone(),
                                     created_from_unix_secs: dashboard_utc_to_unix_secs(raw_start),
                                     created_until_unix_secs: dashboard_utc_to_unix_secs(raw_end),
                                     granularity: UsageTimeSeriesGranularity::Day,
@@ -7000,6 +6994,7 @@ WHERE is_complete IS TRUE
                             aggregate_end,
                             query.user_id.as_deref(),
                             query.user_ids.as_deref(),
+                            query.provider_names.as_deref(),
                         )
                         .await?,
                     );
@@ -7007,6 +7002,7 @@ WHERE is_complete IS TRUE
                         &mut grouped,
                         self.summarize_usage_time_series_raw(
                             &UsageTimeSeriesQuery {
+                                provider_names: query.provider_names.clone(),
                                 created_from_unix_secs: dashboard_utc_to_unix_secs(aggregate_start),
                                 created_until_unix_secs: dashboard_utc_to_unix_secs(aggregate_end),
                                 granularity: UsageTimeSeriesGranularity::Day,
@@ -7025,6 +7021,7 @@ WHERE is_complete IS TRUE
                             &mut grouped,
                             self.summarize_usage_time_series_raw(
                                 &UsageTimeSeriesQuery {
+                                    provider_names: query.provider_names.clone(),
                                     created_from_unix_secs: dashboard_utc_to_unix_secs(raw_start),
                                     created_until_unix_secs: dashboard_utc_to_unix_secs(raw_end),
                                     granularity: UsageTimeSeriesGranularity::Day,
@@ -7044,7 +7041,10 @@ WHERE is_complete IS TRUE
             }
         }
 
-        if query.user_id.is_none() && query.user_ids.is_none() && query.tz_offset_minutes % 60 == 0
+        if query.provider_names.is_none()
+            && query.user_id.is_none()
+            && query.user_ids.is_none()
+            && query.tz_offset_minutes % 60 == 0
         {
             if let Some(cutoff_utc) = self.read_stats_hourly_cutoff().await? {
                 let start_utc = dashboard_unix_secs_to_utc(query.created_from_unix_secs);
@@ -7057,6 +7057,7 @@ WHERE is_complete IS TRUE
                             &mut grouped,
                             self.summarize_usage_time_series_raw(
                                 &UsageTimeSeriesQuery {
+                                    provider_names: query.provider_names.clone(),
                                     created_from_unix_secs: dashboard_utc_to_unix_secs(raw_start),
                                     created_until_unix_secs: dashboard_utc_to_unix_secs(raw_end),
                                     granularity: query.granularity,
@@ -7085,6 +7086,7 @@ WHERE is_complete IS TRUE
                         &mut grouped,
                         self.summarize_usage_time_series_raw(
                             &UsageTimeSeriesQuery {
+                                provider_names: query.provider_names.clone(),
                                 created_from_unix_secs: dashboard_utc_to_unix_secs(aggregate_start),
                                 created_until_unix_secs: dashboard_utc_to_unix_secs(aggregate_end),
                                 granularity: query.granularity,
@@ -7103,6 +7105,7 @@ WHERE is_complete IS TRUE
                             &mut grouped,
                             self.summarize_usage_time_series_raw(
                                 &UsageTimeSeriesQuery {
+                                    provider_names: query.provider_names.clone(),
                                     created_from_unix_secs: dashboard_utc_to_unix_secs(raw_start),
                                     created_until_unix_secs: dashboard_utc_to_unix_secs(raw_end),
                                     granularity: query.granularity,
@@ -7149,6 +7152,7 @@ WHERE "usage".created_at >= TO_TIMESTAMP($1::double precision)
   AND ($4::varchar IS NULL OR "usage".provider_name = $4)
   AND ($5::varchar IS NULL OR "usage".model = $5)
   AND ($6::text[] IS NULL OR "usage".user_id::text = ANY($6))
+  AND ($7::text[] IS NULL OR "usage".provider_name = ANY($7))
 GROUP BY group_key
 ORDER BY group_key ASC
 "#,
@@ -7163,6 +7167,7 @@ ORDER BY group_key ASC
             .bind(query.provider_name.as_deref())
             .bind(query.model.as_deref())
             .bind(query.user_ids.clone())
+            .bind(query.provider_names.clone())
             .fetch(&self.pool);
         let mut items = Vec::new();
         while let Some(row) = rows.try_next().await.map_postgres_err()? {
@@ -7177,6 +7182,51 @@ ORDER BY group_key ASC
         end_day_utc: DateTime<Utc>,
         query: &UsageLeaderboardQuery,
     ) -> Result<Option<Vec<StoredUsageLeaderboardSummary>>, DataLayerError> {
+        if let Some(names) = query.provider_names.as_ref() {
+            let group_key = match query.group_by {
+                UsageLeaderboardGroupBy::User => "user_id",
+                UsageLeaderboardGroupBy::Model => "model",
+                UsageLeaderboardGroupBy::ApiKey => return Ok(None),
+            };
+            let mut builder = QueryBuilder::<Postgres>::new(format!(
+                r#"
+SELECT
+  {group_key} AS group_key,
+  MAX(NULLIF(BTRIM(username), '')) AS legacy_name,
+  COALESCE(SUM(total_requests), 0)::BIGINT AS request_count,
+  COALESCE(SUM(total_tokens), 0)::BIGINT AS total_tokens,
+  COALESCE(SUM(total_cost), 0)::DOUBLE PRECISION AS total_cost_usd
+FROM stats_user_daily_model_provider
+WHERE date >=
+"#
+            ));
+            builder
+                .push_bind(start_day_utc)
+                .push(" AND date < ")
+                .push_bind(end_day_utc);
+            builder
+                .push(" AND provider_name = ANY(")
+                .push_bind(names.clone())
+                .push("::text[])");
+            push_usage_user_scope(
+                &mut builder,
+                "user_id",
+                query.user_id.as_deref(),
+                query.user_ids.as_deref(),
+            );
+            if let Some(provider) = query.provider_name.as_ref() {
+                builder
+                    .push(" AND provider_name = ")
+                    .push_bind(provider.clone());
+            }
+            if let Some(model) = query.model.as_ref() {
+                builder.push(" AND model = ").push_bind(model.clone());
+            }
+            builder.push(format!(" GROUP BY {group_key} ORDER BY {group_key}"));
+            return fetch_usage_leaderboard_query(builder.build(), &self.pool)
+                .await
+                .map(Some);
+        }
         let items = match query.group_by {
             UsageLeaderboardGroupBy::Model => {
                 let mut builder = if let Some(user_id) = query.user_id.as_deref() {
@@ -7452,6 +7502,7 @@ WHERE stats_daily_api_key.date >=
             absorb_usage_leaderboard_rows(
                 &mut grouped,
                 self.summarize_usage_leaderboard_raw(&UsageLeaderboardQuery {
+                    provider_names: query.provider_names.clone(),
                     created_from_unix_secs: dashboard_utc_to_unix_secs(raw_start),
                     created_until_unix_secs: dashboard_utc_to_unix_secs(raw_end),
                     ..query.clone()
@@ -7474,6 +7525,7 @@ WHERE stats_daily_api_key.date >=
                 absorb_usage_leaderboard_rows(
                     &mut grouped,
                     self.summarize_usage_leaderboard_raw(&UsageLeaderboardQuery {
+                        provider_names: query.provider_names.clone(),
                         created_from_unix_secs: dashboard_utc_to_unix_secs(aggregate_start),
                         created_until_unix_secs: dashboard_utc_to_unix_secs(aggregate_end),
                         ..query.clone()
@@ -7487,6 +7539,7 @@ WHERE stats_daily_api_key.date >=
             absorb_usage_leaderboard_rows(
                 &mut grouped,
                 self.summarize_usage_leaderboard_raw(&UsageLeaderboardQuery {
+                    provider_names: query.provider_names.clone(),
                     created_from_unix_secs: dashboard_utc_to_unix_secs(raw_start),
                     created_until_unix_secs: dashboard_utc_to_unix_secs(raw_end),
                     ..query.clone()

@@ -1202,6 +1202,9 @@ pub struct UsageAuditAggregationQuery {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct UsageAuditSummaryQuery {
+    /// Optional provider-name allowlist, intersected with provider_name; empty matches nothing.
+    #[serde(default)]
+    pub provider_names: Option<Vec<String>>,
     pub created_from_unix_secs: u64,
     pub created_until_unix_secs: u64,
     pub user_id: Option<String>,
@@ -1595,6 +1598,9 @@ pub enum UsageTimeSeriesGranularity {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct UsageTimeSeriesQuery {
+    /// Optional provider-name allowlist, intersected with provider_name; empty matches nothing.
+    #[serde(default)]
+    pub provider_names: Option<Vec<String>>,
     pub created_from_unix_secs: u64,
     pub created_until_unix_secs: u64,
     pub granularity: UsageTimeSeriesGranularity,
@@ -1629,6 +1635,9 @@ pub enum UsageLeaderboardGroupBy {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct UsageLeaderboardQuery {
+    /// Optional provider-name allowlist, intersected with provider_name; empty matches nothing.
+    #[serde(default)]
+    pub provider_names: Option<Vec<String>>,
     pub created_from_unix_secs: u64,
     pub created_until_unix_secs: u64,
     pub group_by: UsageLeaderboardGroupBy,

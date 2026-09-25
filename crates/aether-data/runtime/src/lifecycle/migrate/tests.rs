@@ -2382,6 +2382,7 @@ INSERT INTO public.stats_daily_api_key (
     .expect("API key daily aggregate fixtures should be inserted");
 
     let leaderboard_query = UsageLeaderboardQuery {
+        provider_names: None,
         created_from_unix_secs: u64::try_from(stats_day.timestamp())
             .expect("historical stats day should be nonnegative"),
         created_until_unix_secs: u64::try_from((stats_day + chrono::Duration::days(1)).timestamp())

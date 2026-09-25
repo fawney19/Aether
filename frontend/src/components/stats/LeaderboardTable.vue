@@ -77,7 +77,7 @@
           <TableCell class="font-medium">
             {{ item.rank }}
           </TableCell>
-          <TableCell>{{ item.name }}</TableCell>
+          <TableCell>{{ showMemberCount && item.id === '__ungrouped__' ? t('userStats.ungrouped') : item.name }}</TableCell>
           <TableCell
             v-if="showMemberCount"
             class="text-right"

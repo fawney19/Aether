@@ -457,6 +457,7 @@ async fn unmetered_session_audit_counts_lifecycle_without_token_or_cost_contribu
 
     let summary = repository
         .summarize_usage_audits(&UsageAuditSummaryQuery {
+            provider_names: None,
             created_from_unix_secs: 0,
             created_until_unix_secs: 1_000,
             ..UsageAuditSummaryQuery::default()
@@ -2213,6 +2214,7 @@ async fn dashboard_and_leaderboard_total_tokens_use_effective_cache_aware_tokens
 
     let leaderboard = repository
         .summarize_usage_leaderboard(&UsageLeaderboardQuery {
+            provider_names: None,
             created_from_unix_secs: 1_711_000_000,
             created_until_unix_secs: 1_711_000_001,
             group_by: UsageLeaderboardGroupBy::User,
@@ -2239,6 +2241,7 @@ async fn usage_analytics_filters_by_multiple_user_ids() {
 
     let summary = repository
         .summarize_usage_audits(&UsageAuditSummaryQuery {
+            provider_names: None,
             created_from_unix_secs: 1_711_000_000,
             created_until_unix_secs: 1_711_000_001,
             user_ids: Some(scoped_user_ids.clone()),
@@ -2250,6 +2253,7 @@ async fn usage_analytics_filters_by_multiple_user_ids() {
 
     let buckets = repository
         .summarize_usage_time_series(&UsageTimeSeriesQuery {
+            provider_names: None,
             created_from_unix_secs: 1_711_000_000,
             created_until_unix_secs: 1_711_000_001,
             granularity: UsageTimeSeriesGranularity::Day,
@@ -2271,6 +2275,7 @@ async fn usage_analytics_filters_by_multiple_user_ids() {
 
     let leaderboard = repository
         .summarize_usage_leaderboard(&UsageLeaderboardQuery {
+            provider_names: None,
             created_from_unix_secs: 1_711_000_000,
             created_until_unix_secs: 1_711_000_001,
             group_by: UsageLeaderboardGroupBy::User,
@@ -2283,6 +2288,79 @@ async fn usage_analytics_filters_by_multiple_user_ids() {
         .expect("leaderboard should filter by multiple users");
     assert_eq!(leaderboard.len(), 2);
     assert!(leaderboard.iter().all(|item| item.group_key != "user-3"));
+}
+
+#[tokio::test]
+async fn usage_analytics_intersects_provider_allowlist_and_user_scope() {
+    let mut a = sample_usage("allowed", 1_711_000_000);
+    a.provider_name = "Gemini".to_string();
+    a.user_id = Some("user-1".to_string());
+    let mut b = a.clone();
+    b.request_id = "other-provider".to_string();
+    b.provider_name = "Other".to_string();
+    let mut c = a.clone();
+    c.request_id = "other-user".to_string();
+    c.user_id = Some("user-2".to_string());
+    let repository = InMemoryUsageReadRepository::seed(vec![a, b, c]);
+    for (names, provider, count) in [
+        (
+            Some(vec!["Gemini".to_string(), "Gemini".to_string()]),
+            None,
+            1,
+        ),
+        (Some(vec![]), None, 0),
+        (
+            Some(vec!["Gemini".to_string()]),
+            Some("Other".to_string()),
+            0,
+        ),
+        (None, None, 2),
+    ] {
+        let summary = repository
+            .summarize_usage_audits(&UsageAuditSummaryQuery {
+                created_from_unix_secs: 1_711_000_000,
+                created_until_unix_secs: 1_711_000_001,
+                user_ids: Some(vec!["user-1".to_string()]),
+                provider_names: names.clone(),
+                provider_name: provider.clone(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(summary.total_requests, count);
+        let buckets = repository
+            .summarize_usage_time_series(&UsageTimeSeriesQuery {
+                created_from_unix_secs: 1_711_000_000,
+                created_until_unix_secs: 1_711_000_001,
+                user_id: None,
+                user_ids: Some(vec!["user-1".to_string()]),
+                provider_names: names.clone(),
+                provider_name: provider.clone(),
+                model: None,
+                granularity: UsageTimeSeriesGranularity::Day,
+                tz_offset_minutes: 0,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            buckets.iter().map(|row| row.total_requests).sum::<u64>(),
+            count
+        );
+        let rows = repository
+            .summarize_usage_leaderboard(&UsageLeaderboardQuery {
+                created_from_unix_secs: 1_711_000_000,
+                created_until_unix_secs: 1_711_000_001,
+                user_id: None,
+                user_ids: Some(vec!["user-1".to_string()]),
+                provider_names: names,
+                provider_name: provider,
+                model: None,
+                group_by: UsageLeaderboardGroupBy::User,
+            })
+            .await
+            .unwrap();
+        assert_eq!(rows.iter().map(|row| row.request_count).sum::<u64>(), count);
+    }
 }
 
 #[tokio::test]

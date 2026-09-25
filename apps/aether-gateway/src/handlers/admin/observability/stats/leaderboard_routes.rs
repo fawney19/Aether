@@ -78,6 +78,7 @@ pub(super) async fn maybe_build_local_admin_stats_leaderboard_response(
         };
         let summaries = state
             .summarize_usage_leaderboard(&UsageLeaderboardQuery {
+                provider_names: None,
                 created_from_unix_secs,
                 created_until_unix_secs,
                 group_by: UsageLeaderboardGroupBy::Model,
@@ -156,6 +157,7 @@ pub(super) async fn maybe_build_local_admin_stats_leaderboard_response(
         };
         let summaries = state
             .summarize_usage_leaderboard(&UsageLeaderboardQuery {
+                provider_names: None,
                 created_from_unix_secs,
                 created_until_unix_secs,
                 group_by: UsageLeaderboardGroupBy::ApiKey,
@@ -283,34 +285,6 @@ pub(super) async fn maybe_build_local_admin_stats_leaderboard_response(
             )));
         };
 
-        let summaries = state
-            .summarize_usage_leaderboard(&UsageLeaderboardQuery {
-                created_from_unix_secs,
-                created_until_unix_secs,
-                group_by: UsageLeaderboardGroupBy::User,
-                user_id: None,
-                user_ids: None,
-                provider_name: filters.provider_name,
-                model: filters.model,
-            })
-            .await?;
-        let user_ids = summaries
-            .iter()
-            .map(|item| item.group_key.clone())
-            .collect::<Vec<_>>();
-        let user_metadata = load_user_leaderboard_metadata(state, &user_ids).await?;
-        let user_usage = build_user_leaderboard_items_from_summaries(
-            &summaries,
-            &user_metadata,
-            state.has_auth_user_data_reader(),
-            state.has_user_data_reader(),
-            include_inactive,
-            exclude_admin,
-        )
-        .into_iter()
-        .map(|item| (item.id.clone(), item))
-        .collect::<BTreeMap<_, _>>();
-
         let mut leaderboard = Vec::new();
         let mut member_counts = BTreeMap::new();
         let mut active_member_counts = BTreeMap::new();
@@ -321,13 +295,38 @@ pub(super) async fn maybe_build_local_admin_stats_leaderboard_response(
                 .iter()
                 .filter(|member| !member.is_deleted && member.is_active)
                 .count();
-            let scoped_user_ids = members
+            let user_ids = members
                 .iter()
                 .filter(|member| !member.is_deleted)
                 .filter(|member| include_inactive || member.is_active)
                 .filter(|member| !exclude_admin || !member.role.eq_ignore_ascii_case("admin"))
-                .map(|member| member.user_id.as_str())
-                .collect::<BTreeSet<_>>();
+                .map(|member| member.user_id.clone())
+                .collect::<Vec<_>>();
+            let summaries = state
+                .summarize_usage_leaderboard(&UsageLeaderboardQuery {
+                    created_from_unix_secs,
+                    created_until_unix_secs,
+                    group_by: UsageLeaderboardGroupBy::User,
+                    user_id: None,
+                    user_ids: Some(user_ids),
+                    provider_names: super::super::usage_group_provider_names(state, &group).await?,
+                    provider_name: filters.provider_name.clone(),
+                    model: filters.model.clone(),
+                })
+                .await?;
+            let user_ids = summaries
+                .iter()
+                .map(|row| row.group_key.clone())
+                .collect::<Vec<_>>();
+            let metadata = load_user_leaderboard_metadata(state, &user_ids).await?;
+            let users = build_user_leaderboard_items_from_summaries(
+                &summaries,
+                &metadata,
+                state.has_auth_user_data_reader(),
+                state.has_user_data_reader(),
+                include_inactive,
+                exclude_admin,
+            );
             let mut item = AdminStatsLeaderboardItem {
                 id: group.id.clone(),
                 name: group.name,
@@ -335,17 +334,47 @@ pub(super) async fn maybe_build_local_admin_stats_leaderboard_response(
                 tokens: 0,
                 cost: 0.0,
             };
-            for user_id in scoped_user_ids {
-                if let Some(user) = user_usage.get(user_id) {
-                    item.requests = item.requests.saturating_add(user.requests);
-                    item.tokens = item.tokens.saturating_add(user.tokens);
-                    item.cost += user.cost;
-                }
+            for user in users {
+                item.requests = item.requests.saturating_add(user.requests);
+                item.tokens = item.tokens.saturating_add(user.tokens);
+                item.cost += user.cost;
             }
             member_counts.insert(group.id.clone(), member_count);
             active_member_counts.insert(group.id, active_member_count);
             leaderboard.push(item);
         }
+        let ungrouped = super::super::ungrouped_usage_users(state).await?;
+        let id = super::super::UNGROUPED_USAGE_ID.to_string();
+        member_counts.insert(id.clone(), ungrouped.len());
+        active_member_counts.insert(
+            id.clone(),
+            ungrouped.iter().filter(|user| user.is_active).count(),
+        );
+        let user_ids = ungrouped
+            .into_iter()
+            .filter(|user| include_inactive || user.is_active)
+            .filter(|user| !exclude_admin || !user.role.eq_ignore_ascii_case("admin"))
+            .map(|user| user.id)
+            .collect();
+        let rows = state
+            .summarize_usage_leaderboard(&UsageLeaderboardQuery {
+                created_from_unix_secs,
+                created_until_unix_secs,
+                group_by: UsageLeaderboardGroupBy::User,
+                user_id: None,
+                user_ids: Some(user_ids),
+                provider_names: None,
+                provider_name: filters.provider_name.clone(),
+                model: filters.model.clone(),
+            })
+            .await?;
+        leaderboard.push(AdminStatsLeaderboardItem {
+            id,
+            name: "Ungrouped".to_string(),
+            requests: rows.iter().map(|row| row.request_count).sum(),
+            tokens: rows.iter().map(|row| row.total_tokens).sum(),
+            cost: rows.iter().map(|row| row.total_cost_usd).sum(),
+        });
         leaderboard.sort_by(|left, right| compare_leaderboard_items(metric, order, left, right));
 
         return Ok(Some(build_admin_stats_user_group_leaderboard_response(
@@ -422,6 +451,8 @@ pub(super) async fn maybe_build_local_admin_stats_leaderboard_response(
         };
         let summaries = state
             .summarize_usage_leaderboard(&UsageLeaderboardQuery {
+                provider_names: super::super::resolve_usage_group_provider_names(state, query)
+                    .await?,
                 created_from_unix_secs,
                 created_until_unix_secs,
                 group_by: UsageLeaderboardGroupBy::User,

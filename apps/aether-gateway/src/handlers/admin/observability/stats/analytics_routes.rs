@@ -110,6 +110,7 @@ pub(super) async fn maybe_build_local_admin_stats_analytics_response(
         };
         let current_summary = state
             .summarize_usage_audits(&UsageAuditSummaryQuery {
+                provider_names: None,
                 created_from_unix_secs: current_from_unix_secs,
                 created_until_unix_secs: current_until_unix_secs,
                 ..Default::default()
@@ -117,6 +118,7 @@ pub(super) async fn maybe_build_local_admin_stats_analytics_response(
             .await?;
         let comparison_summary = state
             .summarize_usage_audits(&UsageAuditSummaryQuery {
+                provider_names: None,
                 created_from_unix_secs: comparison_from_unix_secs,
                 created_until_unix_secs: comparison_until_unix_secs,
                 ..Default::default()
@@ -318,6 +320,11 @@ pub(super) async fn maybe_build_local_admin_stats_analytics_response(
         };
         let buckets = state
             .summarize_usage_time_series(&UsageTimeSeriesQuery {
+                provider_names: super::super::resolve_usage_group_provider_names(
+                    state,
+                    request_context.query_string(),
+                )
+                .await?,
                 created_from_unix_secs,
                 created_until_unix_secs,
                 granularity: query_granularity,
