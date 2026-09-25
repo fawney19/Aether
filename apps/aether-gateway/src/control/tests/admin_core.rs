@@ -1,6 +1,7 @@
 use http::Uri;
 
-use crate::control::management_token_required_permission;
+use crate::control::{management_token_required_permission, GatewayPublicRequestContext};
+use crate::handlers::shared::local_proxy_route_requires_buffered_body;
 
 use super::{classify_control_route, headers};
 
@@ -206,6 +207,10 @@ fn classifies_admin_system_maintenance_write_routes_as_admin_proxy_route() {
             "/api/admin/system/important-notification/test",
             "important_notification_test",
         ),
+        (
+            "/api/admin/system/cleanup/usage/manual",
+            "cleanup_usage_manual",
+        ),
         ("/api/admin/system/cleanup", "cleanup"),
         ("/api/admin/system/purge/config", "purge_config"),
         ("/api/admin/system/purge/users", "purge_users"),
@@ -235,6 +240,28 @@ fn classifies_admin_system_maintenance_write_routes_as_admin_proxy_route() {
             Some("admin:system")
         );
         assert!(!decision.is_execution_runtime_candidate());
+
+        if matches!(
+            expected_kind,
+            "config_import"
+                | "users_import"
+                | "data_import"
+                | "smtp_test"
+                | "important_notification_test"
+                | "cleanup_usage_manual"
+        ) {
+            let context = GatewayPublicRequestContext::from_request_parts(
+                "trace-system-maintenance-write",
+                &http::Method::POST,
+                &uri,
+                &headers,
+                Some(decision),
+            );
+            assert!(
+                local_proxy_route_requires_buffered_body(&context),
+                "POST {path} should buffer request body"
+            );
+        }
     }
 }
 
@@ -303,6 +330,20 @@ fn classifies_admin_system_update_routes_as_admin_proxy_routes() {
             Some("admin:system")
         );
         assert!(!decision.is_execution_runtime_candidate());
+
+        if matches!(expected_kind, "prepare_update" | "apply_update") {
+            let context = GatewayPublicRequestContext::from_request_parts(
+                "trace-system-update-write",
+                &method,
+                &uri,
+                &headers,
+                Some(decision),
+            );
+            assert!(
+                local_proxy_route_requires_buffered_body(&context),
+                "{method} {path} should buffer request body"
+            );
+        }
     }
 }
 

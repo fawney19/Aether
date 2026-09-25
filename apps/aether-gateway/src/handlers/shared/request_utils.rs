@@ -275,6 +275,10 @@ pub(crate) fn admin_proxy_local_requires_buffered_body(
                 | (Some("system_manage"), http::Method::POST, Some("config_import"))
                 | (Some("system_manage"), http::Method::POST, Some("users_import"))
                 | (Some("system_manage"), http::Method::POST, Some("data_import"))
+                | (Some("system_manage"), http::Method::POST, Some("cleanup_usage_manual"))
+                | (Some("system_manage"), http::Method::POST, Some("smtp_test"))
+                | (Some("system_manage"), http::Method::POST, Some("prepare_update"))
+                | (Some("system_manage"), http::Method::POST, Some("apply_update"))
                 | (Some("system_manage"), http::Method::PUT, Some("settings_set"))
                 | (Some("system_manage"), http::Method::PUT, Some("config_set"))
                 | (Some("system_manage"), http::Method::PUT, Some("email_template_set"))
@@ -608,5 +612,28 @@ mod tests {
             sanitize_upstream_path_and_query(None, "/v1/chat/completions?key=passthrough"),
             "/v1/chat/completions?key=passthrough"
         );
+    }
+
+    #[test]
+    fn manual_cleanup_route_requires_buffered_body() {
+        use crate::control::GatewayPublicRequestContext;
+        let mut decision = GatewayControlDecision::synthetic(
+            "/api/admin/system/cleanup/usage/manual",
+            Some("admin_proxy".to_string()),
+            Some("system_manage".to_string()),
+            Some("cleanup_usage_manual".to_string()),
+            Some("system_manage:cleanup_usage_manual".to_string()),
+        );
+        decision.route_class = Some("admin_proxy".to_string());
+        let uri: http::Uri = "/api/admin/system/cleanup/usage/manual".parse().unwrap();
+        let headers = http::HeaderMap::new();
+        let context = GatewayPublicRequestContext::from_request_parts(
+            "trace-manual-cleanup",
+            &http::Method::POST,
+            &uri,
+            &headers,
+            Some(decision),
+        );
+        assert!(super::admin_proxy_local_requires_buffered_body(&context));
     }
 }

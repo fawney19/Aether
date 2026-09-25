@@ -687,11 +687,31 @@ async fn cleanup_usage_raw_body_fields(
     Ok(total_cleaned)
 }
 
+async fn truncate_usage_body_blobs_table(pool: &PostgresPool) -> Result<(), DataLayerError> {
+    let mut tx = pool.begin().await.map_err(postgres_error)?;
+    sqlx::query("SET LOCAL lock_timeout = '2s'")
+        .execute(&mut *tx)
+        .await
+        .map_err(postgres_error)?;
+    sqlx::query("TRUNCATE TABLE usage_body_blobs")
+        .execute(&mut *tx)
+        .await
+        .map_err(postgres_error)?;
+    tx.commit().await.map_err(postgres_error)?;
+    Ok(())
+}
+
 async fn cleanup_usage_compressed_body_fields(
     pool: &PostgresPool,
     cutoff_time: DateTime<Utc>,
     batch_size: usize,
 ) -> Result<usize, DataLayerError> {
+    if let Err(err) = truncate_usage_body_blobs_table(pool).await {
+        warn!(
+            error = %err,
+            "usage cleanup truncate usage_body_blobs table failed or timed out, falling back to batch deletion"
+        );
+    }
     let mut total_cleaned = 0usize;
     loop {
         let rows = fetch_usage_body_cleanup_rows(
