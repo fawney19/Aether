@@ -6564,6 +6564,9 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
     let mut prefetched_chunks: Vec<Bytes> = Vec::new();
     let mut provider_prefetched_body = Vec::new();
     let mut provider_prefetched_body_truncated = false;
+    // Provider bytes read during prefetch beyond the capture cap. The capture is bounded for
+    // reporting, but stream processor state must be restored from every byte consumed.
+    let mut provider_prefetched_overflow: Vec<u8> = Vec::new();
     let mut prefetched_body = Vec::new();
     let mut prefetched_inspection_body = Vec::new();
     let mut prefetched_inspection_body_truncated = false;
@@ -6815,12 +6818,18 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                         }
                     }
 
+                    let provider_captured_before = provider_prefetched_body.len();
                     append_stream_capture_bytes(
                         &mut provider_prefetched_body,
                         &chunk,
                         MAX_STREAM_PREFETCH_BYTES,
                         &mut provider_prefetched_body_truncated,
                     );
+                    let provider_captured =
+                        provider_prefetched_body.len() - provider_captured_before;
+                    if provider_captured < chunk.len() {
+                        provider_prefetched_overflow.extend_from_slice(&chunk[provider_captured..]);
+                    }
                     append_stream_capture_bytes(
                         &mut prefetched_inspection_body,
                         &chunk,
@@ -7248,6 +7257,11 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
     let report_context_owned = report_context;
     let normalized_stream_report_context_owned = normalized_stream_report_context;
     let lifecycle_seed_for_report = lifecycle_seed;
+    let provider_prefetched_replay_body = [
+        provider_prefetched_body.as_slice(),
+        provider_prefetched_overflow.as_slice(),
+    ]
+    .concat();
     let provider_prefetched_body_for_report = provider_prefetched_body;
     let prefetched_body_for_report = prefetched_body;
     let prefetched_chunks_for_body = prefetched_chunks;
@@ -7467,7 +7481,7 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
             let normalized_prefetched_chunk = if let Some(normalizer) =
                 private_stream_normalizer.as_mut()
             {
-                match normalizer.push_chunk(&provider_prefetched_body_for_report) {
+                match normalizer.push_chunk(&provider_prefetched_replay_body) {
                     Ok(normalized_chunk) => Some(normalized_chunk),
                     Err(err) => {
                         warn!(
@@ -7494,7 +7508,7 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
             };
             let replay_chunk = normalized_prefetched_chunk
                 .as_deref()
-                .unwrap_or(provider_prefetched_body_for_report.as_slice());
+                .unwrap_or(provider_prefetched_replay_body.as_slice());
             if let Some(error_body_json) = provider_error_inspection
                 .observe(stream_usage_report_context.as_ref(), replay_chunk)
             {
@@ -8933,6 +8947,102 @@ mod tests {
             transport_profile: None,
             timeouts: None,
         }
+    }
+
+    #[tokio::test]
+    async fn prefetch_overflow_bytes_are_replayed_into_stream_rewriter_state() {
+        // The opening events of a tool-heavy Responses stream echo the request and easily exceed
+        // MAX_STREAM_PREFETCH_BYTES. The frame that crosses the cap ends mid-line, so the bytes
+        // past the cap only live in the prefetch-phase rewriter buffer. They must survive the
+        // handoff to the pump task, otherwise the client receives a line with a hole in it.
+        let request_id = "req-prefetch-overflow-replay";
+        let plan = codex_cyber_policy_plan(request_id);
+        let provider_catalog = provider_catalog_for_plan(&plan, None);
+        let data_state = crate::data::GatewayDataState::with_provider_transport_reader_for_tests(
+            Arc::new(provider_catalog),
+            DEVELOPMENT_ENCRYPTION_KEY,
+        );
+        let state = AppState::new()
+            .expect("app state should build")
+            .with_data_state_for_tests(data_state);
+        let echoed_tools = "x".repeat(11_000);
+        let created = format!(
+            "event: response.created\ndata: {{\"type\":\"response.created\",\"response\":{{\"instructions\":\"{echoed_tools}\"}}}}\n\n"
+        );
+        let in_progress = format!(
+            "event: response.in_progress\ndata: {{\"type\":\"response.in_progress\",\"response\":{{\"instructions\":\"{echoed_tools}\"}}}}\n\n"
+        );
+        let delta = "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n".to_string();
+        assert!(created.len() < crate::execution_runtime::MAX_STREAM_PREFETCH_BYTES);
+        let split_at = crate::execution_runtime::MAX_STREAM_PREFETCH_BYTES - created.len() + 2_048;
+        assert!(split_at < in_progress.len());
+        let upstream_chunks = vec![
+            created.clone(),
+            in_progress[..split_at].to_string(),
+            in_progress[split_at..].to_string(),
+            delta.clone(),
+        ];
+        let expected_body = upstream_chunks.concat();
+        let frame_stream = stream! {
+            yield Ok::<Bytes, std::io::Error>(ndjson_frame(StreamFrame {
+                frame_type: StreamFrameType::Headers,
+                payload: StreamFramePayload::Headers {
+                    status_code: 200,
+                    headers: BTreeMap::from([(
+                        "content-type".to_string(),
+                        "text/event-stream".to_string(),
+                    )]),
+                    response_observation: None,
+                },
+            }));
+            for chunk in upstream_chunks {
+                yield Ok::<Bytes, std::io::Error>(ndjson_frame(StreamFrame {
+                    frame_type: StreamFrameType::Data,
+                    payload: StreamFramePayload::Data {
+                        chunk_b64: None,
+                        text: Some(chunk),
+                    },
+                }));
+            }
+            yield Ok::<Bytes, std::io::Error>(ndjson_frame(StreamFrame::eof()));
+        }
+        .boxed();
+
+        let response = execute_stream_from_frame_stream(
+            &state,
+            plan,
+            &format!("trace-{request_id}"),
+            &test_decision(),
+            "openai_responses_stream",
+            Some("openai_responses_stream_success".to_string()),
+            Some(json!({
+                "request_id": request_id,
+                "candidate_id": format!("candidate-{request_id}"),
+                "candidate_index": 0,
+                "retry_index": 0,
+                "provider_api_format": "openai:responses",
+                "client_api_format": "openai:responses"
+            })),
+            crate::clock::current_unix_ms(),
+            Instant::now(),
+            RequestStageTrace::from_env(),
+            true,
+            frame_stream,
+            None,
+        )
+        .await
+        .expect("stream execution should succeed")
+        .expect("stream execution should return a response");
+
+        let body = tokio::time::timeout(
+            Duration::from_secs(5),
+            to_bytes(response.into_body(), usize::MAX),
+        )
+        .await
+        .expect("client body should finish")
+        .expect("client body should read");
+        assert_eq!(body.len(), expected_body.len());
+        assert_eq!(body.as_ref(), expected_body.as_bytes());
     }
 
     async fn execute_prefetched_codex_cyber_policy_failure(
