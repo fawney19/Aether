@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 use serde_json::Value;
@@ -354,7 +355,7 @@ enum ProviderPrivateStreamNormalizeMode {
 }
 
 pub struct ProviderPrivateStreamNormalizer<'a> {
-    report_context: &'a Value,
+    report_context: Cow<'a, Value>,
     buffered: Vec<u8>,
     current_event_type: Option<String>,
     mode: ProviderPrivateStreamNormalizeMode,
@@ -401,7 +402,7 @@ pub fn maybe_build_provider_private_stream_normalizer<'a>(
         return None;
     };
     Some(ProviderPrivateStreamNormalizer {
-        report_context,
+        report_context: Cow::Borrowed(report_context),
         buffered: Vec::new(),
         current_event_type: None,
         mode,
@@ -422,10 +423,20 @@ pub fn extract_provider_private_stream_error_body(
 }
 
 impl ProviderPrivateStreamNormalizer<'_> {
+    /// Move parser state across task boundaries without replaying captured bytes.
+    pub fn into_owned(self) -> ProviderPrivateStreamNormalizer<'static> {
+        ProviderPrivateStreamNormalizer {
+            report_context: Cow::Owned(self.report_context.into_owned()),
+            buffered: self.buffered,
+            current_event_type: self.current_event_type,
+            mode: self.mode,
+        }
+    }
+
     pub fn push_chunk(&mut self, chunk: &[u8]) -> Result<Vec<u8>, AiSurfaceFinalizeError> {
         match &mut self.mode {
             ProviderPrivateStreamNormalizeMode::KiroToClaudeCli(state) => {
-                state.push_chunk(self.report_context, chunk)
+                state.push_chunk(self.report_context.as_ref(), chunk)
             }
             ProviderPrivateStreamNormalizeMode::EnvelopeUnwrap => {
                 let next_len = self
@@ -441,7 +452,7 @@ impl ProviderPrivateStreamNormalizer<'_> {
                     )));
                 }
                 self.buffered.extend_from_slice(chunk);
-                if report_context_is_windsurf_envelope(self.report_context)
+                if report_context_is_windsurf_envelope(self.report_context.as_ref())
                     && buffer_looks_like_connect_frame(&self.buffered)
                 {
                     return drain_windsurf_connect_json_frames(&mut self.buffered);
@@ -451,7 +462,7 @@ impl ProviderPrivateStreamNormalizer<'_> {
                     let line = self.buffered.drain(..=line_end).collect::<Vec<_>>();
                     output.extend(
                         transform_provider_private_stream_line_with_event_state(
-                            self.report_context,
+                            self.report_context.as_ref(),
                             line,
                             &mut self.current_event_type,
                         )
@@ -466,20 +477,20 @@ impl ProviderPrivateStreamNormalizer<'_> {
     pub fn finish(&mut self) -> Result<Vec<u8>, AiSurfaceFinalizeError> {
         match &mut self.mode {
             ProviderPrivateStreamNormalizeMode::KiroToClaudeCli(state) => {
-                state.finish(self.report_context)
+                state.finish(self.report_context.as_ref())
             }
             ProviderPrivateStreamNormalizeMode::EnvelopeUnwrap => {
                 if self.buffered.is_empty() {
                     return Ok(Vec::new());
                 }
-                if report_context_is_windsurf_envelope(self.report_context)
+                if report_context_is_windsurf_envelope(self.report_context.as_ref())
                     && buffer_looks_like_connect_frame(&self.buffered)
                 {
                     return drain_windsurf_connect_json_frames(&mut self.buffered);
                 }
                 let line = std::mem::take(&mut self.buffered);
                 transform_provider_private_stream_line_with_event_state(
-                    self.report_context,
+                    self.report_context.as_ref(),
                     line,
                     &mut self.current_event_type,
                 )
@@ -939,7 +950,7 @@ fn postprocess_private_response_value(data: &mut Value, report_context: &Value) 
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use serde_json::{json, Value};
 
     use super::{
         extract_provider_private_stream_error_body, maybe_build_provider_private_stream_normalizer,
@@ -1114,6 +1125,44 @@ mod tests {
 
         assert!(text.contains(r#""object":"chat.completion.chunk""#));
         assert!(text.contains(r#""content":"chunk""#));
+    }
+
+    #[test]
+    fn owned_handoff_preserves_private_binary_frame() {
+        let text = "frame".repeat(10_000);
+        let framed = connect_json_frame(
+            0,
+            &serde_json::to_vec(&json!({
+                "responseId":"ws-handoff", "response":{"text":text}
+            }))
+            .unwrap(),
+        );
+        let split = 17_735;
+        let mut normalizer = {
+            let context = json!({"has_envelope":true,
+                "envelope_name":"windsurf:GetChatMessage", "provider_api_format":"openai:chat"});
+            let mut normalizer =
+                maybe_build_provider_private_stream_normalizer(Some(&context)).unwrap();
+            assert!(normalizer.push_chunk(&framed[..split]).unwrap().is_empty());
+            normalizer.into_owned()
+        };
+        let mut output = normalizer.push_chunk(&framed[split..]).unwrap();
+        output.extend(normalizer.finish().unwrap());
+        let output = String::from_utf8(output).unwrap();
+        let events: Vec<Value> = output
+            .lines()
+            .filter_map(|l| l.strip_prefix("data: "))
+            .filter(|p| *p != "[DONE]")
+            .map(|p| serde_json::from_str(p).unwrap())
+            .collect();
+        let recovered: String = events
+            .iter()
+            .filter_map(|e| {
+                e.pointer("/choices/0/delta/content")
+                    .and_then(Value::as_str)
+            })
+            .collect();
+        assert_eq!(recovered, text);
     }
 
     #[test]

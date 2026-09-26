@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 use serde_json::{json, Map, Value};
@@ -226,7 +227,7 @@ enum AiSurfaceStreamRewriteState {
 }
 
 pub struct AiSurfaceStreamRewriter<'a> {
-    report_context: &'a Value,
+    report_context: Cow<'a, Value>,
     buffered: Vec<u8>,
     state: AiSurfaceStreamRewriteState,
 }
@@ -271,30 +272,39 @@ pub fn maybe_build_ai_surface_stream_rewriter<'a>(
     };
 
     Some(AiSurfaceStreamRewriter {
-        report_context,
+        report_context: Cow::Borrowed(report_context),
         buffered: Vec::new(),
         state,
     })
 }
 
 impl AiSurfaceStreamRewriter<'_> {
+    /// Move parser state across task boundaries without replaying captured bytes.
+    pub fn into_owned(self) -> AiSurfaceStreamRewriter<'static> {
+        AiSurfaceStreamRewriter {
+            report_context: Cow::Owned(self.report_context.into_owned()),
+            buffered: self.buffered,
+            state: self.state,
+        }
+    }
+
     pub fn push_chunk(&mut self, chunk: &[u8]) -> Result<Vec<u8>, AiSurfaceFinalizeError> {
         match &mut self.state {
             AiSurfaceStreamRewriteState::OpenAiImage(state) => {
-                state.push_chunk(self.report_context, chunk)
+                state.push_chunk(self.report_context.as_ref(), chunk)
             }
             AiSurfaceStreamRewriteState::OpenAiImageToOpenAiChat(state) => {
-                state.push_chunk(self.report_context, chunk)
+                state.push_chunk(self.report_context.as_ref(), chunk)
             }
             AiSurfaceStreamRewriteState::ClaudeReadToolSanitize(state) => {
-                state.push_chunk(self.report_context, chunk)
+                state.push_chunk(self.report_context.as_ref(), chunk)
             }
             AiSurfaceStreamRewriteState::KiroToClaudeCli(state) => {
-                state.push_chunk(self.report_context, chunk)
+                state.push_chunk(self.report_context.as_ref(), chunk)
             }
             AiSurfaceStreamRewriteState::KiroToClaudeCliThenStandard { kiro, standard } => {
-                let claude_bytes = kiro.push_chunk(self.report_context, chunk)?;
-                transform_standard_bytes(standard, self.report_context, claude_bytes)
+                let claude_bytes = kiro.push_chunk(self.report_context.as_ref(), chunk)?;
+                transform_standard_bytes(standard, self.report_context.as_ref(), claude_bytes)
             }
             AiSurfaceStreamRewriteState::EnvelopeUnwrap
             | AiSurfaceStreamRewriteState::ModelDirectiveDisplay
@@ -313,23 +323,25 @@ impl AiSurfaceStreamRewriter<'_> {
 
     pub fn finish(&mut self) -> Result<Vec<u8>, AiSurfaceFinalizeError> {
         match &mut self.state {
-            AiSurfaceStreamRewriteState::OpenAiImage(state) => state.finish(self.report_context),
+            AiSurfaceStreamRewriteState::OpenAiImage(state) => {
+                state.finish(self.report_context.as_ref())
+            }
             AiSurfaceStreamRewriteState::OpenAiImageToOpenAiChat(state) => {
-                state.finish(self.report_context)
+                state.finish(self.report_context.as_ref())
             }
             AiSurfaceStreamRewriteState::ClaudeReadToolSanitize(state) => {
-                state.finish(self.report_context)
+                state.finish(self.report_context.as_ref())
             }
             AiSurfaceStreamRewriteState::KiroToClaudeCli(state) => {
-                state.finish(self.report_context)
+                state.finish(self.report_context.as_ref())
             }
             AiSurfaceStreamRewriteState::KiroToClaudeCliThenStandard { kiro, standard } => {
                 let mut output = transform_standard_bytes(
                     standard,
-                    self.report_context,
-                    kiro.finish(self.report_context)?,
+                    self.report_context.as_ref(),
+                    kiro.finish(self.report_context.as_ref())?,
                 )?;
-                output.extend(standard.finish(self.report_context)?);
+                output.extend(standard.finish(self.report_context.as_ref())?);
                 Ok(output)
             }
             AiSurfaceStreamRewriteState::EnvelopeUnwrap
@@ -338,14 +350,14 @@ impl AiSurfaceStreamRewriter<'_> {
             | AiSurfaceStreamRewriteState::Standard(_) => {
                 if self.buffered.is_empty() {
                     if let AiSurfaceStreamRewriteState::Standard(state) = &mut self.state {
-                        return state.finish(self.report_context);
+                        return state.finish(self.report_context.as_ref());
                     }
                     return Ok(Vec::new());
                 }
                 let line = std::mem::take(&mut self.buffered);
                 let mut output = self.transform_line(line)?;
                 if let AiSurfaceStreamRewriteState::Standard(state) = &mut self.state {
-                    output.extend(state.finish(self.report_context)?);
+                    output.extend(state.finish(self.report_context.as_ref())?);
                 }
                 Ok(output)
             }
@@ -365,18 +377,19 @@ impl AiSurfaceStreamRewriter<'_> {
     fn transform_line(&mut self, line: Vec<u8>) -> Result<Vec<u8>, AiSurfaceFinalizeError> {
         match &mut self.state {
             AiSurfaceStreamRewriteState::EnvelopeUnwrap => {
-                let output = transform_provider_private_stream_line(self.report_context, line)
-                    .map_err(AiSurfaceFinalizeError::from)?;
-                rewrite_model_directive_stream_line(self.report_context, output)
+                let output =
+                    transform_provider_private_stream_line(self.report_context.as_ref(), line)
+                        .map_err(AiSurfaceFinalizeError::from)?;
+                rewrite_model_directive_stream_line(self.report_context.as_ref(), output)
             }
             AiSurfaceStreamRewriteState::ModelDirectiveDisplay => {
-                rewrite_model_directive_stream_line(self.report_context, line)
+                rewrite_model_directive_stream_line(self.report_context.as_ref(), line)
             }
             AiSurfaceStreamRewriteState::OpenAiResponsesCompat => {
-                rewrite_openai_responses_compat_stream_line(self.report_context, line)
+                rewrite_openai_responses_compat_stream_line(self.report_context.as_ref(), line)
             }
             AiSurfaceStreamRewriteState::Standard(state) => {
-                transform_standard_line(state, self.report_context, line)
+                transform_standard_line(state, self.report_context.as_ref(), line)
             }
             AiSurfaceStreamRewriteState::OpenAiImage(_)
             | AiSurfaceStreamRewriteState::OpenAiImageToOpenAiChat(_)
@@ -892,7 +905,7 @@ fn is_standard_cli_client_api_format(api_format: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use serde_json::{json, Value};
 
     use super::{
         maybe_build_ai_surface_stream_rewriter, resolve_finalize_stream_rewrite_mode,
@@ -1065,6 +1078,50 @@ data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_123\",\"object\
         assert!(output.contains("event: response.created"));
         assert!(output.contains("\"model\":\"gpt-5.5-xhigh\""));
         assert!(!output.contains("\"model\":\"gpt-5.5\""));
+    }
+
+    #[test]
+    fn owned_handoff_preserves_partial_utf8_and_conversion_state() {
+        for client in ["openai:responses", "openai:chat"] {
+            let text = "界".repeat(12_000);
+            let delta = format!(
+                "data: {}\n\n",
+                json!({
+                    "type":"response.output_text.delta", "response_id":"resp_handoff",
+                    "item_id":"msg_handoff", "output_index":0, "content_index":0, "delta":text,
+                })
+            );
+            let split = delta.find('界').unwrap() + 17_002;
+            assert!(!delta.is_char_boundary(split));
+            let (mut owned, mut output) = {
+                let context = json!({"provider_api_format":"openai:responses",
+                    "client_api_format":client, "needs_conversion":client == "openai:chat"});
+                let mut parser = maybe_build_ai_surface_stream_rewriter(Some(&context)).unwrap();
+                let output = parser.push_chunk(&delta.as_bytes()[..split]).unwrap();
+                (parser.into_owned(), output)
+            };
+            output.extend(owned.push_chunk(&delta.as_bytes()[split..]).unwrap());
+            output.extend(owned.finish().unwrap());
+            let output = String::from_utf8(output).unwrap();
+            let events: Vec<Value> = output
+                .lines()
+                .filter_map(|l| l.strip_prefix("data: "))
+                .filter(|p| *p != "[DONE]")
+                .map(|p| serde_json::from_str(p).unwrap())
+                .collect();
+            let recovered: String = events
+                .iter()
+                .filter_map(|e| {
+                    if client == "openai:responses" {
+                        e["delta"].as_str()
+                    } else {
+                        e.pointer("/choices/0/delta/content")
+                            .and_then(Value::as_str)
+                    }
+                })
+                .collect();
+            assert_eq!(recovered, text);
+        }
     }
 
     #[test]
