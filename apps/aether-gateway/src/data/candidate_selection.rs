@@ -6,7 +6,7 @@ use aether_data_contracts::repository::candidate_selection::{
 use aether_scheduler_core::{
     auth_constraints_allow_api_format, collect_global_model_names_for_required_capability,
     enumerate_minimal_candidate_selection_with_model_directives, normalize_api_format,
-    resolve_requested_global_model_name_with_model_directives,
+    resolve_requested_global_model_name_with_reserved_global_model,
     row_supports_requested_model_with_model_directives, EnumerateMinimalCandidateSelectionInput,
     SchedulerAuthConstraints, SchedulerMinimalCandidateSelectionCandidate,
 };
@@ -56,6 +56,37 @@ pub(crate) trait MinimalCandidateSelectionRowSource {
         &self,
         query: &StoredPoolKeyCandidateRowsQuery,
     ) -> Result<Vec<StoredMinimalCandidateSelectionRow>, DataLayerError>;
+
+    /// Returns the canonical global model name when `model_name` is one, so the
+    /// caller can keep provider-side aliases out of a request that names a
+    /// global model. Sources without a global model reader answer `None`, which
+    /// leaves matching unrestricted.
+    async fn read_reserved_global_model_name(
+        &self,
+        _model_name: &str,
+    ) -> Result<Option<String>, DataLayerError> {
+        Ok(None)
+    }
+}
+
+/// Resolves the reserved global model name for `routing_model`.
+///
+/// Rows already in hand answer the question for free whenever one of them is
+/// bound to a global model of that exact name; only a request that no local row
+/// claims as a global model needs the lookup, which keeps the extra read off the
+/// path every ordinary request takes.
+pub(crate) async fn resolve_reserved_global_model_name(
+    source: &(impl MinimalCandidateSelectionRowSource + Sync),
+    rows: &[StoredMinimalCandidateSelectionRow],
+    routing_model: &str,
+) -> Result<Option<String>, DataLayerError> {
+    if rows
+        .iter()
+        .any(|row| row.global_model_name == routing_model)
+    {
+        return Ok(Some(routing_model.to_string()));
+    }
+    source.read_reserved_global_model_name(routing_model).await
 }
 
 pub(crate) const REQUESTED_MODEL_CANDIDATE_PAGE_SIZE: u32 = 256;
@@ -102,12 +133,16 @@ pub(crate) async fn read_requested_model_rows(
         return Ok(None);
     }
 
+    let reserved_global_model_name =
+        resolve_reserved_global_model_name(state, &rows, requested_model_name).await?;
     let Some(resolved_global_model_name) =
-        resolve_requested_global_model_name_with_model_directives(
+        resolve_requested_global_model_name_with_reserved_global_model(
             &rows,
             requested_model_name,
             api_format,
             enable_model_directives,
+            None,
+            reserved_global_model_name.as_deref(),
         )
     else {
         return Ok(None);
