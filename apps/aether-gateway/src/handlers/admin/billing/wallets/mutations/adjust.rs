@@ -63,13 +63,14 @@ pub(in super::super) async fn build_admin_wallet_adjust_response(
     }
     let operator_id = admin_wallet_operator_id(request_context);
     let has_wallet_writer = state.has_wallet_data_writer();
-    let Some((wallet, transaction)) = state
+    let Some((wallet, Some(transaction))) = state
         .admin_adjust_wallet_balance(
             &wallet_id,
             amount_usd,
             &balance_type,
             operator_id.as_deref(),
             description.as_deref(),
+            false,
         )
         .await?
     else {

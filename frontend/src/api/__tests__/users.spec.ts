@@ -17,7 +17,7 @@ vi.mock('@/utils/cache', () => ({
   cachedRequest: cachedRequestMock,
 }))
 
-import { usersApi } from '@/api/users'
+import { buildUserBatchBalanceAdjustmentPayload, usersApi } from '@/api/users'
 
 describe('usersApi admin list query', () => {
   beforeEach(() => {
@@ -102,5 +102,27 @@ describe('usersApi admin list query', () => {
       { id: 'target-key', created_at: '2026-07-17T00:00:00Z' },
     ])
     expect(getMock).toHaveBeenCalledWith('/api/admin/users/target-user/api-keys')
+  })
+})
+
+describe('user batch wallet balance payload', () => {
+  it('builds an addition payload from a valid positive amount', () => {
+    expect(buildUserBatchBalanceAdjustmentPayload('add', '12.5')).toEqual({
+      operation: 'add',
+      amount: 12.5,
+    })
+  })
+
+  it('builds a deduction payload from a valid positive amount', () => {
+    expect(buildUserBatchBalanceAdjustmentPayload('deduct', 4)).toEqual({
+      operation: 'deduct',
+      amount: 4,
+    })
+  })
+
+  it('rejects zero, blank, and non-finite amounts', () => {
+    expect(buildUserBatchBalanceAdjustmentPayload('add', '0')).toBeNull()
+    expect(buildUserBatchBalanceAdjustmentPayload('deduct', '')).toBeNull()
+    expect(buildUserBatchBalanceAdjustmentPayload('deduct', '1e999')).toBeNull()
   })
 })

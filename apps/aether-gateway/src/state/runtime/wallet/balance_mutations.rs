@@ -1,8 +1,198 @@
 use crate::{AdminWalletPaymentOrderRecord, AdminWalletTransactionRecord, AppState, GatewayError};
+use aether_data::repository::wallet::{
+    AdjustWalletBalanceInBatchInput, AdminUserWalletBalanceBatchUserOutcome,
+    PrepareAdminUserWalletBalanceBatchInput, PrepareAdminUserWalletBalanceBatchOutcome,
+    StoredAdminUserWalletBalanceBatch,
+};
+use std::collections::BTreeMap;
 
 use super::admin_wallet_build_order_no;
 
 impl AppState {
+    pub(crate) async fn prepare_admin_user_wallet_balance_batch(
+        &self,
+        input: PrepareAdminUserWalletBalanceBatchInput,
+    ) -> Result<PrepareAdminUserWalletBalanceBatchOutcome, GatewayError> {
+        #[cfg(test)]
+        if let Some(store) = self.auth_wallet_batch_store_for_tests.as_ref() {
+            let mut batches = store.lock().expect("auth wallet batch store should lock");
+            let key = (input.admin_user_id.clone(), input.idempotency_key.clone());
+            if let Some(existing) = batches.get(&key) {
+                if existing.request_fingerprint != input.request_fingerprint {
+                    return Ok(PrepareAdminUserWalletBalanceBatchOutcome::Conflict);
+                }
+                return Ok(PrepareAdminUserWalletBalanceBatchOutcome::Ready(
+                    existing.clone(),
+                ));
+            }
+            let batch = StoredAdminUserWalletBalanceBatch {
+                admin_user_id: input.admin_user_id,
+                idempotency_key: input.idempotency_key,
+                request_fingerprint: input.request_fingerprint,
+                target_user_ids: input.target_user_ids,
+                missing_user_ids: input.missing_user_ids,
+                warnings: input.warnings,
+                user_outcomes: BTreeMap::new(),
+            };
+            batches.insert(key, batch.clone());
+            return Ok(PrepareAdminUserWalletBalanceBatchOutcome::Ready(batch));
+        }
+
+        self.data
+            .prepare_admin_user_wallet_balance_batch(input)
+            .await
+            .map_err(|error| GatewayError::Internal(error.to_string()))?
+            .ok_or_else(|| {
+                GatewayError::Internal("admin wallet batch storage is unavailable".to_string())
+            })
+    }
+
+    pub(crate) async fn get_admin_user_wallet_balance_batch(
+        &self,
+        admin_user_id: &str,
+        idempotency_key: &str,
+        request_fingerprint: &str,
+    ) -> Result<Option<PrepareAdminUserWalletBalanceBatchOutcome>, GatewayError> {
+        #[cfg(test)]
+        if let Some(store) = self.auth_wallet_batch_store_for_tests.as_ref() {
+            let batches = store.lock().expect("auth wallet batch store should lock");
+            return Ok(batches
+                .get(&(admin_user_id.to_string(), idempotency_key.to_string()))
+                .map(|existing| {
+                    if existing.request_fingerprint != request_fingerprint {
+                        PrepareAdminUserWalletBalanceBatchOutcome::Conflict
+                    } else {
+                        PrepareAdminUserWalletBalanceBatchOutcome::Ready(existing.clone())
+                    }
+                }));
+        }
+
+        self.data
+            .get_admin_user_wallet_balance_batch(
+                admin_user_id,
+                idempotency_key,
+                request_fingerprint,
+            )
+            .await
+            .map_err(|error| GatewayError::Internal(error.to_string()))
+    }
+
+    pub(crate) async fn adjust_admin_user_wallet_balance_batch_user(
+        &self,
+        input: AdjustWalletBalanceInBatchInput,
+    ) -> Result<AdminUserWalletBalanceBatchUserOutcome, GatewayError> {
+        #[cfg(test)]
+        if let Some(store) = self.auth_wallet_batch_store_for_tests.as_ref() {
+            let _operation = self.auth_wallet_batch_operation_lock_for_tests.lock().await;
+            let key = (input.admin_user_id.clone(), input.idempotency_key.clone());
+            if let Some(existing) = store
+                .lock()
+                .expect("auth wallet batch store should lock")
+                .get(&key)
+                .and_then(|batch| batch.user_outcomes.get(&input.user_id))
+                .cloned()
+            {
+                return Ok(existing);
+            }
+            let target_exists = store
+                .lock()
+                .expect("auth wallet batch store should lock")
+                .get(&key)
+                .is_some_and(|batch| batch.target_user_ids.contains(&input.user_id));
+            if !target_exists {
+                return Err(GatewayError::Internal(
+                    "user is outside the prepared admin wallet batch".to_string(),
+                ));
+            }
+            let adjustment = input.adjustment;
+            let result = self
+                .admin_adjust_wallet_balance(
+                    &adjustment.wallet_id,
+                    adjustment.amount_usd,
+                    &adjustment.balance_type,
+                    adjustment.operator_id.as_deref(),
+                    adjustment.description.as_deref(),
+                    adjustment.clamp_deduction_to_available_balance,
+                )
+                .await?;
+            let outcome = if result.is_some() {
+                AdminUserWalletBalanceBatchUserOutcome::Succeeded
+            } else {
+                AdminUserWalletBalanceBatchUserOutcome::Failed("用户钱包不可用".to_string())
+            };
+            if let Some(batch) = store
+                .lock()
+                .expect("auth wallet batch store should lock")
+                .get_mut(&key)
+            {
+                batch.user_outcomes.insert(input.user_id, outcome.clone());
+            }
+            return Ok(outcome);
+        }
+
+        self.data
+            .adjust_admin_user_wallet_balance_batch_user(input)
+            .await
+            .map_err(|error| GatewayError::Internal(error.to_string()))?
+            .ok_or_else(|| {
+                GatewayError::Internal("admin wallet batch storage is unavailable".to_string())
+            })
+    }
+
+    pub(crate) async fn record_admin_user_wallet_balance_batch_failure(
+        &self,
+        admin_user_id: &str,
+        idempotency_key: &str,
+        user_id: &str,
+        reason: &str,
+    ) -> Result<AdminUserWalletBalanceBatchUserOutcome, GatewayError> {
+        #[cfg(test)]
+        if self
+            .auth_wallet_batch_failure_record_error_for_tests
+            .as_deref()
+            == Some(user_id)
+        {
+            return Err(GatewayError::Internal(
+                "injected wallet batch failure-record error".to_string(),
+            ));
+        }
+
+        #[cfg(test)]
+        if let Some(store) = self.auth_wallet_batch_store_for_tests.as_ref() {
+            let _operation = self.auth_wallet_batch_operation_lock_for_tests.lock().await;
+            let key = (admin_user_id.to_string(), idempotency_key.to_string());
+            let mut batches = store.lock().expect("auth wallet batch store should lock");
+            let batch = batches.get_mut(&key).ok_or_else(|| {
+                GatewayError::Internal("admin wallet batch was not prepared".to_string())
+            })?;
+            if !batch.target_user_ids.iter().any(|target| target == user_id) {
+                return Err(GatewayError::Internal(
+                    "user is outside the prepared admin wallet batch".to_string(),
+                ));
+            }
+            return Ok(batch
+                .user_outcomes
+                .entry(user_id.to_string())
+                .or_insert_with(|| {
+                    AdminUserWalletBalanceBatchUserOutcome::Failed(reason.to_string())
+                })
+                .clone());
+        }
+
+        self.data
+            .record_admin_user_wallet_balance_batch_failure(
+                admin_user_id,
+                idempotency_key,
+                user_id,
+                reason,
+            )
+            .await
+            .map_err(|error| GatewayError::Internal(error.to_string()))?
+            .ok_or_else(|| {
+                GatewayError::Internal("admin wallet batch storage is unavailable".to_string())
+            })
+    }
+
     pub(crate) async fn admin_adjust_wallet_balance(
         &self,
         wallet_id: &str,
@@ -10,13 +200,21 @@ impl AppState {
         balance_type: &str,
         operator_id: Option<&str>,
         description: Option<&str>,
+        clamp_deduction_to_available_balance: bool,
     ) -> Result<
         Option<(
             aether_data::repository::wallet::StoredWalletSnapshot,
-            AdminWalletTransactionRecord,
+            Option<AdminWalletTransactionRecord>,
         )>,
         GatewayError,
     > {
+        #[cfg(test)]
+        if self.auth_wallet_adjustment_error_for_tests.as_deref() == Some(wallet_id) {
+            return Err(GatewayError::Internal(
+                "injected test wallet adjustment failure".to_string(),
+            ));
+        }
+
         #[cfg(test)]
         if let Some(store) = self.auth_wallet_store.as_ref() {
             let mut guard = store.lock().expect("auth wallet store should lock");
@@ -27,6 +225,14 @@ impl AppState {
             let before_recharge = wallet.balance;
             let before_gift = wallet.gift_balance;
             let before_total = before_recharge + before_gift;
+            let amount_usd = if clamp_deduction_to_available_balance && amount_usd < 0.0 {
+                -(-amount_usd).min(before_total.max(0.0))
+            } else {
+                amount_usd
+            };
+            if amount_usd == 0.0 {
+                return Ok(Some((wallet.clone(), None)));
+            }
             let mut after_recharge = before_recharge;
             let mut after_gift = before_gift;
 
@@ -90,7 +296,7 @@ impl AppState {
             let updated_wallet = wallet.clone();
             drop(guard);
             self.invalidate_auth_context_cache();
-            return Ok(Some((updated_wallet, transaction)));
+            return Ok(Some((updated_wallet, Some(transaction))));
         }
 
         Ok(self
@@ -100,10 +306,15 @@ impl AppState {
                 balance_type: balance_type.to_string(),
                 operator_id: operator_id.map(ToOwned::to_owned),
                 description: description.map(ToOwned::to_owned),
+                clamp_deduction_to_available_balance,
+                batch_context: None,
             })
             .await?
             .map(|(wallet, transaction)| {
-                (wallet, stored_wallet_transaction_to_gateway(transaction))
+                (
+                    wallet,
+                    transaction.map(stored_wallet_transaction_to_gateway),
+                )
             }))
     }
 

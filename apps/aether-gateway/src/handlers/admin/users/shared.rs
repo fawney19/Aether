@@ -165,6 +165,18 @@ pub(super) fn management_token_may_administer_user_accounts(
     })
 }
 
+pub(super) fn management_token_may_adjust_admin_wallet_balance(
+    request_context: &crate::handlers::admin::request::AdminRequestContext<'_>,
+) -> bool {
+    request_context.decision().is_some_and(|decision| {
+        crate::control::management_token_principal_has_permission(decision, "admin:wallets:write")
+            || crate::control::management_token_principal_has_permission(
+                decision,
+                "admin:wallets:admin",
+            )
+    })
+}
+
 pub(super) fn build_admin_users_permission_denied_response(
     request_context: &crate::handlers::admin::request::AdminRequestContext<'_>,
 ) -> Response<Body> {
@@ -188,6 +200,34 @@ pub(super) fn build_admin_users_permission_denied_response(
         "admin_user_account_permission_denied",
         "permission_denied",
         "admin_user_account",
+        actor_id,
+    )
+}
+
+pub(super) fn build_admin_users_wallet_permission_denied_response(
+    request_context: &crate::handlers::admin::request::AdminRequestContext<'_>,
+) -> Response<Body> {
+    let actor_id = request_context
+        .decision()
+        .and_then(|decision| decision.admin_principal.as_ref())
+        .and_then(|principal| principal.management_token_id.as_deref())
+        .unwrap_or("unknown");
+    crate::handlers::admin::shared::attach_admin_audit_response(
+        (
+            http::StatusCode::FORBIDDEN,
+            Json(json!({
+                "detail": "management token permission denied",
+                "required_permissions": ["admin:wallets:write", "admin:wallets:admin"],
+                "permission_mode": "any_of",
+                "route_family": request_context.route_family(),
+                "route_kind": request_context.route_kind(),
+                "request_path": request_context.path(),
+            })),
+        )
+            .into_response(),
+        "admin_user_wallet_balance_permission_denied",
+        "permission_denied",
+        "admin_user_wallet_balance",
         actor_id,
     )
 }
@@ -397,8 +437,51 @@ pub(super) fn format_optional_datetime_iso8601(
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_admin_user_api_formats, AdminUpdateUserApiKeyRequest};
+    use super::{
+        build_admin_users_wallet_permission_denied_response, normalize_admin_user_api_formats,
+        AdminUpdateUserApiKeyRequest,
+    };
+    use crate::control::{GatewayControlDecision, GatewayPublicRequestContext};
+    use crate::handlers::admin::request::AdminRequestContext;
+    use axum::http::{HeaderMap, Method, Uri};
     use serde_json::json;
+
+    #[test]
+    fn wallet_permission_denial_uses_wallet_audit_category() {
+        let uri: Uri = "/api/admin/users/batch-action"
+            .parse()
+            .expect("uri should parse");
+        let method = Method::POST;
+        let headers = HeaderMap::new();
+        let decision = GatewayControlDecision::synthetic(
+            uri.path(),
+            Some("admin_proxy".to_string()),
+            Some("users_manage".to_string()),
+            Some("batch_user_action".to_string()),
+            Some("admin:users".to_string()),
+        );
+        let context = GatewayPublicRequestContext::from_request_parts(
+            "trace-wallet-permission-denied",
+            &method,
+            &uri,
+            &headers,
+            Some(decision),
+        );
+        let request_context = AdminRequestContext::new(&context);
+
+        let response = build_admin_users_wallet_permission_denied_response(&request_context);
+        let event = response
+            .extensions()
+            .get::<crate::audit::AdminAuditEvent>()
+            .expect("wallet denial should attach an audit event");
+
+        assert_eq!(
+            event.event_name,
+            "admin_user_wallet_balance_permission_denied"
+        );
+        assert_eq!(event.action, "permission_denied");
+        assert_eq!(event.target_type, "admin_user_wallet_balance");
+    }
 
     #[test]
     fn admin_user_api_formats_accept_current_canonical_signatures() {

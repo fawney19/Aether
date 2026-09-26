@@ -2462,6 +2462,59 @@ pub struct AdjustWalletBalanceInput {
     pub balance_type: String,
     pub operator_id: Option<String>,
     pub description: Option<String>,
+    #[serde(default)]
+    pub clamp_deduction_to_available_balance: bool,
+    #[serde(default)]
+    pub batch_context: Option<AdminUserWalletBalanceBatchContext>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct AdminUserWalletBalanceBatchContext {
+    pub admin_user_id: String,
+    pub idempotency_key: String,
+    pub user_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PrepareAdminUserWalletBalanceBatchInput {
+    pub admin_user_id: String,
+    pub idempotency_key: String,
+    pub request_fingerprint: String,
+    pub target_user_ids: Vec<String>,
+    pub missing_user_ids: Vec<String>,
+    pub warnings: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct StoredAdminUserWalletBalanceBatch {
+    pub admin_user_id: String,
+    pub idempotency_key: String,
+    pub request_fingerprint: String,
+    pub target_user_ids: Vec<String>,
+    pub missing_user_ids: Vec<String>,
+    pub warnings: Vec<serde_json::Value>,
+    pub user_outcomes: std::collections::BTreeMap<String, AdminUserWalletBalanceBatchUserOutcome>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum PrepareAdminUserWalletBalanceBatchOutcome {
+    Ready(StoredAdminUserWalletBalanceBatch),
+    Conflict,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "status", content = "reason", rename_all = "snake_case")]
+pub enum AdminUserWalletBalanceBatchUserOutcome {
+    Succeeded,
+    Failed(String),
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct AdjustWalletBalanceInBatchInput {
+    pub admin_user_id: String,
+    pub idempotency_key: String,
+    pub user_id: String,
+    pub adjustment: AdjustWalletBalanceInput,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -2893,7 +2946,51 @@ pub trait WalletWriteRepository: Send + Sync {
     async fn adjust_wallet_balance(
         &self,
         input: AdjustWalletBalanceInput,
-    ) -> Result<Option<(StoredWalletSnapshot, StoredAdminWalletTransaction)>, crate::DataLayerError>;
+    ) -> Result<
+        Option<(StoredWalletSnapshot, Option<StoredAdminWalletTransaction>)>,
+        crate::DataLayerError,
+    >;
+
+    async fn prepare_admin_user_wallet_balance_batch(
+        &self,
+        _input: PrepareAdminUserWalletBalanceBatchInput,
+    ) -> Result<PrepareAdminUserWalletBalanceBatchOutcome, crate::DataLayerError> {
+        Err(crate::DataLayerError::InvalidInput(
+            "idempotent admin wallet batches are not available".to_string(),
+        ))
+    }
+
+    async fn get_admin_user_wallet_balance_batch(
+        &self,
+        _admin_user_id: &str,
+        _idempotency_key: &str,
+        _request_fingerprint: &str,
+    ) -> Result<Option<PrepareAdminUserWalletBalanceBatchOutcome>, crate::DataLayerError> {
+        Err(crate::DataLayerError::InvalidInput(
+            "idempotent admin wallet batches are not available".to_string(),
+        ))
+    }
+
+    async fn adjust_admin_user_wallet_balance_batch_user(
+        &self,
+        _input: AdjustWalletBalanceInBatchInput,
+    ) -> Result<AdminUserWalletBalanceBatchUserOutcome, crate::DataLayerError> {
+        Err(crate::DataLayerError::InvalidInput(
+            "idempotent admin wallet batches are not available".to_string(),
+        ))
+    }
+
+    async fn record_admin_user_wallet_balance_batch_failure(
+        &self,
+        _admin_user_id: &str,
+        _idempotency_key: &str,
+        _user_id: &str,
+        _reason: &str,
+    ) -> Result<AdminUserWalletBalanceBatchUserOutcome, crate::DataLayerError> {
+        Err(crate::DataLayerError::InvalidInput(
+            "idempotent admin wallet batches are not available".to_string(),
+        ))
+    }
 
     async fn create_manual_wallet_recharge(
         &self,

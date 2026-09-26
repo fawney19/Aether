@@ -3,6 +3,7 @@ import {
   CheckCircle2,
   ShieldCheck,
   UserCog,
+  Wallet,
 } from 'lucide-vue-next'
 import type { Component } from 'vue'
 import type { UserBatchAction, UserRole } from '@/api/users'
@@ -63,6 +64,12 @@ export const USER_BATCH_ACTION_OPTIONS: UserBatchActionOption[] = [
     label: '修改角色',
     description: '批量设为普通用户或管理员',
     icon: UserCog,
+  },
+  {
+    value: 'adjust_wallet_balance',
+    label: '调整余额',
+    description: '批量增加或扣减钱包余额',
+    icon: Wallet,
   },
 ]
 

@@ -1366,3 +1366,47 @@ columns = ["redeemed_by_user_id", "redeemed_at"]
 [[table.redeem_codes.indexes]]
 name = "idx_redeem_codes_redeemed_order"
 columns = ["redeemed_payment_order_id"]
+
+[table.admin_user_wallet_balance_batches]
+domain = "wallet_billing"
+order = 110
+primary_key = ["admin_user_id", "idempotency_key"]
+
+[[table.admin_user_wallet_balance_batches.columns]]
+name = "admin_user_id"
+type = "text_id"
+length = 64
+
+[[table.admin_user_wallet_balance_batches.columns]]
+name = "idempotency_key"
+type = "text"
+length = 128
+
+[[table.admin_user_wallet_balance_batches.columns]]
+name = "request_fingerprint"
+type = "text"
+length = 64
+
+[[table.admin_user_wallet_balance_batches.columns]]
+name = "target_user_ids"
+type = "json"
+
+[[table.admin_user_wallet_balance_batches.columns]]
+name = "missing_user_ids"
+type = "json"
+
+[[table.admin_user_wallet_balance_batches.columns]]
+name = "warnings"
+type = "json"
+
+[[table.admin_user_wallet_balance_batches.columns]]
+name = "user_outcomes"
+type = "json"
+
+[[table.admin_user_wallet_balance_batches.columns]]
+name = "created_at_unix_secs"
+type = "unix_seconds"
+
+[[table.admin_user_wallet_balance_batches.columns]]
+name = "updated_at_unix_secs"
+type = "unix_seconds"

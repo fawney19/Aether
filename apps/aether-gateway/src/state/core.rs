@@ -471,6 +471,16 @@ impl AppState {
             #[cfg(test)]
             auth_wallet_store: Some(Arc::new(StdMutex::new(HashMap::new()))),
             #[cfg(test)]
+            auth_wallet_adjustment_error_for_tests: None,
+            #[cfg(test)]
+            auth_wallet_lookup_error_for_tests: None,
+            #[cfg(test)]
+            auth_wallet_batch_store_for_tests: Some(Arc::new(StdMutex::new(HashMap::new()))),
+            #[cfg(test)]
+            auth_wallet_batch_operation_lock_for_tests: Arc::new(TokioMutex::new(())),
+            #[cfg(test)]
+            auth_wallet_batch_failure_record_error_for_tests: None,
+            #[cfg(test)]
             admin_wallet_payment_order_store: Some(Arc::new(StdMutex::new(HashMap::new()))),
             #[cfg(test)]
             admin_payment_callback_store: Some(Arc::new(StdMutex::new(HashMap::new()))),

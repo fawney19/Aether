@@ -112,7 +112,7 @@ impl AppState {
     ) -> Result<
         Option<(
             aether_data::repository::wallet::StoredWalletSnapshot,
-            aether_data::repository::wallet::StoredAdminWalletTransaction,
+            Option<aether_data::repository::wallet::StoredAdminWalletTransaction>,
         )>,
         GatewayError,
     > {

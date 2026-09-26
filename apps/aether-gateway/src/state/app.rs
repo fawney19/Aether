@@ -492,6 +492,25 @@ pub struct AppState {
         Arc<StdMutex<HashMap<String, aether_data::repository::wallet::StoredWalletSnapshot>>>,
     >,
     #[cfg(test)]
+    pub(crate) auth_wallet_adjustment_error_for_tests: Option<String>,
+    #[cfg(test)]
+    pub(crate) auth_wallet_lookup_error_for_tests: Option<String>,
+    #[cfg(test)]
+    pub(crate) auth_wallet_batch_store_for_tests: Option<
+        Arc<
+            StdMutex<
+                HashMap<
+                    (String, String),
+                    aether_data::repository::wallet::StoredAdminUserWalletBalanceBatch,
+                >,
+            >,
+        >,
+    >,
+    #[cfg(test)]
+    pub(crate) auth_wallet_batch_operation_lock_for_tests: Arc<TokioMutex<()>>,
+    #[cfg(test)]
+    pub(crate) auth_wallet_batch_failure_record_error_for_tests: Option<String>,
+    #[cfg(test)]
     pub(crate) admin_wallet_payment_order_store:
         Option<Arc<StdMutex<HashMap<String, AdminWalletPaymentOrderRecord>>>>,
     #[cfg(test)]

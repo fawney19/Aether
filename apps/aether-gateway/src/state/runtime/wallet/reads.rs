@@ -6,6 +6,19 @@ impl AppState {
         lookup: aether_data::repository::wallet::WalletLookupKey<'_>,
     ) -> Result<Option<aether_data::repository::wallet::StoredWalletSnapshot>, GatewayError> {
         #[cfg(test)]
+        if let Some(failed_user_id) = self.auth_wallet_lookup_error_for_tests.as_deref() {
+            let lookup_user_id = match &lookup {
+                aether_data::repository::wallet::WalletLookupKey::UserId(user_id) => Some(*user_id),
+                _ => None,
+            };
+            if lookup_user_id == Some(failed_user_id) {
+                return Err(GatewayError::Internal(
+                    "injected test wallet lookup failure".to_string(),
+                ));
+            }
+        }
+
+        #[cfg(test)]
         if let Some(store) = self.auth_wallet_store.as_ref() {
             let wallet = {
                 let wallets = store.lock().expect("auth wallet store should lock");

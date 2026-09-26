@@ -1,11 +1,16 @@
 use super::{
     build_admin_users_bad_request_response, build_admin_users_permission_denied_response,
-    build_admin_users_read_only_response, disabled_user_policy_detail, disabled_user_policy_field,
+    build_admin_users_read_only_response, build_admin_users_wallet_permission_denied_response,
+    disabled_user_policy_detail, disabled_user_policy_field,
+    management_token_may_adjust_admin_wallet_balance,
     management_token_may_administer_user_accounts, normalize_admin_user_role,
 };
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::handlers::admin::shared::attach_admin_audit_response;
 use crate::GatewayError;
+use aether_data::repository::wallet::{
+    AdminUserWalletBalanceBatchUserOutcome, PrepareAdminUserWalletBalanceBatchOutcome,
+};
 use axum::{
     body::{Body, Bytes},
     http,
@@ -13,9 +18,10 @@ use axum::{
     Json,
 };
 use serde_json::{json, Value};
+use sha2::{Digest as _, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
-#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
 struct AdminUserSelectionFilters {
     #[serde(default)]
     search: Option<String>,
@@ -27,7 +33,7 @@ struct AdminUserSelectionFilters {
     group_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize)]
 struct AdminUserSelectionRequest {
     user_ids: Vec<String>,
     group_ids: Vec<String>,
@@ -40,6 +46,7 @@ struct AdminUserBatchActionRequest {
     selection: AdminUserSelectionRequest,
     action: String,
     payload: Option<Value>,
+    idempotency_key: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -48,6 +55,8 @@ struct RawAdminUserBatchActionRequest {
     action: String,
     #[serde(default)]
     payload: Option<Value>,
+    #[serde(default)]
+    idempotency_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -68,7 +77,7 @@ struct AdminUserSelectionItem {
     matched_by: Vec<String>,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 struct AdminUserSelectionWarning {
     #[serde(rename = "type")]
     warning_type: String,
@@ -88,6 +97,7 @@ struct AdminUserBatchMutation {
     role: Option<String>,
     is_active: Option<bool>,
     unlimited: Option<bool>,
+    wallet_balance_adjustment: Option<AdminUserWalletBalanceAdjustment>,
     modified_fields: Vec<&'static str>,
 }
 
@@ -95,6 +105,28 @@ impl AdminUserBatchMutation {
     fn has_auth_user_fields(&self) -> bool {
         self.role.is_some() || self.is_active.is_some()
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AdminUserWalletBalanceAdjustment {
+    operation: AdminUserWalletBalanceOperation,
+    amount: f64,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum AdminUserWalletBalanceOperation {
+    Add,
+    Deduct,
+}
+
+enum AdminBatchWalletBalanceAdjustmentError {
+    WalletLookup,
+    BalanceAdjustment,
+}
+
+enum AdminBatchWalletLimitModeError {
+    WalletLookup,
+    Mutation,
 }
 
 pub(in super::super) async fn build_admin_resolve_user_selection_response(
@@ -128,10 +160,29 @@ pub(in super::super) async fn build_admin_user_batch_action_response(
         Ok(value) => value,
         Err(detail) => return Ok(build_admin_user_batch_bad_request_response(detail)),
     };
-    let mutation = match parse_batch_mutation(&request.action, request.payload) {
+    let mutation = match parse_batch_mutation(&request.action, request.payload.clone()) {
         Ok(value) => value,
         Err(detail) => return Ok(build_admin_user_batch_bad_request_response(detail)),
     };
+    if mutation.wallet_balance_adjustment.is_some() {
+        if !management_token_may_adjust_admin_wallet_balance(request_context) {
+            return Ok(build_admin_users_wallet_permission_denied_response(
+                request_context,
+            ));
+        }
+        if !state.has_auth_wallet_write_capability() {
+            return Ok(build_admin_users_read_only_response(
+                "当前为只读模式，无法批量调整用户钱包余额",
+            ));
+        }
+        return build_admin_user_wallet_balance_batch_response(
+            state,
+            request_context,
+            request,
+            mutation,
+        )
+        .await;
+    }
     let resolved = match resolve_admin_user_selection(state, request.selection).await {
         Ok(value) => value,
         Err(detail) => return Ok(build_admin_user_batch_bad_request_response(detail)),
@@ -177,9 +228,29 @@ pub(in super::super) async fn build_admin_user_batch_action_response(
         .iter()
         .map(|user_id| json!({ "user_id": user_id, "reason": "用户不存在或已删除" }))
         .collect::<Vec<_>>();
+    let mut completed_user_ids = Vec::new();
+    let mut uncertain_user_ids = Vec::new();
+    let mut unprocessed_user_ids = Vec::new();
+    let mut interrupted = false;
 
-    for item in &resolved.items {
-        if state.find_user_auth_by_id(&item.user_id).await?.is_none() {
+    for (item_index, item) in resolved.items.iter().enumerate() {
+        let user = match state.find_user_auth_by_id(&item.user_id).await {
+            Ok(user) => user,
+            Err(_) => {
+                record_batch_action_interruption(
+                    &resolved.items,
+                    item_index,
+                    false,
+                    "读取用户状态失败，批次已中止，该用户未执行",
+                    &mut failures,
+                    &mut uncertain_user_ids,
+                    &mut unprocessed_user_ids,
+                );
+                interrupted = true;
+                break;
+            }
+        };
+        if user.is_none() {
             failures.push(json!({
                 "user_id": item.user_id,
                 "reason": "用户不存在或已删除",
@@ -202,17 +273,92 @@ pub(in super::super) async fn build_admin_user_batch_action_response(
         }
 
         if let Some(unlimited) = mutation.unlimited {
-            if !apply_batch_user_wallet_limit_mode(state, &item.user_id, unlimited).await? {
-                failures.push(json!({
-                    "user_id": item.user_id,
-                    "reason": "用户钱包不可用",
-                }));
-                continue;
+            match apply_batch_user_wallet_limit_mode(state, &item.user_id, unlimited).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    failures.push(json!({
+                        "user_id": item.user_id,
+                        "reason": "用户钱包不可用",
+                    }));
+                    continue;
+                }
+                Err(AdminBatchWalletLimitModeError::WalletLookup) => {
+                    record_batch_action_interruption(
+                        &resolved.items,
+                        item_index,
+                        false,
+                        "读取用户钱包失败，批次已中止，该用户未执行",
+                        &mut failures,
+                        &mut uncertain_user_ids,
+                        &mut unprocessed_user_ids,
+                    );
+                    interrupted = true;
+                    break;
+                }
+                Err(AdminBatchWalletLimitModeError::Mutation) => {
+                    record_batch_action_interruption(
+                        &resolved.items,
+                        item_index,
+                        true,
+                        "用户钱包更新结果未确认，批次已中止，请核对钱包后再重试",
+                        &mut failures,
+                        &mut uncertain_user_ids,
+                        &mut unprocessed_user_ids,
+                    );
+                    interrupted = true;
+                    break;
+                }
             }
         }
 
-        if mutation.has_auth_user_fields()
-            && state
+        if let Some(adjustment) = mutation.wallet_balance_adjustment {
+            match apply_batch_user_wallet_balance_adjustment(
+                state,
+                &item.user_id,
+                adjustment,
+                current_admin_user_id,
+            )
+            .await
+            {
+                Ok(true) => {}
+                Ok(false) => {
+                    failures.push(json!({
+                        "user_id": item.user_id,
+                        "reason": "用户钱包不可用",
+                    }));
+                    continue;
+                }
+                Err(AdminBatchWalletBalanceAdjustmentError::WalletLookup) => {
+                    record_batch_action_interruption(
+                        &resolved.items,
+                        item_index,
+                        false,
+                        "读取用户钱包失败，批次已中止，该用户未执行",
+                        &mut failures,
+                        &mut uncertain_user_ids,
+                        &mut unprocessed_user_ids,
+                    );
+                    interrupted = true;
+                    break;
+                }
+                Err(AdminBatchWalletBalanceAdjustmentError::BalanceAdjustment) => {
+                    record_batch_action_interruption(
+                        &resolved.items,
+                        item_index,
+                        true,
+                        "余额调整结果未确认，批次已中止，请核对钱包后再重试",
+                        &mut failures,
+                        &mut uncertain_user_ids,
+                        &mut unprocessed_user_ids,
+                    );
+                    interrupted = true;
+                    break;
+                }
+            }
+        }
+
+        if mutation.has_auth_user_fields() {
+            let updated_user = match state
                 .update_local_auth_user_admin_fields(
                     &item.user_id,
                     mutation.role.clone(),
@@ -226,22 +372,39 @@ pub(in super::super) async fn build_admin_user_batch_action_response(
                     None,
                     mutation.is_active,
                 )
-                .await?
-                .is_none()
-        {
-            failures.push(json!({
-                "user_id": item.user_id,
-                "reason": "用户不存在或已删除",
-            }));
-            continue;
+                .await
+            {
+                Ok(user) => user,
+                Err(_) => {
+                    record_batch_action_interruption(
+                        &resolved.items,
+                        item_index,
+                        true,
+                        "用户更新结果未确认，批次已中止，请核对后再重试",
+                        &mut failures,
+                        &mut uncertain_user_ids,
+                        &mut unprocessed_user_ids,
+                    );
+                    interrupted = true;
+                    break;
+                }
+            };
+            if updated_user.is_none() {
+                failures.push(json!({
+                    "user_id": item.user_id,
+                    "reason": "用户不存在或已删除",
+                }));
+                continue;
+            }
         }
 
         success += 1;
+        completed_user_ids.push(item.user_id.clone());
     }
 
     let failed = failures.len();
     let total = success + failed;
-    let response = Json(json!({
+    let mut response_payload = json!({
         "total": total,
         "success": success,
         "failed": failed,
@@ -249,8 +412,14 @@ pub(in super::super) async fn build_admin_user_batch_action_response(
         "warnings": resolved.warnings,
         "action": request.action.trim().to_ascii_lowercase(),
         "modified_fields": mutation.modified_fields,
-    }))
-    .into_response();
+        "interrupted": interrupted,
+    });
+    if interrupted {
+        response_payload["completed_user_ids"] = json!(completed_user_ids);
+        response_payload["uncertain_user_ids"] = json!(uncertain_user_ids);
+        response_payload["unprocessed_user_ids"] = json!(unprocessed_user_ids);
+    }
+    let response = Json(response_payload).into_response();
 
     Ok(attach_admin_audit_response(
         response,
@@ -259,6 +428,408 @@ pub(in super::super) async fn build_admin_user_batch_action_response(
         "user_batch",
         "users",
     ))
+}
+
+fn record_batch_action_interruption(
+    items: &[AdminUserSelectionItem],
+    item_index: usize,
+    current_result_uncertain: bool,
+    reason: &str,
+    failures: &mut Vec<Value>,
+    uncertain_user_ids: &mut Vec<String>,
+    unprocessed_user_ids: &mut Vec<String>,
+) {
+    let current_item = &items[item_index];
+    failures.push(json!({
+        "user_id": current_item.user_id,
+        "reason": reason,
+    }));
+    if current_result_uncertain {
+        uncertain_user_ids.push(current_item.user_id.clone());
+    } else {
+        unprocessed_user_ids.push(current_item.user_id.clone());
+    }
+
+    for item in items.iter().skip(item_index + 1) {
+        failures.push(json!({
+            "user_id": item.user_id,
+            "reason": "因前序错误未执行",
+        }));
+        unprocessed_user_ids.push(item.user_id.clone());
+    }
+}
+
+async fn build_admin_user_wallet_balance_batch_response(
+    state: &AdminAppState<'_>,
+    request_context: &AdminRequestContext<'_>,
+    request: AdminUserBatchActionRequest,
+    mutation: AdminUserBatchMutation,
+) -> Result<Response<Body>, GatewayError> {
+    let Some(idempotency_key) = request
+        .idempotency_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 128
+                && value.bytes().all(|byte| (0x21..=0x7e).contains(&byte))
+        })
+    else {
+        return Ok(build_admin_user_batch_bad_request_response(
+            "余额批量操作必须提供有效的 idempotency_key".to_string(),
+        ));
+    };
+    let Some(admin_user_id) = request_context
+        .decision()
+        .and_then(|decision| decision.admin_principal.as_ref())
+        .map(|principal| principal.user_id.clone())
+    else {
+        return Ok(build_admin_users_permission_denied_response(
+            request_context,
+        ));
+    };
+    let action = request.action.trim().to_ascii_lowercase();
+    let fingerprint_payload = json!({
+        "selection": &request.selection,
+        "action": &action,
+        "payload": &request.payload,
+    });
+    let encoded = serde_json::to_vec(&fingerprint_payload)
+        .map_err(|error| GatewayError::Internal(error.to_string()))?;
+    let request_fingerprint = format!("{:x}", Sha256::digest(encoded));
+
+    let existing = state
+        .get_admin_user_wallet_balance_batch(&admin_user_id, idempotency_key, &request_fingerprint)
+        .await?;
+    let batch = match existing {
+        Some(PrepareAdminUserWalletBalanceBatchOutcome::Conflict) => {
+            return Ok(build_admin_user_batch_idempotency_conflict_response());
+        }
+        Some(PrepareAdminUserWalletBalanceBatchOutcome::Ready(batch)) => batch,
+        None => {
+            let resolved =
+                match resolve_admin_user_selection(state, request.selection.clone()).await {
+                    Ok(value) => value,
+                    Err(detail) => return Ok(build_admin_user_batch_bad_request_response(detail)),
+                };
+            let warnings = serde_json::to_value(&resolved.warnings)
+                .ok()
+                .and_then(|value| value.as_array().cloned())
+                .unwrap_or_default();
+            let prepared = state
+                .prepare_admin_user_wallet_balance_batch(
+                    aether_data::repository::wallet::PrepareAdminUserWalletBalanceBatchInput {
+                        admin_user_id: admin_user_id.clone(),
+                        idempotency_key: idempotency_key.to_string(),
+                        request_fingerprint: request_fingerprint.clone(),
+                        target_user_ids: resolved
+                            .items
+                            .iter()
+                            .map(|item| item.user_id.clone())
+                            .collect(),
+                        missing_user_ids: resolved.missing_user_ids,
+                        warnings,
+                    },
+                )
+                .await?;
+            match prepared {
+                PrepareAdminUserWalletBalanceBatchOutcome::Conflict => {
+                    return Ok(build_admin_user_batch_idempotency_conflict_response());
+                }
+                PrepareAdminUserWalletBalanceBatchOutcome::Ready(batch) => batch,
+            }
+        }
+    };
+    let warnings: Vec<AdminUserSelectionWarning> =
+        serde_json::from_value(Value::Array(batch.warnings.clone()))
+            .map_err(|error| GatewayError::Internal(error.to_string()))?;
+    let resolved = ResolvedAdminUserSelection {
+        items: batch
+            .target_user_ids
+            .iter()
+            .map(|user_id| AdminUserSelectionItem {
+                user_id: user_id.clone(),
+                username: String::new(),
+                email: None,
+                role: "user".to_string(),
+                is_active: true,
+                matched_by: Vec::new(),
+            })
+            .collect(),
+        missing_user_ids: batch.missing_user_ids.clone(),
+        warnings,
+    };
+    let adjustment = mutation
+        .wallet_balance_adjustment
+        .expect("wallet balance action should have an adjustment");
+    let signed_amount = match adjustment.operation {
+        AdminUserWalletBalanceOperation::Add => adjustment.amount,
+        AdminUserWalletBalanceOperation::Deduct => -adjustment.amount,
+    };
+
+    let mut outcomes = batch.user_outcomes;
+    let mut completed_user_ids = outcomes
+        .iter()
+        .filter_map(|(user_id, outcome)| {
+            matches!(outcome, AdminUserWalletBalanceBatchUserOutcome::Succeeded)
+                .then_some(user_id.clone())
+        })
+        .collect::<Vec<_>>();
+    let mut success = completed_user_ids.len();
+    let mut failures = resolved
+        .missing_user_ids
+        .iter()
+        .map(|user_id| json!({ "user_id": user_id, "reason": "用户不存在或已删除" }))
+        .collect::<Vec<_>>();
+    for (user_id, outcome) in &outcomes {
+        if let AdminUserWalletBalanceBatchUserOutcome::Failed(reason) = outcome {
+            failures.push(json!({ "user_id": user_id, "reason": reason }));
+        }
+    }
+    let mut uncertain_user_ids = Vec::new();
+    let mut unprocessed_user_ids = Vec::new();
+    let mut interrupted = false;
+
+    for (item_index, item) in resolved.items.iter().enumerate() {
+        if outcomes.contains_key(&item.user_id) {
+            continue;
+        }
+        match state.find_user_auth_by_id(&item.user_id).await {
+            Err(_) => {
+                failures.push(json!({
+                    "user_id": item.user_id,
+                    "reason": "读取用户状态失败，批次已中止，该用户未执行",
+                }));
+                unprocessed_user_ids.push(item.user_id.clone());
+                interrupted = true;
+            }
+            Ok(None) => {
+                let outcome = match state
+                    .record_admin_user_wallet_balance_batch_failure(
+                        &admin_user_id,
+                        idempotency_key,
+                        &item.user_id,
+                        "用户不存在或已删除",
+                    )
+                    .await
+                {
+                    Ok(outcome) => outcome,
+                    Err(_) => {
+                        failures.push(json!({
+                            "user_id": item.user_id,
+                            "reason": "记录用户状态失败，批次已中止，该用户未执行",
+                        }));
+                        unprocessed_user_ids.push(item.user_id.clone());
+                        interrupted = true;
+                        append_wallet_batch_unprocessed_suffix(
+                            &resolved.items,
+                            item_index + 1,
+                            &outcomes,
+                            &mut failures,
+                            &mut unprocessed_user_ids,
+                        );
+                        break;
+                    }
+                };
+                outcomes.insert(item.user_id.clone(), outcome.clone());
+                match outcome {
+                    AdminUserWalletBalanceBatchUserOutcome::Succeeded => {
+                        completed_user_ids.push(item.user_id.clone());
+                        success += 1;
+                    }
+                    AdminUserWalletBalanceBatchUserOutcome::Failed(reason) => {
+                        failures.push(json!({ "user_id": item.user_id, "reason": reason }));
+                    }
+                }
+            }
+            Ok(Some(_)) => {
+                let wallet = match state
+                    .find_wallet(aether_data::repository::wallet::WalletLookupKey::UserId(
+                        &item.user_id,
+                    ))
+                    .await
+                {
+                    Ok(Some(wallet)) => wallet,
+                    Ok(None) => {
+                        let outcome = match state
+                            .record_admin_user_wallet_balance_batch_failure(
+                                &admin_user_id,
+                                idempotency_key,
+                                &item.user_id,
+                                "用户钱包不可用",
+                            )
+                            .await
+                        {
+                            Ok(outcome) => outcome,
+                            Err(_) => {
+                                failures.push(json!({
+                                    "user_id": item.user_id,
+                                    "reason": "记录用户钱包状态失败，批次已中止，该用户未执行",
+                                }));
+                                unprocessed_user_ids.push(item.user_id.clone());
+                                interrupted = true;
+                                append_wallet_batch_unprocessed_suffix(
+                                    &resolved.items,
+                                    item_index + 1,
+                                    &outcomes,
+                                    &mut failures,
+                                    &mut unprocessed_user_ids,
+                                );
+                                break;
+                            }
+                        };
+                        outcomes.insert(item.user_id.clone(), outcome.clone());
+                        match outcome {
+                            AdminUserWalletBalanceBatchUserOutcome::Succeeded => {
+                                completed_user_ids.push(item.user_id.clone());
+                                success += 1;
+                            }
+                            AdminUserWalletBalanceBatchUserOutcome::Failed(reason) => {
+                                failures.push(json!({ "user_id": item.user_id, "reason": reason }));
+                            }
+                        }
+                        continue;
+                    }
+                    Err(_) => {
+                        failures.push(json!({
+                            "user_id": item.user_id,
+                            "reason": "读取用户钱包失败，批次已中止，该用户未执行",
+                        }));
+                        unprocessed_user_ids.push(item.user_id.clone());
+                        interrupted = true;
+                        append_wallet_batch_unprocessed_suffix(
+                            &resolved.items,
+                            item_index + 1,
+                            &outcomes,
+                            &mut failures,
+                            &mut unprocessed_user_ids,
+                        );
+                        break;
+                    }
+                };
+                let result = state
+                    .adjust_admin_user_wallet_balance_batch_user(
+                        aether_data::repository::wallet::AdjustWalletBalanceInBatchInput {
+                            admin_user_id: admin_user_id.clone(),
+                            idempotency_key: idempotency_key.to_string(),
+                            user_id: item.user_id.clone(),
+                            adjustment: aether_data::repository::wallet::AdjustWalletBalanceInput {
+                                wallet_id: wallet.id,
+                                amount_usd: signed_amount,
+                                balance_type: "recharge".to_string(),
+                                operator_id: Some(admin_user_id.clone()),
+                                description: Some("管理员批量调整用户余额".to_string()),
+                                clamp_deduction_to_available_balance: true,
+                                batch_context: None,
+                            },
+                        },
+                    )
+                    .await;
+                match result {
+                    Ok(AdminUserWalletBalanceBatchUserOutcome::Succeeded) => {
+                        outcomes.insert(
+                            item.user_id.clone(),
+                            AdminUserWalletBalanceBatchUserOutcome::Succeeded,
+                        );
+                        completed_user_ids.push(item.user_id.clone());
+                        success += 1;
+                    }
+                    Ok(AdminUserWalletBalanceBatchUserOutcome::Failed(reason)) => {
+                        outcomes.insert(
+                            item.user_id.clone(),
+                            AdminUserWalletBalanceBatchUserOutcome::Failed(reason.clone()),
+                        );
+                        failures.push(json!({ "user_id": item.user_id, "reason": reason }));
+                    }
+                    Err(_) => {
+                        failures.push(json!({
+                            "user_id": item.user_id,
+                            "reason": "余额调整结果未确认，批次已中止，请使用同一批次重试以核对结果",
+                        }));
+                        uncertain_user_ids.push(item.user_id.clone());
+                        interrupted = true;
+                        append_wallet_batch_unprocessed_suffix(
+                            &resolved.items,
+                            item_index + 1,
+                            &outcomes,
+                            &mut failures,
+                            &mut unprocessed_user_ids,
+                        );
+                        break;
+                    }
+                }
+            }
+        }
+        if interrupted {
+            for pending in resolved.items.iter().skip(item_index + 1) {
+                if outcomes.contains_key(&pending.user_id) {
+                    continue;
+                }
+                failures.push(json!({
+                    "user_id": pending.user_id,
+                    "reason": "因前序错误未执行",
+                }));
+                unprocessed_user_ids.push(pending.user_id.clone());
+            }
+            break;
+        }
+    }
+
+    let failed = failures.len();
+    let total = success + failed;
+    let mut response_payload = json!({
+        "total": total,
+        "success": success,
+        "failed": failed,
+        "failures": failures,
+        "warnings": resolved.warnings,
+        "action": action,
+        "modified_fields": mutation.modified_fields,
+        "interrupted": interrupted,
+    });
+    if interrupted {
+        response_payload["completed_user_ids"] = json!(completed_user_ids);
+        response_payload["uncertain_user_ids"] = json!(uncertain_user_ids);
+        response_payload["unprocessed_user_ids"] = json!(unprocessed_user_ids);
+    }
+    let response = Json(response_payload).into_response();
+    Ok(attach_admin_audit_response(
+        response,
+        "admin_users_batch_action_executed",
+        "batch_update_users",
+        "user_batch",
+        "users",
+    ))
+}
+
+fn append_wallet_batch_unprocessed_suffix(
+    items: &[AdminUserSelectionItem],
+    start_index: usize,
+    outcomes: &BTreeMap<String, AdminUserWalletBalanceBatchUserOutcome>,
+    failures: &mut Vec<Value>,
+    unprocessed_user_ids: &mut Vec<String>,
+) {
+    for pending in items.iter().skip(start_index) {
+        if outcomes.contains_key(&pending.user_id) {
+            continue;
+        }
+        failures.push(json!({
+            "user_id": pending.user_id,
+            "reason": "因前序错误未执行",
+        }));
+        unprocessed_user_ids.push(pending.user_id.clone());
+    }
+}
+
+fn build_admin_user_batch_idempotency_conflict_response() -> Response<Body> {
+    (
+        http::StatusCode::CONFLICT,
+        Json(json!({
+            "detail": "idempotency_key was already used with a different request",
+            "error_code": "idempotency_key_conflict",
+        })),
+    )
+        .into_response()
 }
 
 fn parse_resolve_selection_request(
@@ -286,6 +857,7 @@ fn parse_batch_action_request(
                 selection: parse_selection_request_value(raw.selection)?,
                 action: raw.action,
                 payload: raw.payload,
+                idempotency_key: raw.idempotency_key,
             })
         }
         _ => Err("Invalid JSON request body".to_string()),
@@ -604,8 +1176,35 @@ fn parse_batch_mutation(
         }),
         "update_access_control" => parse_access_control_mutation(payload),
         "update_role" => parse_role_mutation(payload),
+        "adjust_wallet_balance" => parse_wallet_balance_adjustment_mutation(payload),
         _ => Err("不支持的批量操作".to_string()),
     }
+}
+
+fn parse_wallet_balance_adjustment_mutation(
+    payload: Option<Value>,
+) -> Result<AdminUserBatchMutation, String> {
+    let Some(Value::Object(payload)) = payload else {
+        return Err("payload 必须是对象".to_string());
+    };
+    let operation = match payload.get("operation").and_then(Value::as_str) {
+        Some("add") => AdminUserWalletBalanceOperation::Add,
+        Some("deduct") => AdminUserWalletBalanceOperation::Deduct,
+        _ => return Err("operation 必须为 add 或 deduct".to_string()),
+    };
+    let amount = payload
+        .get("amount")
+        .and_then(Value::as_f64)
+        .ok_or_else(|| "amount 必须为大于 0 的有限数字".to_string())?;
+    if !amount.is_finite() || amount <= 0.0 {
+        return Err("amount 必须为大于 0 的有限数字".to_string());
+    }
+
+    Ok(AdminUserBatchMutation {
+        wallet_balance_adjustment: Some(AdminUserWalletBalanceAdjustment { operation, amount }),
+        modified_fields: vec!["wallet_balance"],
+        ..AdminUserBatchMutation::default()
+    })
 }
 
 fn parse_role_mutation(payload: Option<Value>) -> Result<AdminUserBatchMutation, String> {
@@ -700,28 +1299,66 @@ async fn apply_batch_user_wallet_limit_mode(
     state: &AdminAppState<'_>,
     user_id: &str,
     unlimited: bool,
-) -> Result<bool, GatewayError> {
+) -> Result<bool, AdminBatchWalletLimitModeError> {
     let desired_limit_mode = if unlimited { "unlimited" } else { "finite" };
-    match state
+    let wallet = state
         .find_wallet(aether_data::repository::wallet::WalletLookupKey::UserId(
             user_id,
         ))
-        .await?
-    {
+        .await
+        .map_err(|_| AdminBatchWalletLimitModeError::WalletLookup)?;
+    match wallet {
         Some(wallet) => {
             if wallet.limit_mode.eq_ignore_ascii_case(desired_limit_mode) {
                 return Ok(true);
             }
             Ok(state
                 .update_auth_user_wallet_limit_mode(user_id, desired_limit_mode)
-                .await?
+                .await
+                .map_err(|_| AdminBatchWalletLimitModeError::Mutation)?
                 .is_some())
         }
         None => Ok(state
             .initialize_auth_user_wallet(user_id, 0.0, unlimited)
-            .await?
+            .await
+            .map_err(|_| AdminBatchWalletLimitModeError::Mutation)?
             .is_some()),
     }
+}
+
+async fn apply_batch_user_wallet_balance_adjustment(
+    state: &AdminAppState<'_>,
+    user_id: &str,
+    adjustment: AdminUserWalletBalanceAdjustment,
+    operator_id: Option<&str>,
+) -> Result<bool, AdminBatchWalletBalanceAdjustmentError> {
+    // Resolve only the wallet ID; the repository clamps the deduction under its row lock.
+    let Some(wallet) = state
+        .find_wallet(aether_data::repository::wallet::WalletLookupKey::UserId(
+            user_id,
+        ))
+        .await
+        .map_err(|_| AdminBatchWalletBalanceAdjustmentError::WalletLookup)?
+    else {
+        return Ok(false);
+    };
+    let amount = match adjustment.operation {
+        AdminUserWalletBalanceOperation::Add => adjustment.amount,
+        AdminUserWalletBalanceOperation::Deduct => -adjustment.amount,
+    };
+
+    state
+        .admin_adjust_wallet_balance(
+            &wallet.id,
+            amount,
+            "recharge",
+            operator_id,
+            Some("管理员批量调整用户余额"),
+            true,
+        )
+        .await
+        .map_err(|_| AdminBatchWalletBalanceAdjustmentError::BalanceAdjustment)
+        .map(|result| result.is_some())
 }
 
 fn build_admin_user_batch_bad_request_response(detail: String) -> Response<Body> {

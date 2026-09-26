@@ -24,8 +24,9 @@ use aether_data_contracts::repository::wallet::{
     wallet_recharge_checkout_failed_response, wallet_recharge_checkout_uncertain_response,
     wallet_recharge_order_is_reclaimable_placeholder, wallet_recharge_replay_matches,
     wallet_recharge_response_is_checkout_placeholder, wallet_refund_proof_is_success,
-    AdjustWalletBalanceInput, AdminPaymentOrderListQuery, AdminRedeemCodeBatchListQuery,
-    AdminRedeemCodeListQuery, AdminWalletLedgerQuery, AdminWalletListQuery,
+    AdjustWalletBalanceInBatchInput, AdjustWalletBalanceInput, AdminPaymentOrderListQuery,
+    AdminRedeemCodeBatchListQuery, AdminRedeemCodeListQuery, AdminUserWalletBalanceBatchContext,
+    AdminUserWalletBalanceBatchUserOutcome, AdminWalletLedgerQuery, AdminWalletListQuery,
     AdminWalletRefundRequestListQuery, CompareAndSwapPaymentOrderStripeClientSecretInput,
     CompleteAdminWalletRefundInput, CreateAdminRedeemCodeBatchInput,
     CreateAdminRedeemCodeBatchResult, CreateManualWalletRechargeInput,
@@ -34,21 +35,23 @@ use aether_data_contracts::repository::wallet::{
     CreateWalletRefundRequestOutcome, CreatedAdminRedeemCodePlaintext,
     CreditAdminPaymentOrderInput, DeleteAdminRedeemCodeBatchInput,
     DisableAdminRedeemCodeBatchInput, DisableAdminRedeemCodeInput, FailAdminWalletRefundInput,
-    FailWalletRechargeCheckoutInput, InitializeAuthWalletOutcome, ProcessAdminWalletRefundInput,
-    ProcessPaymentCallbackInput, ProcessPaymentCallbackOutcome, ReclaimWalletRechargeCheckoutInput,
-    RedeemWalletCodeInput, RedeemWalletCodeOutcome, StoredAdminPaymentCallback,
-    StoredAdminPaymentCallbackPage, StoredAdminPaymentOrder, StoredAdminPaymentOrderPage,
-    StoredAdminRedeemCode, StoredAdminRedeemCodeBatch, StoredAdminRedeemCodeBatchPage,
-    StoredAdminRedeemCodePage, StoredAdminWalletLedgerItem, StoredAdminWalletLedgerPage,
-    StoredAdminWalletListItem, StoredAdminWalletListPage, StoredAdminWalletRefund,
-    StoredAdminWalletRefundPage, StoredAdminWalletRefundRequestItem,
-    StoredAdminWalletRefundRequestPage, StoredAdminWalletTransaction,
-    StoredAdminWalletTransactionPage, StoredWalletDailyUsageLedger,
+    FailWalletRechargeCheckoutInput, InitializeAuthWalletOutcome,
+    PrepareAdminUserWalletBalanceBatchInput, PrepareAdminUserWalletBalanceBatchOutcome,
+    ProcessAdminWalletRefundInput, ProcessPaymentCallbackInput, ProcessPaymentCallbackOutcome,
+    ReclaimWalletRechargeCheckoutInput, RedeemWalletCodeInput, RedeemWalletCodeOutcome,
+    StoredAdminPaymentCallback, StoredAdminPaymentCallbackPage, StoredAdminPaymentOrder,
+    StoredAdminPaymentOrderPage, StoredAdminRedeemCode, StoredAdminRedeemCodeBatch,
+    StoredAdminRedeemCodeBatchPage, StoredAdminRedeemCodePage, StoredAdminUserWalletBalanceBatch,
+    StoredAdminWalletLedgerItem, StoredAdminWalletLedgerPage, StoredAdminWalletListItem,
+    StoredAdminWalletListPage, StoredAdminWalletRefund, StoredAdminWalletRefundPage,
+    StoredAdminWalletRefundRequestItem, StoredAdminWalletRefundRequestPage,
+    StoredAdminWalletTransaction, StoredAdminWalletTransactionPage, StoredWalletDailyUsageLedger,
     StoredWalletDailyUsageLedgerPage, StoredWalletSnapshot, UpdateAdminWalletRefundGatewayInput,
     UpdateWalletRechargeCheckoutInput, WalletLookupKey, WalletMutationOutcome,
     WalletReadRepository, WalletWriteRepository,
 };
 use aether_data_contracts::DataLayerError;
+use std::collections::BTreeMap;
 
 use crate::{
     error::{postgres_error, SqlxResultExt},
@@ -805,6 +808,39 @@ impl SqlxWalletRepository {
         let tx_runner = PostgresTransactionRunner::new(pool.clone());
         Self { pool, tx_runner }
     }
+}
+
+fn effective_wallet_adjustment_amount(input: &AdjustWalletBalanceInput, before_total: f64) -> f64 {
+    if input.clamp_deduction_to_available_balance && input.amount_usd < 0.0 {
+        -(-input.amount_usd).min(before_total.max(0.0))
+    } else {
+        input.amount_usd
+    }
+}
+
+async fn persist_admin_wallet_batch_outcomes(
+    connection: &mut sqlx::PgConnection,
+    context: &AdminUserWalletBalanceBatchContext,
+    outcomes: &BTreeMap<String, AdminUserWalletBalanceBatchUserOutcome>,
+) -> Result<(), DataLayerError> {
+    let outcomes = serde_json::to_value(outcomes).map_err(|error| {
+        DataLayerError::UnexpectedValue(format!("admin wallet batch outcomes are invalid: {error}"))
+    })?;
+    sqlx::query(
+        r#"
+UPDATE admin_user_wallet_balance_batches
+SET user_outcomes = $3, updated_at_unix_secs = $4
+WHERE admin_user_id = $1 AND idempotency_key = $2
+        "#,
+    )
+    .bind(&context.admin_user_id)
+    .bind(&context.idempotency_key)
+    .bind(outcomes)
+    .bind(Utc::now().timestamp().max(0))
+    .execute(connection)
+    .await
+    .map_postgres_err()?;
+    Ok(())
 }
 
 #[async_trait]
@@ -4262,7 +4298,8 @@ RETURNING
     async fn adjust_wallet_balance(
         &self,
         input: AdjustWalletBalanceInput,
-    ) -> Result<Option<(StoredWalletSnapshot, StoredAdminWalletTransaction)>, DataLayerError> {
+    ) -> Result<Option<(StoredWalletSnapshot, Option<StoredAdminWalletTransaction>)>, DataLayerError>
+    {
         if !input.amount_usd.is_finite() || input.amount_usd == 0.0 {
             return Err(DataLayerError::InvalidInput(
                 "adjustment amount must be finite and non-zero".to_string(),
@@ -4271,6 +4308,58 @@ RETURNING
         self.tx_runner
             .run_read_write(|tx| {
                 Box::pin(async move {
+                    let batch_context = input.batch_context.clone();
+                    let mut batch_user_outcomes = if let Some(context) = &batch_context {
+                        let batch_row = sqlx::query(
+                            r#"
+SELECT target_user_ids, user_outcomes
+FROM admin_user_wallet_balance_batches
+WHERE admin_user_id = $1 AND idempotency_key = $2
+FOR UPDATE
+                            "#,
+                        )
+                        .bind(&context.admin_user_id)
+                        .bind(&context.idempotency_key)
+                        .fetch_optional(&mut **tx)
+                        .await
+                        .map_postgres_err()?
+                        .ok_or_else(|| {
+                            DataLayerError::InvalidInput(
+                                "admin wallet batch was not prepared".to_string(),
+                            )
+                        })?;
+                        let target_user_ids: Vec<String> =
+                            serde_json::from_value(row_get(&batch_row, "target_user_ids")?)
+                                .map_err(|error| {
+                                    DataLayerError::UnexpectedValue(format!(
+                                        "admin wallet batch target list is invalid: {error}"
+                                    ))
+                                })?;
+                        if !target_user_ids.iter().any(|id| id == &context.user_id) {
+                            return Err(DataLayerError::InvalidInput(
+                                "user is outside the prepared admin wallet batch".to_string(),
+                            ));
+                        }
+                        let outcomes: BTreeMap<String, AdminUserWalletBalanceBatchUserOutcome> =
+                            serde_json::from_value(row_get(&batch_row, "user_outcomes")?).map_err(
+                                |error| {
+                                    DataLayerError::UnexpectedValue(format!(
+                                        "admin wallet batch outcomes are invalid: {error}"
+                                    ))
+                                },
+                            )?;
+                        if let Some(outcome) = outcomes.get(&context.user_id) {
+                            match outcome {
+                                AdminUserWalletBalanceBatchUserOutcome::Succeeded => {}
+                                AdminUserWalletBalanceBatchUserOutcome::Failed(_) => {
+                                    return Ok(None);
+                                }
+                            }
+                        }
+                        Some(outcomes)
+                    } else {
+                        None
+                    };
                     let Some(row) = sqlx::query(
                         r#"
 SELECT
@@ -4285,13 +4374,20 @@ SELECT
   CAST(total_recharged AS DOUBLE PRECISION) AS total_recharged,
   CAST(total_consumed AS DOUBLE PRECISION) AS total_consumed,
   CAST(total_refunded AS DOUBLE PRECISION) AS total_refunded,
-  CAST(total_adjusted AS DOUBLE PRECISION) AS total_adjusted
+  CAST(total_adjusted AS DOUBLE PRECISION) AS total_adjusted,
+  CAST(EXTRACT(EPOCH FROM updated_at) AS BIGINT) AS updated_at_unix_secs
 FROM wallets
 WHERE id = $1
+  AND ($2::character varying IS NULL OR user_id = $2::character varying)
 FOR UPDATE
                         "#,
                     )
                     .bind(&input.wallet_id)
+                    .bind(
+                        batch_context
+                            .as_ref()
+                            .map(|context| context.user_id.as_str()),
+                    )
                     .fetch_optional(&mut **tx)
                     .await
                     .map_postgres_err()?
@@ -4312,17 +4408,40 @@ FOR UPDATE
                             "wallet balance is invalid".to_string(),
                         ));
                     }
+                    let wallet = map_wallet_row(&row)?;
+                    let already_applied = batch_context.as_ref().is_some_and(|context| {
+                        batch_user_outcomes.as_ref().is_some_and(|outcomes| {
+                            outcomes.get(&context.user_id)
+                                == Some(&AdminUserWalletBalanceBatchUserOutcome::Succeeded)
+                        })
+                    });
+                    if already_applied {
+                        return Ok(Some((wallet, None)));
+                    }
+                    let amount_usd = effective_wallet_adjustment_amount(&input, before_total);
+                    if amount_usd == 0.0 {
+                        if let (Some(context), Some(outcomes)) =
+                            (batch_context.as_ref(), batch_user_outcomes.as_mut())
+                        {
+                            outcomes.insert(
+                                context.user_id.clone(),
+                                AdminUserWalletBalanceBatchUserOutcome::Succeeded,
+                            );
+                            persist_admin_wallet_batch_outcomes(tx, context, outcomes).await?;
+                        }
+                        return Ok(Some((wallet, None)));
+                    }
                     let mut after_recharge = before_recharge;
                     let mut after_gift = before_gift;
 
-                    if input.amount_usd > 0.0 {
+                    if amount_usd > 0.0 {
                         if input.balance_type.eq_ignore_ascii_case("gift") {
-                            after_gift += input.amount_usd;
+                            after_gift += amount_usd;
                         } else {
-                            after_recharge += input.amount_usd;
+                            after_recharge += amount_usd;
                         }
                     } else {
-                        let mut remaining = -input.amount_usd;
+                        let mut remaining = -amount_usd;
                         let consume_positive_bucket = |balance: &mut f64, to_consume: &mut f64| {
                             if *to_consume <= 0.0 {
                                 return;
@@ -4344,7 +4463,7 @@ FOR UPDATE
                         }
                     }
                     let after_total = after_recharge + after_gift;
-                    let after_total_adjusted = before_total_adjusted + input.amount_usd;
+                    let after_total_adjusted = before_total_adjusted + amount_usd;
                     if !after_recharge.is_finite()
                         || !after_gift.is_finite()
                         || !after_total.is_finite()
@@ -4383,7 +4502,7 @@ RETURNING
                     .bind(&input.wallet_id)
                     .bind(after_recharge)
                     .bind(after_gift)
-                    .bind(input.amount_usd)
+                    .bind(amount_usd)
                     .fetch_one(&mut **tx)
                     .await
                     .map_postgres_err()?;
@@ -4439,7 +4558,7 @@ VALUES (
                     )
                     .bind(&transaction_id)
                     .bind(&input.wallet_id)
-                    .bind(input.amount_usd)
+                    .bind(amount_usd)
                     .bind(before_total)
                     .bind(after_total)
                     .bind(before_recharge)
@@ -4453,14 +4572,24 @@ VALUES (
                     .await
                     .map_postgres_err()?;
 
+                    if let (Some(context), Some(outcomes)) =
+                        (batch_context.as_ref(), batch_user_outcomes.as_mut())
+                    {
+                        outcomes.insert(
+                            context.user_id.clone(),
+                            AdminUserWalletBalanceBatchUserOutcome::Succeeded,
+                        );
+                        persist_admin_wallet_batch_outcomes(tx, context, outcomes).await?;
+                    }
+
                     Ok(Some((
                         wallet,
-                        StoredAdminWalletTransaction {
+                        Some(StoredAdminWalletTransaction {
                             id: transaction_id,
                             wallet_id: input.wallet_id,
                             category: "adjust".to_string(),
                             reason_code: "adjust_admin".to_string(),
-                            amount: input.amount_usd,
+                            amount: amount_usd,
                             balance_before: before_total,
                             balance_after: after_total,
                             recharge_balance_before: before_recharge,
@@ -4474,8 +4603,239 @@ VALUES (
                             operator_email: None,
                             description: Some(description),
                             created_at_unix_ms: Some(created_at),
-                        },
+                        }),
                     )))
+                })
+            })
+            .await
+    }
+
+    async fn prepare_admin_user_wallet_balance_batch(
+        &self,
+        input: PrepareAdminUserWalletBalanceBatchInput,
+    ) -> Result<PrepareAdminUserWalletBalanceBatchOutcome, DataLayerError> {
+        let target_user_ids = serde_json::to_value(&input.target_user_ids).map_err(|error| {
+            DataLayerError::InvalidInput(format!("invalid batch target users: {error}"))
+        })?;
+        let missing_user_ids = serde_json::to_value(&input.missing_user_ids).map_err(|error| {
+            DataLayerError::InvalidInput(format!("invalid missing batch users: {error}"))
+        })?;
+        let warnings = serde_json::to_value(&input.warnings).map_err(|error| {
+            DataLayerError::InvalidInput(format!("invalid batch warnings: {error}"))
+        })?;
+        let now = Utc::now().timestamp().max(0);
+        self.tx_runner
+            .run_read_write(|tx| {
+                Box::pin(async move {
+                    sqlx::query(
+                        r#"
+INSERT INTO admin_user_wallet_balance_batches (
+  admin_user_id, idempotency_key, request_fingerprint, target_user_ids,
+  missing_user_ids, warnings, user_outcomes, created_at_unix_secs, updated_at_unix_secs
+)
+VALUES ($1, $2, $3, $4, $5, $6, '{}'::jsonb, $7, $7)
+ON CONFLICT (admin_user_id, idempotency_key) DO NOTHING
+                        "#,
+                    )
+                    .bind(&input.admin_user_id)
+                    .bind(&input.idempotency_key)
+                    .bind(&input.request_fingerprint)
+                    .bind(target_user_ids)
+                    .bind(missing_user_ids)
+                    .bind(warnings)
+                    .bind(now)
+                    .execute(&mut **tx)
+                    .await
+                    .map_postgres_err()?;
+
+                    let row = sqlx::query(
+                        r#"
+SELECT admin_user_id, idempotency_key, request_fingerprint, target_user_ids,
+       missing_user_ids, warnings, user_outcomes
+FROM admin_user_wallet_balance_batches
+WHERE admin_user_id = $1 AND idempotency_key = $2
+FOR UPDATE
+                        "#,
+                    )
+                    .bind(&input.admin_user_id)
+                    .bind(&input.idempotency_key)
+                    .fetch_one(&mut **tx)
+                    .await
+                    .map_postgres_err()?;
+                    let request_fingerprint: String = row_get(&row, "request_fingerprint")?;
+                    if request_fingerprint != input.request_fingerprint {
+                        return Ok(PrepareAdminUserWalletBalanceBatchOutcome::Conflict);
+                    }
+
+                    let read_json = |column: &str| -> Result<serde_json::Value, DataLayerError> {
+                        row_get(&row, column)
+                    };
+                    let batch = StoredAdminUserWalletBalanceBatch {
+                        admin_user_id: row_get(&row, "admin_user_id")?,
+                        idempotency_key: row_get(&row, "idempotency_key")?,
+                        request_fingerprint,
+                        target_user_ids: serde_json::from_value(read_json("target_user_ids")?)
+                            .map_err(|error| DataLayerError::UnexpectedValue(error.to_string()))?,
+                        missing_user_ids: serde_json::from_value(read_json("missing_user_ids")?)
+                            .map_err(|error| DataLayerError::UnexpectedValue(error.to_string()))?,
+                        warnings: serde_json::from_value(read_json("warnings")?)
+                            .map_err(|error| DataLayerError::UnexpectedValue(error.to_string()))?,
+                        user_outcomes: serde_json::from_value(read_json("user_outcomes")?)
+                            .map_err(|error| DataLayerError::UnexpectedValue(error.to_string()))?,
+                    };
+                    Ok(PrepareAdminUserWalletBalanceBatchOutcome::Ready(batch))
+                })
+            })
+            .await
+    }
+
+    async fn get_admin_user_wallet_balance_batch(
+        &self,
+        admin_user_id: &str,
+        idempotency_key: &str,
+        expected_fingerprint: &str,
+    ) -> Result<Option<PrepareAdminUserWalletBalanceBatchOutcome>, DataLayerError> {
+        let row = sqlx::query(
+            r#"
+SELECT admin_user_id, idempotency_key, request_fingerprint, target_user_ids,
+       missing_user_ids, warnings, user_outcomes
+FROM admin_user_wallet_balance_batches
+WHERE admin_user_id = $1 AND idempotency_key = $2
+            "#,
+        )
+        .bind(admin_user_id)
+        .bind(idempotency_key)
+        .fetch_optional(&self.pool)
+        .await
+        .map_postgres_err()?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let request_fingerprint: String = row_get(&row, "request_fingerprint")?;
+        if request_fingerprint != expected_fingerprint {
+            return Ok(Some(PrepareAdminUserWalletBalanceBatchOutcome::Conflict));
+        }
+        let read_json =
+            |column: &str| -> Result<serde_json::Value, DataLayerError> { row_get(&row, column) };
+        let batch = StoredAdminUserWalletBalanceBatch {
+            admin_user_id: row_get(&row, "admin_user_id")?,
+            idempotency_key: row_get(&row, "idempotency_key")?,
+            request_fingerprint,
+            target_user_ids: serde_json::from_value(read_json("target_user_ids")?)
+                .map_err(|error| DataLayerError::UnexpectedValue(error.to_string()))?,
+            missing_user_ids: serde_json::from_value(read_json("missing_user_ids")?)
+                .map_err(|error| DataLayerError::UnexpectedValue(error.to_string()))?,
+            warnings: serde_json::from_value(read_json("warnings")?)
+                .map_err(|error| DataLayerError::UnexpectedValue(error.to_string()))?,
+            user_outcomes: serde_json::from_value(read_json("user_outcomes")?)
+                .map_err(|error| DataLayerError::UnexpectedValue(error.to_string()))?,
+        };
+        Ok(Some(PrepareAdminUserWalletBalanceBatchOutcome::Ready(
+            batch,
+        )))
+    }
+
+    async fn adjust_admin_user_wallet_balance_batch_user(
+        &self,
+        input: AdjustWalletBalanceInBatchInput,
+    ) -> Result<AdminUserWalletBalanceBatchUserOutcome, DataLayerError> {
+        let context = AdminUserWalletBalanceBatchContext {
+            admin_user_id: input.admin_user_id.clone(),
+            idempotency_key: input.idempotency_key.clone(),
+            user_id: input.user_id.clone(),
+        };
+        let mut adjustment = input.adjustment;
+        adjustment.batch_context = Some(context);
+        if self.adjust_wallet_balance(adjustment).await?.is_some() {
+            return Ok(AdminUserWalletBalanceBatchUserOutcome::Succeeded);
+        }
+        self.record_admin_user_wallet_balance_batch_failure(
+            &input.admin_user_id,
+            &input.idempotency_key,
+            &input.user_id,
+            "用户钱包不可用",
+        )
+        .await
+    }
+
+    async fn record_admin_user_wallet_balance_batch_failure(
+        &self,
+        admin_user_id: &str,
+        idempotency_key: &str,
+        user_id: &str,
+        reason: &str,
+    ) -> Result<AdminUserWalletBalanceBatchUserOutcome, DataLayerError> {
+        let admin_user_id = admin_user_id.to_string();
+        let idempotency_key = idempotency_key.to_string();
+        let user_id = user_id.to_string();
+        let reason = reason.to_string();
+        self.tx_runner
+            .run_read_write(|tx| {
+                Box::pin(async move {
+                    let row = sqlx::query(
+                        r#"
+SELECT target_user_ids, user_outcomes
+FROM admin_user_wallet_balance_batches
+WHERE admin_user_id = $1 AND idempotency_key = $2
+FOR UPDATE
+                        "#,
+                    )
+                    .bind(&admin_user_id)
+                    .bind(&idempotency_key)
+                    .fetch_optional(&mut **tx)
+                    .await
+                    .map_postgres_err()?
+                    .ok_or_else(|| {
+                        DataLayerError::InvalidInput(
+                            "admin wallet batch was not prepared".to_string(),
+                        )
+                    })?;
+                    let target_user_ids: Vec<String> =
+                        serde_json::from_value(row_get(&row, "target_user_ids")?).map_err(
+                            |error| {
+                                DataLayerError::UnexpectedValue(format!(
+                                    "admin wallet batch target list is invalid: {error}"
+                                ))
+                            },
+                        )?;
+                    if !target_user_ids.iter().any(|id| id == &user_id) {
+                        return Err(DataLayerError::InvalidInput(
+                            "user is outside the prepared admin wallet batch".to_string(),
+                        ));
+                    }
+                    let mut outcomes: BTreeMap<String, AdminUserWalletBalanceBatchUserOutcome> =
+                        serde_json::from_value(row_get(&row, "user_outcomes")?).map_err(
+                            |error| {
+                                DataLayerError::UnexpectedValue(format!(
+                                    "admin wallet batch outcomes are invalid: {error}"
+                                ))
+                            },
+                        )?;
+                    if let Some(outcome) = outcomes.get(&user_id) {
+                        return Ok(outcome.clone());
+                    }
+                    let outcome = AdminUserWalletBalanceBatchUserOutcome::Failed(reason);
+                    outcomes.insert(user_id, outcome.clone());
+                    let value = serde_json::to_value(&outcomes).map_err(|error| {
+                        DataLayerError::UnexpectedValue(format!(
+                            "admin wallet batch outcomes are invalid: {error}"
+                        ))
+                    })?;
+                    sqlx::query(
+                        r#"
+UPDATE admin_user_wallet_balance_batches
+SET user_outcomes = $3, updated_at_unix_secs = $4
+WHERE admin_user_id = $1 AND idempotency_key = $2
+                        "#,
+                    )
+                    .bind(&admin_user_id)
+                    .bind(&idempotency_key)
+                    .bind(value)
+                    .bind(Utc::now().timestamp().max(0))
+                    .execute(&mut **tx)
+                    .await
+                    .map_postgres_err()?;
+                    Ok(outcome)
                 })
             })
             .await
@@ -8489,13 +8849,16 @@ VALUES ($1, $2, 'gift', 'gift_initial', $3, 0, $3, 0, 0, 0, $3, 'system_task', $
 #[cfg(test)]
 mod tests {
     use aether_data_contracts::repository::wallet::{
-        CreateManualWalletRechargeInput, CreditAdminPaymentOrderInput, ProcessPaymentCallbackInput,
+        AdjustWalletBalanceInBatchInput, AdjustWalletBalanceInput,
+        AdminUserWalletBalanceBatchUserOutcome, CreateManualWalletRechargeInput,
+        CreditAdminPaymentOrderInput, PrepareAdminUserWalletBalanceBatchInput,
+        PrepareAdminUserWalletBalanceBatchOutcome, ProcessPaymentCallbackInput,
         ProcessPaymentCallbackOutcome, RedeemWalletCodeInput, RedeemWalletCodeOutcome,
         WalletLookupKey, WalletMutationOutcome, WalletReadRepository, WalletWriteRepository,
     };
     use sqlx::Row;
 
-    use super::SqlxWalletRepository;
+    use super::{effective_wallet_adjustment_amount, SqlxWalletRepository};
     use crate::{PostgresPoolConfig, PostgresPoolFactory};
 
     #[test]
@@ -8575,6 +8938,7 @@ mod tests {
             "payment_orders",
             "payment_callbacks",
             "wallet_transactions",
+            "admin_user_wallet_balance_batches",
             "user_plan_entitlements",
             "redeem_code_batches",
             "redeem_codes",
@@ -9218,6 +9582,252 @@ mod tests {
                 assert_eq!(count, 1, "redeeming twice must not duplicate {table}");
             }
         }
+        pool.close().await;
+    }
+
+    #[test]
+    fn bulk_adjustment_clamp_is_opt_in_and_uses_available_total() {
+        let input = AdjustWalletBalanceInput {
+            wallet_id: "wallet-1".to_string(),
+            amount_usd: -100.0,
+            balance_type: "recharge".to_string(),
+            operator_id: None,
+            description: None,
+            clamp_deduction_to_available_balance: true,
+            batch_context: None,
+        };
+        assert_eq!(effective_wallet_adjustment_amount(&input, 13.0), -13.0);
+        assert_eq!(effective_wallet_adjustment_amount(&input, 0.0), -0.0);
+        assert_eq!(effective_wallet_adjustment_amount(&input, -1.0), -0.0);
+
+        let legacy_input = AdjustWalletBalanceInput {
+            clamp_deduction_to_available_balance: false,
+            ..input
+        };
+        assert_eq!(
+            effective_wallet_adjustment_amount(&legacy_input, 13.0),
+            -100.0
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires AETHER_TEST_DATABASE_URL and PostgreSQL bootstrap schema"]
+    async fn live_bulk_wallet_adjustment_persists_actual_delta_and_skips_zero_ledger() {
+        let pool = isolated_wallet_test_pool().await;
+        let (wallet_id, _) = seed_wallet(&pool).await;
+        let repository = SqlxWalletRepository::new(pool.clone());
+
+        let (wallet, transaction) = repository
+            .adjust_wallet_balance(AdjustWalletBalanceInput {
+                wallet_id: wallet_id.clone(),
+                amount_usd: -100.0,
+                balance_type: "recharge".to_string(),
+                operator_id: Some("admin-user".to_string()),
+                description: Some("bulk deduction".to_string()),
+                clamp_deduction_to_available_balance: true,
+                batch_context: None,
+            })
+            .await
+            .expect("bulk adjustment should succeed")
+            .expect("wallet should exist");
+        let transaction =
+            transaction.expect("positive available balance should create a ledger row");
+        assert_eq!(transaction.amount, -13.0);
+        assert_eq!(transaction.balance_before, 13.0);
+        assert_eq!(transaction.balance_after, 0.0);
+        assert_eq!(wallet.balance + wallet.gift_balance, 0.0);
+        let persisted_amount: f64 =
+            sqlx::query_scalar("SELECT amount FROM wallet_transactions WHERE id = $1")
+                .bind(&transaction.id)
+                .fetch_one(&pool)
+                .await
+                .expect("ledger should store the effective deduction");
+        assert_eq!(persisted_amount, -13.0);
+
+        let (wallet, transaction) = repository
+            .adjust_wallet_balance(AdjustWalletBalanceInput {
+                wallet_id: wallet_id.clone(),
+                amount_usd: -1.0,
+                balance_type: "recharge".to_string(),
+                operator_id: Some("admin-user".to_string()),
+                description: Some("bulk deduction at zero".to_string()),
+                clamp_deduction_to_available_balance: true,
+                batch_context: None,
+            })
+            .await
+            .expect("zero-balance adjustment should succeed")
+            .expect("wallet should still exist");
+        assert_eq!(wallet.balance + wallet.gift_balance, 0.0);
+        assert!(
+            transaction.is_none(),
+            "zero effective delta must not create a ledger row"
+        );
+        let transaction_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM wallet_transactions WHERE wallet_id = $1")
+                .bind(&wallet_id)
+                .fetch_one(&pool)
+                .await
+                .expect("ledger row count should be readable");
+        assert_eq!(transaction_count, 1);
+
+        sqlx::query("UPDATE wallets SET balance = -2, gift_balance = 1 WHERE id = $1")
+            .bind(&wallet_id)
+            .execute(&pool)
+            .await
+            .expect("legacy negative wallet balance should be seeded");
+        let (wallet, transaction) = repository
+            .adjust_wallet_balance(AdjustWalletBalanceInput {
+                wallet_id: wallet_id.clone(),
+                amount_usd: -1.0,
+                balance_type: "recharge".to_string(),
+                operator_id: Some("admin-user".to_string()),
+                description: Some("bulk deduction from negative balance".to_string()),
+                clamp_deduction_to_available_balance: true,
+                batch_context: None,
+            })
+            .await
+            .expect("legacy negative wallet should remain usable")
+            .expect("wallet should still exist");
+        assert_eq!(wallet.balance + wallet.gift_balance, -1.0);
+        assert!(transaction.is_none());
+        let transaction_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM wallet_transactions WHERE wallet_id = $1")
+                .bind(&wallet_id)
+                .fetch_one(&pool)
+                .await
+                .expect("ledger row count should be readable");
+        assert_eq!(transaction_count, 1);
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires AETHER_TEST_DATABASE_URL and PostgreSQL bootstrap schema"]
+    async fn live_admin_wallet_balance_batch_replays_committed_and_zero_delta_results_once() {
+        let pool = isolated_wallet_test_pool().await;
+        let (wallet_id, user_id) = seed_wallet(&pool).await;
+        let repository = SqlxWalletRepository::new(pool.clone());
+        let admin_user_id = "admin-user".to_string();
+        let make_adjustment =
+            |idempotency_key: &str, amount_usd: f64| AdjustWalletBalanceInBatchInput {
+                admin_user_id: admin_user_id.clone(),
+                idempotency_key: idempotency_key.to_string(),
+                user_id: user_id.clone(),
+                adjustment: AdjustWalletBalanceInput {
+                    wallet_id: wallet_id.clone(),
+                    amount_usd,
+                    balance_type: "recharge".to_string(),
+                    operator_id: Some(admin_user_id.clone()),
+                    description: Some("idempotency integration test".to_string()),
+                    clamp_deduction_to_available_balance: true,
+                    batch_context: None,
+                },
+            };
+        let prepare_batch = |idempotency_key: &str, request_fingerprint: &str| {
+            PrepareAdminUserWalletBalanceBatchInput {
+                admin_user_id: admin_user_id.clone(),
+                idempotency_key: idempotency_key.to_string(),
+                request_fingerprint: request_fingerprint.to_string(),
+                target_user_ids: vec![user_id.clone()],
+                missing_user_ids: Vec::new(),
+                warnings: Vec::new(),
+            }
+        };
+
+        assert!(matches!(
+            repository
+                .prepare_admin_user_wallet_balance_batch(prepare_batch(
+                    "deduct-key",
+                    "deduct-fingerprint"
+                ))
+                .await
+                .unwrap(),
+            PrepareAdminUserWalletBalanceBatchOutcome::Ready(_)
+        ));
+        let deduct = make_adjustment("deduct-key", -50.0);
+        assert_eq!(
+            repository
+                .adjust_admin_user_wallet_balance_batch_user(deduct.clone())
+                .await
+                .unwrap(),
+            AdminUserWalletBalanceBatchUserOutcome::Succeeded
+        );
+        assert_eq!(
+            repository
+                .adjust_admin_user_wallet_balance_batch_user(deduct.clone())
+                .await
+                .unwrap(),
+            AdminUserWalletBalanceBatchUserOutcome::Succeeded
+        );
+        let wallet = repository
+            .find(WalletLookupKey::WalletId(&wallet_id))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(wallet.balance + wallet.gift_balance, 0.0);
+
+        assert!(matches!(
+            repository
+                .prepare_admin_user_wallet_balance_batch(prepare_batch(
+                    "zero-key",
+                    "zero-fingerprint"
+                ))
+                .await
+                .unwrap(),
+            PrepareAdminUserWalletBalanceBatchOutcome::Ready(_)
+        ));
+        let zero_delta = make_adjustment("zero-key", -5.0);
+        assert_eq!(
+            repository
+                .adjust_admin_user_wallet_balance_batch_user(zero_delta.clone())
+                .await
+                .unwrap(),
+            AdminUserWalletBalanceBatchUserOutcome::Succeeded
+        );
+        repository
+            .adjust_wallet_balance(AdjustWalletBalanceInput {
+                wallet_id: wallet_id.clone(),
+                amount_usd: 8.0,
+                balance_type: "recharge".to_string(),
+                operator_id: Some(admin_user_id.clone()),
+                description: Some("recharge after zero-delta batch".to_string()),
+                clamp_deduction_to_available_balance: true,
+                batch_context: None,
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        for replay in [zero_delta, deduct] {
+            assert_eq!(
+                repository
+                    .adjust_admin_user_wallet_balance_batch_user(replay)
+                    .await
+                    .unwrap(),
+                AdminUserWalletBalanceBatchUserOutcome::Succeeded
+            );
+        }
+        assert_eq!(
+            repository
+                .prepare_admin_user_wallet_balance_batch(prepare_batch(
+                    "zero-key",
+                    "different-fingerprint"
+                ))
+                .await
+                .unwrap(),
+            PrepareAdminUserWalletBalanceBatchOutcome::Conflict
+        );
+        let wallet = repository
+            .find(WalletLookupKey::WalletId(&wallet_id))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(wallet.balance + wallet.gift_balance, 8.0);
+        let transaction_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM wallet_transactions WHERE wallet_id = $1")
+                .bind(&wallet_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(transaction_count, 2);
         pool.close().await;
     }
 

@@ -1,9 +1,10 @@
 use super::{
     read_decision_trace, read_provider_transport_snapshot, read_request_candidate_trace,
-    AdjustWalletBalanceInput, AdminBillingCollectorRecord, AdminBillingCollectorWriteInput,
-    AdminBillingMutationOutcome, AdminBillingPresetApplyResult, AdminBillingRuleRecord,
-    AdminBillingRuleWriteInput, AdminPaymentOrderListQuery, AdminRedeemCodeBatchListQuery,
-    AdminRedeemCodeListQuery, AdminWalletLedgerQuery, AdminWalletListQuery,
+    AdjustWalletBalanceInBatchInput, AdjustWalletBalanceInput, AdminBillingCollectorRecord,
+    AdminBillingCollectorWriteInput, AdminBillingMutationOutcome, AdminBillingPresetApplyResult,
+    AdminBillingRuleRecord, AdminBillingRuleWriteInput, AdminPaymentOrderListQuery,
+    AdminRedeemCodeBatchListQuery, AdminRedeemCodeListQuery,
+    AdminUserWalletBalanceBatchUserOutcome, AdminWalletLedgerQuery, AdminWalletListQuery,
     AdminWalletRefundRequestListQuery, AnnouncementListQuery, AuditLogListQuery,
     BackgroundTaskListQuery, BackgroundTaskSummary, BillingModelContextCacheKey,
     BillingModelContextCacheState, BillingModelContextInflightState, BillingPlanRecord,
@@ -17,24 +18,25 @@ use super::{
     DisableAdminRedeemCodeBatchInput, DisableAdminRedeemCodeInput, FailAdminWalletRefundInput,
     FailWalletRechargeCheckoutInput, GatewayDataState, GatewayProviderTransportSnapshot,
     LocalVideoTaskReadResponse, PaymentGatewayConfigCasWriteInput, PaymentGatewayConfigRecord,
-    PaymentGatewayConfigWriteInput, PaymentGatewaySecretCasUpdate, ProcessAdminWalletRefundInput,
-    ProcessPaymentCallbackInput, ProcessPaymentCallbackOutcome, ReclaimWalletRechargeCheckoutInput,
-    ReconcileUsagePolicyCostInput, RedeemWalletCodeInput, RedeemWalletCodeOutcome,
-    ReleaseUsagePolicyRequestAdmissionInput, RequestAuditBundle, RequestCandidateTrace,
-    ReserveUsagePolicyCostInput, ReserveUsagePolicyCostOutcome, ReserveUsagePolicyRequestInput,
-    ReserveUsagePolicyRequestOutcome, StoredAdminAuditLogPage, StoredAdminPaymentCallbackPage,
-    StoredAdminPaymentOrder, StoredAdminPaymentOrderPage, StoredAdminRedeemCodeBatch,
-    StoredAdminRedeemCodeBatchPage, StoredAdminRedeemCodePage, StoredAdminWalletLedgerPage,
-    StoredAdminWalletListPage, StoredAdminWalletRefund, StoredAdminWalletRefundPage,
-    StoredAdminWalletRefundRequestPage, StoredAdminWalletTransaction,
-    StoredAdminWalletTransactionPage, StoredAnnouncement, StoredAnnouncementPage,
-    StoredBackgroundTaskEvent, StoredBackgroundTaskRun, StoredBackgroundTaskRunPage,
-    StoredBillingModelContext, StoredProviderQuotaSnapshot, StoredProviderUsageSummary,
-    StoredRequestUsageAudit, StoredSuspiciousActivity, StoredUsagePolicyCostReservation,
-    StoredUsagePolicyRequestAdmission, StoredUsageSettlement, StoredUserAuditLogPage,
-    StoredUserAuthRecord, StoredUserExportRow, StoredUserSummary, StoredVideoTask,
-    StoredWalletDailyUsageLedger, StoredWalletDailyUsageLedgerPage, StoredWalletSnapshot,
-    UpdateAdminWalletRefundGatewayInput, UpdateAnnouncementRecord,
+    PaymentGatewayConfigWriteInput, PaymentGatewaySecretCasUpdate,
+    PrepareAdminUserWalletBalanceBatchInput, PrepareAdminUserWalletBalanceBatchOutcome,
+    ProcessAdminWalletRefundInput, ProcessPaymentCallbackInput, ProcessPaymentCallbackOutcome,
+    ReclaimWalletRechargeCheckoutInput, ReconcileUsagePolicyCostInput, RedeemWalletCodeInput,
+    RedeemWalletCodeOutcome, ReleaseUsagePolicyRequestAdmissionInput, RequestAuditBundle,
+    RequestCandidateTrace, ReserveUsagePolicyCostInput, ReserveUsagePolicyCostOutcome,
+    ReserveUsagePolicyRequestInput, ReserveUsagePolicyRequestOutcome, StoredAdminAuditLogPage,
+    StoredAdminPaymentCallbackPage, StoredAdminPaymentOrder, StoredAdminPaymentOrderPage,
+    StoredAdminRedeemCodeBatch, StoredAdminRedeemCodeBatchPage, StoredAdminRedeemCodePage,
+    StoredAdminUserWalletBalanceBatch, StoredAdminWalletLedgerPage, StoredAdminWalletListPage,
+    StoredAdminWalletRefund, StoredAdminWalletRefundPage, StoredAdminWalletRefundRequestPage,
+    StoredAdminWalletTransaction, StoredAdminWalletTransactionPage, StoredAnnouncement,
+    StoredAnnouncementPage, StoredBackgroundTaskEvent, StoredBackgroundTaskRun,
+    StoredBackgroundTaskRunPage, StoredBillingModelContext, StoredProviderQuotaSnapshot,
+    StoredProviderUsageSummary, StoredRequestUsageAudit, StoredSuspiciousActivity,
+    StoredUsagePolicyCostReservation, StoredUsagePolicyRequestAdmission, StoredUsageSettlement,
+    StoredUserAuditLogPage, StoredUserAuthRecord, StoredUserExportRow, StoredUserSummary,
+    StoredVideoTask, StoredWalletDailyUsageLedger, StoredWalletDailyUsageLedgerPage,
+    StoredWalletSnapshot, UpdateAdminWalletRefundGatewayInput, UpdateAnnouncementRecord,
     UpdateWalletRechargeCheckoutInput, UpsertBackgroundTaskEvent, UpsertBackgroundTaskRun,
     UpsertUsageRecord, UpsertVideoTask, UsageSettlementInput, UserDailyQuotaAvailabilityRecord,
     UserPlanEntitlementRecord, VideoTaskLookupKey, VideoTaskModelCount, VideoTaskQueryFilter,
@@ -1066,9 +1068,77 @@ impl GatewayDataState {
     pub(crate) async fn adjust_wallet_balance(
         &self,
         input: AdjustWalletBalanceInput,
-    ) -> Result<Option<(StoredWalletSnapshot, StoredAdminWalletTransaction)>, DataLayerError> {
+    ) -> Result<Option<(StoredWalletSnapshot, Option<StoredAdminWalletTransaction>)>, DataLayerError>
+    {
         match &self.wallet_writer {
             Some(repository) => repository.adjust_wallet_balance(input).await,
+            None => Ok(None),
+        }
+    }
+
+    pub(crate) async fn prepare_admin_user_wallet_balance_batch(
+        &self,
+        input: PrepareAdminUserWalletBalanceBatchInput,
+    ) -> Result<Option<PrepareAdminUserWalletBalanceBatchOutcome>, DataLayerError> {
+        match &self.wallet_writer {
+            Some(repository) => repository
+                .prepare_admin_user_wallet_balance_batch(input)
+                .await
+                .map(Some),
+            None => Ok(None),
+        }
+    }
+
+    pub(crate) async fn get_admin_user_wallet_balance_batch(
+        &self,
+        admin_user_id: &str,
+        idempotency_key: &str,
+        request_fingerprint: &str,
+    ) -> Result<Option<PrepareAdminUserWalletBalanceBatchOutcome>, DataLayerError> {
+        match &self.wallet_writer {
+            Some(repository) => {
+                repository
+                    .get_admin_user_wallet_balance_batch(
+                        admin_user_id,
+                        idempotency_key,
+                        request_fingerprint,
+                    )
+                    .await
+            }
+            None => Ok(None),
+        }
+    }
+
+    pub(crate) async fn adjust_admin_user_wallet_balance_batch_user(
+        &self,
+        input: AdjustWalletBalanceInBatchInput,
+    ) -> Result<Option<AdminUserWalletBalanceBatchUserOutcome>, DataLayerError> {
+        match &self.wallet_writer {
+            Some(repository) => repository
+                .adjust_admin_user_wallet_balance_batch_user(input)
+                .await
+                .map(Some),
+            None => Ok(None),
+        }
+    }
+
+    pub(crate) async fn record_admin_user_wallet_balance_batch_failure(
+        &self,
+        admin_user_id: &str,
+        idempotency_key: &str,
+        user_id: &str,
+        reason: &str,
+    ) -> Result<Option<AdminUserWalletBalanceBatchUserOutcome>, DataLayerError> {
+        match &self.wallet_writer {
+            Some(repository) => repository
+                .record_admin_user_wallet_balance_batch_failure(
+                    admin_user_id,
+                    idempotency_key,
+                    user_id,
+                    reason,
+                )
+                .await
+                .map(Some),
             None => Ok(None),
         }
     }
