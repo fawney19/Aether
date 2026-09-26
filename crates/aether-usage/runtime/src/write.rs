@@ -3052,14 +3052,26 @@ fn parse_sse_body_for_storage(text: &str) -> Option<Value> {
     let mut chunks = Vec::new();
     let mut total_chunks = 0_u64;
     let mut saw_done = false;
+    let mut first_parse_error = None;
     for_each_sse_payload(text, |payload| {
         if payload == "[DONE]" {
             saw_done = true;
             return;
         }
         total_chunks += 1;
-        if let Ok(json_body) = serde_json::from_str::<Value>(payload) {
-            chunks.push(json_body);
+        match serde_json::from_str::<Value>(payload) {
+            Ok(json_body) => chunks.push(json_body),
+            Err(error) if first_parse_error.is_none() => {
+                // A later valid event must not hide an earlier broken one.
+                // Store diagnostics only, without duplicating raw user content.
+                first_parse_error = Some(json!({
+                    "chunk_index": total_chunks - 1,
+                    "line": error.line(),
+                    "column": error.column(),
+                    "message": error.to_string(),
+                }));
+            }
+            Err(_) => {}
         }
     });
     if total_chunks == 0 && !saw_done {
@@ -3075,6 +3087,11 @@ fn parse_sse_body_for_storage(text: &str) -> Option<Value> {
     ]);
     if saw_done {
         metadata.insert("has_completion".to_string(), Value::Bool(true));
+    }
+    if let Some(error) = first_parse_error {
+        // Capture truncation can also cause a parse error; this describes the
+        // captured payload, not an assertion that the provider sent bad JSON.
+        metadata.insert("first_parse_error".to_string(), error);
     }
     if stored_chunks < total_chunks {
         metadata.insert(
@@ -7102,6 +7119,20 @@ mod tests {
                 }
             })),
         );
+    }
+
+    #[test]
+    fn parse_sse_body_for_storage_reports_bad_event_before_valid_terminal() {
+        let body = concat!(
+            "data: {\"tools\":[}\n\n",
+            "data: {\"type\":\"response.completed\"}\n\n",
+        );
+        let parsed = parse_sse_body_for_storage(body).unwrap();
+        assert_eq!(parsed["metadata"]["dropped_chunks"], 1);
+        assert_eq!(parsed["metadata"]["first_parse_error"]["chunk_index"], 0);
+        assert!(parsed["metadata"]["first_parse_error"]["message"].is_string());
+        assert_eq!(parsed["chunks"][0]["type"], "response.completed");
+        assert!(parsed.get("raw_response").is_none());
     }
 
     #[test]

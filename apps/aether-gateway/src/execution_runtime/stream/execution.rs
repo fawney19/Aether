@@ -6462,6 +6462,21 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
 
     let normalized_stream_report_context =
         normalize_provider_private_report_context(report_context.as_ref());
+    // Observers follow the live protocol stream across prefetch and transfer.
+    // Diagnostic capture limits must never determine parser state.
+    let stream_usage_report_context = normalized_stream_report_context.clone().or_else(|| {
+        Some(json!({
+            "provider_api_format": plan.provider_api_format.as_str(),
+            "client_api_format": plan.client_api_format.as_str(),
+        }))
+    });
+    let mut stream_usage_observer = stream_usage_report_context
+        .as_ref()
+        .map(|_| StreamingStandardTerminalObserver::default());
+    let mut stream_usage_observer_buffered =
+        StreamUsageObservationBuffer::new(max_stream_body_buffer_bytes);
+    let mut provider_error_inspection = ProviderStreamErrorInspection::default();
+    let mut prefetched_provider_error = None;
     let upstream_headers = headers.clone();
     let mut private_stream_normalizer =
         maybe_build_provider_private_stream_normalizer(report_context.as_ref());
@@ -6562,7 +6577,8 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
         stream_commit_gate.commit();
     }
     let mut prefetched_chunks: Vec<Bytes> = Vec::new();
-    let mut provider_prefetched_body = Vec::new();
+    let mut provider_prefetched_body = StreamBodyCapture::default();
+    let mut provider_prefetched_bytes = 0_u64;
     let mut provider_prefetched_body_truncated = false;
     let mut prefetched_body = Vec::new();
     let mut prefetched_inspection_body = Vec::new();
@@ -6815,10 +6831,12 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                         }
                     }
 
-                    append_stream_capture_bytes(
+                    provider_prefetched_bytes =
+                        provider_prefetched_bytes.saturating_add(chunk.len() as u64);
+                    append_budgeted_stream_capture_bytes(
                         &mut provider_prefetched_body,
                         &chunk,
-                        MAX_STREAM_PREFETCH_BYTES,
+                        max_stream_body_buffer_bytes,
                         &mut provider_prefetched_body_truncated,
                     );
                     append_stream_capture_bytes(
@@ -7063,6 +7081,22 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                     } else {
                         chunk
                     };
+                    if let Some(error) = provider_error_inspection
+                        .observe(stream_usage_report_context.as_ref(), &normalized_chunk)
+                    {
+                        prefetched_provider_error.get_or_insert(error);
+                    }
+                    if let (Some(observer), Some(context)) = (
+                        stream_usage_observer.as_mut(),
+                        stream_usage_report_context.as_ref(),
+                    ) {
+                        observe_stream_usage_bytes(
+                            observer,
+                            context,
+                            &mut stream_usage_observer_buffered,
+                            &normalized_chunk,
+                        );
+                    }
                     let rewritten_chunk = if let Some(rewriter) = local_stream_rewriter.as_mut() {
                         match rewriter.push_chunk(&normalized_chunk) {
                             Ok(rewritten_chunk) => rewritten_chunk,
@@ -7193,17 +7227,21 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
     if stream_commit_gate.is_uncommitted() {
         stream_commit_gate.commit();
     }
-    let prefetched_response_history_persisted = if let Some(record) = local_stream_rewriter
+    if let Some(record) = local_stream_rewriter
         .as_mut()
         .and_then(|rewriter| rewriter.take_response_history_record())
     {
         crate::ai_serving::persist_response_history_record(state, record).await;
-        true
-    } else {
-        false
-    };
-    drop(private_stream_normalizer);
-    drop(local_stream_rewriter);
+    }
+    // Keep partial records and conversion state; replaying the bounded
+    // inspection/capture prefix loses any bytes consumed beyond that prefix.
+    let mut private_stream_normalizer = private_stream_normalizer.map(|parser| parser.into_owned());
+    let mut local_stream_rewriter = local_stream_rewriter.map(|parser| parser.into_owned());
+    if sync_json_stream_bridge_active {
+        private_stream_normalizer = None;
+        local_stream_rewriter = None;
+        stream_usage_observer = None;
+    }
 
     let initial_usage_telemetry = prefetched_usage_telemetry.clone().or_else(|| {
         prefetched_telemetry
@@ -7246,7 +7284,6 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
     let headers_for_report = headers.clone();
     let report_kind_owned = report_kind;
     let report_context_owned = report_context;
-    let normalized_stream_report_context_owned = normalized_stream_report_context;
     let lifecycle_seed_for_report = lifecycle_seed;
     let provider_prefetched_body_for_report = provider_prefetched_body;
     let prefetched_body_for_report = prefetched_body;
@@ -7288,40 +7325,10 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
         let _stream_total_guard =
             StageElapsedGuard::from_started_at("stream_total", stream_started_at_for_report);
         let _provider_pool_in_flight_guard = provider_pool_in_flight_guard_for_report;
-        let mut provider_buffered_body = StreamBodyCapture::default();
+        let mut provider_buffered_body = provider_prefetched_body_for_report;
         let mut buffered_body = StreamBodyCapture::default();
-        let mut provider_body_truncated = false;
+        let mut provider_body_truncated = provider_prefetched_body_truncated;
         let mut client_body_truncated = false;
-        let mut private_stream_normalizer = if sync_json_stream_bridge_active_for_report {
-            None
-        } else {
-            maybe_build_provider_private_stream_normalizer(report_context_owned.as_ref())
-        };
-        let mut local_stream_rewriter = if sync_json_stream_bridge_active_for_report {
-            None
-        } else {
-            maybe_build_stream_response_rewriter(normalized_stream_report_context_owned.as_ref())
-        };
-        let stream_usage_report_context =
-            normalized_stream_report_context_owned.clone().or_else(|| {
-                Some(serde_json::json!({
-                    "provider_api_format": plan_for_report.provider_api_format.as_str(),
-                    "client_api_format": plan_for_report.client_api_format.as_str(),
-                }))
-            });
-        let mut stream_usage_observer = stream_usage_report_context
-            .as_ref()
-            .filter(|_| !sync_json_stream_bridge_active_for_report)
-            .map(|_| StreamingStandardTerminalObserver::default());
-        let mut stream_usage_observer_buffered =
-            StreamUsageObservationBuffer::new(max_stream_body_buffer_bytes);
-        let mut provider_error_inspection = ProviderStreamErrorInspection::default();
-        append_budgeted_stream_capture_bytes(
-            &mut provider_buffered_body,
-            &provider_prefetched_body_for_report,
-            max_stream_body_buffer_bytes,
-            &mut provider_body_truncated,
-        );
         append_budgeted_stream_capture_bytes(
             &mut buffered_body,
             &prefetched_body_for_report,
@@ -7365,9 +7372,7 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
             } else {
                 initial_elapsed_ms
             }));
-        let provider_stream_bytes = Arc::new(AtomicU64::new(
-            u64::try_from(provider_prefetched_body_for_report.len()).unwrap_or(u64::MAX),
-        ));
+        let provider_stream_bytes = Arc::new(AtomicU64::new(provider_prefetched_bytes));
         let client_stream_bytes = Arc::new(AtomicU64::new(
             u64::try_from(prefetched_body_for_report.len()).unwrap_or(u64::MAX),
         ));
@@ -7463,96 +7468,20 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                 }
             })
         };
-        if !provider_prefetched_body_for_report.is_empty() {
-            let normalized_prefetched_chunk = if let Some(normalizer) =
-                private_stream_normalizer.as_mut()
-            {
-                match normalizer.push_chunk(&provider_prefetched_body_for_report) {
-                    Ok(normalized_chunk) => Some(normalized_chunk),
-                    Err(err) => {
-                        warn!(
-                            event_name = "stream_execution_prefetch_normalize_restore_failed",
-                            log_type = "ops",
-                            trace_id = %trace_id_owned,
-                            request_id = %request_id_for_report_log,
-                            candidate_id = ?candidate_id_for_report.as_deref(),
-                            error_category = "stream_normalization_restore_failed",
-                            "gateway failed to restore private stream normalization state after prefetch"
-                        );
-                        terminal_failure = Some(build_stream_failure_report(
-                            "execution_runtime_stream_rewrite_error",
-                            format!(
-                                "failed to restore private stream normalization state after prefetch: {err:?}"
-                            ),
-                            502,
-                        ));
-                        None
-                    }
-                }
-            } else {
-                None
-            };
-            let replay_chunk = normalized_prefetched_chunk
-                .as_deref()
-                .unwrap_or(provider_prefetched_body_for_report.as_slice());
-            if let Some(error_body_json) = provider_error_inspection
-                .observe(stream_usage_report_context.as_ref(), replay_chunk)
-            {
-                provider_error_forwarded_to_client = !prefetched_body_for_report.is_empty();
-                let error_status_code = resolve_provider_stream_error_status_code(
-                    plan_for_report.provider_api_format.as_str(),
-                    status_code,
-                    &error_body_json,
-                );
-                terminal_failure = Some(build_stream_failure_from_provider_error_body(
-                    error_status_code,
-                    &error_body_json,
-                ));
-            }
-            if let (Some(observer), Some(report_context)) = (
-                stream_usage_observer.as_mut(),
-                stream_usage_report_context.as_ref(),
-            ) {
-                observe_stream_usage_bytes(
-                    observer,
-                    report_context,
-                    &mut stream_usage_observer_buffered,
-                    replay_chunk,
-                );
-            }
-            if terminal_failure.is_none() {
-                if let Some(rewriter) = local_stream_rewriter.as_mut() {
-                    if let Err(err) = rewriter.push_chunk(replay_chunk) {
-                        warn!(
-                            event_name = "stream_execution_prefetch_rewrite_restore_failed",
-                            log_type = "ops",
-                            trace_id = %trace_id_owned,
-                            request_id = %request_id_for_report_log,
-                            candidate_id = ?candidate_id_for_report.as_deref(),
-                            error_category = "stream_rewrite_restore_failed",
-                            "gateway failed to restore local stream rewrite state after prefetch"
-                        );
-                        terminal_failure = Some(build_stream_failure_report(
-                            "execution_runtime_stream_rewrite_error",
-                            format!(
-                                "failed to restore local stream rewrite state after prefetch: {err:?}"
-                            ),
-                            502,
-                        ));
-                    }
-                }
-            }
-            if prefetched_response_history_persisted {
-                if let Some(rewriter) = local_stream_rewriter.as_mut() {
-                    let _ = rewriter.take_response_history_record();
-                }
-            }
+        if let Some(error_body_json) = prefetched_provider_error {
+            provider_error_forwarded_to_client = !prefetched_body_for_report.is_empty();
+            let error_status_code = resolve_provider_stream_error_status_code(
+                plan_for_report.provider_api_format.as_str(),
+                status_code,
+                &error_body_json,
+            );
+            terminal_failure = Some(build_stream_failure_from_provider_error_body(
+                error_status_code,
+                &error_body_json,
+            ));
         }
-
-        // These buffers restore parser/rewriter state above. Audit capture owns
-        // its budgeted copies; retaining semantic prefetch duplicates for the
-        // rest of the stream would bypass the capture memory limit.
-        drop(provider_prefetched_body_for_report);
+        // Parser state is already current and capture owns its budgeted bytes.
+        // This output prefix is needed only to initialize client-side trackers.
         drop(prefetched_body_for_report);
 
         if terminal_failure.is_none() && !reached_eof {
@@ -9313,6 +9242,188 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn prefetch_handoff_preserves_large_responses_setup_event() {
+        let event = format!(
+            "event: response.created\ndata: {}\n\n",
+            json!({"type":"response.created", "response": {
+                "id":"resp-large-setup", "status":"in_progress", "output":[],
+                "tools":[{"name":"write", "description":"x".repeat(64 * 1024)}]
+            }})
+        );
+        let done = "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-large-setup\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":7,\"output_tokens\":2}}}\n\n";
+        // Include the two observed transport boundaries, exact/near budget
+        // boundaries, and multiple prefetch chunks crossing the budget.
+        for cuts in [
+            vec![16_383],
+            vec![16_384],
+            vec![17_735],
+            vec![17_741],
+            vec![8_192, 17_735],
+        ] {
+            let mut chunks = Vec::new();
+            let mut start = 0;
+            for end in cuts {
+                chunks.push(&event[start..end]);
+                start = end;
+            }
+            chunks.push(&event[start..]);
+            chunks.push(done);
+            let response = execute_generic_sse_precommit(chunks, json!({}), None, false)
+                .await
+                .expect("large setup should commit at the bounded prefetch limit");
+            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let body = String::from_utf8(body.to_vec()).unwrap();
+            assert!(
+                body.starts_with(&event),
+                "setup bytes lost or duplicated at split {start}"
+            );
+            let events: Vec<Value> = body
+                .lines()
+                .filter_map(|line| line.strip_prefix("data: "))
+                .filter(|payload| *payload != "[DONE]")
+                .map(|payload| {
+                    serde_json::from_str(payload).expect("every SSE payload must be valid JSON")
+                })
+                .collect();
+            assert_eq!(events.len(), 2, "events must be forwarded exactly once");
+            assert_eq!(events[1]["type"], "response.completed");
+        }
+    }
+
+    #[tokio::test]
+    async fn prefetch_handoff_keeps_audit_usage_and_private_conversion() {
+        for private in [false, true] {
+            let request_id = format!("handoff-audit-{}", uuid::Uuid::new_v4());
+            let mut plan = if private {
+                antigravity_gemini_stream_plan(&request_id)
+            } else {
+                native_anthropic_stream_plan(&request_id)
+            };
+            if !private {
+                plan.provider_api_format = "openai:responses".into();
+                plan.client_api_format = "openai:responses".into();
+            }
+            let context = json!({
+                "request_id": request_id, "candidate_id": plan.candidate_id,
+                "candidate_index":0, "retry_index":0,
+                "provider_api_format": plan.provider_api_format,
+                "client_api_format": plan.client_api_format,
+                "needs_conversion": private, "has_envelope": private,
+                "envelope_name": if private { "antigravity:v1internal" } else { "" },
+            });
+            let repository = Arc::new(InMemoryUsageReadRepository::default());
+            let catalog = provider_catalog_for_plan(&plan, None);
+            let state = AppState::new()
+                .unwrap()
+                .with_data_state_for_tests(
+                    crate::data::GatewayDataState::with_usage_repository_for_tests(Arc::clone(
+                        &repository,
+                    ))
+                    .with_provider_catalog_reader(Arc::new(catalog))
+                    .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY)
+                    .with_system_config_values_for_tests([(
+                        "request_record_level".into(),
+                        json!("full"),
+                    )]),
+                )
+                .with_usage_runtime_for_tests(UsageRuntimeConfig {
+                    enabled: true,
+                    ..Default::default()
+                });
+            let text = "hello".repeat(12_000);
+            let payload = if private {
+                json!({"response":{"candidates":[{"content":{"role":"model","parts":[{"text":text}]},
+                    "finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1234,"candidatesTokenCount":567},
+                    "modelVersion":"gemini-3.7-flash-tiered"}})
+            } else {
+                json!({"type":"response.completed","response":{"id":"resp-handoff-usage","status":"completed",
+                    "output":[{"type":"message","id":"msg-handoff","role":"assistant","status":"completed",
+                        "content":[{"type":"output_text","text":text,"annotations":[]}]}],
+                    "usage":{"input_tokens":1234,"output_tokens":567,"total_tokens":1801}}})
+            };
+            let input = format!("data: {payload}\n\n");
+            // One complete large chunk exercises an already-emitted prefetch
+            // result; the private path exercises incomplete normalization too.
+            let chunks = if private {
+                vec![input[..17_735].to_string(), input[17_735..].to_string()]
+            } else {
+                vec![input.clone()]
+            };
+            let frames = stream! {
+                yield Ok::<Bytes, std::io::Error>(ndjson_frame(StreamFrame {
+                    frame_type:StreamFrameType::Headers,
+                    payload:StreamFramePayload::Headers { status_code:200,
+                        headers:BTreeMap::from([("content-type".into(),"text/event-stream".into())]),
+                        response_observation:None },
+                }));
+                for chunk in chunks {
+                    yield Ok(ndjson_frame(StreamFrame { frame_type:StreamFrameType::Data,
+                        payload:StreamFramePayload::Data { text:Some(chunk),chunk_b64:None } }));
+                }
+                yield Ok(ndjson_frame(StreamFrame::eof()));
+            }.boxed();
+            let response = execute_stream_from_frame_stream(
+                &state,
+                plan,
+                "trace-handoff-audit",
+                &test_decision(),
+                OPENAI_RESPONSES_STREAM_PLAN_KIND,
+                Some("openai_responses_stream_success".into()),
+                Some(context),
+                crate::clock::current_unix_ms(),
+                Instant::now(),
+                RequestStageTrace::from_env(),
+                false,
+                frames,
+                None,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let body = String::from_utf8(body.to_vec()).unwrap();
+            let events: Vec<Value> = body
+                .lines()
+                .filter_map(|l| l.strip_prefix("data: "))
+                .filter(|p| *p != "[DONE]")
+                .map(|p| serde_json::from_str(p).unwrap())
+                .collect();
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|e| e["type"] == "response.completed")
+                    .count(),
+                1
+            );
+            assert!(body.contains(&text));
+            let usage = tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    if let Some(u) = repository
+                        .find_by_request_id(&request_id)
+                        .await
+                        .unwrap()
+                        .filter(|u| u.status == "completed" || u.status == "failed")
+                    {
+                        break u;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("usage should finalize");
+            assert_eq!(usage.status, "completed", "{:?}", usage.error_message);
+            assert_eq!(usage.input_tokens, 1234);
+            assert_eq!(usage.output_tokens, 567);
+            let captured = usage.response_body.as_ref().expect("provider capture");
+            assert!(
+                captured["metadata"].get("dropped_chunks").is_none(),
+                "{captured}"
+            );
+            assert_eq!(captured["chunks"].as_array().unwrap(), &vec![payload]);
+        }
+    }
+
+    #[tokio::test]
     async fn generic_stream_success_regex_matches_fragmented_plain_body() {
         for chunks in [
             vec!["upstream CAPACITY ", "exhausted"],
@@ -9850,7 +9961,7 @@ mod tests {
             let mut buffer = super::StreamUsageObservationBuffer::new(32 * 1024);
             let mut rewriter = super::maybe_build_stream_response_rewriter(Some(&context)).unwrap();
             let mut delivered = Vec::new();
-            for chunk in chunks {
+            for (index, chunk) in chunks.into_iter().enumerate() {
                 provider.append(chunk, 32 * 1024, &mut provider_truncated);
                 super::observe_stream_usage_bytes(
                     observer.as_mut().unwrap(),
@@ -9861,6 +9972,10 @@ mod tests {
                 let output = rewriter.push_chunk(chunk).unwrap();
                 client.append(&output, 32 * 1024, &mut client_truncated);
                 delivered.extend(output);
+                if index == 0 {
+                    // Task handoff must also work when audit admits no bytes.
+                    rewriter = rewriter.into_owned();
+                }
             }
             let tail = rewriter.finish().unwrap();
             client.append(&tail, 32 * 1024, &mut client_truncated);

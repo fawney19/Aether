@@ -18,6 +18,12 @@ pub(crate) fn maybe_build_local_stream_rewriter<'a>(
 }
 
 impl LocalStreamRewriter<'_> {
+    pub(crate) fn into_owned(self) -> LocalStreamRewriter<'static> {
+        LocalStreamRewriter {
+            inner: self.inner.into_owned(),
+        }
+    }
+
     pub(crate) fn push_chunk(&mut self, chunk: &[u8]) -> Result<Vec<u8>, GatewayError> {
         self.inner.push_chunk(chunk).map_err(map_surface_error)
     }
