@@ -17,6 +17,8 @@ export interface PoolStatsKeyInput {
         code?: string | null
         label?: string | null
         scope?: string | null
+        quota_group_label?: string | null
+        bucket_id?: string | null
         window_minutes?: number | null
         usage?: QuotaWindowUsageSnapshot | null
       } | null> | null
@@ -40,6 +42,8 @@ export interface PoolAccountTotalStatsDisplay {
 export interface PoolCodexCycleStatsGroup {
   code: PoolCodexCycleWindowCode
   label: string
+  /** Model family whose quota this window tracks (Antigravity quota groups). */
+  section?: string
   metrics: PoolStatsMetric[]
 }
 
@@ -54,6 +58,12 @@ const MISSING_STAT_VALUE = '—'
 
 export function isCodexProviderType(providerType: string | null | undefined): boolean {
   return String(providerType || '').trim().toLowerCase() === 'codex'
+}
+
+const CYCLE_STATS_PROVIDER_TYPES = new Set(['codex', 'xai', 'antigravity'])
+
+export function isCycleStatsProviderType(providerType: string | null | undefined): boolean {
+  return CYCLE_STATS_PROVIDER_TYPES.has(String(providerType || '').trim().toLowerCase())
 }
 
 export function formatPoolStatInteger(value: number | null | undefined): string {
@@ -119,31 +129,59 @@ function normalizeWindowCode(value: unknown): string {
   return String(value || '').trim().toLowerCase()
 }
 
-function getCodexCycleStatsGroups(key: PoolStatsKeyInput): PoolCodexCycleStatsGroup[] {
+// Antigravity quota groups: "group:<index>:<bucket_id>".
+function quotaGroupPrefix(window: { bucket_id?: string | null, quota_group_label?: string | null }): string {
+  const bucketId = String(window.bucket_id || '').trim().toLowerCase()
+  if (bucketId.startsWith('gemini')) return 'Gemini'
+  if (bucketId.startsWith('3p')) return 'Claude/GPT'
+  return String(window.quota_group_label || '').trim()
+}
+
+function quotaGroupSortBase(code: string): number {
+  const index = Number(code.split(':')[1])
+  return Number.isInteger(index) && index >= 0 ? (index + 1) * 1_000_000 : 100_000_000
+}
+
+function getCodexCycleStatsGroups(
+  key: PoolStatsKeyInput,
+  providerType?: string | null,
+): PoolCodexCycleStatsGroup[] {
   const windows = key.status_snapshot?.quota?.windows
   if (!Array.isArray(windows)) return []
 
+  // Non-codex providers only get cycle stats on the windows the backend
+  // annotated with a cycle length (xAI "usage", Antigravity quota groups).
+  const requireWindowMinutes = providerType != null && !isCodexProviderType(providerType)
   const seenCodes = new Set<string>()
   return windows
     .map((window) => {
       if (!window) return null
       const code = normalizeWindowCode(window.code)
       const scope = String(window.scope || 'account').trim().toLowerCase()
-      if (!code || scope !== 'account' || code.startsWith('spark_') || seenCodes.has(code)) {
+      const isQuotaGroup = scope === 'quota_group'
+      if (
+        !code
+        || (scope !== 'account' && !isQuotaGroup)
+        || code.startsWith('spark_')
+        || seenCodes.has(code)
+        || (requireWindowMinutes && window.window_minutes == null)
+      ) {
         return null
       }
       const presentation = getCodexQuotaWindowPresentation({
         code,
-        label: window.label,
+        label: isQuotaGroup ? null : window.label,
         scope,
         window_minutes: window.window_minutes,
       })
       if (!presentation) return null
       seenCodes.add(code)
+      const prefix = isQuotaGroup ? quotaGroupPrefix(window) : ''
       return {
         code,
-        label: presentation.label,
-        sortOrder: presentation.sortOrder,
+        label: prefix ? `${prefix} ${presentation.label}` : presentation.label,
+        ...(prefix ? { section: prefix } : {}),
+        sortOrder: (isQuotaGroup ? quotaGroupSortBase(code) : 0) + presentation.sortOrder,
         metrics: buildCycleMetrics(window.usage ?? null),
       }
     })
@@ -198,10 +236,11 @@ export function buildAccountTotalStatsDisplay(
 
 export function buildCodexCycleStatsDisplay(
   key: PoolStatsKeyInput,
+  providerType?: string | null,
 ): PoolCodexCycleStatsDisplay {
   return {
     kind: 'codex_cycle',
-    groups: getCodexCycleStatsGroups(key),
+    groups: getCodexCycleStatsGroups(key, providerType),
   }
 }
 
@@ -210,8 +249,10 @@ export function buildPoolStatsDisplay(
   providerType: string | null | undefined,
   mode: PoolManagementStatsMode,
 ): PoolStatsDisplay {
-  if (isCodexProviderType(providerType) && mode === 'current_cycle') {
-    return buildCodexCycleStatsDisplay(key)
+  if (isCycleStatsProviderType(providerType) && mode === 'current_cycle') {
+    const display = buildCodexCycleStatsDisplay(key, providerType)
+    // Keys without any cycle window (e.g. never refreshed) keep account totals.
+    if (isCodexProviderType(providerType) || display.groups.length > 0) return display
   }
 
   return buildAccountTotalStatsDisplay(key)

@@ -34,7 +34,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-type AdminPoolCodexCycleUsageByKey =
+type AdminPoolCycleUsageByKey =
     BTreeMap<String, BTreeMap<String, StoredProviderApiKeyWindowUsageSummary>>;
 
 fn admin_pool_json_u64(value: Option<&serde_json::Value>) -> Option<u64> {
@@ -42,18 +42,6 @@ fn admin_pool_json_u64(value: Option<&serde_json::Value>) -> Option<u64> {
         Some(serde_json::Value::Number(number)) => number.as_u64(),
         Some(serde_json::Value::String(text)) => text.trim().parse::<u64>().ok(),
         _ => None,
-    }
-}
-
-fn admin_pool_codex_default_window_minutes(code: &str) -> Option<u64> {
-    if code.eq_ignore_ascii_case("5h") {
-        Some(300)
-    } else if code.eq_ignore_ascii_case("weekly") {
-        Some(10_080)
-    } else if code.eq_ignore_ascii_case("monthly") {
-        Some(43_800)
-    } else {
-        None
     }
 }
 
@@ -95,36 +83,23 @@ async fn read_admin_pool_scores_by_key_id(
         .collect::<BTreeMap<_, _>>())
 }
 
-fn admin_pool_codex_cycle_usage_request(
+fn admin_pool_cycle_usage_request(
+    provider_type: &str,
     key: &StoredProviderCatalogKey,
     window: &serde_json::Map<String, serde_json::Value>,
     now_unix_secs: u64,
 ) -> Option<ProviderApiKeyWindowUsageRequest> {
-    let scope = window
-        .get("scope")
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .unwrap_or("account");
-    if !scope.eq_ignore_ascii_case("account") {
-        return None;
-    }
-    let window_code = window
-        .get("code")
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .filter(|code| !code.is_empty() && !code.to_ascii_lowercase().starts_with("spark_"))?
-        .to_ascii_lowercase();
+    let spec = pool_payloads::admin_pool_cycle_window_spec(provider_type, window)?;
     let reset_at = admin_pool_json_u64(window.get("reset_at"))?;
-    let window_minutes = match admin_pool_json_u64(window.get("window_minutes")) {
-        Some(0) => return None,
-        Some(value) => value,
-        None => admin_pool_codex_default_window_minutes(&window_code)?,
-    };
-    let window_seconds = window_minutes.checked_mul(60)?;
+    let window_seconds = spec.window_minutes.checked_mul(60)?;
     if reset_at <= now_unix_secs {
         return None;
     }
-    let mut start_unix_secs = reset_at.checked_sub(window_seconds)?;
+    // A reported period start is exact; otherwise derive it from the window length.
+    let mut start_unix_secs = match admin_pool_json_u64(window.get("period_start_at")) {
+        Some(period_start_at) if period_start_at < reset_at => period_start_at,
+        _ => reset_at.checked_sub(window_seconds)?,
+    };
     if let Some(usage_reset_at) = admin_pool_json_u64(window.get("usage_reset_at")) {
         start_unix_secs = start_unix_secs.max(usage_reset_at);
     }
@@ -134,47 +109,51 @@ fn admin_pool_codex_cycle_usage_request(
 
     Some(ProviderApiKeyWindowUsageRequest {
         provider_api_key_id: key.id.clone(),
-        window_code,
+        window_code: spec.code,
         start_unix_secs,
         end_unix_secs: now_unix_secs,
+        include_model_prefix: spec.include_model_prefix.map(str::to_string),
+        exclude_model_prefix: spec.exclude_model_prefix.map(str::to_string),
     })
 }
 
-fn admin_pool_codex_cycle_usage_requests(
+fn admin_pool_cycle_usage_requests(
+    provider_type: &str,
     keys: &[StoredProviderCatalogKey],
     now_unix_secs: u64,
 ) -> Vec<ProviderApiKeyWindowUsageRequest> {
     keys.iter()
         .flat_map(|key| {
-            key.status_snapshot
-                .as_ref()
-                .and_then(serde_json::Value::as_object)
-                .and_then(|snapshot| snapshot.get("quota"))
-                .and_then(serde_json::Value::as_object)
+            // Enumerate the same windows the pool page returns: the payload
+            // materializes quota windows from upstream metadata when the stored
+            // snapshot lacks them.
+            let snapshot = provider_key_status_snapshot_payload(key, provider_type);
+            snapshot
+                .get("quota")
                 .and_then(|quota| quota.get("windows"))
                 .and_then(serde_json::Value::as_array)
                 .into_iter()
                 .flatten()
                 .filter_map(serde_json::Value::as_object)
                 .filter_map(|window| {
-                    admin_pool_codex_cycle_usage_request(key, window, now_unix_secs)
+                    admin_pool_cycle_usage_request(provider_type, key, window, now_unix_secs)
                 })
                 .collect::<Vec<_>>()
         })
         .collect()
 }
 
-async fn read_admin_pool_codex_cycle_usage_by_key(
+async fn read_admin_pool_cycle_usage_by_key(
     state: &AdminAppState<'_>,
     provider_type: &str,
     keys: &[StoredProviderCatalogKey],
     now_unix_secs: u64,
-) -> Result<AdminPoolCodexCycleUsageByKey, GatewayError> {
-    if !provider_type.trim().eq_ignore_ascii_case("codex") || keys.is_empty() {
+) -> Result<AdminPoolCycleUsageByKey, GatewayError> {
+    if !pool_payloads::admin_pool_provider_supports_cycle_stats(provider_type) || keys.is_empty() {
         return Ok(BTreeMap::new());
     }
 
-    let requests = admin_pool_codex_cycle_usage_requests(keys, now_unix_secs);
+    let requests = admin_pool_cycle_usage_requests(provider_type, keys, now_unix_secs);
     if requests.is_empty() {
         return Ok(BTreeMap::new());
     }
@@ -183,7 +162,7 @@ async fn read_admin_pool_codex_cycle_usage_by_key(
         .app()
         .summarize_usage_by_provider_api_key_windows(&requests)
         .await?;
-    let mut usage_by_key = AdminPoolCodexCycleUsageByKey::new();
+    let mut usage_by_key = AdminPoolCycleUsageByKey::new();
     for summary in summaries {
         let window_code = summary.window_code.trim().to_ascii_lowercase();
         if window_code.is_empty() {
@@ -744,13 +723,9 @@ pub(super) async fn build_admin_pool_list_keys_response(
         }
         _ => AdminProviderPoolRuntimeState::default(),
     };
-    let codex_cycle_usage_by_key = read_admin_pool_codex_cycle_usage_by_key(
-        state,
-        &provider.provider_type,
-        &keys,
-        now_unix_secs,
-    )
-    .await?;
+    let cycle_usage_by_key =
+        read_admin_pool_cycle_usage_by_key(state, &provider.provider_type, &keys, now_unix_secs)
+            .await?;
 
     let items = keys
         .into_iter()
@@ -763,7 +738,7 @@ pub(super) async fn build_admin_pool_list_keys_response(
                 &runtime,
                 pool_config.clone(),
                 pool_scores_by_key_id.get(&key.id),
-                codex_cycle_usage_by_key.get(&key.id),
+                cycle_usage_by_key.get(&key.id),
                 now_unix_secs,
             )
         })
@@ -846,7 +821,8 @@ mod tests {
             "window_minutes": 43_800u64
         });
 
-        let request = admin_pool_codex_cycle_usage_request(
+        let request = admin_pool_cycle_usage_request(
+            "codex",
             &key,
             window.as_object().expect("window should be object"),
             now,
@@ -861,27 +837,208 @@ mod tests {
     #[test]
     fn codex_cycle_usage_request_ignores_zero_and_spark_windows() {
         let key = sample_key("oauth");
+        // The reset lies inside a weekly cycle from `now`, so only the zero or
+        // spark marker can drop these windows.
+        let reset_at = 3_100_000u64;
         for window in [
             json!({
                 "code": "weekly",
                 "scope": "account",
-                "reset_at": 5_000_000u64,
+                "reset_at": reset_at,
                 "window_minutes": 0
+            }),
+            json!({
+                "code": "weekly",
+                "scope": "account",
+                "reset_at": reset_at,
+                "window_minutes": "0"
             }),
             json!({
                 "code": "spark_weekly",
                 "scope": "account",
-                "reset_at": 5_000_000u64,
+                "reset_at": reset_at,
                 "window_minutes": 10_080
             }),
         ] {
-            assert!(admin_pool_codex_cycle_usage_request(
+            assert!(admin_pool_cycle_usage_request(
+                "codex",
                 &key,
                 window.as_object().expect("window should be object"),
                 3_000_000,
             )
             .is_none());
         }
+        let weekly = json!({
+            "code": "weekly",
+            "scope": "account",
+            "reset_at": reset_at
+        });
+        assert!(admin_pool_cycle_usage_request(
+            "codex",
+            &key,
+            weekly.as_object().expect("window should be object"),
+            3_000_000,
+        )
+        .is_some());
+    }
+
+    #[test]
+    fn xai_cycle_usage_request_uses_weekly_period() {
+        let key = sample_key("oauth");
+        let reset_at = 5_000_000u64;
+        let window = json!({
+            "code": "usage",
+            "scope": "account",
+            "window": "weekly",
+            "reset_at": reset_at
+        });
+
+        let request = admin_pool_cycle_usage_request(
+            "xai",
+            &key,
+            window.as_object().expect("window should be object"),
+            4_900_000,
+        )
+        .expect("xai weekly usage request should build");
+
+        assert_eq!(request.window_code, "usage");
+        assert_eq!(request.start_unix_secs, reset_at - 10_080 * 60);
+        assert_eq!(request.include_model_prefix, None);
+        assert_eq!(request.exclude_model_prefix, None);
+
+        let prepaid = json!({"code": "prepaid", "scope": "account", "reset_at": reset_at});
+        assert!(admin_pool_cycle_usage_request(
+            "xai",
+            &key,
+            prepaid.as_object().expect("window should be object"),
+            4_900_000,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn cycle_usage_requests_cover_windows_materialized_from_upstream_metadata() {
+        let mut key = sample_key("oauth");
+        key.status_snapshot = None;
+        key.upstream_metadata = Some(json!({
+            "xai": {
+                "updated_at": 4_900_000u64,
+                "usage_percentage": 46.0,
+                "period_type": "weekly",
+                "next_reset_at": 5_000_000u64
+            }
+        }));
+
+        let requests = admin_pool_cycle_usage_requests("xai", &[key], 4_900_000);
+
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].window_code, "usage");
+        assert_eq!(requests[0].start_unix_secs, 5_000_000 - 10_080 * 60);
+    }
+
+    #[test]
+    fn xai_monthly_cycle_usage_request_requires_the_reported_period_start() {
+        let key = sample_key("oauth");
+        let reset_at = 5_000_000u64;
+        let period_start_at = 2_500_000u64;
+        let now = 4_900_000u64;
+        let monthly = json!({
+            "code": "usage",
+            "scope": "account",
+            "window": "monthly",
+            "reset_at": reset_at,
+            "period_start_at": period_start_at
+        });
+
+        let request = admin_pool_cycle_usage_request(
+            "xai",
+            &key,
+            monthly.as_object().expect("window should be object"),
+            now,
+        )
+        .expect("xai monthly usage request should build from its period start");
+        assert_eq!(request.start_unix_secs, period_start_at);
+        assert_eq!(request.end_unix_secs, now);
+
+        for window in [
+            json!({"code": "usage", "scope": "account", "window": "monthly", "reset_at": reset_at}),
+            json!({"code": "usage", "scope": "account", "label": "月额度", "reset_at": reset_at}),
+        ] {
+            assert!(admin_pool_cycle_usage_request(
+                "xai",
+                &key,
+                window.as_object().expect("window should be object"),
+                now,
+            )
+            .is_none());
+        }
+    }
+
+    #[test]
+    fn antigravity_cycle_usage_request_splits_quota_groups_by_model_family() {
+        let key = sample_key("oauth");
+        let reset_at = 5_000_000u64;
+        let now = 4_990_000u64;
+        let window_for = |code: &str, bucket_id: &str, period: &str| {
+            json!({
+                "code": code,
+                "scope": "quota_group",
+                "quota_group": code.rsplit_once(':').map(|(group, _)| group),
+                "bucket_id": bucket_id,
+                "window": period,
+                "reset_at": reset_at
+            })
+        };
+
+        let gemini_5h = window_for("group:0:gemini-5h", "gemini-5h", "5h");
+        let request = admin_pool_cycle_usage_request(
+            "antigravity",
+            &key,
+            gemini_5h.as_object().expect("window should be object"),
+            now,
+        )
+        .expect("gemini 5h request should build");
+        assert_eq!(request.window_code, "group:0:gemini-5h");
+        assert_eq!(request.start_unix_secs, reset_at - 300 * 60);
+        assert_eq!(request.include_model_prefix.as_deref(), Some("gemini"));
+        assert_eq!(request.exclude_model_prefix, None);
+
+        let third_party_weekly = window_for("group:1:3p-weekly", "3p-weekly", "weekly");
+        let request = admin_pool_cycle_usage_request(
+            "antigravity",
+            &key,
+            third_party_weekly
+                .as_object()
+                .expect("window should be object"),
+            now,
+        )
+        .expect("3p weekly request should build");
+        assert_eq!(request.start_unix_secs, reset_at - 10_080 * 60);
+        assert_eq!(request.include_model_prefix, None);
+        assert_eq!(request.exclude_model_prefix.as_deref(), Some("gemini"));
+
+        let model_window = json!({
+            "code": "model:gemini-3-flash",
+            "scope": "model",
+            "model": "gemini-3-flash",
+            "reset_at": reset_at
+        });
+        assert!(admin_pool_cycle_usage_request(
+            "antigravity",
+            &key,
+            model_window.as_object().expect("window should be object"),
+            now,
+        )
+        .is_none());
+
+        let stale = window_for("group:0:gemini-5h", "gemini-5h", "5h");
+        assert!(admin_pool_cycle_usage_request(
+            "antigravity",
+            &key,
+            stale.as_object().expect("window should be object"),
+            reset_at + 1,
+        )
+        .is_none());
     }
 
     #[test]

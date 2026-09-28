@@ -1,31 +1,43 @@
 <template>
   <div
-    v-if="cycle && cycleMetricRows.length > 0"
+    v-if="cycle && cycleSections.length > 0"
     :class="cycleContainerClass"
     :data-testid="variant === 'desktop' ? 'pool-stats-cycle-text' : 'pool-mobile-stats-cycle-text'"
   >
-    <div
-      v-for="row in cycleMetricRows"
-      :key="`${row.key}-${variant}-cycle-row`"
-      class="flex items-baseline justify-between gap-3"
-      :title="`${row.label} ${row.valueText}`"
+    <template
+      v-for="section in cycleSections"
+      :key="`${section.name}-${variant}-cycle-section`"
     >
-      <span class="shrink-0 text-muted-foreground">
-        {{ row.label }}
-      </span>
-      <span
-        class="grid w-[112px] shrink-0 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-baseline gap-x-1 font-medium text-foreground"
-        :data-testid="variant === 'desktop' ? `pool-stats-cycle-${row.key}` : undefined"
+      <div
+        v-if="section.name"
+        class="truncate pt-0.5 text-[10px] font-medium text-muted-foreground/80 first:pt-0"
+        data-cycle-stat-part="section"
       >
-        <span class="min-w-0 truncate text-right">{{ row.hasComparison ? row.smallValue : '-' }}</span>
+        {{ section.name }}
+      </div>
+      <div
+        v-for="row in section.rows"
+        :key="`${section.name}-${row.key}-${variant}-cycle-row`"
+        class="flex items-baseline justify-between gap-3"
+        :title="`${section.name ? `${section.name} ` : ''}${row.label} ${row.valueText}`"
+      >
+        <span class="shrink-0 text-muted-foreground">
+          {{ row.label }}
+        </span>
         <span
-          class="w-1.5 text-center text-muted-foreground/60"
-          data-cycle-stat-part="divider"
-          aria-hidden="true"
-        >/</span>
-        <span class="min-w-0 truncate text-left">{{ row.largeValue }}</span>
-      </span>
-    </div>
+          class="grid w-[112px] shrink-0 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-baseline gap-x-1 font-medium text-foreground"
+          :data-testid="variant === 'desktop' ? `pool-stats-cycle-${row.key}` : undefined"
+        >
+          <span class="min-w-0 truncate text-right">{{ row.hasComparison ? row.smallValue : '-' }}</span>
+          <span
+            class="w-1.5 text-center text-muted-foreground/60"
+            data-cycle-stat-part="divider"
+            aria-hidden="true"
+          >/</span>
+          <span class="min-w-0 truncate text-left">{{ row.largeValue }}</span>
+        </span>
+      </div>
+    </template>
   </div>
 
   <div
@@ -106,9 +118,9 @@ function metricForGroup(
   return group?.metrics.find(metric => metric.key === key) ?? missingMetric(key)
 }
 
-const cycleMetricRows = computed(() => {
-  const smallGroup = props.cycleGroups.length > 1 ? props.cycleGroups[0] : undefined
-  const largeGroup = props.cycleGroups[props.cycleGroups.length - 1]
+function buildCycleMetricRows(groups: PoolCodexCycleStatsGroup[]) {
+  const smallGroup = groups.length > 1 ? groups[0] : undefined
+  const largeGroup = groups[groups.length - 1]
   if (!largeGroup) return []
 
   return CYCLE_METRIC_KEYS.map((key) => {
@@ -124,6 +136,17 @@ const cycleMetricRows = computed(() => {
       valueText: hasComparison ? `${smallMetric.value}/${largeMetric.value}` : largeMetric.value,
     }
   })
+}
+
+const cycleSections = computed(() => {
+  const sections = new Map<string, PoolCodexCycleStatsGroup[]>()
+  for (const group of props.cycleGroups) {
+    const name = group.section ?? ''
+    sections.set(name, [...(sections.get(name) ?? []), group])
+  }
+  return [...sections.entries()]
+    .map(([name, groups]) => ({ name, rows: buildCycleMetricRows(groups) }))
+    .filter(section => section.rows.length > 0)
 })
 
 const cycleContainerClass = computed(() => [
