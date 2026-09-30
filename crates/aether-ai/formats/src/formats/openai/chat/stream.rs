@@ -2198,10 +2198,6 @@ struct OpenAIResponsesClientToolResultState {
     item_started: bool,
 }
 
-fn is_responses_web_search_tool(name: &str) -> bool {
-    matches!(name, "web_search" | "web_search_preview")
-}
-
 fn web_search_query_from_arguments(arguments: &str) -> String {
     serde_json::from_str::<Value>(arguments)
         .ok()
@@ -3526,12 +3522,14 @@ impl OpenAIResponsesClientEmitter {
                     .map(|(_, child_name)| child_name.to_string())
                     .unwrap_or_else(|| name.clone());
                 let emitted_namespace = namespaced_tool.map(|(namespace, _)| namespace.to_string());
-                let is_namespaced_tool = namespaced_tool.is_some();
+                let web_search = self
+                    .namespace_tool_aliases
+                    .emits_hosted_web_search_call(&name);
                 let state = self.tool_calls.entry(index).or_default();
                 state.call_id = call_id.clone();
                 state.name = emitted_name;
                 state.namespace = emitted_namespace;
-                state.web_search = !is_namespaced_tool && is_responses_web_search_tool(&name);
+                state.web_search = web_search;
                 let emitted_call_id = state.call_id.clone();
                 let emitted_name = state.name.clone();
                 let emitted_namespace = state.namespace.clone();
@@ -6377,6 +6375,53 @@ mod tests {
         assert!(sse.contains("event: response.output_item.done\n"));
         assert!(sse.contains(r#""query":"today tech""#));
         assert!(!sse.contains("response.function_call_arguments.delta"));
+    }
+
+    #[test]
+    fn openai_responses_client_emitter_keeps_client_declared_web_search_function_as_function_call()
+    {
+        let mut emitter = OpenAIResponsesClientEmitter::with_report_context(&json!({
+            "original_request_body": {
+                "tools": [{
+                    "type": "function",
+                    "name": "web_search",
+                    "parameters": {"type": "object", "properties": {"query": {"type": "string"}}}
+                }]
+            }
+        }));
+        let mut bytes = Vec::new();
+        for event in [
+            CanonicalStreamEvent::ToolCallStart {
+                index: 0,
+                call_id: "call_ws_1".to_string(),
+                name: "web_search".to_string(),
+            },
+            CanonicalStreamEvent::ToolCallArgumentsDelta {
+                index: 0,
+                arguments: r#"{"query":"today tech"}"#.to_string(),
+            },
+            CanonicalStreamEvent::Finish {
+                finish_reason: Some("tool_calls".to_string()),
+                usage: None,
+            },
+        ] {
+            bytes.extend(
+                emitter
+                    .emit(CanonicalStreamFrame {
+                        id: "resp_123".to_string(),
+                        model: "gemini-3.8-flash".to_string(),
+                        event,
+                    })
+                    .expect("event should encode"),
+            );
+        }
+
+        let sse = String::from_utf8(bytes).expect("sse should be utf8");
+        assert!(!sse.contains("web_search_call"));
+        assert!(sse.contains(r#""type":"function_call""#));
+        assert!(sse.contains(r#""call_id":"call_ws_1""#));
+        assert!(sse.contains(r#""name":"web_search""#));
+        assert!(sse.contains("response.function_call_arguments.delta"));
     }
 
     #[test]

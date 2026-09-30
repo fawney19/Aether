@@ -974,6 +974,66 @@ mod tests {
     }
 
     #[test]
+    fn streams_gemini_web_search_function_call_to_responses_function_call_for_function_tool() {
+        let mut context = report_context("gemini:generate_content", "openai:responses");
+        context["original_request_body"] = json!({
+            "model": "gemini-3.8-flash",
+            "tools": [{
+                "type": "function",
+                "name": "web_search",
+                "parameters": {"type": "object", "properties": {"query": {"type": "string"}}}
+            }]
+        });
+        let mut matrix = StreamingStandardFormatMatrix::default();
+        let mut output = matrix
+            .transform_line(
+                &context,
+                data_line(json!({
+                    "response": {
+                        "responseId": "resp_ws_function",
+                        "modelVersion": "gemini-3.8-flash",
+                        "candidates": [{
+                            "index": 0,
+                            "content": {
+                                "role": "model",
+                                "parts": [{
+                                    "thoughtSignature": "signature",
+                                    "functionCall": {
+                                        "name": "web_search",
+                                        "args": {"query": "conpty newline"},
+                                        "id": "call_109312"
+                                    }
+                                }]
+                            },
+                            "finishReason": "STOP"
+                        }]
+                    }
+                })),
+            )
+            .expect("Gemini function call should transform");
+        output.extend(matrix.finish(&context).expect("stream should finish"));
+
+        let events = json_data_events(&output);
+        let completed = events
+            .iter()
+            .find(|event| event["type"] == "response.completed")
+            .expect("response should complete");
+        let items = completed["response"]["output"]
+            .as_array()
+            .expect("completed response should carry output");
+        assert!(
+            items.iter().all(|item| item["type"] != "web_search_call"),
+            "{items:?}"
+        );
+        let call = items
+            .iter()
+            .find(|item| item["type"] == "function_call")
+            .expect("function tool call should stay a function_call");
+        assert_eq!(call["name"], "web_search");
+        assert_eq!(call["call_id"], "call_109312");
+    }
+
+    #[test]
     fn terminal_observer_marks_malformed_gemini_function_call_as_failure() {
         let context = report_context("gemini:generate_content", "openai:responses");
         let mut observer = StreamingStandardTerminalObserver::default();

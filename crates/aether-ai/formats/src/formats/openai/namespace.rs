@@ -54,6 +54,7 @@ pub(crate) struct NamespaceToolAliases {
     by_chat_name: BTreeMap<String, (String, String)>,
     namespace_tool_indices: BTreeSet<usize>,
     invalid_namespace_tool_indices: BTreeSet<usize>,
+    client_function_tool_names: BTreeSet<String>,
 }
 
 impl NamespaceToolAliases {
@@ -171,10 +172,24 @@ impl NamespaceToolAliases {
         else {
             return Self::default();
         };
-        let Some(canonical) = openai_responses_tools_to_canonical(Some(tools)) else {
-            return Self::default();
-        };
-        Self::from_canonical_tools(&canonical)
+        let client_function_tool_names = client_function_tool_names(tools);
+        let mut result = openai_responses_tools_to_canonical(Some(tools))
+            .map(|canonical| Self::from_canonical_tools(&canonical))
+            .unwrap_or_default();
+        result.client_function_tool_names = client_function_tool_names;
+        result
+    }
+
+    /// Whether a tool call named `name` should surface to a Responses client as
+    /// a hosted `web_search_call`. A client that declared its own function or
+    /// custom tool called `web_search` must get a `function_call` back, or it
+    /// cannot answer the call and will echo an unconvertible hosted item.
+    /// When the client declares both a hosted `web_search` tool and a function
+    /// of the same name, the function wins: only the client can answer it.
+    pub(crate) fn emits_hosted_web_search_call(&self, name: &str) -> bool {
+        matches!(name, "web_search" | "web_search_preview")
+            && self.responses_name(name).is_none()
+            && !self.client_function_tool_names.contains(name)
     }
 
     pub(crate) fn chat_name(&self, namespace: &str, child_name: &str) -> Option<&str> {
@@ -225,6 +240,32 @@ impl NamespaceToolAliases {
             .iter()
             .filter(move |tool| tool.name == child_name)
     }
+}
+
+fn client_function_tool_names(tools: &Value) -> BTreeSet<String> {
+    tools
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_object)
+        .filter(|tool| {
+            tool.get("type")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .is_none_or(|tool_type| {
+                    tool_type.eq_ignore_ascii_case("function")
+                        || tool_type.eq_ignore_ascii_case("custom")
+                })
+        })
+        .filter_map(|tool| {
+            non_empty_string(tool.get("name")).or_else(|| {
+                ["function", "custom"]
+                    .iter()
+                    .find_map(|key| non_empty_string(tool.get(*key)?.get("name")))
+            })
+        })
+        .map(ToOwned::to_owned)
+        .collect()
 }
 
 pub(crate) fn canonical_tool_is_responses_namespace(tool: &CanonicalToolDefinition) -> bool {
@@ -412,6 +453,111 @@ mod tests {
             aliases.responses_name("vulnerability_report"),
             Some(("mcp__reports", "vulnerability_report"))
         );
+    }
+
+    fn hosted_web_search(tools: Value, name: &str) -> bool {
+        NamespaceToolAliases::from_report_context(&json!({
+            "original_request_body": {"tools": tools}
+        }))
+        .emits_hosted_web_search_call(name)
+    }
+
+    #[test]
+    fn hosted_web_search_call_is_reserved_for_undeclared_search_names() {
+        let schema = json!({"type": "object", "properties": {"query": {"type": "string"}}});
+        let cases = [
+            ("no tools", json!([]), "web_search", true),
+            (
+                "hosted tool",
+                json!([{"type": "web_search"}]),
+                "web_search",
+                true,
+            ),
+            (
+                "hosted preview tool",
+                json!([{"type": "web_search_preview"}]),
+                "web_search_preview",
+                true,
+            ),
+            (
+                "function tool",
+                json!([{"type": "function", "name": "web_search", "parameters": schema}]),
+                "web_search",
+                false,
+            ),
+            (
+                "function tool named preview",
+                json!([{"type": "function", "name": "web_search_preview", "parameters": schema}]),
+                "web_search_preview",
+                false,
+            ),
+            (
+                "custom tool",
+                json!([{"type": "custom", "name": "web_search"}]),
+                "web_search",
+                false,
+            ),
+            (
+                "tool without type",
+                json!([{"name": "web_search", "parameters": schema}]),
+                "web_search",
+                false,
+            ),
+            (
+                "chat-shaped function tool",
+                json!([{"type": "function", "function": {"name": "web_search", "parameters": schema}}]),
+                "web_search",
+                false,
+            ),
+            (
+                "chat-shaped custom tool",
+                json!([{"type": "custom", "custom": {"name": "web_search"}}]),
+                "web_search",
+                false,
+            ),
+            (
+                "hosted and function tool together",
+                json!([
+                    {"type": "web_search"},
+                    {"type": "function", "name": "web_search", "parameters": schema}
+                ]),
+                "web_search",
+                false,
+            ),
+            (
+                "unrelated function tool",
+                json!([{"type": "function", "name": "lookup", "parameters": schema}]),
+                "web_search",
+                true,
+            ),
+            (
+                "non-search name",
+                json!([{"type": "web_search"}]),
+                "lookup",
+                false,
+            ),
+        ];
+
+        for (label, tools, name, expected) in cases {
+            assert_eq!(hosted_web_search(tools, name), expected, "{label}");
+        }
+    }
+
+    #[test]
+    fn namespaced_web_search_child_is_not_a_hosted_web_search_call() {
+        assert!(!hosted_web_search(
+            json!([{
+                "type": "namespace",
+                "name": "mcp__search",
+                "description": "Search tools",
+                "tools": [{
+                    "type": "function",
+                    "name": "web_search",
+                    "parameters": {"type": "object", "properties": {}}
+                }]
+            }]),
+            "web_search"
+        ));
     }
 
     #[test]

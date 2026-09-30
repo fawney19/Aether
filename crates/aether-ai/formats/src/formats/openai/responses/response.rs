@@ -275,7 +275,7 @@ pub fn to_raw(canonical: &CanonicalResponse, report_context: &Value, compact: bo
                     }));
                 }
                 let namespaced_tool = namespace_tool_aliases.responses_name(name);
-                if namespaced_tool.is_none() && is_responses_web_search_tool(name) {
+                if namespace_tool_aliases.emits_hosted_web_search_call(name) {
                     output.push(json!({
                         "type": "web_search_call",
                         "id": id,
@@ -601,10 +601,6 @@ fn openai_responses_output_format_from_mime_type(mime_type: &str) -> String {
     .to_string()
 }
 
-fn is_responses_web_search_tool(name: &str) -> bool {
-    matches!(name, "web_search" | "web_search_preview")
-}
-
 fn web_search_query_from_value(input: &Value) -> String {
     input
         .get("query")
@@ -645,6 +641,70 @@ mod tests {
         assert_eq!(body["output_text"], "");
         assert!(body["created_at"].as_i64().is_some());
         assert!(body["completed_at"].as_i64().is_some());
+    }
+
+    #[test]
+    fn responses_response_builder_keeps_client_declared_web_search_function_as_function_call() {
+        let report_context = json!({
+            "original_request_body": {
+                "tools": [{
+                    "type": "function",
+                    "name": "web_search",
+                    "parameters": {"type": "object", "properties": {"query": {"type": "string"}}}
+                }]
+            }
+        });
+        let response = CanonicalResponse {
+            id: "resp_test".to_string(),
+            model: "gemini-3.8-flash".to_string(),
+            content: vec![CanonicalContentBlock::ToolUse {
+                id: "call_ws_1".to_string(),
+                name: "web_search".to_string(),
+                input: json!({"query": "today tech"}),
+                extensions: BTreeMap::new(),
+            }],
+            outputs: Vec::new(),
+            stop_reason: Some(CanonicalStopReason::ToolUse),
+            usage: None,
+            extensions: BTreeMap::new(),
+        };
+
+        let body = to_raw(&response, &report_context, false);
+
+        let item = &body["output"][0];
+        assert_eq!(item["type"], "function_call");
+        assert_eq!(item["name"], "web_search");
+        assert_eq!(item["call_id"], "call_ws_1");
+        assert_eq!(
+            serde_json::from_str::<Value>(item["arguments"].as_str().unwrap()).unwrap(),
+            json!({"query": "today tech"})
+        );
+    }
+
+    #[test]
+    fn responses_response_builder_emits_web_search_call_for_hosted_web_search_tool() {
+        let report_context = json!({
+            "original_request_body": {"tools": [{"type": "web_search"}]}
+        });
+        let response = CanonicalResponse {
+            id: "resp_test".to_string(),
+            model: "gpt-5-5-low".to_string(),
+            content: vec![CanonicalContentBlock::ToolUse {
+                id: "call_ws_1".to_string(),
+                name: "web_search".to_string(),
+                input: json!({"query": "today tech"}),
+                extensions: BTreeMap::new(),
+            }],
+            outputs: Vec::new(),
+            stop_reason: Some(CanonicalStopReason::ToolUse),
+            usage: None,
+            extensions: BTreeMap::new(),
+        };
+
+        let body = to_raw(&response, &report_context, false);
+
+        assert_eq!(body["output"][0]["type"], "web_search_call");
+        assert_eq!(body["output"][0]["action"]["query"], "today tech");
     }
 
     #[test]
