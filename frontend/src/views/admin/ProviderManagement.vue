@@ -576,7 +576,8 @@ function sortProvidersByActiveAndPriority(items: ProviderWithEndpointsSummary[])
 
 const providerListRef = ref<HTMLElement | null>(null)
 const {
-  orderedProviders: displayedProviders,
+  orderedProviders,
+  hasCustomOrder,
   draggingProvider,
   dragPreviewStyle,
   announcement,
@@ -586,6 +587,16 @@ const {
   handleSortClick,
   sortItemClass,
 } = useProviderDisplayOrder(() => sortProvidersByActiveAndPriority(providers.value), providerListRef)
+
+// 自定义展示顺序需要作用于整个列表，因此改为一次性拉取全量并在前端分页，
+// 否则服务端分页切片会把拖到前面的供应商排除在当前页之外（换每页条数后顺序回退）。
+const DISPLAY_ORDER_FETCH_PAGE_SIZE = 10_000
+const localPaging = computed(() => hasCustomOrder.value)
+const displayedProviders = computed(() => {
+  if (!localPaging.value) return orderedProviders.value
+  const start = (currentPage.value - 1) * pageSize.value
+  return orderedProviders.value.slice(start, start + pageSize.value)
+})
 
 watch([loading, cardView, queryParams], cancelDrag)
 
@@ -645,7 +656,10 @@ async function loadProviders(options: { cacheTtlMs?: number } = {}) {
   const requestId = ++providersRequestId
   loading.value = true
   try {
-    const response = await getProvidersSummary(queryParams.value, {
+    const requestParams = localPaging.value
+      ? { ...queryParams.value, page: 1, page_size: DISPLAY_ORDER_FETCH_PAGE_SIZE }
+      : queryParams.value
+    const response = await getProvidersSummary(requestParams, {
       cacheTtlMs: options.cacheTtlMs ?? 0,
     })
     if (requestId !== providersRequestId) return
@@ -656,7 +670,8 @@ async function loadProviders(options: { cacheTtlMs?: number } = {}) {
       Object.assign(existing, item)
       return existing
     })
-    total.value = response.total
+    // 前端分页模式下总数以实际拉取到的条目为准，避免切片越界
+    total.value = localPaging.value ? response.items.length : response.total
     // 异步加载配置了 ops 的 provider 的余额数据
     loadBalances(providers.value)
   } catch (err: unknown) {
@@ -669,10 +684,26 @@ async function loadProviders(options: { cacheTtlMs?: number } = {}) {
   }
 }
 
+// 首次建立自定义顺序时，当前页可能只是全量的一部分，需要补拉全量以支持前端分页
+watch(hasCustomOrder, (enabled) => {
+  if (enabled && providers.value.length < total.value) {
+    void loadProviders({ cacheTtlMs: PROVIDER_SUMMARY_CACHE_TTL_MS })
+  }
+})
+
 // 分页/筛选/搜索变化时重新加载
 let debounceTimer: ReturnType<typeof setTimeout> | null = null
 watch(queryParams, (newParams, oldParams) => {
   if (debounceTimer) clearTimeout(debounceTimer)
+  // 前端分页模式下翻页/换每页条数只影响本地切片，无需重新请求
+  const isPagingOnly = (newParams.page !== oldParams?.page || newParams.page_size !== oldParams?.page_size) &&
+    newParams.search === oldParams?.search &&
+    newParams.status === oldParams?.status &&
+    newParams.api_format === oldParams?.api_format &&
+    newParams.model_id === oldParams?.model_id
+  if (localPaging.value && isPagingOnly) {
+    return
+  }
   // 搜索输入 debounce 300ms，其他变化立即执行
   const isSearchOnly = newParams.search !== oldParams?.search &&
     newParams.page === oldParams?.page &&

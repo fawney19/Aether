@@ -528,32 +528,45 @@ describe('ProviderManagement shared display order', () => {
     expect(providerOrder(root)).toEqual(['provider-1', 'provider-2', 'provider-3', 'provider-4'])
   })
 
-  it('preserves saved ordering on other pages when reordering the current page', async () => {
-    const providers = mockSortableProviders()
-    apiMocks.getProvidersSummary.mockImplementation(async ({ page }: { page: number }) => ({
-      items: page === 1 ? providers.slice(0, 2) : providers.slice(2),
-      total: 40,
+  it('keeps the saved ordering across local pages after reordering the current page', async () => {
+    const providers = Array.from({ length: 12 }, (_, index) => createProvider({
+      id: `provider-${index + 1}`,
+      name: `Provider ${index + 1}`,
+      provider_priority: (index + 1) * 10,
     }))
+    apiMocks.getProvidersSummary.mockImplementation(async (query: { page?: number, page_size?: number } = {}) => {
+      const page = query.page ?? 1
+      const pageSize = query.page_size ?? 20
+      return {
+        items: providers.slice((page - 1) * pageSize, page * pageSize),
+        total: providers.length,
+      }
+    })
+    localStorage.setItem('provider-management-page-size', '10')
     const root = await mountView()
-    const firstDrag = startProviderDrag(root, 'provider-1', 'provider-2')
-    await dropProvider(firstDrag.handle)
 
+    const firstDrag = startProviderDrag(root, 'provider-2', 'provider-1')
+    await dropProvider(firstDrag.handle)
+    expect(providerOrder(root).slice(0, 2)).toEqual(['provider-2', 'provider-1'])
+
+    const requestsBeforePaging = apiMocks.getProvidersSummary.mock.calls.length
     const secondPage = [...root.querySelectorAll<HTMLButtonElement>('button')]
       .find(button => button.textContent?.trim() === '2')!
     secondPage.click()
     await settle()
-    expect(providerOrder(root)).toEqual(['provider-3', 'provider-4'])
-    const secondDrag = startProviderDrag(root, 'provider-4', 'provider-3')
-    await dropProvider(secondDrag.handle)
-    expect(providerOrder(root)).toEqual(['provider-4', 'provider-3'])
+    expect(providerOrder(root)).toEqual(['provider-11', 'provider-12'])
+    expect(apiMocks.getProvidersSummary).toHaveBeenCalledTimes(requestsBeforePaging)
 
     const firstPage = [...root.querySelectorAll<HTMLButtonElement>('button')]
       .find(button => button.textContent?.trim() === '1')!
     firstPage.click()
     await settle()
-    expect(providerOrder(root)).toEqual(['provider-2', 'provider-1'])
+    expect(providerOrder(root).slice(0, 2)).toEqual(['provider-2', 'provider-1'])
     expect(JSON.parse(localStorage.getItem('aether-provider-display-order')!))
-      .toEqual(['provider-2', 'provider-1', 'provider-4', 'provider-3'])
+      .toEqual([
+        'provider-2', 'provider-1', 'provider-3', 'provider-4', 'provider-5', 'provider-6',
+        'provider-7', 'provider-8', 'provider-9', 'provider-10', 'provider-11', 'provider-12',
+      ])
   })
 
   it('ignores stale IDs and appends providers that are not in the saved order', async () => {
@@ -561,5 +574,37 @@ describe('ProviderManagement shared display order', () => {
     localStorage.setItem('aether-provider-display-order', JSON.stringify(['deleted-provider', 'provider-3', 'provider-1']))
     const root = await mountView()
     expect(providerOrder(root)).toEqual(['provider-3', 'provider-1', 'provider-2', 'provider-4'])
+  })
+
+  it('keeps the dragged provider first after switching to a smaller page size', async () => {
+    const providers = Array.from({ length: 12 }, (_, index) => createProvider({
+      id: `provider-${index + 1}`,
+      name: `Provider ${index + 1}`,
+      provider_priority: (index + 1) * 10,
+    }))
+    apiMocks.getProvidersSummary.mockImplementation(async (query: { page?: number, page_size?: number } = {}) => {
+      const page = query.page ?? 1
+      const pageSize = query.page_size ?? 20
+      return {
+        items: providers.slice((page - 1) * pageSize, page * pageSize),
+        total: providers.length,
+      }
+    })
+
+    localStorage.setItem('provider-management-page-size', '50')
+    let root = await mountView()
+    const { handle } = startProviderDrag(root, 'provider-12', 'provider-1')
+    await dropProvider(handle)
+    expect(providerOrder(root)[0]).toBe('provider-12')
+
+    unmountView()
+    localStorage.setItem('provider-management-page-size', '10')
+    root = await mountView()
+
+    expect(providerOrder(root)).toEqual([
+      'provider-12',
+      'provider-1', 'provider-2', 'provider-3', 'provider-4', 'provider-5',
+      'provider-6', 'provider-7', 'provider-8', 'provider-9',
+    ])
   })
 })

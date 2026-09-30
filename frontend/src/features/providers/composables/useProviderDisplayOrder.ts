@@ -34,6 +34,8 @@ export function useProviderDisplayOrder<Provider extends SortableProvider>(
     ? [...new Set(savedOrder.value.filter((providerId): providerId is string => typeof providerId === 'string'))]
     : [])
 
+  const hasCustomOrder = computed(() => normalizedOrder.value.length > 0)
+
   const orderedProviders = computed(() => {
     const ranks = new Map(normalizedOrder.value.map((providerId, index) => [providerId, index]))
     return [...providers()].sort((first, second) => (
@@ -212,6 +214,7 @@ export function useProviderDisplayOrder<Provider extends SortableProvider>(
 
   return {
     orderedProviders,
+    hasCustomOrder,
     draggingProvider,
     dragPreviewStyle,
     announcement,
