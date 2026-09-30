@@ -185,6 +185,16 @@ impl MinimalCandidateSelectionRowSource for GatewayDataState {
     ) -> Result<Vec<StoredMinimalCandidateSelectionRow>, DataLayerError> {
         self.list_pool_key_candidate_rows_for_group(query).await
     }
+
+    async fn read_reserved_global_model_name(
+        &self,
+        model_name: &str,
+    ) -> Result<Option<String>, DataLayerError> {
+        Ok(self
+            .get_public_global_model_by_name(model_name)
+            .await?
+            .map(|global_model| global_model.name))
+    }
 }
 
 #[async_trait]

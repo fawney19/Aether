@@ -1,8 +1,12 @@
 use std::sync::Arc;
 
 use aether_data::repository::candidate_selection::InMemoryMinimalCandidateSelectionReadRepository;
+use aether_data::repository::global_models::InMemoryGlobalModelReadRepository;
 use aether_data::repository::quota::InMemoryProviderQuotaRepository;
-use aether_data_contracts::repository::candidate_selection::StoredProviderModelMapping;
+use aether_data_contracts::repository::candidate_selection::{
+    StoredMinimalCandidateSelectionRow, StoredProviderModelMapping,
+};
+use aether_data_contracts::repository::global_models::StoredPublicGlobalModel;
 use aether_scheduler_core::{
     resolve_requested_global_model_name, SchedulerMinimalCandidateSelectionCandidate,
 };
@@ -146,6 +150,157 @@ fn scheduler_candidate_is_serializable() {
 
     let json = serde_json::to_value(candidate).expect("candidate should serialize");
     assert_eq!(json["provider_name"], "OpenAI");
+}
+
+/// A provider whose own model reaches the upstream under a borrowed name must not
+/// answer for that name: `gemini-3.8-flash` belongs to the providers bound to that
+/// global model, even when the only provider serving the client's own API format is
+/// the one that merely renames its model on the way out.
+#[tokio::test]
+async fn provider_alias_does_not_capture_a_request_naming_another_global_model() {
+    let row = cursor_alias_row();
+    let candidates = Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
+        row.clone(),
+    ]));
+    let quotas = Arc::new(InMemoryProviderQuotaRepository::seed(vec![]));
+    let global_models = Arc::new(InMemoryGlobalModelReadRepository::seed(vec![
+        public_global_model("gemini-3.8-flash"),
+        public_global_model("gemini-3.8-flash-cursor"),
+    ]));
+    let state = GatewayDataState::with_candidate_selection_and_quota_for_tests(candidates, quotas)
+        .with_global_model_reader(global_models);
+
+    let hijacked = enumerate_minimal_candidate_selection_with_required_capabilities(
+        &state,
+        "claude:messages",
+        "gemini-3.8-flash",
+        false,
+        None,
+        None,
+        false,
+    )
+    .await
+    .expect("selection should succeed");
+    assert!(hijacked.is_empty());
+
+    let selection = enumerate_minimal_candidate_selection_with_required_capabilities(
+        &state,
+        "claude:messages",
+        "gemini-3.8-flash-cursor",
+        false,
+        None,
+        None,
+        false,
+    )
+    .await
+    .expect("selection should succeed");
+    assert_eq!(selection.len(), 1);
+    assert_eq!(selection[0].global_model_name, "gemini-3.8-flash-cursor");
+    assert_eq!(
+        selection[0].selected_provider_model_name,
+        "gemini-3.8-flash"
+    );
+}
+
+/// Pins what the rule is worth: the very same rows hand the request to the aliasing
+/// provider as soon as nothing can tell that `gemini-3.8-flash` is a global model.
+#[tokio::test]
+async fn provider_alias_captures_the_request_without_a_global_model_reader() {
+    let candidates = Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
+        cursor_alias_row(),
+    ]));
+    let quotas = Arc::new(InMemoryProviderQuotaRepository::seed(vec![]));
+    let state = GatewayDataState::with_candidate_selection_and_quota_for_tests(candidates, quotas);
+
+    let selection = enumerate_minimal_candidate_selection_with_required_capabilities(
+        &state,
+        "claude:messages",
+        "gemini-3.8-flash",
+        false,
+        None,
+        None,
+        false,
+    )
+    .await
+    .expect("selection should succeed");
+    assert_eq!(selection.len(), 1);
+    assert_eq!(selection[0].global_model_name, "gemini-3.8-flash-cursor");
+}
+
+fn cursor_alias_row() -> StoredMinimalCandidateSelectionRow {
+    let mut row = sample_row();
+    row.endpoint_api_format = "claude:messages".to_string();
+    row.endpoint_api_family = Some("claude".to_string());
+    row.endpoint_kind = Some("messages".to_string());
+    row.key_api_formats = Some(vec!["claude:messages".to_string()]);
+    row.key_global_priority_by_format = None;
+    row.global_model_id = "global-gemini-3.8-flash-cursor".to_string();
+    row.global_model_name = "gemini-3.8-flash-cursor".to_string();
+    row.global_model_mappings = None;
+    row.model_provider_model_name = "gemini-3.8-flash-cursor".to_string();
+    row.model_provider_model_mappings = Some(vec![StoredProviderModelMapping {
+        name: "gemini-3.8-flash".to_string(),
+        priority: 1,
+        api_formats: None,
+        endpoint_ids: None,
+        operations: None,
+    }]);
+    row
+}
+
+/// Without a global model of that name the alias stays addressable, which is what a
+/// provider-scoped variant name relies on.
+#[tokio::test]
+async fn provider_alias_stays_addressable_without_a_global_model_of_that_name() {
+    let mut row = sample_row();
+    row.global_model_name = "gpt-5".to_string();
+    row.model_provider_model_name = "gpt-5-upstream".to_string();
+    row.model_provider_model_mappings = Some(vec![StoredProviderModelMapping {
+        name: "gpt-5-alias".to_string(),
+        priority: 1,
+        api_formats: Some(vec!["openai:chat".to_string()]),
+        endpoint_ids: None,
+        operations: None,
+    }]);
+
+    let candidates = Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
+        row,
+    ]));
+    let quotas = Arc::new(InMemoryProviderQuotaRepository::seed(vec![]));
+    let global_models = Arc::new(InMemoryGlobalModelReadRepository::seed(vec![
+        public_global_model("gpt-5"),
+    ]));
+    let state = GatewayDataState::with_candidate_selection_and_quota_for_tests(candidates, quotas)
+        .with_global_model_reader(global_models);
+
+    let selection = enumerate_minimal_candidate_selection_with_required_capabilities(
+        &state,
+        "openai:chat",
+        "gpt-5-alias",
+        false,
+        None,
+        None,
+        false,
+    )
+    .await
+    .expect("selection should succeed");
+    assert_eq!(selection.len(), 1);
+    assert_eq!(selection[0].global_model_name, "gpt-5");
+    assert_eq!(selection[0].selected_provider_model_name, "gpt-5-alias");
+}
+
+fn public_global_model(name: &str) -> StoredPublicGlobalModel {
+    StoredPublicGlobalModel {
+        id: format!("global-{name}"),
+        name: name.to_string(),
+        display_name: None,
+        is_active: true,
+        default_price_per_request: None,
+        default_tiered_pricing: None,
+        supported_capabilities: None,
+        config: None,
+        usage_count: 0,
+    }
 }
 
 #[tokio::test]

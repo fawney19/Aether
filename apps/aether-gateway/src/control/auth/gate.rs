@@ -1,5 +1,6 @@
 use axum::body::Bytes;
 use axum::http::Uri;
+use std::collections::BTreeMap;
 
 use super::super::GatewayControlDecision;
 use super::credentials::{contains_string, extract_requested_model};
@@ -747,6 +748,11 @@ async fn request_model_resolves_to_allowed_model(
         return Ok(false);
     };
 
+    // Global model names are a reserved routing namespace, so authorization has to
+    // resolve a request the same way candidate planning will: a provider whose own
+    // model carries the requested name only as an upstream alias must not make the
+    // request resolve to that provider's global model.
+    let mut reserved_global_model_names: BTreeMap<String, Option<String>> = BTreeMap::new();
     for api_format in candidate_api_formats_for_model_resolution(&client_api_format) {
         let resolution = decision
             .model_directive_policy
@@ -762,23 +768,45 @@ async fn request_model_resolves_to_allowed_model(
                 .list_minimal_candidate_selection_rows_for_api_format(&api_format)
                 .await?
         };
+        let reserved_global_model_name = match reserved_global_model_names.get(routing_model) {
+            Some(cached) => cached.clone(),
+            None => {
+                let reserved_global_model_name =
+                    crate::data::candidate_selection::resolve_reserved_global_model_name(
+                        state.data.as_ref(),
+                        &rows,
+                        routing_model,
+                    )
+                    .await
+                    .map_err(|err| GatewayError::Internal(err.to_string()))?;
+                reserved_global_model_names.insert(
+                    routing_model.to_string(),
+                    reserved_global_model_name.clone(),
+                );
+                reserved_global_model_name
+            }
+        };
         let matching_rows = rows
             .into_iter()
             .filter(|row| {
-                aether_scheduler_core::row_supports_requested_model_with_model_directives(
+                aether_scheduler_core::row_supports_requested_model_with_reserved_global_model(
                     row,
                     routing_model,
                     &api_format,
                     false,
+                    None,
+                    reserved_global_model_name.as_deref(),
                 )
             })
             .collect::<Vec<_>>();
         let Some(resolved_global_model) =
-            aether_scheduler_core::resolve_requested_global_model_name_with_model_directives(
+            aether_scheduler_core::resolve_requested_global_model_name_with_reserved_global_model(
                 &matching_rows,
                 routing_model,
                 &api_format,
                 false,
+                None,
+                reserved_global_model_name.as_deref(),
             )
         else {
             continue;

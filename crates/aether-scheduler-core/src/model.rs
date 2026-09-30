@@ -43,21 +43,53 @@ pub fn resolve_requested_global_model_name_with_model_directives_and_request_ope
     enable_model_directives: bool,
     request_operation: Option<&str>,
 ) -> Option<String> {
+    resolve_requested_global_model_name_with_reserved_global_model(
+        rows,
+        requested_model_name,
+        api_format,
+        enable_model_directives,
+        request_operation,
+        None,
+    )
+}
+
+/// Global model names are a reserved routing namespace.
+///
+/// A provider model can also be reached by its upstream name
+/// (`provider_model_name`) or by one of its `provider_model_mappings` entries.
+/// Neither of those names is published in the model catalog, which lists global
+/// model names only, so they must not capture a request that names a global
+/// model: `gemini-3.8-flash` belongs to the providers bound to that global
+/// model, not to a provider that merely renames its own model to
+/// `gemini-3.8-flash` on the way upstream.
+///
+/// `reserved_global_model_name` carries the canonical global model name when the
+/// requested name is one of them, which puts every row bound to a different
+/// global model out of the running. `None` keeps all matching rules available,
+/// which is what a request for a provider-side alias needs.
+pub fn resolve_requested_global_model_name_with_reserved_global_model(
+    rows: &[StoredMinimalCandidateSelectionRow],
+    requested_model_name: &str,
+    api_format: &str,
+    enable_model_directives: bool,
+    request_operation: Option<&str>,
+    reserved_global_model_name: Option<&str>,
+) -> Option<String> {
     requested_model_name_candidates(requested_model_name, enable_model_directives).find_map(
         |requested_model_name| {
             let requested_model_name = requested_model_name.as_ref();
-            resolve_global_model_name_by(rows, |row| {
+            resolve_global_model_name_by(rows, reserved_global_model_name, |row| {
                 row_has_available_provider_model(row, api_format, request_operation)
                     && row.global_model_name == requested_model_name
             })
             .or_else(|| {
-                resolve_global_model_name_by(rows, |row| {
+                resolve_global_model_name_by(rows, reserved_global_model_name, |row| {
                     row_default_provider_model_name_available(row, api_format, request_operation)
                         && row.model_provider_model_name == requested_model_name
                 })
             })
             .or_else(|| {
-                resolve_global_model_name_by(rows, |row| {
+                resolve_global_model_name_by(rows, reserved_global_model_name, |row| {
                     row.model_provider_model_mappings
                         .as_ref()
                         .is_some_and(|mappings| {
@@ -69,7 +101,7 @@ pub fn resolve_requested_global_model_name_with_model_directives_and_request_ope
                 })
             })
             .or_else(|| {
-                resolve_global_model_name_by(rows, |row| {
+                resolve_global_model_name_by(rows, reserved_global_model_name, |row| {
                     row_has_available_provider_model(row, api_format, request_operation)
                         && row.global_model_mappings.as_ref().is_some_and(|patterns| {
                             patterns
@@ -80,6 +112,13 @@ pub fn resolve_requested_global_model_name_with_model_directives_and_request_ope
             })
         },
     )
+}
+
+fn reserved_global_model_allows_row(
+    reserved_global_model_name: Option<&str>,
+    row: &StoredMinimalCandidateSelectionRow,
+) -> bool {
+    reserved_global_model_name.is_none_or(|reserved| row.global_model_name == reserved)
 }
 
 pub fn row_supports_requested_model(
@@ -112,16 +151,37 @@ pub fn row_supports_requested_model_with_model_directives_and_request_operation(
     enable_model_directives: bool,
     request_operation: Option<&str>,
 ) -> bool {
-    requested_model_name_candidates(requested_model_name, enable_model_directives).any(
-        |requested_model_name| {
-            row_supports_requested_model_exact(
-                row,
-                requested_model_name.as_ref(),
-                api_format,
-                request_operation,
-            )
-        },
+    row_supports_requested_model_with_reserved_global_model(
+        row,
+        requested_model_name,
+        api_format,
+        enable_model_directives,
+        request_operation,
+        None,
     )
+}
+
+/// See [`resolve_requested_global_model_name_with_reserved_global_model`] for what
+/// `reserved_global_model_name` means.
+pub fn row_supports_requested_model_with_reserved_global_model(
+    row: &StoredMinimalCandidateSelectionRow,
+    requested_model_name: &str,
+    api_format: &str,
+    enable_model_directives: bool,
+    request_operation: Option<&str>,
+    reserved_global_model_name: Option<&str>,
+) -> bool {
+    reserved_global_model_allows_row(reserved_global_model_name, row)
+        && requested_model_name_candidates(requested_model_name, enable_model_directives).any(
+            |requested_model_name| {
+                row_supports_requested_model_exact(
+                    row,
+                    requested_model_name.as_ref(),
+                    api_format,
+                    request_operation,
+                )
+            },
+        )
 }
 
 fn row_supports_requested_model_exact(
@@ -152,13 +212,16 @@ fn row_supports_requested_model_exact(
 
 fn resolve_global_model_name_by<F>(
     rows: &[StoredMinimalCandidateSelectionRow],
+    reserved_global_model_name: Option<&str>,
     matches: F,
 ) -> Option<String>
 where
     F: Fn(&StoredMinimalCandidateSelectionRow) -> bool,
 {
     let mut best_match = None::<&str>;
-    for row in rows.iter().filter(|row| matches(row)) {
+    for row in rows.iter().filter(|row| {
+        reserved_global_model_allows_row(reserved_global_model_name, row) && matches(row)
+    }) {
         let candidate = row.global_model_name.trim();
         if candidate.is_empty() {
             continue;
@@ -561,8 +624,10 @@ mod tests {
         matches_model_mapping, resolve_provider_model_name,
         resolve_provider_model_name_with_model_directives,
         resolve_provider_model_name_with_model_directives_and_request_operation,
-        resolve_requested_global_model_name_with_model_directives, row_supports_requested_model,
-        row_supports_requested_model_with_model_directives,
+        resolve_requested_global_model_name_with_model_directives,
+        resolve_requested_global_model_name_with_reserved_global_model,
+        row_supports_requested_model, row_supports_requested_model_with_model_directives,
+        row_supports_requested_model_with_reserved_global_model,
     };
     use aether_data_contracts::repository::candidate_selection::{
         StoredMinimalCandidateSelectionRow, StoredProviderModelMapping,
@@ -896,6 +961,111 @@ mod tests {
             )
             .as_deref(),
             Some("deepseek-v4-pro")
+        );
+    }
+
+    fn cursor_alias_row() -> StoredMinimalCandidateSelectionRow {
+        let mut row = sample_row("gemini-3.8-flash-cursor", "gemini-3.8-flash-cursor");
+        row.endpoint_api_format = "claude:messages".to_string();
+        row.model_provider_model_mappings = Some(vec![StoredProviderModelMapping {
+            name: "gemini-3.8-flash".to_string(),
+            priority: 1,
+            api_formats: None,
+            endpoint_ids: None,
+            operations: None,
+        }]);
+        row
+    }
+
+    #[test]
+    fn reserved_global_model_name_rejects_provider_alias_from_another_global_model() {
+        let row = cursor_alias_row();
+
+        assert!(row_supports_requested_model_with_reserved_global_model(
+            &row,
+            "gemini-3.8-flash",
+            "claude:messages",
+            false,
+            None,
+            None,
+        ));
+        assert!(!row_supports_requested_model_with_reserved_global_model(
+            &row,
+            "gemini-3.8-flash",
+            "claude:messages",
+            false,
+            None,
+            Some("gemini-3.8-flash"),
+        ));
+        assert_eq!(
+            resolve_requested_global_model_name_with_reserved_global_model(
+                &[row],
+                "gemini-3.8-flash",
+                "claude:messages",
+                false,
+                None,
+                Some("gemini-3.8-flash"),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn reserved_global_model_name_keeps_its_own_rows_addressable() {
+        let row = cursor_alias_row();
+
+        assert!(row_supports_requested_model_with_reserved_global_model(
+            &row,
+            "gemini-3.8-flash-cursor",
+            "claude:messages",
+            false,
+            None,
+            Some("gemini-3.8-flash-cursor"),
+        ));
+        assert_eq!(
+            resolve_requested_global_model_name_with_reserved_global_model(
+                &[row],
+                "gemini-3.8-flash-cursor",
+                "claude:messages",
+                false,
+                None,
+                Some("gemini-3.8-flash-cursor"),
+            )
+            .as_deref(),
+            Some("gemini-3.8-flash-cursor")
+        );
+    }
+
+    #[test]
+    fn provider_alias_stays_addressable_when_it_is_not_a_global_model_name() {
+        let mut row = sample_row("gpt-5", "gpt-5-upstream");
+        row.model_provider_model_mappings = Some(vec![StoredProviderModelMapping {
+            name: "gpt-5-alias".to_string(),
+            priority: 1,
+            api_formats: None,
+            endpoint_ids: None,
+            operations: None,
+        }]);
+
+        assert!(row_supports_requested_model_with_reserved_global_model(
+            &row,
+            "gpt-5-alias",
+            "openai:chat",
+            false,
+            None,
+            None,
+        ));
+        assert_eq!(
+            resolve_requested_global_model_name_with_reserved_global_model(
+                &[row],
+                "gpt-5-alias",
+                "openai:chat",
+                false,
+                None,
+                None,
+            )
+            .as_deref(),
+            Some("gpt-5")
         );
     }
 
