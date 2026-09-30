@@ -330,14 +330,20 @@ fn row_default_provider_model_name_available(
             return true;
         }
     }
-    !has_explicit_default_mapping
+    if has_explicit_default_mapping {
+        return false;
+    }
+    // 映射一旦限定了端点或 API 格式范围，默认模型名就只在范围内可用；
+    // 范围之外整行不再参与候选，避免把默认名发到不认识它的上游端点。
+    mappings
+        .iter()
+        .any(|mapping| mapping_endpoint_and_api_format_scope_matches(mapping, row, api_format))
 }
 
-fn mapping_scope_matches(
+fn mapping_endpoint_and_api_format_scope_matches(
     mapping: &StoredProviderModelMapping,
     row: &StoredMinimalCandidateSelectionRow,
     api_format: &str,
-    request_operation: Option<&str>,
 ) -> bool {
     let api_format_matches_scope = mapping.api_formats.as_ref().is_none_or(|api_formats| {
         api_formats.iter().any(|value| {
@@ -348,22 +354,27 @@ fn mapping_scope_matches(
         return false;
     }
 
-    let endpoint_matches_scope = mapping.endpoint_ids.as_ref().is_none_or(|endpoint_ids| {
+    mapping.endpoint_ids.as_ref().is_none_or(|endpoint_ids| {
         endpoint_ids
             .iter()
             .any(|endpoint_id| endpoint_id == &row.endpoint_id)
-    });
-    if !endpoint_matches_scope {
-        return false;
-    }
-
-    mapping.operations.as_ref().is_none_or(|operations| {
-        request_operation.is_some_and(|request_operation| {
-            operations
-                .iter()
-                .any(|operation| operation.eq_ignore_ascii_case(request_operation))
-        })
     })
+}
+
+fn mapping_scope_matches(
+    mapping: &StoredProviderModelMapping,
+    row: &StoredMinimalCandidateSelectionRow,
+    api_format: &str,
+    request_operation: Option<&str>,
+) -> bool {
+    mapping_endpoint_and_api_format_scope_matches(mapping, row, api_format)
+        && mapping.operations.as_ref().is_none_or(|operations| {
+            request_operation.is_some_and(|request_operation| {
+                operations
+                    .iter()
+                    .any(|operation| operation.eq_ignore_ascii_case(request_operation))
+            })
+        })
 }
 
 fn mapping_operation_scope_rank(mapping: &StoredProviderModelMapping) -> u8 {
@@ -896,6 +907,97 @@ mod tests {
             )
             .as_deref(),
             Some("deepseek-v4-pro")
+        );
+    }
+
+    #[test]
+    fn endpoint_scoped_mapping_confines_row_availability_to_scoped_endpoints() {
+        // 场景：某行只把上游名 gpt-6-luna 映射到 openai:chat 端点；
+        // 其他端点（如 claude:messages）不应回退到默认名，整行不可用。
+        let mut row = sample_row("deepseek-flash", "deepseek-flash");
+        row.endpoint_id = "endpoint-chat".to_string();
+        row.endpoint_api_format = "openai:chat".to_string();
+        row.model_provider_model_mappings = Some(vec![StoredProviderModelMapping {
+            name: "gpt-6-luna".to_string(),
+            priority: 1,
+            api_formats: None,
+            endpoint_ids: Some(vec!["endpoint-chat".to_string()]),
+            operations: None,
+        }]);
+
+        assert!(row_supports_requested_model(
+            &row,
+            "deepseek-flash",
+            "openai:chat"
+        ));
+        assert_eq!(
+            resolve_provider_model_name(&row, "deepseek-flash", "openai:chat")
+                .map(|resolved| resolved.0),
+            Some("gpt-6-luna".to_string())
+        );
+
+        let mut claude_row = row.clone();
+        claude_row.endpoint_id = "endpoint-claude".to_string();
+        claude_row.endpoint_api_format = "claude:messages".to_string();
+
+        assert!(!row_supports_requested_model(
+            &claude_row,
+            "deepseek-flash",
+            "claude:messages"
+        ));
+        assert!(
+            resolve_provider_model_name(&claude_row, "deepseek-flash", "claude:messages").is_none()
+        );
+        assert_eq!(
+            resolve_requested_global_model_name_with_model_directives(
+                &[claude_row],
+                "deepseek-flash",
+                "claude:messages",
+                false,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn operation_scoped_mapping_keeps_default_name_available() {
+        // 只限定“适用请求”（如 compact）的映射不应把整行从其他请求里排除掉。
+        let mut row = sample_row("gpt-5.6-sol", "gpt-5.6-sol");
+        row.endpoint_api_format = "openai:responses".to_string();
+        row.model_provider_model_mappings = Some(vec![StoredProviderModelMapping {
+            name: "gpt-5.6-terra".to_string(),
+            priority: 1,
+            api_formats: Some(vec!["openai:responses".to_string()]),
+            endpoint_ids: None,
+            operations: Some(vec!["compact".to_string()]),
+        }]);
+
+        assert!(row_supports_requested_model(
+            &row,
+            "gpt-5.6-sol",
+            "openai:responses"
+        ));
+        assert_eq!(
+            resolve_provider_model_name_with_model_directives_and_request_operation(
+                &row,
+                "gpt-5.6-sol",
+                "openai:responses",
+                false,
+                None,
+            )
+            .map(|resolved| resolved.0),
+            Some("gpt-5.6-sol".to_string())
+        );
+        assert_eq!(
+            resolve_provider_model_name_with_model_directives_and_request_operation(
+                &row,
+                "gpt-5.6-sol",
+                "openai:responses",
+                false,
+                Some("compact"),
+            )
+            .map(|resolved| resolved.0),
+            Some("gpt-5.6-terra".to_string())
         );
     }
 

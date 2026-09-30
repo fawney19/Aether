@@ -284,7 +284,12 @@ fn row_default_provider_model_name_available(
             return true;
         }
     }
-    !has_explicit_default_mapping
+    if has_explicit_default_mapping {
+        return false;
+    }
+    // 与调度核心保持一致：映射一旦限定了端点或 API 格式范围，
+    // 默认模型名就只在范围内可用；范围之外整行不再匹配。
+    row_mapping_matches_scope(row, api_format)
 }
 
 fn row_mapping_matches_scope(row: &StoredMinimalCandidateSelectionRow, api_format: &str) -> bool {
@@ -689,6 +694,45 @@ mod tests {
             .expect("list should succeed");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].endpoint_id, "endpoint-openai");
+    }
+
+    #[tokio::test]
+    async fn requested_model_filter_confines_rows_to_mapping_endpoint_scope() {
+        // 场景：映射只把上游名绑定到 openai:chat 端点；
+        // 其他端点（claude:messages）不应回退到默认名，整行不可匹配。
+        let mut selected = sample_row("provider-1", "openai:chat", "deepseek-flash", 10);
+        selected.endpoint_id = "endpoint-chat".to_string();
+        selected.model_provider_model_name = "deepseek-flash".to_string();
+        selected.model_provider_model_mappings = Some(vec![StoredProviderModelMapping {
+            name: "gpt-6-luna".to_string(),
+            priority: 1,
+            api_formats: None,
+            endpoint_ids: Some(vec!["endpoint-chat".to_string()]),
+            operations: None,
+        }]);
+
+        let mut scoped_out = selected.clone();
+        scoped_out.provider_id = "provider-2".to_string();
+        scoped_out.endpoint_id = "endpoint-claude".to_string();
+        scoped_out.endpoint_api_format = "claude:messages".to_string();
+        scoped_out.key_id = "key-provider-2".to_string();
+        scoped_out.key_api_formats = Some(vec!["claude:messages".to_string()]);
+
+        let repository =
+            InMemoryMinimalCandidateSelectionReadRepository::seed(vec![scoped_out, selected]);
+
+        let rows = repository
+            .list_for_exact_api_format_and_requested_model("claude:messages", "deepseek-flash")
+            .await
+            .expect("list should succeed");
+        assert!(rows.is_empty());
+
+        let rows = repository
+            .list_for_exact_api_format_and_requested_model("openai:chat", "deepseek-flash")
+            .await
+            .expect("list should succeed");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].endpoint_id, "endpoint-chat");
     }
 
     #[tokio::test]

@@ -1050,17 +1050,6 @@ fn requested_model_selection_sql() -> String {
             )
           )
         )
-        OR NOT EXISTS (
-          SELECT 1
-          FROM jsonb_array_elements(
-            CASE
-              WHEN jsonb_typeof(m.provider_model_mappings) = 'array'
-                THEN m.provider_model_mappings
-              ELSE '[]'::jsonb
-            END
-          ) AS mapping(value)
-          WHERE mapping.value ->> 'name' = m.provider_model_name
-        )
       )
     )
     OR (
@@ -1068,17 +1057,6 @@ fn requested_model_selection_sql() -> String {
       AND (
         m.provider_model_mappings IS NULL
         OR jsonb_typeof(m.provider_model_mappings) <> 'array'
-        OR NOT EXISTS (
-          SELECT 1
-          FROM jsonb_array_elements(
-            CASE
-              WHEN jsonb_typeof(m.provider_model_mappings) = 'array'
-                THEN m.provider_model_mappings
-              ELSE '[]'::jsonb
-            END
-          ) AS mapping(value)
-          WHERE mapping.value ->> 'name' = m.provider_model_name
-        )
         OR EXISTS (
           SELECT 1
           FROM jsonb_array_elements(
@@ -1107,6 +1085,47 @@ fn requested_model_selection_sql() -> String {
                 WHERE endpoint.value = pe.id
               )
             )
+        )
+        OR (
+          NOT EXISTS (
+            SELECT 1
+            FROM jsonb_array_elements(
+              CASE
+                WHEN jsonb_typeof(m.provider_model_mappings) = 'array'
+                  THEN m.provider_model_mappings
+                ELSE '[]'::jsonb
+              END
+            ) AS mapping(value)
+            WHERE mapping.value ->> 'name' = m.provider_model_name
+          )
+          AND EXISTS (
+            SELECT 1
+            FROM jsonb_array_elements(
+              CASE
+                WHEN jsonb_typeof(m.provider_model_mappings) = 'array'
+                  THEN m.provider_model_mappings
+                ELSE '[]'::jsonb
+              END
+            ) AS mapping(value)
+            WHERE (
+              mapping.value -> 'api_formats' IS NULL
+              OR jsonb_typeof(mapping.value -> 'api_formats') <> 'array'
+              OR EXISTS (
+                SELECT 1
+                FROM jsonb_array_elements_text(mapping.value -> 'api_formats') AS fmt(value)
+                WHERE __AETHER_PROVIDER_MODEL_MAPPING_API_FORMAT_MATCH__
+              )
+            )
+            AND (
+              mapping.value -> 'endpoint_ids' IS NULL
+              OR jsonb_typeof(mapping.value -> 'endpoint_ids') <> 'array'
+              OR EXISTS (
+                SELECT 1
+                FROM jsonb_array_elements_text(mapping.value -> 'endpoint_ids') AS endpoint(value)
+                WHERE endpoint.value = pe.id
+              )
+            )
+          )
         )
       )
     )
@@ -1706,7 +1725,7 @@ mod tests {
         let sql = requested_model_selection_sql();
         let compatibility = PROVIDER_MODEL_MAPPING_API_FORMAT_MATCH_SQL;
 
-        assert_eq!(sql.matches(compatibility).count(), 3);
+        assert_eq!(sql.matches(compatibility).count(), 4);
         assert!(!sql.contains(PROVIDER_MODEL_MAPPING_API_FORMAT_MATCH_MARKER));
         assert!(compatibility.contains("LOWER(BTRIM(p.provider_type)) = 'codex'"));
         assert!(compatibility.contains("LOWER($4) = 'codex:live'"));
@@ -1728,6 +1747,21 @@ mod tests {
         ] {
             assert!(!permission_sql.contains("'/v1/responses'"));
         }
+    }
+
+    #[test]
+    fn requested_model_sql_confines_default_name_to_mapping_scope() {
+        let sql = requested_model_selection_sql();
+
+        // 默认名（provider_model_name）的可用性由映射的端点/格式范围决定：
+        // 分支 A（全局名匹配）不再单独放行“无默认名映射”的行；
+        // 分支 B（provider 名匹配）要求默认名映射命中，或映射范围内至少有一条映射命中。
+        assert_eq!(sql.matches("->> 'name' = m.provider_model_name").count(), 2);
+        assert_eq!(
+            sql.matches(PROVIDER_MODEL_MAPPING_API_FORMAT_MATCH_SQL)
+                .count(),
+            4
+        );
     }
 
     #[test]
