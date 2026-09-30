@@ -2063,17 +2063,23 @@ const quotaProgressMap = computed<Record<string, QuotaProgressItem[]>>(() => {
 const quotaProgressDisplayMap = computed<Record<string, QuotaProgressDisplayItem[]>>(() => {
   const map: Record<string, QuotaProgressDisplayItem[]> = {}
   for (const key of keyPage.value.keys) {
-    map[key.key_id] = (quotaProgressMap.value[key.key_id] || []).map(item => ({
-      label: getQuotaProgressLabel(item.label),
-      remainingPercent: item.remainingPercent,
-      resetText: getQuotaProgressResetDisplayText(item),
-      meterText: item.numericOnly
-        ? item.detail || formatQuotaValue(item.remainingPercent)
-        : getQuotaProgressMeterDisplayText(item),
-      barClass: getQuotaRemainingBarColorByRemaining(item.remainingPercent),
-      meterClass: getQuotaRemainingClassByRemaining(item.remainingPercent),
-      numericOnly: item.numericOnly,
-    }))
+    map[key.key_id] = (quotaProgressMap.value[key.key_id] || []).map(item => {
+      // 倒计时归零表示窗口已越过重置时间点：按“已重置”展示 100%，
+      // 不再显示重置前的旧用量文本，与后端读取口径、调度口径保持一致。
+      const expired = !item.numericOnly && getQuotaProgressCountdown(item)?.isExpired === true
+      const remainingPercent = expired ? 100 : item.remainingPercent
+      return {
+        label: getQuotaProgressLabel(item.label),
+        remainingPercent,
+        resetText: getQuotaProgressResetDisplayText(item),
+        meterText: item.numericOnly
+          ? item.detail || formatQuotaValue(remainingPercent)
+          : getQuotaProgressMeterDisplayText(item, remainingPercent, expired),
+        barClass: getQuotaRemainingBarColorByRemaining(remainingPercent),
+        meterClass: getQuotaRemainingClassByRemaining(remainingPercent),
+        numericOnly: item.numericOnly,
+      }
+    })
   }
   return map
 })
@@ -3563,10 +3569,15 @@ function getQuotaProgressResetDisplayText(item: QuotaProgressItem): string {
   return ''
 }
 
-function getQuotaProgressMeterDisplayText(item: QuotaProgressItem): string {
-  const detail = item.detail?.trim() || ''
+function getQuotaProgressMeterDisplayText(
+  item: QuotaProgressItem,
+  remainingPercent = item.remainingPercent,
+  suppressDetail = false,
+): string {
+  // 窗口已重置时忽略重置前的旧用量文本，直接显示归一化后的剩余百分比。
+  const detail = suppressDetail ? '' : (item.detail?.trim() || '')
   if (!shouldHideQuotaProgressDetailText(detail) && detail) return detail
-  return `${item.remainingPercent.toFixed(1)}%`
+  return `${remainingPercent.toFixed(1)}%`
 }
 
 function getQuotaFallbackText(key: PoolKeyDetail): string | null {

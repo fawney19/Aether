@@ -857,7 +857,14 @@ fn provider_pool_reset_deadline_unix_secs(
         })
 }
 
-pub(crate) fn provider_pool_reset_deadline_elapsed(
+/// Whether the quota window's reset deadline has already passed.
+///
+/// The deadline is taken from `reset_at`/`next_reset_at` when present, otherwise
+/// derived from `reset_seconds`/`reset_after_seconds` anchored at the window (or
+/// fallback) observation time. Scheduling ignores exhausted windows once this is
+/// true; read paths can reuse the same predicate so the displayed quota matches
+/// the scheduling decision after a reset.
+pub fn provider_pool_reset_deadline_elapsed(
     item: &Map<String, Value>,
     fallback_observed_at: Option<u64>,
     now_unix_secs: u64,

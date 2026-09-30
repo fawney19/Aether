@@ -35,6 +35,10 @@ const routeMocks = vi.hoisted(() => ({
   }),
 }))
 
+const countdownMocks = vi.hoisted(() => ({
+  isExpired: false,
+}))
+
 const proxyStoreMocks = vi.hoisted(() => ({
   ensureLoaded: vi.fn(),
 }))
@@ -106,7 +110,7 @@ vi.mock('@/composables/useCountdownTimer', async () => {
       start: vi.fn(),
     }),
     getCodexResetCountdown: () => ({
-      isExpired: false,
+      isExpired: countdownMocks.isExpired,
       text: '1h',
     }),
   }
@@ -604,6 +608,7 @@ beforeEach(() => {
   window.sessionStorage.clear()
   routeMocks.patchQuery.mockClear()
   proxyStoreMocks.ensureLoaded.mockClear()
+  countdownMocks.isExpired = false
 
   endpointMocks.getPoolOverview.mockReset()
   endpointMocks.getPoolSchedulingPresets.mockReset()
@@ -734,6 +739,44 @@ describe('PoolManagement Codex cycle stats mode', () => {
       .filter(Boolean)
     expect(resetTexts).toContain('1h')
     expect(root.textContent).toContain('生图')
+  })
+
+  it('shows expired Codex quota windows as fully restored', async () => {
+    countdownMocks.isExpired = true
+    const expiredKey = createPoolKey('codex', {
+      status_snapshot: {
+        oauth: { code: 'valid' },
+        account: { code: 'ok', blocked: false },
+        quota: {
+          code: 'ok',
+          exhausted: false,
+          provider_type: 'codex',
+          windows: [
+            {
+              code: '5h',
+              label: '5H',
+              scope: 'account',
+              remaining_ratio: 0.12,
+              reset_at: 1_700_000_000,
+              window_minutes: 300,
+            },
+          ],
+        },
+      },
+    })
+    endpointMocks.getPoolOverview.mockResolvedValue({ items: [createOverview('codex')] })
+    endpointMocks.listPoolKeys.mockResolvedValue(createKeyPage(expiredKey))
+    endpointMocks.getProvider.mockResolvedValue(createProvider('codex'))
+
+    const root = mountPoolManagement()
+    await settle()
+
+    // 倒计时归零后进度条与文本按“已重置”显示 100%，不再显示旧百分比。
+    expect(root.querySelector('[data-testid="pool-quota-meter-text"]')?.textContent?.trim()).toBe('100.0%')
+    const track = root.querySelector('[data-testid="pool-quota-progress-track"]')
+    const bar = track?.firstElementChild as HTMLElement | null
+    expect(bar?.style.width).toBe('100%')
+    expect(root.querySelector('[data-testid="pool-quota-reset-text"]')).toBeNull()
   })
 
   it('labels Codex quota by the actual refresh window duration', async () => {
