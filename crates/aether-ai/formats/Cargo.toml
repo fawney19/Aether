@@ -10,6 +10,7 @@ description = "Pure AI API format, surface, planning, and finalize logic for Aet
 aether-contracts.workspace = true
 base64.workspace = true
 http.workspace = true
+os_info = { version = "=3.12.0", default-features = false }
 regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -2,6 +2,7 @@
 
 use async_trait::async_trait;
 use serde_json::{Map, Value};
+use std::borrow::Cow;
 
 use super::super::adapter::{
     is_standard_responses_event, ResponsesWebSocketAdapterObservation,
@@ -222,7 +223,7 @@ fn codex_relay_directive(event: &Value) -> ResponsesWebSocketRelayDirective<'_> 
         Some(Value::Array(chunks)) if is_explicit_codex_batch_envelope(event) => {
             let public_events = chunks
                 .iter()
-                .filter(|chunk| !is_codex_private_leaf_event(chunk))
+                .filter_map(codex_public_event)
                 .collect::<Vec<_>>();
             if public_events.is_empty() {
                 ResponsesWebSocketRelayDirective::SuppressProviderPrivate
@@ -233,11 +234,49 @@ fn codex_relay_directive(event: &Value) -> ResponsesWebSocketRelayDirective<'_> 
         // A malformed or future shape is not proven private. Preserve it
         // opaquely rather than guessing at a provider schema.
         Some(_) => ResponsesWebSocketRelayDirective::ForwardOriginal,
-        None if is_codex_private_leaf_event(event) => {
-            ResponsesWebSocketRelayDirective::SuppressProviderPrivate
-        }
+        None if is_codex_private_leaf_event(event) => match codex_public_event(event) {
+            Some(projected) => ResponsesWebSocketRelayDirective::ForwardEvents(vec![projected]),
+            None => ResponsesWebSocketRelayDirective::SuppressProviderPrivate,
+        },
         None => ResponsesWebSocketRelayDirective::ForwardOriginal,
     }
+}
+
+fn codex_public_event(event: &Value) -> Option<Cow<'_, Value>> {
+    if !is_codex_private_leaf_event(event) {
+        return Some(Cow::Borrowed(event));
+    }
+    if event.get("type").and_then(Value::as_str) != Some("codex.response.metadata") {
+        // 配额属于选中的上游账户，不能代表网关用户配额；仅交给
+        // 账户级熔断和持久化路径处理。
+        return None;
+    }
+    let headers = event.get("headers")?.as_object()?;
+    let public_headers: Map<String, Value> = headers
+        .iter()
+        .filter_map(|(name, value)| {
+            let name = name.to_ascii_lowercase();
+            if matches!(
+                name.as_str(),
+                "x-models-etag"
+                    | "x-codex-turn-state"
+                    | "openai-model"
+                    | "x-codex-safety-buffering-enabled"
+                    | "x-codex-safety-buffering-faster-model"
+            ) && value.as_str().is_some()
+            {
+                Some((name, value.clone()))
+            } else {
+                None
+            }
+        })
+        .collect();
+    if public_headers.is_empty() {
+        return None;
+    }
+    Some(Cow::Owned(serde_json::json!({
+        "type": "codex.response.metadata", "headers": public_headers
+    })))
 }
 
 /// Recognizes only Codex's private batch container. A type-less object must
@@ -547,6 +586,55 @@ mod tests {
                 ResponsesWebSocketRelayDirective::ForwardOriginal
             );
         }
+    }
+
+    #[test]
+    fn codex_metadata_relays_cli_catalog_and_turn_state_without_account_fields() {
+        let event = json!({
+            "type": "codex.response.metadata",
+            "headers": {
+                "X-Models-Etag": "catalog-v2",
+                "x-codex-turn-state": "synthetic-turn-state",
+                "openai-model": "gpt-6.1-sol",
+                "x-codex-safety-buffering-enabled": "true",
+                "x-codex-safety-buffering-faster-model": "gpt-6-luna",
+                "chatgpt-account-id": "synthetic-private-account",
+                "set-cookie": "synthetic-private-cookie",
+                "authorization": "synthetic-private-token"
+            },
+            "account_hint": "private",
+            "metadata": {"user_id": "private"}
+        });
+        let ResponsesWebSocketRelayDirective::ForwardEvents(events) =
+            CodexResponsesWebSocketAdapter.relay_directive_for_upstream_event(&event)
+        else {
+            panic!("CLI metadata must reach the client");
+        };
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            *events[0],
+            json!({
+                "type": "codex.response.metadata",
+                "headers": {"x-models-etag": "catalog-v2", "x-codex-turn-state": "synthetic-turn-state", "openai-model": "gpt-6.1-sol", "x-codex-safety-buffering-enabled": "true", "x-codex-safety-buffering-faster-model": "gpt-6-luna"}
+            })
+        );
+    }
+
+    #[test]
+    fn codex_batch_retains_safe_metadata_in_public_event_order() {
+        let event = json!({"chunks": [
+            {"type": "codex.response.metadata", "headers": {"x-models-etag": "catalog-v3"}},
+            {"type": "codex.rate_limits", "plan_type": "private-plan"},
+            {"type": "response.created", "response": {"id": "resp_synthetic"}, "future": 42}
+        ]});
+        let ResponsesWebSocketRelayDirective::ForwardEvents(events) =
+            CodexResponsesWebSocketAdapter.relay_directive_for_upstream_event(&event)
+        else {
+            panic!("batch must retain public events");
+        };
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0]["headers"]["x-models-etag"], "catalog-v3");
+        assert_eq!(events[1]["future"], 42);
     }
 
     #[test]

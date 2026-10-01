@@ -45,6 +45,153 @@ where
     }
 }
 
+fn hash_api_key(value: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(value.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+fn auth_snapshot() -> StoredAuthApiKeySnapshot {
+    StoredAuthApiKeySnapshot::new(
+        "user-search-1".to_string(),
+        "alice".to_string(),
+        Some("alice@example.com".to_string()),
+        "user".to_string(),
+        "local".to_string(),
+        true,
+        false,
+        Some(json!(["openai", "codex"])),
+        Some(json!(["openai:responses"])),
+        None,
+        "api-key-search-1".to_string(),
+        Some("search-client".to_string()),
+        true,
+        false,
+        false,
+        Some(60),
+        Some(5),
+        Some(4_102_444_800_i64),
+        Some(json!(["openai", "codex"])),
+        Some(json!(["openai:responses"])),
+        None,
+    )
+    .expect("auth snapshot should build")
+}
+
+fn candidate_row(api_format: &str) -> StoredMinimalCandidateSelectionRow {
+    StoredMinimalCandidateSelectionRow {
+        provider_id: "provider-codex-search-1".to_string(),
+        provider_name: "codex".to_string(),
+        provider_type: "codex".to_string(),
+        provider_priority: 10,
+        provider_is_active: true,
+        endpoint_id: "endpoint-codex-search-1".to_string(),
+        endpoint_api_format: api_format.to_string(),
+        endpoint_api_family: Some("openai".to_string()),
+        endpoint_kind: Some(api_format.split_once(':').expect("format").1.to_string()),
+        endpoint_is_active: true,
+        key_id: "key-codex-search-1".to_string(),
+        key_name: "oauth".to_string(),
+        key_auth_type: "oauth".to_string(),
+        key_is_active: true,
+        key_api_formats: Some(vec!["openai:responses".to_string()]),
+        key_allowed_models: None,
+        key_capabilities: None,
+        key_internal_priority: 5,
+        key_global_priority_by_format: Some(json!({"openai:search": 1})),
+        model_id: "model-codex-search-1".to_string(),
+        global_model_id: "global-model-codex-search-1".to_string(),
+        global_model_name: "gpt-5.6-sol".to_string(),
+        global_model_mappings: None,
+        global_model_supports_streaming: Some(false),
+        model_provider_model_name: "gpt-5.6-sol".to_string(),
+        model_provider_model_mappings: Some(vec![StoredProviderModelMapping {
+            name: "gpt-5.6-sol".to_string(),
+            priority: 1,
+            api_formats: Some(vec!["openai:responses".to_string()]),
+            endpoint_ids: None,
+            operations: None,
+        }]),
+        model_supports_streaming: Some(false),
+        model_is_active: true,
+        model_is_available: true,
+    }
+}
+
+fn provider() -> StoredProviderCatalogProvider {
+    StoredProviderCatalogProvider::new(
+        "provider-codex-search-1".to_string(),
+        "codex".to_string(),
+        Some("https://chatgpt.com".to_string()),
+        "codex".to_string(),
+    )
+    .expect("provider should build")
+    .with_transport_fields(
+        true,
+        false,
+        false,
+        None,
+        Some(1),
+        None,
+        Some(900.0),
+        None,
+        None,
+    )
+}
+
+fn endpoint(api_format: &str) -> StoredProviderCatalogEndpoint {
+    StoredProviderCatalogEndpoint::new(
+        "endpoint-codex-search-1".to_string(),
+        "provider-codex-search-1".to_string(),
+        api_format.to_string(),
+        Some("openai".to_string()),
+        Some(api_format.split_once(':').expect("format").1.to_string()),
+        true,
+    )
+    .expect("endpoint should build")
+    .with_transport_fields(
+        "https://chatgpt.com/backend-api/codex".to_string(),
+        None,
+        None,
+        Some(1),
+        None,
+        None,
+        None,
+        None,
+    )
+    .expect("endpoint transport should build")
+}
+
+fn key() -> StoredProviderCatalogKey {
+    let auth_config = encrypt_python_fernet_plaintext(
+        DEVELOPMENT_ENCRYPTION_KEY,
+        r#"{"provider_type":"codex","account_id":"account-search-1","is_fedramp":true}"#,
+    )
+    .expect("auth config should encrypt");
+    StoredProviderCatalogKey::new(
+        "key-codex-search-1".to_string(),
+        "provider-codex-search-1".to_string(),
+        "oauth".to_string(),
+        "oauth".to_string(),
+        None,
+        true,
+    )
+    .expect("key should build")
+    .with_transport_fields(
+        Some(json!(["openai:responses"])),
+        encrypt_python_fernet_plaintext(DEVELOPMENT_ENCRYPTION_KEY, "codex-search-access-token")
+            .expect("access token should encrypt"),
+        Some(auth_config),
+        None,
+        Some(json!({"openai:search": 1})),
+        None,
+        Some(4_102_444_800),
+        None,
+        None,
+    )
+    .expect("key transport should build")
+}
+
 #[test]
 fn gateway_executes_codex_search_with_responses_permission_and_search_contract() {
     run_search_sync_test(
@@ -54,156 +201,6 @@ fn gateway_executes_codex_search_with_responses_permission_and_search_contract()
 }
 
 async fn gateway_executes_codex_search_with_responses_permission_and_search_contract_impl() {
-    fn hash_api_key(value: &str) -> String {
-        let mut hasher = Sha256::new();
-        hasher.update(value.as_bytes());
-        format!("{:x}", hasher.finalize())
-    }
-
-    fn auth_snapshot() -> StoredAuthApiKeySnapshot {
-        StoredAuthApiKeySnapshot::new(
-            "user-search-1".to_string(),
-            "alice".to_string(),
-            Some("alice@example.com".to_string()),
-            "user".to_string(),
-            "local".to_string(),
-            true,
-            false,
-            Some(json!(["openai", "codex"])),
-            Some(json!(["openai:responses"])),
-            None,
-            "api-key-search-1".to_string(),
-            Some("search-client".to_string()),
-            true,
-            false,
-            false,
-            Some(60),
-            Some(5),
-            Some(4_102_444_800_i64),
-            Some(json!(["openai", "codex"])),
-            Some(json!(["openai:responses"])),
-            None,
-        )
-        .expect("auth snapshot should build")
-    }
-
-    fn candidate_row() -> StoredMinimalCandidateSelectionRow {
-        StoredMinimalCandidateSelectionRow {
-            provider_id: "provider-codex-search-1".to_string(),
-            provider_name: "codex".to_string(),
-            provider_type: "codex".to_string(),
-            provider_priority: 10,
-            provider_is_active: true,
-            endpoint_id: "endpoint-codex-search-1".to_string(),
-            endpoint_api_format: "openai:search".to_string(),
-            endpoint_api_family: Some("openai".to_string()),
-            endpoint_kind: Some("search".to_string()),
-            endpoint_is_active: true,
-            key_id: "key-codex-search-1".to_string(),
-            key_name: "oauth".to_string(),
-            key_auth_type: "oauth".to_string(),
-            key_is_active: true,
-            key_api_formats: Some(vec!["openai:responses".to_string()]),
-            key_allowed_models: None,
-            key_capabilities: None,
-            key_internal_priority: 5,
-            key_global_priority_by_format: Some(json!({"openai:search": 1})),
-            model_id: "model-codex-search-1".to_string(),
-            global_model_id: "global-model-codex-search-1".to_string(),
-            global_model_name: "gpt-5.6-sol".to_string(),
-            global_model_mappings: None,
-            global_model_supports_streaming: Some(false),
-            model_provider_model_name: "gpt-5.6-sol".to_string(),
-            model_provider_model_mappings: Some(vec![StoredProviderModelMapping {
-                name: "gpt-5.6-sol".to_string(),
-                priority: 1,
-                api_formats: Some(vec!["openai:responses".to_string()]),
-                endpoint_ids: None,
-                operations: None,
-            }]),
-            model_supports_streaming: Some(false),
-            model_is_active: true,
-            model_is_available: true,
-        }
-    }
-
-    fn provider() -> StoredProviderCatalogProvider {
-        StoredProviderCatalogProvider::new(
-            "provider-codex-search-1".to_string(),
-            "codex".to_string(),
-            Some("https://chatgpt.com".to_string()),
-            "codex".to_string(),
-        )
-        .expect("provider should build")
-        .with_transport_fields(
-            true,
-            false,
-            false,
-            None,
-            Some(1),
-            None,
-            Some(900.0),
-            None,
-            None,
-        )
-    }
-
-    fn endpoint() -> StoredProviderCatalogEndpoint {
-        StoredProviderCatalogEndpoint::new(
-            "endpoint-codex-search-1".to_string(),
-            "provider-codex-search-1".to_string(),
-            "openai:search".to_string(),
-            Some("openai".to_string()),
-            Some("search".to_string()),
-            true,
-        )
-        .expect("endpoint should build")
-        .with_transport_fields(
-            "https://chatgpt.com/backend-api/codex".to_string(),
-            None,
-            None,
-            Some(1),
-            None,
-            None,
-            None,
-            None,
-        )
-        .expect("endpoint transport should build")
-    }
-
-    fn key() -> StoredProviderCatalogKey {
-        let auth_config = encrypt_python_fernet_plaintext(
-            DEVELOPMENT_ENCRYPTION_KEY,
-            r#"{"provider_type":"codex","account_id":"account-search-1","is_fedramp":true}"#,
-        )
-        .expect("auth config should encrypt");
-        StoredProviderCatalogKey::new(
-            "key-codex-search-1".to_string(),
-            "provider-codex-search-1".to_string(),
-            "oauth".to_string(),
-            "oauth".to_string(),
-            None,
-            true,
-        )
-        .expect("key should build")
-        .with_transport_fields(
-            Some(json!(["openai:responses"])),
-            encrypt_python_fernet_plaintext(
-                DEVELOPMENT_ENCRYPTION_KEY,
-                "codex-search-access-token",
-            )
-            .expect("access token should encrypt"),
-            Some(auth_config),
-            None,
-            Some(json!({"openai:search": 1})),
-            None,
-            Some(4_102_444_800),
-            None,
-            None,
-        )
-        .expect("key transport should build")
-    }
-
     let seen_plans = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
     let seen_plans_clone = Arc::clone(&seen_plans);
     let execution_runtime = Router::new().route(
@@ -316,7 +313,7 @@ async fn gateway_executes_codex_search_with_responses_permission_and_search_cont
         auth_snapshot(),
     )]));
     let candidate_repository = Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed({
-        let primary = candidate_row();
+        let primary = candidate_row("openai:search");
         let mut backup = primary.clone();
         backup.provider_id = "provider-codex-search-2".to_string();
         backup.provider_name = "codex-backup".to_string();
@@ -338,7 +335,7 @@ async fn gateway_executes_codex_search_with_responses_permission_and_search_cont
             vec![primary, backup]
         },
         {
-            let primary = endpoint();
+            let primary = endpoint("openai:search");
             let mut backup = primary.clone();
             backup.id = "endpoint-codex-search-2".to_string();
             backup.provider_id = "provider-codex-search-2".to_string();
@@ -597,4 +594,121 @@ async fn gateway_executes_codex_search_with_responses_permission_and_search_cont
 
     gateway_handle.abort();
     execution_runtime_handle.abort();
+}
+
+#[test]
+fn gateway_executes_codex_memories_with_responses_permission_and_native_json() {
+    run_search_sync_test(
+        "gateway_executes_codex_memories_with_responses_permission_and_native_json",
+        || async {
+            let response_body = json!({"output":[{"trace_summary":"synthetic trace", "memory_summary":"synthetic memory"}],"future_response_field":{"enabled":true}});
+            let seen = Arc::new(Mutex::new(None));
+            let captured = Arc::clone(&seen);
+            let expected = response_body.clone();
+            let runtime = Router::new().route("/v1/execute/sync", any(move |request: Request| {
+            let captured = Arc::clone(&captured);
+            let response_body = expected.clone();
+            async move {
+                let bytes = to_bytes(request.into_body(), usize::MAX).await.expect("read plan");
+                let plan: serde_json::Value = serde_json::from_slice(&bytes).expect("parse plan");
+                let request_id = plan["request_id"].clone();
+                *captured.lock().expect("capture lock") = Some(plan);
+                let (status_code, response_body) = if request_id == json!("trace-memory-error") {
+                    (400, json!({"error":{"type":"invalid_request_error","message":"synthetic invalid trace","code":"invalid_trace"},"future_error_field":{"enabled":true}}))
+                } else { (200, response_body) };
+                Json(json!({"request_id":request_id,"status_code":status_code,"headers":{"content-type":"application/json"},"body":{"json_body":response_body},"telemetry":{"elapsed_ms":1}}))
+            }
+        }));
+            let client_key = "sk-synthetic-memory-client";
+            let auth = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+                Some(hash_api_key(client_key)),
+                auth_snapshot(),
+            )]));
+            let candidates = Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
+                candidate_row("openai:responses"),
+            ]));
+            let mut memory_provider = provider();
+            memory_provider.config = Some(
+                json!({"codex":{"fingerprint_convergence_enabled":true},"failover_rules":{"stop_status_codes":[400]}}),
+            );
+            let catalog = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+                vec![memory_provider],
+                vec![endpoint("openai:responses")],
+                vec![key()],
+            ));
+            let request_candidates = Arc::new(InMemoryRequestCandidateRepository::default());
+            let data = crate::data::GatewayDataState::with_auth_candidate_selection_provider_catalog_and_request_candidate_repository_for_tests(auth,candidates,catalog,Arc::clone(&request_candidates),DEVELOPMENT_ENCRYPTION_KEY)
+            .with_system_config_values_for_tests([(crate::system_features::ENABLE_MODEL_DIRECTIVES_CONFIG_KEY.to_string(),json!(true))]);
+            let (runtime_url, runtime_handle) = start_server(runtime).await;
+            let state = build_state_with_execution_runtime_override(runtime_url)
+                .with_data_state_for_tests(data);
+            let (url, gateway_handle) = start_server(build_router_with_state(state)).await;
+            let input = json!({"model":"gpt-5.6-sol-max","traces":[{"id":"synthetic-trace","metadata":{"source_path":"/synthetic/trace.json"},"items":[{"type":"message","role":"user","content":[]}]}],"reasoning":{"effort":"low"},"future_request_field":{"enabled":true}});
+            let response = reqwest::Client::new()
+                .post(format!("{url}/v1/memories/trace_summarize"))
+                .header(http::header::AUTHORIZATION, format!("Bearer {client_key}"))
+                .header(TRACE_ID_HEADER, "trace-memory-1")
+                .json(&input)
+                .send()
+                .await
+                .expect("send request");
+            let status = response.status();
+            let body: serde_json::Value = response.json().await.expect("read response");
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body, response_body);
+            let plan = seen
+                .lock()
+                .expect("capture lock")
+                .clone()
+                .expect("captured plan");
+            assert_eq!(
+                plan["url"],
+                "https://chatgpt.com/backend-api/codex/memories/trace_summarize"
+            );
+            assert_eq!(plan["stream"], false);
+            assert_eq!(plan["client_api_format"], "openai:responses");
+            assert_eq!(plan["provider_api_format"], "openai:responses");
+            assert_eq!(plan["headers"]["originator"], "codex_cli_rs");
+            assert_eq!(
+                plan["headers"]["authorization"],
+                "Bearer codex-search-access-token"
+            );
+            assert_eq!(plan["headers"]["accept"], "application/json");
+            assert!(plan["headers"]
+                .get("x-openai-internal-codex-responses-lite")
+                .is_none());
+            let mut expected_input = input;
+            expected_input["model"] = json!("gpt-5.6-sol");
+            expected_input["reasoning"]["effort"] = json!("max");
+            assert_eq!(plan["body"]["json_body"], expected_input);
+            let stored = request_candidates
+                .list_by_request_id("trace-memory-1")
+                .await
+                .expect("read candidates");
+            assert_eq!(stored.len(), 1);
+            assert_eq!(stored[0].status, RequestCandidateStatus::Success);
+            let error = reqwest::Client::new()
+                .post(format!("{url}/v1/memories/trace_summarize"))
+                .header(http::header::AUTHORIZATION, format!("Bearer {client_key}"))
+                .header(TRACE_ID_HEADER, "trace-memory-error")
+                .json(&expected_input)
+                .send()
+                .await
+                .expect("error response");
+            let error_status = error.status();
+            assert_eq!(error_status, StatusCode::BAD_REQUEST);
+            assert_eq!(
+                error.json::<serde_json::Value>().await.expect("error JSON"),
+                json!({"error":{"type":"invalid_request_error","message":"synthetic invalid trace","code":"invalid_trace"},"future_error_field":{"enabled":true}})
+            );
+            let error_candidates = request_candidates
+                .list_by_request_id("trace-memory-error")
+                .await
+                .expect("error candidate");
+            assert_eq!(error_candidates.len(), 1);
+            assert_eq!(error_candidates[0].status, RequestCandidateStatus::Failed);
+            gateway_handle.abort();
+            runtime_handle.abort();
+        },
+    );
 }

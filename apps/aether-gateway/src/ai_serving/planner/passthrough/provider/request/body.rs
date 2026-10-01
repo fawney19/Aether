@@ -3,7 +3,7 @@ use serde_json::Value;
 use super::super::LocalSameFormatProviderSpec;
 use crate::ai_serving::transport::{
     build_same_format_provider_request_body as build_same_format_provider_request_body_impl,
-    build_same_format_provider_request_body_with_compatibility_report_and_reasoning_replay_policy as build_same_format_provider_request_body_with_compatibility_report_impl,
+    build_same_format_provider_request_body_for_operation as build_same_format_provider_request_body_with_compatibility_report_impl,
     SameFormatProviderFamily, SameFormatProviderRequestBodyInput,
     SameFormatProviderRequestBodyOutput,
 };
@@ -69,6 +69,7 @@ pub(crate) fn build_same_format_provider_request_body_with_compatibility_report(
             enable_model_directives,
         },
         reasoning_replay_policy,
+        spec.operation,
     )
 }
 

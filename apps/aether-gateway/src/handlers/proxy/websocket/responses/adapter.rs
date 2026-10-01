@@ -2,6 +2,7 @@
 
 use async_trait::async_trait;
 use serde_json::Value;
+use std::borrow::Cow;
 
 use super::adapters::CODEX_RESPONSES_WEBSOCKET_ADAPTER;
 use crate::ai_serving::AiExecutionDecision;
@@ -59,7 +60,7 @@ pub(super) enum ResponsesWebSocketRelayDirective<'a> {
     ForwardOriginal,
     /// The provider frame was a private batch envelope. Forward each retained
     /// event in document order by serializing the complete borrowed value.
-    ForwardEvents(Vec<&'a Value>),
+    ForwardEvents(Vec<Cow<'a, Value>>),
     /// The entire frame was an explicitly recognized provider-private
     /// envelope and therefore has no public event to relay.
     SuppressProviderPrivate,
@@ -88,8 +89,8 @@ pub(super) trait ResponsesWebSocketProtocolAdapter: Send + Sync {
     /// observably ambiguous to the client.
     fn rebind_safety_for_upstream_event(&self, event: &Value) -> ResponsesWebSocketRebindSafety;
 
-    /// Selects the public relay shape without projecting a provider event
-    /// through an Aether-owned field or event-type allowlist.
+    /// 公开事件保持完整；提供商私有元数据仅投影到客户端使用的公开字段，
+    /// 不公开账户信息。
     fn relay_directive_for_upstream_event<'a>(
         &self,
         _event: &'a Value,

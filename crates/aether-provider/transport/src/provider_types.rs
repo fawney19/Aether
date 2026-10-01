@@ -604,7 +604,7 @@ pub fn provider_type_admin_oauth_template(provider_type: &str) -> Option<Provide
             authorize_url: "https://auth.openai.com/oauth/authorize",
             token_url: "https://auth.openai.com/oauth/token",
             client_id: "app_EMoamEEZ73f0CkXaXp7hrann",
-            scopes: &["openid", "email", "profile", "offline_access"],
+            scopes: aether_oauth::provider::providers::CODEX_OAUTH_SCOPES,
             redirect_uri: "http://localhost:1455/auth/callback",
             use_pkce: true,
         }),

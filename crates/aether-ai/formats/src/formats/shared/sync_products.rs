@@ -746,6 +746,9 @@ fn maybe_build_standard_same_format_sync_body(
     }
 
     let body_json = body_json?;
+    if report_kind == "openai_memories_sync_finalize" {
+        return Some(body_json.clone());
+    }
     if is_error_like_sync_body(body_json) {
         return None;
     }
@@ -1949,6 +1952,7 @@ fn is_openai_responses_finalize_kind(report_kind: &str) -> bool {
 
 fn standard_same_format_api_format(report_kind: &str) -> Option<&'static str> {
     match report_kind {
+        "openai_memories_sync_finalize" => Some("openai:responses"),
         "openai_chat_sync_finalize" => Some("openai:chat"),
         "claude_chat_sync_finalize" => Some("claude:messages"),
         "gemini_chat_sync_finalize" => Some("gemini:generate_content"),
@@ -4162,6 +4166,24 @@ mod tests {
     use aether_ai_formats::{sync_cli_response_conversion_kind, SyncCliResponseConversionKind};
     use base64::Engine as _;
     use serde_json::json;
+
+    #[test]
+    fn native_memories_response_keeps_output_array_and_future_fields() {
+        let body = json!({"output":[{"trace_summary":"synthetic", "memory_summary":"memory"}], "future_response_field":{"enabled":true}});
+        let context = json!({"provider_api_format":"openai:responses","client_api_format":"openai:responses","needs_conversion":false,"requested_model":"gpt-6.1-sol-max"});
+        assert_eq!(
+            maybe_build_standard_same_format_sync_body_from_normalized_payload(
+                "openai_memories_sync_finalize",
+                200,
+                Some(&context),
+                Some(&body),
+                None
+            )
+            .expect("native response")
+            .expect("body"),
+            body
+        );
+    }
 
     #[test]
     fn converts_openai_images_sync_body_to_gemini_image_body() {

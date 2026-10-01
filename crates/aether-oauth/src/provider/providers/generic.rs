@@ -92,7 +92,7 @@ pub const GENERIC_PROVIDER_OAUTH_TEMPLATES: &[GenericProviderOAuthTemplate] = &[
         client_id: "app_EMoamEEZ73f0CkXaXp7hrann",
         client_id_env: None,
         client_secret_env: None,
-        scopes: &["openid", "email", "profile", "offline_access"],
+        scopes: super::codex::CODEX_OAUTH_SCOPES,
         redirect_uri: "http://localhost:1455/auth/callback",
         use_pkce: true,
         uses_json_payload: false,

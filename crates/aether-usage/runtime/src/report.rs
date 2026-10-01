@@ -299,6 +299,7 @@ pub fn is_local_ai_sync_report_kind(report_kind: &str) -> bool {
             | "claude_chat_sync_error"
             | "gemini_chat_sync_error"
             | "openai_responses_sync_success"
+            | "openai_memories_sync_success"
             | "openai_responses_compact_sync_success"
             | "openai_responses_sync_error"
             | "openai_responses_compact_sync_error"
@@ -946,6 +947,7 @@ mod tests {
         ));
         assert!(is_local_ai_sync_report_kind("openai_image_sync_success"));
         assert!(is_local_ai_sync_report_kind("openai_search_sync_success"));
+        assert!(is_local_ai_sync_report_kind("openai_memories_sync_success"));
         assert!(is_local_ai_sync_report_kind("openai_image_sync_error"));
         assert!(is_local_ai_sync_report_kind(
             "openai_embedding_sync_success"

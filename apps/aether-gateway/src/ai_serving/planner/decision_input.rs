@@ -17,7 +17,7 @@ use crate::ai_serving::transport::ProviderOutboundRequestContext;
 use crate::ai_serving::{
     ClientSurface, ExecutionRuntimeAuthContext, GatewayAuthApiKeySnapshot,
     GatewayCredentialCarrier, GatewayProviderTransportSnapshot, PlannerAppState,
-    CODEX_RESPONSES_LITE_HEADER,
+    CODEX_RESPONSES_LITE_HEADER, OPENAI_MEMORIES_SYNC_PLAN_KIND,
 };
 use crate::cache::CacheLoadObserver;
 use crate::client_session_affinity::client_session_affinity_from_api_request;
@@ -123,6 +123,7 @@ pub(crate) fn apply_provider_request_routing_policy_to_decision_with_websocket_m
     transport: Option<&GatewayProviderTransportSnapshot>,
     websocket_continuation: bool,
 ) -> Result<(), GatewayError> {
+    let native_memories = decision.decision_kind.as_deref() == Some(OPENAI_MEMORIES_SYNC_PLAN_KIND);
     let provider_api_format = decision
         .provider_api_format
         .clone()
@@ -150,7 +151,12 @@ pub(crate) fn apply_provider_request_routing_policy_to_decision_with_websocket_m
             input.requested_model.as_str(),
         )
     });
-    crate::ai_serving::apply_codex_openai_responses_lite_header_for_request_body_with_capabilities(
+    if native_memories {
+        decision
+            .provider_request_headers
+            .retain(|name, _| !name.eq_ignore_ascii_case(CODEX_RESPONSES_LITE_HEADER));
+    } else {
+        crate::ai_serving::apply_codex_openai_responses_lite_header_for_request_body_with_capabilities(
         &mut decision.provider_request_headers,
         decision.provider_request_body.as_ref(),
         provider_type.as_str(),
@@ -159,6 +165,7 @@ pub(crate) fn apply_provider_request_routing_policy_to_decision_with_websocket_m
         input.requested_model.as_str(),
         model_capabilities.as_ref(),
     );
+    }
 
     let Some(context) = input.routing_context.as_ref() else {
         // Cache identity headers are projected only at the terminal boundary. Any non-empty
@@ -260,7 +267,7 @@ pub(crate) fn apply_provider_request_routing_policy_to_decision_with_websocket_m
             provider_headers.insert(HeaderName::from_static(name), value);
         }
     }
-    if original_provider_request_body.is_some() {
+    if original_provider_request_body.is_some() && !native_memories {
         let provider_model = provider_request_body
             .get("model")
             .and_then(Value::as_str)
@@ -318,6 +325,12 @@ pub(crate) fn apply_provider_request_routing_policy_to_decision_with_websocket_m
         }
         .map_err(|_| invalid_routing_provider_contract())?;
     }
+    if native_memories {
+        crate::ai_serving::transport::enforce_same_format_provider_api_operation_body_policy(
+            &mut provider_request_body,
+            Some(crate::ai_serving::ApiOperation::OpenAiMemoriesSummarize),
+        );
+    }
     let provider_model = provider_request_body
         .get("model")
         .and_then(Value::as_str)
@@ -339,7 +352,11 @@ pub(crate) fn apply_provider_request_routing_policy_to_decision_with_websocket_m
         provider_type.as_str(),
         provider_api_format.as_str(),
     );
-    crate::ai_serving::apply_codex_openai_responses_lite_header_for_request_body_with_capabilities(
+    if native_memories {
+        provider_request_headers
+            .retain(|name, _| !name.eq_ignore_ascii_case(CODEX_RESPONSES_LITE_HEADER));
+    } else {
+        crate::ai_serving::apply_codex_openai_responses_lite_header_for_request_body_with_capabilities(
         &mut provider_request_headers,
         Some(&provider_request_body),
         provider_type.as_str(),
@@ -348,6 +365,7 @@ pub(crate) fn apply_provider_request_routing_policy_to_decision_with_websocket_m
         input.requested_model.as_str(),
         model_capabilities.as_ref(),
     );
+    }
     crate::ai_serving::apply_codex_openai_compact_terminal_headers(
         &mut provider_request_headers,
         provider_type.as_str(),
@@ -381,6 +399,15 @@ fn apply_provider_outbound_request_policies_to_decision(
     };
     let Some(context) = input.provider_outbound_context.as_ref() else {
         return;
+    };
+    let native_context;
+    let context = if decision.decision_kind.as_deref() == Some(OPENAI_MEMORIES_SYNC_PLAN_KIND) {
+        native_context = context
+            .clone()
+            .with_api_operation(crate::ai_serving::ApiOperation::OpenAiMemoriesSummarize);
+        &native_context
+    } else {
+        context
     };
     let results = crate::ai_serving::transport::apply_provider_outbound_request_policies(
         transport,

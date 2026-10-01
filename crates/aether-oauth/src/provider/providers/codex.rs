@@ -3,6 +3,16 @@ use super::generic::{
 };
 use crate::provider::ProviderOAuthAdapter;
 
+/// Codex CLI 的公开 OAuth 权限范围，不包含账户专属值。
+pub const CODEX_OAUTH_SCOPES: &[&str] = &[
+    "openid",
+    "profile",
+    "email",
+    "offline_access",
+    "api.connectors.read",
+    "api.connectors.invoke",
+];
+
 #[derive(Debug, Clone)]
 pub struct CodexProviderOAuthAdapter {
     inner: GenericProviderOAuthAdapter,
@@ -45,6 +55,7 @@ impl ProviderOAuthAdapter for CodexProviderOAuthAdapter {
             query.append_pair("prompt", "login");
             query.append_pair("id_token_add_organizations", "true");
             query.append_pair("codex_cli_simplified_flow", "true");
+            query.append_pair("originator", "codex_cli_rs");
         }
         response.authorize_url = url.to_string();
         Ok(response)
@@ -156,6 +167,26 @@ mod tests {
         assert!(response
             .authorize_url
             .contains("codex_cli_simplified_flow=true"));
+        let url = url::Url::parse(&response.authorize_url).unwrap();
+        let query = url.query_pairs().collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            query.get("scope").map(|value| value.as_ref()),
+            Some("openid profile email offline_access api.connectors.read api.connectors.invoke")
+        );
+        assert_eq!(
+            query.get("originator").map(|value| value.as_ref()),
+            Some("codex_cli_rs")
+        );
+        assert_eq!(
+            query
+                .get("code_challenge_method")
+                .map(|value| value.as_ref()),
+            Some("S256")
+        );
+        assert_eq!(
+            query.get("state").map(|value| value.as_ref()),
+            Some("state-1")
+        );
     }
 
     #[tokio::test]

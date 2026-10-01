@@ -107,6 +107,12 @@ pub(crate) fn apply_codex_fingerprint_convergence_policy(
     }
 
     let is_responses = aether_ai_formats::is_openai_responses_format(provider_api_format);
+    if context.api_operation() == Some(aether_ai_formats::ApiOperation::OpenAiMemoriesSummarize) {
+        return ProviderOutboundRequestPolicyResult::skipped(
+            policy,
+            ProviderOutboundRequestPolicyReason::NativeOperationExcluded,
+        );
+    }
     let is_live = aether_ai_formats::api_format_alias_matches(provider_api_format, "codex:live");
     if !is_responses && !is_live {
         return ProviderOutboundRequestPolicyResult::skipped(
@@ -565,6 +571,30 @@ mod tests {
                 decrypted_auth_config: Some(json!({"account_id": "account-1"}).to_string()),
             },
         }
+    }
+
+    #[test]
+    fn native_memories_excludes_responses_fingerprint_body_mutations() {
+        let transport = sample_transport();
+        let context =
+            ProviderOutboundRequestContext::new("synthetic-memory-turn", 1_700_000_000_123)
+                .with_api_operation(aether_ai_formats::ApiOperation::OpenAiMemoriesSummarize);
+        let mut headers = BTreeMap::new();
+        let mut body = json!({"model":"gpt-6.1-sol","traces":[],"future":42});
+        let original = body.clone();
+        let result = apply_codex_fingerprint_convergence_policy(
+            &transport,
+            "openai:responses",
+            &context,
+            &mut headers,
+            &mut body,
+        );
+        assert_eq!(
+            result.reason,
+            ProviderOutboundRequestPolicyReason::NativeOperationExcluded
+        );
+        assert_eq!(body, original);
+        assert!(headers.is_empty());
     }
 
     #[test]

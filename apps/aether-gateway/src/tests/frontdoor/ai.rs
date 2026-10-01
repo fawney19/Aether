@@ -1270,10 +1270,9 @@ async fn run_versioned_codex_model_cards_frontdoor_scenario() {
         captured_catalog_plan.0,
         "https://chatgpt.example/backend-api/codex/models?client_version=0.145.2"
     );
-    assert_eq!(
-        captured_catalog_plan.1.as_deref(),
-        Some("codex_cli_rs/0.145.2")
-    );
+    let captured_ua = captured_catalog_plan.1.expect("目录请求应包含 UA");
+    assert!(captured_ua.starts_with("codex_cli_rs/0.145.2 ("));
+    assert!(captured_ua.ends_with(") unknown"));
 
     let fresh_response = client
         .get(format!("{gateway_url}/v1/models?client_version=0.145.2"))

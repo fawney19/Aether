@@ -7,6 +7,7 @@ use crate::contracts::{
     GEMINI_EMBEDDING_SYNC_SUCCESS_REPORT_KIND, GEMINI_INTERACTIONS_STREAM_PLAN_KIND,
     GEMINI_INTERACTIONS_STREAM_SUCCESS_REPORT_KIND, GEMINI_INTERACTIONS_SYNC_PLAN_KIND,
     GEMINI_INTERACTIONS_SYNC_SUCCESS_REPORT_KIND, OPENAI_EMBEDDING_SYNC_PLAN_KIND,
+    OPENAI_MEMORIES_SYNC_PLAN_KIND, OPENAI_MEMORIES_SYNC_SUCCESS_REPORT_KIND,
     OPENAI_REALTIME_STREAM_PLAN_KIND, OPENAI_RERANK_SYNC_PLAN_KIND, OPENAI_SEARCH_SYNC_PLAN_KIND,
     OPENAI_SEARCH_SYNC_SUCCESS_REPORT_KIND,
 };
@@ -29,6 +30,14 @@ pub struct LocalSameFormatProviderSpec {
 
 pub fn resolve_sync_spec(plan_kind: &str) -> Option<LocalSameFormatProviderSpec> {
     match plan_kind {
+        OPENAI_MEMORIES_SYNC_PLAN_KIND => Some(LocalSameFormatProviderSpec {
+            api_format: "openai:responses",
+            decision_kind: OPENAI_MEMORIES_SYNC_PLAN_KIND,
+            report_kind: OPENAI_MEMORIES_SYNC_SUCCESS_REPORT_KIND,
+            family: LocalSameFormatProviderFamily::Standard,
+            require_streaming: false,
+            operation: Some(ApiOperation::OpenAiMemoriesSummarize),
+        }),
         CLAUDE_CHAT_SYNC_PLAN_KIND => Some(LocalSameFormatProviderSpec {
             api_format: "claude:messages",
             decision_kind: CLAUDE_CHAT_SYNC_PLAN_KIND,
@@ -258,6 +267,18 @@ mod tests {
         let spec = resolve_sync_spec("openai_search_sync").expect("spec");
         assert_eq!(spec.api_format, "openai:search");
         assert_eq!(spec.report_kind, "openai_search_sync_success");
+        assert!(!spec.require_streaming);
+    }
+
+    #[test]
+    fn memories_uses_responses_permissions_and_a_native_sync_operation() {
+        let spec = resolve_sync_spec("openai_memories_sync").expect("memory spec");
+        assert_eq!(spec.api_format, "openai:responses");
+        assert_eq!(
+            spec.operation,
+            Some(crate::ApiOperation::OpenAiMemoriesSummarize)
+        );
+        assert_eq!(spec.report_kind, "openai_memories_sync_success");
         assert!(!spec.require_streaming);
     }
 }

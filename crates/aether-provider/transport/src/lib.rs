@@ -154,6 +154,7 @@ pub use rules::{
 };
 pub use same_format_provider::{
     build_same_format_provider_headers, build_same_format_provider_request_body,
+    build_same_format_provider_request_body_for_operation,
     build_same_format_provider_request_body_with_compatibility_report,
     build_same_format_provider_request_body_with_compatibility_report_and_reasoning_replay_policy,
     build_same_format_provider_upstream_url, classify_same_format_provider_request_behavior,

@@ -849,6 +849,12 @@ async fn gateway_handles_admin_provider_query_models_falls_back_to_codex_preset_
             "gpt-5.6-luna",
             "gpt-5.6-sol",
             "gpt-5.6-terra",
+            "gpt-6-astra",
+            "gpt-6-luna",
+            "gpt-6-sol",
+            "gpt-6.1-sol",
+            "gpt-daybreak-blue-latest",
+            "gpt-daybreak-red-latest",
         ]
     );
     assert_eq!(

@@ -120,6 +120,43 @@ fn build_transport_request_url_inner(
         return Some(url);
     }
 
+    if params.api_operation == Some(ApiOperation::OpenAiMemoriesSummarize) {
+        if normalized_provider_api_format != "openai:responses" {
+            return None;
+        }
+        if let Some(path) = transport
+            .endpoint
+            .custom_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+        {
+            // 显式操作模板也适用于原生同步操作。
+            if path.contains("{operation}") {
+                let path = expand_custom_path_template(path, build_path_params(params, false))?;
+                return build_passthrough_path_url(
+                    &transport.endpoint.base_url,
+                    &path,
+                    params.request_query,
+                    GATEWAY_CREDENTIAL_QUERY_KEYS,
+                );
+            }
+            // 仅描述 Responses 的自定义路径无法承接该操作。
+            return None;
+        }
+        // 以 Responses 的同一提供商根路径派生原生端点。
+        let mut url = Url::parse(&build_openai_responses_url(
+            &transport.endpoint.base_url,
+            strip_gateway_credential_query_parameters(params.request_query).as_deref(),
+            false,
+        ))
+        .ok()?;
+        let root = url.path().strip_suffix("/responses")?;
+        let path = format!("{root}/memories/trace_summarize");
+        url.set_path(&path);
+        return Some(url.to_string());
+    }
+
     let xai_base =
         crate::xai::resolved_xai_upstream_base_url(transport, &normalized_provider_api_format);
     let request_base_url = xai_base
@@ -558,6 +595,14 @@ pub fn transport_supports_api_operation(
     provider_api_format: &str,
     operation: Option<ApiOperation>,
 ) -> bool {
+    if operation == Some(ApiOperation::OpenAiMemoriesSummarize) {
+        return aether_ai_formats::normalize_api_format_alias(provider_api_format)
+            == "openai:responses"
+            && !crate::kiro::is_kiro_provider_transport(transport)
+            && !crate::grok::is_grok_provider_transport(transport)
+            && !is_antigravity_provider_transport(transport)
+            && !is_gemini_cli_provider_transport(transport);
+    }
     if operation != Some(ApiOperation::ClaudeCountTokens) {
         return true;
     }
@@ -1219,6 +1264,73 @@ mod tests {
         .expect("openai responses url");
 
         assert_eq!(url, "https://api.openai.example/v1/responses?tenant=demo");
+    }
+
+    #[test]
+    fn memories_url_respects_operation_templates_and_rejects_incompatible_paths() {
+        let params = TransportRequestUrlParams {
+            provider_api_format: "openai:responses",
+            mapped_model: Some("gpt-6.1-sol"),
+            upstream_is_stream: false,
+            request_query: Some("key=synthetic&tenant=demo"),
+            kiro_api_region: None,
+            api_operation: Some(ApiOperation::OpenAiMemoriesSummarize),
+        };
+        let transport = sample_transport(
+            "codex",
+            "openai:responses",
+            "https://example.com",
+            Some("/native/{operation}"),
+        );
+        assert_eq!(
+            build_transport_request_url(&transport, params).as_deref(),
+            Some("https://example.com/native/trace_summarize?tenant=demo")
+        );
+        let incompatible = sample_transport(
+            "codex",
+            "openai:responses",
+            "https://example.com",
+            Some("/native/responses"),
+        );
+        assert!(build_transport_request_url(&incompatible, params).is_none());
+        for provider in ["kiro", "grok", "antigravity", "gemini_cli"] {
+            let private =
+                sample_transport(provider, "openai:responses", "https://example.com", None);
+            assert!(
+                build_transport_request_url(&private, params).is_none(),
+                "{provider}"
+            );
+        }
+    }
+
+    #[test]
+    fn memories_url_uses_the_configured_provider_root_and_removes_gateway_auth() {
+        for (provider, base, expected) in [
+            (
+                "codex",
+                "https://chatgpt.com/backend-api/codex",
+                "https://chatgpt.com/backend-api/codex/memories/trace_summarize?tenant=demo",
+            ),
+            (
+                "custom",
+                "https://example.com/v1",
+                "https://example.com/v1/memories/trace_summarize?tenant=demo",
+            ),
+        ] {
+            let transport = sample_transport(provider, "openai:responses", base, None);
+            let result = build_transport_request_url(
+                &transport,
+                TransportRequestUrlParams {
+                    provider_api_format: "openai:responses",
+                    mapped_model: Some("gpt-6.1-sol"),
+                    upstream_is_stream: false,
+                    request_query: Some("key=synthetic-secret&tenant=demo"),
+                    kiro_api_region: None,
+                    api_operation: Some(ApiOperation::OpenAiMemoriesSummarize),
+                },
+            );
+            assert_eq!(result.as_deref(), Some(expected));
+        }
     }
 
     #[test]

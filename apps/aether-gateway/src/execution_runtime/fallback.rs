@@ -191,6 +191,7 @@ pub(crate) fn resolve_core_sync_error_finalize_report_kind(
     let report_kind = match plan_kind {
         "openai_chat_sync" => "openai_chat_sync_finalize",
         "openai_responses_sync" => "openai_responses_sync_finalize",
+        "openai_memories_sync" => "openai_memories_sync_finalize",
         "openai_responses_compact_sync" => "openai_responses_compact_sync_finalize",
         "claude_chat_sync" => "claude_chat_sync_finalize",
         "gemini_chat_sync" => "gemini_chat_sync_finalize",
@@ -576,6 +577,14 @@ mod tests {
             error: None,
         };
 
+        assert_eq!(
+            resolve_core_sync_error_finalize_report_kind(
+                "openai_memories_sync",
+                &result,
+                Some(&serde_json::json!({"error":{"message":"synthetic"}}))
+            ),
+            Some("openai_memories_sync_finalize".to_string())
+        );
         for body_json in [
             serde_json::json!({"status": "failed", "error": null}),
             serde_json::json!({"type": "error"}),

@@ -610,6 +610,7 @@ pub(super) async fn relay_bound_connection(
                     }
                     Some(ResponsesWebSocketRelayDirective::ForwardEvents(events)) => {
                         for event in events {
+                            let event = event.as_ref();
                             let text = match bound
                                 .redaction_restorer
                                 .restore_provider_frame_text(event)

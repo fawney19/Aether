@@ -1,4 +1,6 @@
-use std::sync::{OnceLock, RwLock};
+use std::sync::{LazyLock, OnceLock, RwLock};
+
+static OS_INFO: LazyLock<os_info::Info> = LazyLock::new(os_info::get);
 
 /// 当前支持的 Codex 客户端类型。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -32,7 +34,19 @@ impl CodexClientProfile {
         Ok(Self {
             client_kind: CodexClientKind::Cli,
             codex_version: version.to_owned(),
-            user_agent: format!("{}/{}", originator, version),
+            // 按 CLI 格式使用当前网关的公开平台信息。无客户端终端时使用官方
+            // unknown 标识，不复制调用方终端后缀、安装标识或个人身份。
+            user_agent: format!(
+                "{}/{} ({} {}; {}) unknown",
+                originator,
+                version,
+                OS_INFO.os_type(),
+                OS_INFO.version(),
+                OS_INFO.architecture().unwrap_or(std::env::consts::ARCH),
+            )
+            .chars()
+            .map(|ch| if matches!(ch, ' '..='~') { ch } else { '_' })
+            .collect(),
             originator,
         })
     }
@@ -40,8 +54,8 @@ impl CodexClientProfile {
 
 impl Default for CodexClientProfile {
     fn default() -> Self {
-        // 远程发布检查不可用时仍保持现有线上行为，避免启动或请求被版本服务拖住。
-        Self::cli("0.153.4").expect("built-in Codex CLI profile must be valid")
+        // 最新已核验稳定版本；后台版本刷新继续作为版本真源。
+        Self::cli("0.159.3").expect("built-in Codex CLI profile must be valid")
     }
 }
 
@@ -97,7 +111,9 @@ mod tests {
         let profile = CodexClientProfile::cli("0.200.1").expect("valid version");
         assert_eq!(profile.client_kind, CodexClientKind::Cli);
         assert_eq!(profile.originator, "codex_cli_rs");
-        assert_eq!(profile.user_agent, "codex_cli_rs/0.200.1");
+        assert!(profile.user_agent.starts_with("codex_cli_rs/0.200.1 ("));
+        assert!(profile.user_agent.ends_with(") unknown"));
+        assert!(profile.user_agent.contains(std::env::consts::ARCH));
     }
 
     #[test]

@@ -12,7 +12,7 @@ pub use claude_code::{
     CLAUDE_CODE_COOKIE_SCOPE, CLAUDE_CODE_OAUTH_SCOPES, CLAUDE_CODE_PROVIDER_TYPE,
     CLAUDE_CODE_REDIRECT_URI, CLAUDE_CODE_TOKEN_URL, CLAUDE_CODE_WEB_BASE_URL,
 };
-pub use codex::CodexProviderOAuthAdapter;
+pub use codex::{CodexProviderOAuthAdapter, CODEX_OAUTH_SCOPES};
 pub use generic::{
     derive_codex_identity_fingerprint, GenericProviderOAuthAdapter, GenericProviderOAuthTemplate,
     ANTIGRAVITY_OAUTH_CLIENT_ID_ENV, ANTIGRAVITY_OAUTH_CLIENT_SECRET_ENV,

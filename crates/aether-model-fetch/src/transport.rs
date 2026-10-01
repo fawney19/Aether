@@ -129,6 +129,12 @@ pub async fn build_standard_models_fetch_execution_plan_for_client_version(
         provider_type == "codex" && api_format.starts_with("openai:");
     let is_deepseek_anthropic_models_fetch = api_format.starts_with("claude:")
         && deepseek_anthropic_models_fetch_uses_openai_auth(&transport.endpoint.base_url);
+    if is_codex_openai_models_fetch {
+        if let Some(version) = codex_client_version {
+            aether_ai_formats::CodexClientProfile::cli(version)
+                .map_err(|error| error.to_string())?;
+        }
+    }
     let mut headers =
         standard_models_fetch_headers(&api_format, &provider_type, codex_client_version);
     if is_codex_openai_models_fetch {
@@ -636,10 +642,9 @@ fn standard_models_fetch_headers(
         return BTreeMap::from([
             (
                 "user-agent".to_string(),
-                format!(
-                    "{}/{client_version}",
-                    aether_ai_formats::codex_client_originator()
-                ),
+                aether_ai_formats::CodexClientProfile::cli(client_version)
+                    .expect("validated Codex catalog client version")
+                    .user_agent,
             ),
             (
                 "originator".to_string(),
@@ -1059,7 +1064,12 @@ mod tests {
         );
         assert_eq!(
             plan.headers.get("user-agent").map(String::as_str),
-            Some("codex_cli_rs/0.145.2")
+            Some(
+                aether_ai_formats::CodexClientProfile::cli("0.145.2")
+                    .unwrap()
+                    .user_agent
+                    .as_str()
+            )
         );
         assert_eq!(
             plan.headers.get("originator").map(String::as_str),

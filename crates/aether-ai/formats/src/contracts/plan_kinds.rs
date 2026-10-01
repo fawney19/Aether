@@ -5,6 +5,7 @@ pub const GEMINI_FILES_DELETE_PLAN_KIND: &str = "gemini_files_delete";
 pub const GEMINI_FILES_DOWNLOAD_PLAN_KIND: &str = "gemini_files_download";
 pub const OPENAI_IMAGE_STREAM_PLAN_KIND: &str = "openai_image_stream";
 pub const OPENAI_IMAGE_SYNC_PLAN_KIND: &str = "openai_image_sync";
+pub const OPENAI_MEMORIES_SYNC_PLAN_KIND: &str = "openai_memories_sync";
 pub const OPENAI_VIDEO_CONTENT_PLAN_KIND: &str = "openai_video_content";
 pub const OPENAI_VIDEO_CANCEL_SYNC_PLAN_KIND: &str = "openai_video_cancel_sync";
 pub const OPENAI_VIDEO_REMIX_SYNC_PLAN_KIND: &str = "openai_video_remix_sync";

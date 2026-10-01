@@ -2663,14 +2663,11 @@ mod tests {
         assert_eq!(plans.len(), 2);
         assert!(plans[0].url.ends_with("/models?client_version=0.145.2"));
         assert!(plans[1].url.ends_with("/models?client_version=0.146.0"));
-        assert_eq!(
-            plans[0].headers.get("user-agent").map(String::as_str),
-            Some("codex_cli_rs/0.145.2")
-        );
-        assert_eq!(
-            plans[1].headers.get("user-agent").map(String::as_str),
-            Some("codex_cli_rs/0.146.0")
-        );
+        for (plan, version) in plans.iter().zip(["0.145.2", "0.146.0"]) {
+            let ua = plan.headers.get("user-agent").expect("画像应包含 UA");
+            assert!(ua.starts_with(&format!("codex_cli_rs/{version} (")));
+            assert!(ua.ends_with(") unknown"));
+        }
 
         let target = target();
         assert_ne!(

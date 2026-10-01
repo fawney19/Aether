@@ -273,7 +273,10 @@ pub fn classify_same_format_provider_request_behavior_for_operation(
         );
     let operation_requires_sync = matches!(
         api_operation,
-        Some(aether_ai_formats::ApiOperation::ClaudeCountTokens)
+        Some(
+            aether_ai_formats::ApiOperation::ClaudeCountTokens
+                | aether_ai_formats::ApiOperation::OpenAiMemoriesSummarize
+        )
     );
     let upstream_is_stream = !operation_requires_sync
         && aether_ai_formats::resolve_upstream_is_stream_for_provider(
@@ -321,6 +324,7 @@ pub fn build_same_format_provider_request_body(
         input,
         None,
         aether_ai_formats::OpenAiResponsesReasoningReplayPolicy::OpenAiItemIds,
+        false,
     )
 }
 
@@ -337,11 +341,34 @@ pub fn build_same_format_provider_request_body_with_compatibility_report_and_rea
     input: SameFormatProviderRequestBodyInput<'_>,
     reasoning_replay_policy: aether_ai_formats::OpenAiResponsesReasoningReplayPolicy,
 ) -> Option<SameFormatProviderRequestBodyOutput> {
+    build_same_format_provider_request_body_for_operation(input, reasoning_replay_policy, None)
+}
+
+pub fn build_same_format_provider_request_body_for_operation(
+    input: SameFormatProviderRequestBodyInput<'_>,
+    reasoning_replay_policy: aether_ai_formats::OpenAiResponsesReasoningReplayPolicy,
+    api_operation: Option<aether_ai_formats::ApiOperation>,
+) -> Option<SameFormatProviderRequestBodyOutput> {
+    let native_memories =
+        api_operation == Some(aether_ai_formats::ApiOperation::OpenAiMemoriesSummarize);
+    if native_memories
+        && (!aether_ai_formats::api_format_alias_matches(
+            input.provider_api_format,
+            "openai:responses",
+        ) || !aether_ai_formats::api_format_alias_matches(
+            input.client_api_format,
+            "openai:responses",
+        ) || input.kiro_auth_config.is_some()
+            || input.is_claude_code)
+    {
+        return None;
+    }
     let mut compatibility_edits = Vec::new();
     let body = build_same_format_provider_request_body_inner(
         input,
         Some(&mut compatibility_edits),
         reasoning_replay_policy,
+        native_memories,
     )?;
     Some(SameFormatProviderRequestBodyOutput {
         body,
@@ -355,7 +382,10 @@ pub fn enforce_same_format_provider_api_operation_body_policy(
 ) -> bool {
     if !matches!(
         api_operation,
-        Some(aether_ai_formats::ApiOperation::ClaudeCountTokens)
+        Some(
+            aether_ai_formats::ApiOperation::ClaudeCountTokens
+                | aether_ai_formats::ApiOperation::OpenAiMemoriesSummarize
+        )
     ) {
         return false;
     }
@@ -367,6 +397,7 @@ fn build_same_format_provider_request_body_inner(
     input: SameFormatProviderRequestBodyInput<'_>,
     mut compatibility_edits: Option<&mut Vec<SameFormatProviderCompatibilityEdit>>,
     reasoning_replay_policy: aether_ai_formats::OpenAiResponsesReasoningReplayPolicy,
+    native_memories: bool,
 ) -> Option<Value> {
     if let Some(kiro_auth_config) = input.kiro_auth_config {
         let body = build_kiro_provider_request_body(
@@ -522,6 +553,11 @@ fn build_same_format_provider_request_body_inner(
             SameFormatProviderCompatibilityEditAction::OperatorRule,
             "applied configured provider body rules",
         );
+    }
+    if native_memories {
+        // 记忆端点使用原生 JSON，不注入 Responses 的 input/store/include/stream，
+        // 也不通过 Responses 规则归一化 traces。
+        return Some(provider_request_body);
     }
     if matches!(input.family, SameFormatProviderFamily::Gemini)
         && aether_ai_formats::api_format_alias_matches(
@@ -991,6 +1027,39 @@ mod tests {
         GatewayProviderTransportProvider,
     };
     use serde_json::json;
+
+    #[test]
+    fn memories_preserves_native_traces_and_does_not_apply_responses_stream_policy() {
+        let body = json!({"model": "memory-global", "reasoning": {"effort": "high"},
+            "traces": [{"id": "synthetic-trace", "items": [{"future": 7}]}],
+            "future_request": {"opaque": [1, 2, 3]}});
+        let input = SameFormatProviderRequestBodyInput {
+            body_json: &body,
+            mapped_model: "memory-upstream",
+            client_api_format: "openai:responses",
+            provider_api_format: "openai:responses",
+            source_model: Some("memory-global"),
+            family: SameFormatProviderFamily::Standard,
+            body_rules: None,
+            request_headers: None,
+            upstream_is_stream: false,
+            force_body_stream_field: true,
+            kiro_auth_config: None,
+            is_claude_code: false,
+            enable_model_directives: false,
+        };
+        let result = build_same_format_provider_request_body_for_operation(
+            input,
+            aether_ai_formats::OpenAiResponsesReasoningReplayPolicy::OpenAiItemIds,
+            Some(aether_ai_formats::ApiOperation::OpenAiMemoriesSummarize),
+        )
+        .unwrap();
+        let mut expected = body.clone();
+        expected["model"] = json!("memory-upstream");
+        assert_eq!(result.body, expected);
+        assert!(result.body.get("input").is_none());
+        assert!(result.body.get("stream").is_none());
+    }
 
     fn sample_transport(provider_type: &str) -> GatewayProviderTransportSnapshot {
         GatewayProviderTransportSnapshot {
