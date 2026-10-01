@@ -31,8 +31,8 @@ use crate::ai_serving::{
     candidate_auth_channel_skip_reason, candidate_common_transport_skip_reason,
     provider_key_pool_score_scope, read_candidate_transport_snapshot,
     record_local_runtime_candidate_skip_reason, CandidateTransportPolicyFacts,
-    EligibleLocalExecutionCandidate, LocalExecutionCandidateKind, PlannerAppState,
-    SkippedLocalExecutionCandidate,
+    EligibleLocalExecutionCandidate, GatewayAuthApiKeySnapshot, LocalExecutionCandidateKind,
+    PlannerAppState, SkippedLocalExecutionCandidate,
 };
 use crate::clock::current_unix_ms;
 use crate::handlers::shared::provider_pool::{
@@ -67,6 +67,7 @@ pub(crate) async fn apply_local_execution_pool_scheduler(
     candidates: Vec<EligibleLocalExecutionCandidate>,
     sticky_session_token: Option<&str>,
     requested_model: Option<&str>,
+    auth_snapshot: Option<&GatewayAuthApiKeySnapshot>,
     request_auth_channel: Option<&str>,
 ) -> (
     Vec<EligibleLocalExecutionCandidate>,
@@ -89,6 +90,7 @@ pub(crate) async fn apply_local_execution_pool_scheduler(
                 candidate,
                 sticky_session_token,
                 requested_model,
+                auth_snapshot,
                 request_auth_channel,
             )
             .await;
@@ -335,6 +337,7 @@ async fn expand_pool_group_candidate(
     group: EligibleLocalExecutionCandidate,
     sticky_session_token: Option<&str>,
     requested_model: Option<&str>,
+    auth_snapshot: Option<&GatewayAuthApiKeySnapshot>,
     request_auth_channel: Option<&str>,
 ) -> (
     Vec<EligibleLocalExecutionCandidate>,
@@ -345,6 +348,7 @@ async fn expand_pool_group_candidate(
         group,
         sticky_session_token,
         requested_model,
+        auth_snapshot,
         request_auth_channel,
     );
     let mut scheduled = Vec::new();
@@ -366,6 +370,7 @@ pub(crate) struct PoolKeyCursor<'a> {
     group: EligibleLocalExecutionCandidate,
     sticky_session_token: Option<String>,
     requested_model: Option<String>,
+    allowed_provider_keys: Option<Vec<String>>,
     request_auth_channel: Option<String>,
     routing_overlay: Option<RankingOverlay>,
     routing_allowed_key_ids: Option<Vec<String>>,
@@ -411,6 +416,7 @@ impl<'a> PoolKeyCursor<'a> {
         group: EligibleLocalExecutionCandidate,
         sticky_session_token: Option<&str>,
         requested_model: Option<&str>,
+        auth_snapshot: Option<&GatewayAuthApiKeySnapshot>,
         request_auth_channel: Option<&str>,
     ) -> Self {
         Self::new_with_routing_policy(
@@ -418,6 +424,7 @@ impl<'a> PoolKeyCursor<'a> {
             group,
             sticky_session_token,
             requested_model,
+            auth_snapshot,
             request_auth_channel,
             None,
         )
@@ -428,6 +435,7 @@ impl<'a> PoolKeyCursor<'a> {
         group: EligibleLocalExecutionCandidate,
         sticky_session_token: Option<&str>,
         requested_model: Option<&str>,
+        auth_snapshot: Option<&GatewayAuthApiKeySnapshot>,
         request_auth_channel: Option<&str>,
         routing_policy: Option<&ResolvedRoutingPolicy>,
     ) -> Self {
@@ -464,6 +472,9 @@ impl<'a> PoolKeyCursor<'a> {
             group,
             sticky_session_token: sticky_session_token.map(str::to_string),
             requested_model: requested_model.map(str::to_string),
+            allowed_provider_keys: auth_snapshot
+                .and_then(|snapshot| snapshot.effective_allowed_provider_keys())
+                .map(|items| items.to_vec()),
             request_auth_channel: request_auth_channel.map(str::to_string),
             routing_overlay,
             routing_allowed_key_ids,
@@ -1099,6 +1110,9 @@ impl<'a> PoolKeyCursor<'a> {
     async fn next_queued_candidate(&mut self) -> Option<EligibleLocalExecutionCandidate> {
         while let Some(candidate) = self.queued_candidates.pop_front() {
             let mut candidate = candidate;
+            if self.skip_candidate_if_auth_snapshot_disallowed(&candidate) {
+                continue;
+            }
             if self.skip_candidate_if_routing_profile_disallowed(&candidate) {
                 continue;
             }
@@ -1115,6 +1129,34 @@ impl<'a> PoolKeyCursor<'a> {
         }
 
         None
+    }
+
+    fn skip_candidate_if_auth_snapshot_disallowed(
+        &mut self,
+        candidate: &EligibleLocalExecutionCandidate,
+    ) -> bool {
+        let Some(allowed_provider_keys) = self.allowed_provider_keys.as_ref() else {
+            return false;
+        };
+        let key_allowed = allowed_provider_keys.iter().any(|value| {
+            let value = value.trim();
+            !value.is_empty()
+                && (value.eq_ignore_ascii_case(candidate.candidate.key_id.as_str())
+                    || value.eq_ignore_ascii_case(candidate.candidate.key_name.as_str()))
+        });
+        if key_allowed {
+            return false;
+        }
+        self.record_skip_reason("auth_snapshot_disallowed_key");
+        self.skipped_candidates
+            .push(SkippedLocalExecutionCandidate {
+                candidate: candidate.candidate.clone(),
+                skip_reason: "auth_snapshot_disallowed_key",
+                transport: Some(candidate.transport.clone()),
+                ranking: candidate.ranking.clone(),
+                extra_data: None,
+            });
+        true
     }
 
     fn skip_candidate_if_routing_profile_disallowed(
@@ -2062,7 +2104,7 @@ mod tests {
     };
     use crate::ai_serving::{
         apply_local_runtime_candidate_terminal_reason, provider_key_pool_score_id,
-        provider_key_pool_score_scope, EligibleLocalExecutionCandidate,
+        provider_key_pool_score_scope, EligibleLocalExecutionCandidate, GatewayAuthApiKeySnapshot,
         LocalExecutionCandidateKind, PlannerAppState,
     };
     use crate::data::GatewayDataState;
@@ -3314,6 +3356,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         assert!(matches!(
             load_balance_cursor.pool_key_order,
@@ -3327,8 +3370,14 @@ mod tests {
             10,
             Some(json!({ "pool_advanced": { "lru_enabled": true } })),
         );
-        let lru_cursor =
-            PoolKeyCursor::new(PlannerAppState::new(&app), lru_group, None, None, None);
+        let lru_cursor = PoolKeyCursor::new(
+            PlannerAppState::new(&app),
+            lru_group,
+            None,
+            None,
+            None,
+            None,
+        );
         assert_eq!(lru_cursor.pool_key_order, StoredPoolKeyCandidateOrder::Lru);
     }
 
@@ -3424,6 +3473,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             Some(&routing_policy),
         );
         assert!(admin_provider_pool_cache_affinity_enabled(
@@ -3491,8 +3541,9 @@ mod tests {
             10,
             Some(json!({ "pool_advanced": { "lru_enabled": true } })),
         );
-        let mut cursor = PoolKeyCursor::new(PlannerAppState::new(&app), group, None, None, None)
-            .with_runtime_miss_diagnostic(trace_id, true);
+        let mut cursor =
+            PoolKeyCursor::new(PlannerAppState::new(&app), group, None, None, None, None)
+                .with_runtime_miss_diagnostic(trace_id, true);
         cursor.record_skip_reason("pool_cooldown");
         cursor.record_skip_reason("pool_cooldown");
         cursor.record_skip_reason("transport_snapshot_missing");
@@ -3527,8 +3578,14 @@ mod tests {
             10,
             provider_config.clone(),
         );
-        let mut cursor =
-            PoolKeyCursor::new(PlannerAppState::new(&app), group.clone(), None, None, None);
+        let mut cursor = PoolKeyCursor::new(
+            PlannerAppState::new(&app),
+            group.clone(),
+            None,
+            None,
+            None,
+            None,
+        );
         cursor.queued_candidates = VecDeque::from([
             sample_eligible_candidate(
                 "provider-pool",
@@ -3594,6 +3651,7 @@ mod tests {
         let mut cursor = PoolKeyCursor::new_with_routing_policy(
             PlannerAppState::new(&app),
             group,
+            None,
             None,
             None,
             None,
@@ -3686,6 +3744,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             Some(&routing_policy),
         );
 
@@ -3737,6 +3796,7 @@ mod tests {
         let mut cursor = PoolKeyCursor::new_with_routing_policy(
             PlannerAppState::new(&app),
             group,
+            None,
             None,
             None,
             None,
@@ -3800,6 +3860,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             Some(&routing_policy),
         );
 
@@ -3809,6 +3870,66 @@ mod tests {
             .expect("an allowed key should be schedulable");
 
         assert_eq!(candidate.candidate.key_id, "key-00001");
+    }
+
+    #[tokio::test]
+    async fn pool_key_cursor_filters_expanded_keys_by_auth_snapshot_allowed_provider_keys() {
+        let app = AppState::new().expect("state should build");
+        let provider_config = Some(json!({ "pool_advanced": { "lru_enabled": true } }));
+        let group = sample_eligible_candidate(
+            "provider-pool",
+            "endpoint-1",
+            "pool-group",
+            10,
+            provider_config.clone(),
+        );
+        let mut auth_snapshot = sample_auth_snapshot("api-key-plus");
+        auth_snapshot.api_key_allowed_provider_keys = Some(vec!["key-plus".to_string()]);
+        let mut cursor = PoolKeyCursor::new(
+            PlannerAppState::new(&app),
+            group,
+            None,
+            None,
+            Some(&auth_snapshot),
+            None,
+        );
+        cursor.queued_candidates = VecDeque::from([
+            sample_eligible_candidate(
+                "provider-pool",
+                "endpoint-1",
+                "key-pro",
+                10,
+                provider_config.clone(),
+            ),
+            sample_eligible_candidate(
+                "provider-pool",
+                "endpoint-1",
+                "key-plus",
+                10,
+                provider_config,
+            ),
+        ]);
+
+        let candidate = cursor
+            .next_key()
+            .await
+            .expect("cursor should skip disallowed auth-snapshot pool key and return allowed key");
+        assert_eq!(candidate.candidate.key_id, "key-plus");
+        assert_eq!(candidate.orchestration.pool_key_index, Some(0));
+        assert_eq!(
+            cursor
+                .skip_reason_counts
+                .get("auth_snapshot_disallowed_key"),
+            Some(&1)
+        );
+        let skipped = cursor.take_skipped_candidates();
+        assert_eq!(
+            skipped
+                .iter()
+                .map(|item| (item.candidate.key_id.as_str(), item.skip_reason))
+                .collect::<Vec<_>>(),
+            vec![("key-pro", "auth_snapshot_disallowed_key")]
+        );
     }
 
     #[tokio::test]
@@ -3822,7 +3943,8 @@ mod tests {
             10,
             provider_config.clone(),
         );
-        let mut cursor = PoolKeyCursor::new(PlannerAppState::new(&app), group, None, None, None);
+        let mut cursor =
+            PoolKeyCursor::new(PlannerAppState::new(&app), group, None, None, None, None);
         cursor.queued_candidates = VecDeque::from([
             sample_eligible_candidate(
                 "provider-pool",
@@ -3859,7 +3981,7 @@ mod tests {
             provider_config,
         );
         let mut second_cursor =
-            PoolKeyCursor::new(PlannerAppState::new(&app), group, None, None, None);
+            PoolKeyCursor::new(PlannerAppState::new(&app), group, None, None, None, None);
         second_cursor.queued_candidates = VecDeque::from([
             sample_eligible_candidate(
                 "provider-pool",
@@ -3896,7 +4018,8 @@ mod tests {
             provider_config.clone(),
         );
         let pool_config = pool_config_for_candidate(&group).expect("pool config should parse");
-        let mut cursor = PoolKeyCursor::new(PlannerAppState::new(&app), group, None, None, None);
+        let mut cursor =
+            PoolKeyCursor::new(PlannerAppState::new(&app), group, None, None, None, None);
         cursor.queued_candidates = VecDeque::from([
             sample_eligible_candidate(
                 "provider-pool",
@@ -3975,7 +4098,8 @@ mod tests {
             provider_config,
         );
 
-        let mut cursor = PoolKeyCursor::new(PlannerAppState::new(&app), group, None, None, None);
+        let mut cursor =
+            PoolKeyCursor::new(PlannerAppState::new(&app), group, None, None, None, None);
         cursor.window_size = 2;
         cursor.page_size = 2;
         cursor.max_scanned_keys = 4;
@@ -4151,7 +4275,8 @@ mod tests {
             provider_config,
         );
 
-        let mut cursor = PoolKeyCursor::new(PlannerAppState::new(&app), group, None, None, None);
+        let mut cursor =
+            PoolKeyCursor::new(PlannerAppState::new(&app), group, None, None, None, None);
         assert_eq!(
             cursor.max_scanned_keys,
             aether_dispatch_core::DEFAULT_POOL_MAX_SCAN
@@ -4217,7 +4342,8 @@ mod tests {
             provider_config,
         );
 
-        let mut cursor = PoolKeyCursor::new(PlannerAppState::new(&app), group, None, None, None);
+        let mut cursor =
+            PoolKeyCursor::new(PlannerAppState::new(&app), group, None, None, None, None);
         assert_eq!(
             cursor.max_scanned_keys,
             aether_dispatch_core::DEFAULT_POOL_MAX_SCAN
@@ -4296,7 +4422,8 @@ mod tests {
             provider_config,
         );
 
-        let mut cursor = PoolKeyCursor::new(PlannerAppState::new(&app), group, None, None, None);
+        let mut cursor =
+            PoolKeyCursor::new(PlannerAppState::new(&app), group, None, None, None, None);
         let candidate = cursor
             .next_key()
             .await
@@ -4353,7 +4480,8 @@ mod tests {
             10,
             provider_config,
         );
-        let mut cursor = PoolKeyCursor::new(PlannerAppState::new(&app), group, None, None, None);
+        let mut cursor =
+            PoolKeyCursor::new(PlannerAppState::new(&app), group, None, None, None, None);
 
         let candidate = cursor
             .next_key()
@@ -4410,7 +4538,8 @@ mod tests {
             10,
             provider_config,
         );
-        let mut cursor = PoolKeyCursor::new(PlannerAppState::new(&app), group, None, None, None);
+        let mut cursor =
+            PoolKeyCursor::new(PlannerAppState::new(&app), group, None, None, None, None);
 
         let candidate = cursor
             .next_key()
@@ -4461,7 +4590,8 @@ mod tests {
             10,
             provider_config,
         );
-        let mut cursor = PoolKeyCursor::new(PlannerAppState::new(&app), group, None, None, None);
+        let mut cursor =
+            PoolKeyCursor::new(PlannerAppState::new(&app), group, None, None, None, None);
 
         let mut returned_key_ids = Vec::new();
         while let Some(candidate) = cursor.next_key().await {
@@ -4514,7 +4644,8 @@ mod tests {
             10,
             provider_config,
         );
-        let mut cursor = PoolKeyCursor::new(PlannerAppState::new(&app), group, None, None, None);
+        let mut cursor =
+            PoolKeyCursor::new(PlannerAppState::new(&app), group, None, None, None, None);
 
         let mut returned_key_ids = vec![
             cursor
@@ -4620,6 +4751,7 @@ mod tests {
             None,
             Some("gpt-5"),
             None,
+            None,
         )
         .await;
 
@@ -4719,6 +4851,7 @@ mod tests {
             vec![group_a, group_b],
             None,
             Some("gpt-5"),
+            None,
             None,
         )
         .await;
@@ -4824,7 +4957,8 @@ mod tests {
             .await;
         }
 
-        let mut cursor = PoolKeyCursor::new(PlannerAppState::new(&app), group, None, None, None);
+        let mut cursor =
+            PoolKeyCursor::new(PlannerAppState::new(&app), group, None, None, None, None);
         assert_eq!(
             cursor.window_size,
             aether_dispatch_core::DEFAULT_POOL_WINDOW_SIZE
@@ -5541,6 +5675,36 @@ mod tests {
             mutation_plan: Default::default(),
             pool_policy_overrides: BTreeMap::new(),
             matched_rules: Vec::new(),
+        }
+    }
+
+    fn sample_auth_snapshot(api_key_id: &str) -> GatewayAuthApiKeySnapshot {
+        GatewayAuthApiKeySnapshot {
+            user_id: "user-1".to_string(),
+            username: "alice".to_string(),
+            email: None,
+            user_role: "user".to_string(),
+            user_auth_source: "local".to_string(),
+            user_is_active: true,
+            user_is_deleted: false,
+            user_rate_limit: None,
+            user_allowed_providers: None,
+            user_allowed_api_formats: None,
+            user_allowed_models: None,
+            api_key_id: api_key_id.to_string(),
+            api_key_name: Some("default".to_string()),
+            api_key_is_active: true,
+            api_key_is_locked: false,
+            api_key_is_standalone: false,
+            api_key_rate_limit: None,
+            api_key_concurrent_limit: None,
+            api_key_expires_at_unix_secs: None,
+            api_key_allowed_providers: None,
+            api_key_allowed_api_formats: None,
+            api_key_allowed_models: None,
+            api_key_ip_rules: None,
+            api_key_allowed_provider_keys: None,
+            currently_usable: true,
         }
     }
 

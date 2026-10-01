@@ -124,6 +124,7 @@ pub(crate) async fn build_admin_update_user_api_key_response(
             concurrent_limit,
             concurrent_limit_present,
             ip_rules,
+            allowed_provider_keys: None,
             feature_settings,
         })
         .await?

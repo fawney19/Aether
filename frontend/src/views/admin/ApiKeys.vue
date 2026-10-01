@@ -1209,6 +1209,7 @@ function editApiKey(apiKey: AdminApiKey) {
     allowed_providers: apiKey.allowed_providers == null ? null : [...apiKey.allowed_providers],
     allowed_api_formats: apiKey.allowed_api_formats == null ? null : [...apiKey.allowed_api_formats],
     allowed_models: apiKey.allowed_models == null ? null : [...apiKey.allowed_models],
+    allowed_provider_keys: apiKey.allowed_provider_keys == null ? null : [...apiKey.allowed_provider_keys],
     feature_settings: apiKey.feature_settings ?? null
   }
 
@@ -1422,6 +1423,7 @@ async function handleKeyFormSubmit(data: StandaloneKeyFormData) {
         allowed_providers: data.allowed_providers,
         allowed_api_formats: data.allowed_api_formats,
         allowed_models: data.allowed_models,
+        allowed_provider_keys: data.allowed_provider_keys,
         ip_rules: data.ip_rules,
         feature_settings: data.feature_settings ?? null
       }
@@ -1454,6 +1456,7 @@ async function handleKeyFormSubmit(data: StandaloneKeyFormData) {
         allowed_providers: data.allowed_providers,
         allowed_api_formats: data.allowed_api_formats,
         allowed_models: data.allowed_models,
+        allowed_provider_keys: data.allowed_provider_keys,
         ip_rules: data.ip_rules,
         feature_settings: data.feature_settings ?? null
       }

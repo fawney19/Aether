@@ -171,6 +171,7 @@ pub(crate) async fn build_admin_create_user_api_key_response(
             allowed_api_formats: None,
             allowed_models: None,
             ip_rules,
+            allowed_provider_keys: None,
             rate_limit,
             concurrent_limit,
             force_capabilities: None,

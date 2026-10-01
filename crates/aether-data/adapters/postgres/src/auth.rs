@@ -36,7 +36,8 @@ SELECT
   api_keys.allowed_providers AS api_key_allowed_providers,
   api_keys.allowed_api_formats AS api_key_allowed_api_formats,
   api_keys.allowed_models AS api_key_allowed_models,
-  api_keys.ip_rules AS api_key_ip_rules
+  api_keys.ip_rules AS api_key_ip_rules,
+  api_keys.allowed_provider_keys AS api_key_allowed_provider_keys
 FROM api_keys
 JOIN users ON users.id = api_keys.user_id
 WHERE api_keys.key_hash = $1
@@ -67,7 +68,8 @@ SELECT
   api_keys.allowed_providers AS api_key_allowed_providers,
   api_keys.allowed_api_formats AS api_key_allowed_api_formats,
   api_keys.allowed_models AS api_key_allowed_models,
-  api_keys.ip_rules AS api_key_ip_rules
+  api_keys.ip_rules AS api_key_ip_rules,
+  api_keys.allowed_provider_keys AS api_key_allowed_provider_keys
 FROM api_keys
 JOIN users ON users.id = api_keys.user_id
 WHERE api_keys.id = $1
@@ -98,7 +100,8 @@ SELECT
   api_keys.allowed_providers AS api_key_allowed_providers,
   api_keys.allowed_api_formats AS api_key_allowed_api_formats,
   api_keys.allowed_models AS api_key_allowed_models,
-  api_keys.ip_rules AS api_key_ip_rules
+  api_keys.ip_rules AS api_key_ip_rules,
+  api_keys.allowed_provider_keys AS api_key_allowed_provider_keys
 FROM api_keys
 JOIN users ON users.id = api_keys.user_id
 WHERE api_keys.id = $1 AND users.id = $2
@@ -129,7 +132,8 @@ SELECT
   api_keys.allowed_providers AS api_key_allowed_providers,
   api_keys.allowed_api_formats AS api_key_allowed_api_formats,
   api_keys.allowed_models AS api_key_allowed_models,
-  api_keys.ip_rules AS api_key_ip_rules
+  api_keys.ip_rules AS api_key_ip_rules,
+  api_keys.allowed_provider_keys AS api_key_allowed_provider_keys
 FROM api_keys
 JOIN users ON users.id = api_keys.user_id
 WHERE api_keys.id = ANY($1::TEXT[])
@@ -147,6 +151,7 @@ SELECT
   api_keys.allowed_api_formats,
   api_keys.allowed_models,
   api_keys.ip_rules,
+  api_keys.allowed_provider_keys,
   api_keys.rate_limit,
   api_keys.concurrent_limit,
   api_keys.force_capabilities,
@@ -178,6 +183,7 @@ SELECT
   api_keys.allowed_api_formats,
   api_keys.allowed_models,
   api_keys.ip_rules,
+  api_keys.allowed_provider_keys,
   api_keys.rate_limit,
   api_keys.concurrent_limit,
   api_keys.force_capabilities,
@@ -239,6 +245,7 @@ SELECT
   api_keys.allowed_api_formats,
   api_keys.allowed_models,
   api_keys.ip_rules,
+  api_keys.allowed_provider_keys,
   api_keys.rate_limit,
   api_keys.concurrent_limit,
   api_keys.force_capabilities,
@@ -269,6 +276,7 @@ SELECT
   api_keys.allowed_api_formats,
   api_keys.allowed_models,
   api_keys.ip_rules,
+  api_keys.allowed_provider_keys,
   api_keys.rate_limit,
   api_keys.concurrent_limit,
   api_keys.force_capabilities,
@@ -299,6 +307,7 @@ SELECT
   api_keys.allowed_api_formats,
   api_keys.allowed_models,
   api_keys.ip_rules,
+  api_keys.allowed_provider_keys,
   api_keys.rate_limit,
   api_keys.concurrent_limit,
   api_keys.force_capabilities,
@@ -373,6 +382,7 @@ SELECT
   api_keys.allowed_api_formats,
   api_keys.allowed_models,
   api_keys.ip_rules,
+  api_keys.allowed_provider_keys,
   api_keys.rate_limit,
   api_keys.concurrent_limit,
   api_keys.force_capabilities,
@@ -410,6 +420,7 @@ INSERT INTO api_keys (
   allowed_api_formats,
   allowed_models,
   ip_rules,
+  allowed_provider_keys,
   rate_limit,
   concurrent_limit,
   force_capabilities,
@@ -442,11 +453,12 @@ VALUES (
   $14,
   $15,
   $16,
-  FALSE,
-  FALSE,
   $17,
+  FALSE,
+  FALSE,
   $18,
   $19,
+  $20,
   NOW(),
   NOW()
 )
@@ -460,6 +472,7 @@ RETURNING
   allowed_api_formats,
   allowed_models,
   ip_rules,
+  allowed_provider_keys,
   rate_limit,
   concurrent_limit,
   force_capabilities,
@@ -487,6 +500,7 @@ INSERT INTO api_keys (
   allowed_api_formats,
   allowed_models,
   ip_rules,
+  allowed_provider_keys,
   rate_limit,
   concurrent_limit,
   force_capabilities,
@@ -515,15 +529,16 @@ VALUES (
   $10,
   $11,
   $12,
-  NULL,
   $13,
+  NULL,
   $14,
   $15,
+  $16,
   FALSE,
   TRUE,
-  $16,
   $17,
   $18,
+  $19,
   NOW(),
   NOW()
 )
@@ -537,6 +552,7 @@ RETURNING
   allowed_api_formats,
   allowed_models,
   ip_rules,
+  allowed_provider_keys,
   rate_limit,
   concurrent_limit,
   force_capabilities,
@@ -562,11 +578,12 @@ SET
   concurrent_limit = CASE WHEN $9 THEN $10 ELSE concurrent_limit END,
   ip_rules = CASE WHEN $11 THEN $12::jsonb ELSE ip_rules END,
   feature_settings = CASE WHEN $13 THEN $14::jsonb ELSE feature_settings END,
+  allowed_provider_keys = CASE WHEN $15 THEN $16::jsonb ELSE allowed_provider_keys END,
   updated_at = NOW()
 WHERE user_id = $1
   AND id = $2
   AND is_standalone = FALSE
-  AND ($15 = FALSE OR is_locked = FALSE)
+  AND ($17 = FALSE OR is_locked = FALSE)
 RETURNING
   user_id,
   id AS api_key_id,
@@ -577,6 +594,7 @@ RETURNING
   allowed_api_formats,
   allowed_models,
   ip_rules,
+  allowed_provider_keys,
   rate_limit,
   concurrent_limit,
   force_capabilities,
@@ -605,8 +623,9 @@ SET
   allowed_api_formats = CASE WHEN $14 THEN $15::json ELSE allowed_api_formats END,
   allowed_models = CASE WHEN $16 THEN $17::json ELSE allowed_models END,
   ip_rules = CASE WHEN $18 THEN $19::jsonb ELSE ip_rules END,
-  expires_at = CASE WHEN $20 THEN $21::timestamptz ELSE expires_at END,
-  auto_delete_on_expiry = CASE WHEN $22 THEN $23 ELSE auto_delete_on_expiry END,
+  allowed_provider_keys = CASE WHEN $20 THEN $21::jsonb ELSE allowed_provider_keys END,
+  expires_at = CASE WHEN $22 THEN $23::timestamptz ELSE expires_at END,
+  auto_delete_on_expiry = CASE WHEN $24 THEN $25 ELSE auto_delete_on_expiry END,
   updated_at = NOW()
 WHERE id = $1
   AND is_standalone = TRUE
@@ -620,6 +639,7 @@ RETURNING
   allowed_api_formats,
   allowed_models,
   ip_rules,
+  allowed_provider_keys,
   rate_limit,
   concurrent_limit,
   force_capabilities,
@@ -655,6 +675,7 @@ RETURNING
   allowed_api_formats,
   allowed_models,
   ip_rules,
+  allowed_provider_keys,
   rate_limit,
   concurrent_limit,
   force_capabilities,
@@ -688,6 +709,7 @@ RETURNING
   allowed_api_formats,
   allowed_models,
   ip_rules,
+  allowed_provider_keys,
   rate_limit,
   concurrent_limit,
   force_capabilities,
@@ -722,6 +744,7 @@ RETURNING
   allowed_api_formats,
   allowed_models,
   ip_rules,
+  allowed_provider_keys,
   rate_limit,
   concurrent_limit,
   force_capabilities,
@@ -767,6 +790,7 @@ RETURNING
   allowed_api_formats,
   allowed_models,
   ip_rules,
+  allowed_provider_keys,
   rate_limit,
   concurrent_limit,
   force_capabilities,
@@ -1212,6 +1236,12 @@ impl AuthApiKeyWriteRepository for SqlxAuthApiKeySnapshotReadRepository {
             .map(serde_json::to_value)
             .transpose()
             .map_err(|err| DataLayerError::UnexpectedValue(err.to_string()))?;
+        let allowed_provider_keys = record
+            .allowed_provider_keys
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|err| DataLayerError::UnexpectedValue(err.to_string()))?;
         let expires_at = record
             .expires_at_unix_secs
             .map(|value| datetime_from_unix_secs(value, "api_keys.expires_at"))
@@ -1238,6 +1268,7 @@ impl AuthApiKeyWriteRepository for SqlxAuthApiKeySnapshotReadRepository {
             .bind(allowed_api_formats)
             .bind(allowed_models)
             .bind(ip_rules)
+            .bind(allowed_provider_keys)
             .bind(record.rate_limit)
             .bind(record.concurrent_limit)
             .bind(record.force_capabilities)
@@ -1283,6 +1314,12 @@ impl AuthApiKeyWriteRepository for SqlxAuthApiKeySnapshotReadRepository {
             .map(serde_json::to_value)
             .transpose()
             .map_err(|err| DataLayerError::UnexpectedValue(err.to_string()))?;
+        let allowed_provider_keys = record
+            .allowed_provider_keys
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|err| DataLayerError::UnexpectedValue(err.to_string()))?;
         let expires_at = record
             .expires_at_unix_secs
             .map(|value| datetime_from_unix_secs(value, "api_keys.expires_at"))
@@ -1309,6 +1346,7 @@ impl AuthApiKeyWriteRepository for SqlxAuthApiKeySnapshotReadRepository {
             .bind(allowed_api_formats)
             .bind(allowed_models)
             .bind(ip_rules)
+            .bind(allowed_provider_keys)
             .bind(record.rate_limit)
             .bind(record.concurrent_limit)
             .bind(record.force_capabilities)
@@ -1340,6 +1378,13 @@ impl AuthApiKeyWriteRepository for SqlxAuthApiKeySnapshotReadRepository {
             .map(serde_json::to_value)
             .transpose()
             .map_err(|err| DataLayerError::UnexpectedValue(err.to_string()))?;
+        let allowed_provider_keys = record
+            .allowed_provider_keys
+            .clone()
+            .flatten()
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|err| DataLayerError::UnexpectedValue(err.to_string()))?;
         let feature_settings = record.feature_settings.clone().flatten();
         let row = sqlx::query(UPDATE_USER_API_KEY_BASIC_SQL)
             .bind(record.user_id)
@@ -1356,6 +1401,8 @@ impl AuthApiKeyWriteRepository for SqlxAuthApiKeySnapshotReadRepository {
             .bind(ip_rules)
             .bind(record.feature_settings.is_some())
             .bind(feature_settings)
+            .bind(record.allowed_provider_keys.is_some())
+            .bind(allowed_provider_keys)
             .bind(false)
             .fetch_optional(&self.pool)
             .await
@@ -1401,6 +1448,13 @@ WHERE id = $2
             .map(serde_json::to_value)
             .transpose()
             .map_err(|err| DataLayerError::UnexpectedValue(err.to_string()))?;
+        let allowed_provider_keys = record
+            .allowed_provider_keys
+            .clone()
+            .flatten()
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|err| DataLayerError::UnexpectedValue(err.to_string()))?;
         let feature_settings = record.feature_settings.clone().flatten();
         let row = sqlx::query(UPDATE_USER_API_KEY_BASIC_SQL)
             .bind(record.user_id)
@@ -1417,6 +1471,8 @@ WHERE id = $2
             .bind(ip_rules)
             .bind(record.feature_settings.is_some())
             .bind(feature_settings)
+            .bind(record.allowed_provider_keys.is_some())
+            .bind(allowed_provider_keys)
             .bind(true)
             .fetch_optional(&self.pool)
             .await
@@ -1456,6 +1512,13 @@ WHERE id = $2
             .map(serde_json::to_value)
             .transpose()
             .map_err(|err| DataLayerError::UnexpectedValue(err.to_string()))?;
+        let allowed_provider_keys = record
+            .allowed_provider_keys
+            .clone()
+            .flatten()
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|err| DataLayerError::UnexpectedValue(err.to_string()))?;
         let expires_at = record
             .expires_at_unix_secs
             .map(|value| datetime_from_unix_secs(value, "api_keys.expires_at"))
@@ -1480,6 +1543,8 @@ WHERE id = $2
             .bind(allowed_models)
             .bind(record.ip_rules.is_some())
             .bind(ip_rules)
+            .bind(record.allowed_provider_keys.is_some())
+            .bind(allowed_provider_keys)
             .bind(record.expires_at_present)
             .bind(expires_at)
             .bind(record.auto_delete_on_expiry_present)
@@ -2004,7 +2069,8 @@ fn map_auth_api_key_snapshot_row(
         row_get(row, "api_key_allowed_api_formats")?,
         row_get(row, "api_key_allowed_models")?,
     )?
-    .with_api_key_ip_rules(row_get(row, "api_key_ip_rules")?)?;
+    .with_api_key_ip_rules(row_get(row, "api_key_ip_rules")?)?
+    .with_allowed_provider_keys(row_get(row, "api_key_allowed_provider_keys")?)?;
     Ok(snapshot.with_user_rate_limit(row_get(row, "user_rate_limit")?))
 }
 
@@ -2033,6 +2099,7 @@ fn map_auth_api_key_export_row(
         row_get(row, "is_standalone")?,
     )
     .and_then(|record| record.with_ip_rules(row_get(row, "ip_rules")?))
+    .and_then(|record| record.with_allowed_provider_keys(row_get(row, "allowed_provider_keys")?))
     .map(|record| record.with_feature_settings(feature_settings))
     .and_then(|record| {
         record.with_activity_timestamps(
@@ -2076,11 +2143,11 @@ mod tests {
         assert!(CREATE_USER_API_KEY_SQL
             .contains("expires_at,\n  auto_delete_on_expiry,\n  is_locked,\n  is_standalone,"));
         assert!(CREATE_USER_API_KEY_SQL
-            .contains("$13,\n  $14,\n  $15,\n  $16,\n  FALSE,\n  FALSE,\n  $17,"));
+            .contains("$13,\n  $14,\n  $15,\n  $16,\n  $17,\n  FALSE,\n  FALSE,\n  $18,"));
         assert!(CREATE_STANDALONE_API_KEY_SQL
             .contains("expires_at,\n  auto_delete_on_expiry,\n  is_locked,\n  is_standalone,"));
         assert!(CREATE_STANDALONE_API_KEY_SQL
-            .contains("$13,\n  $14,\n  $15,\n  FALSE,\n  TRUE,\n  $16,"));
+            .contains("$13,\n  NULL,\n  $14,\n  $15,\n  $16,\n  FALSE,\n  TRUE,\n  $17,"));
     }
 
     #[test]
@@ -2125,12 +2192,15 @@ mod tests {
             .contains("allowed_models = CASE WHEN $16 THEN $17::json ELSE allowed_models END"));
         assert!(UPDATE_STANDALONE_API_KEY_BASIC_SQL
             .contains("ip_rules = CASE WHEN $18 THEN $19::jsonb ELSE ip_rules END"));
+        assert!(UPDATE_STANDALONE_API_KEY_BASIC_SQL.contains(
+            "allowed_provider_keys = CASE WHEN $20 THEN $21::jsonb ELSE allowed_provider_keys END"
+        ));
         assert!(UPDATE_STANDALONE_API_KEY_BASIC_SQL
             .contains("rate_limit = CASE WHEN $8 THEN $9 ELSE rate_limit END"));
         assert!(UPDATE_STANDALONE_API_KEY_BASIC_SQL
-            .contains("expires_at = CASE WHEN $20 THEN $21::timestamptz ELSE expires_at END"));
+            .contains("expires_at = CASE WHEN $22 THEN $23::timestamptz ELSE expires_at END"));
         assert!(UPDATE_STANDALONE_API_KEY_BASIC_SQL.contains(
-            "auto_delete_on_expiry = CASE WHEN $22 THEN $23 ELSE auto_delete_on_expiry END"
+            "auto_delete_on_expiry = CASE WHEN $24 THEN $25 ELSE auto_delete_on_expiry END"
         ));
         assert!(UPDATE_STANDALONE_API_KEY_BASIC_SQL.contains(
             "force_capabilities = CASE WHEN $6 THEN $7::json ELSE force_capabilities END"
@@ -2146,7 +2216,10 @@ mod tests {
         assert!(UPDATE_USER_API_KEY_BASIC_SQL.contains(
             "feature_settings = CASE WHEN $13 THEN $14::jsonb ELSE feature_settings END"
         ));
-        assert!(UPDATE_USER_API_KEY_BASIC_SQL.contains("AND ($15 = FALSE OR is_locked = FALSE)"));
+        assert!(UPDATE_USER_API_KEY_BASIC_SQL.contains(
+            "allowed_provider_keys = CASE WHEN $15 THEN $16::jsonb ELSE allowed_provider_keys END"
+        ));
+        assert!(UPDATE_USER_API_KEY_BASIC_SQL.contains("AND ($17 = FALSE OR is_locked = FALSE)"));
     }
 
     #[tokio::test]

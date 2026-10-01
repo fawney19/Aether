@@ -160,6 +160,13 @@ pub(super) async fn build_admin_create_api_key_response(
         Ok(value) => value,
         Err(detail) => return Ok(build_admin_api_keys_bad_request_response(detail)),
     };
+    let allowed_provider_keys = match normalize_admin_user_string_list(
+        payload.allowed_provider_keys,
+        "allowed_provider_keys",
+    ) {
+        Ok(value) => value,
+        Err(detail) => return Ok(build_admin_api_keys_bad_request_response(detail)),
+    };
     if payload.rate_limit.is_some_and(|value| value < 0) {
         return Ok(build_admin_api_keys_bad_request_response(
             "rate_limit 必须大于等于 0",
@@ -223,6 +230,7 @@ pub(super) async fn build_admin_create_api_key_response(
                 allowed_api_formats,
                 allowed_models,
                 ip_rules,
+                allowed_provider_keys,
                 rate_limit: payload.rate_limit,
                 concurrent_limit,
                 force_capabilities: None,
@@ -296,6 +304,7 @@ pub(super) async fn build_admin_create_api_key_response(
                 "allowed_providers": created.allowed_providers,
                 "allowed_api_formats": created.allowed_api_formats,
                 "allowed_models": created.allowed_models,
+                "allowed_provider_keys": created.allowed_provider_keys,
                 "expires_at": format_optional_unix_secs_iso8601(created.expires_at_unix_secs),
                 "auto_delete_on_expiry": created.auto_delete_on_expiry,
                 "feature_settings": created.feature_settings,
@@ -418,6 +427,17 @@ pub(super) async fn build_admin_update_api_key_response(
     } else {
         None
     };
+    let allowed_provider_keys = if field_presence.contains("allowed_provider_keys") {
+        match payload.allowed_provider_keys {
+            Some(value) => match normalize_admin_user_string_list(value, "allowed_provider_keys") {
+                Ok(value) => Some(value),
+                Err(detail) => return Ok(build_admin_api_keys_bad_request_response(detail)),
+            },
+            None => Some(None),
+        }
+    } else {
+        None
+    };
     let ip_rules_present =
         field_presence.contains("ip_rules") || field_presence.contains("allowed_ips");
     let ip_rules = if ip_rules_present {
@@ -503,6 +523,7 @@ pub(super) async fn build_admin_update_api_key_response(
                 allowed_api_formats,
                 allowed_models,
                 ip_rules,
+                allowed_provider_keys,
                 expires_at_present: field_presence.contains("expires_at"),
                 expires_at_unix_secs: if field_presence.contains("expires_at") {
                     effective_expires_at_unix_secs
@@ -658,6 +679,7 @@ mod tests {
                 allowed_api_formats: None,
                 allowed_models: None,
                 ip_rules: None,
+                allowed_provider_keys: None,
                 rate_limit: None,
                 concurrent_limit: None,
                 force_capabilities: None,

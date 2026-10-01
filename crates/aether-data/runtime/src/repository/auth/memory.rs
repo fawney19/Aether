@@ -735,6 +735,7 @@ impl AuthApiKeyWriteRepository for InMemoryAuthApiKeySnapshotRepository {
             api_key_allowed_api_formats: record.allowed_api_formats.clone(),
             api_key_allowed_models: record.allowed_models.clone(),
             api_key_ip_rules: record.ip_rules.clone(),
+            api_key_allowed_provider_keys: record.allowed_provider_keys.clone(),
         };
 
         let now_unix_secs = current_unix_secs() as i64;
@@ -831,6 +832,7 @@ impl AuthApiKeyWriteRepository for InMemoryAuthApiKeySnapshotRepository {
                 api_key_allowed_api_formats: record.allowed_api_formats.clone(),
                 api_key_allowed_models: record.allowed_models.clone(),
                 api_key_ip_rules: record.ip_rules.clone(),
+                api_key_allowed_provider_keys: record.allowed_provider_keys.clone(),
                 ..template
             }
         } else {
@@ -875,6 +877,12 @@ impl AuthApiKeyWriteRepository for InMemoryAuthApiKeySnapshotRepository {
             .with_api_key_ip_rules(
                 record
                     .ip_rules
+                    .as_ref()
+                    .map(|value| serde_json::json!(value)),
+            )?
+            .with_allowed_provider_keys(
+                record
+                    .allowed_provider_keys
                     .as_ref()
                     .map(|value| serde_json::json!(value)),
             )?
@@ -1006,6 +1014,14 @@ impl AuthApiKeyWriteRepository for InMemoryAuthApiKeySnapshotRepository {
                 export.ip_rules = ip_rules;
             }
         }
+        if let Some(allowed_provider_keys) = record.allowed_provider_keys {
+            if let Some(snapshot) = index.by_api_key_id.get_mut(&record.api_key_id) {
+                snapshot.api_key_allowed_provider_keys = allowed_provider_keys.clone();
+            }
+            if let Some(export) = index.export_by_api_key_id.get_mut(&record.api_key_id) {
+                export.allowed_provider_keys = allowed_provider_keys;
+            }
+        }
         if let Some(feature_settings) = record.feature_settings {
             if let Some(export) = index.export_by_api_key_id.get_mut(&record.api_key_id) {
                 export.feature_settings = match feature_settings {
@@ -1069,6 +1085,14 @@ impl AuthApiKeyWriteRepository for InMemoryAuthApiKeySnapshotRepository {
             }
             if let Some(export) = index.export_by_api_key_id.get_mut(&record.api_key_id) {
                 export.ip_rules = ip_rules;
+            }
+        }
+        if let Some(allowed_provider_keys) = record.allowed_provider_keys {
+            if let Some(snapshot) = index.by_api_key_id.get_mut(&record.api_key_id) {
+                snapshot.api_key_allowed_provider_keys = allowed_provider_keys.clone();
+            }
+            if let Some(export) = index.export_by_api_key_id.get_mut(&record.api_key_id) {
+                export.allowed_provider_keys = allowed_provider_keys;
             }
         }
         if let Some(feature_settings) = record.feature_settings {
@@ -1160,6 +1184,14 @@ impl AuthApiKeyWriteRepository for InMemoryAuthApiKeySnapshotRepository {
             }
             if let Some(export) = index.export_by_api_key_id.get_mut(&record.api_key_id) {
                 export.ip_rules = ip_rules;
+            }
+        }
+        if let Some(allowed_provider_keys) = record.allowed_provider_keys {
+            if let Some(snapshot) = index.by_api_key_id.get_mut(&record.api_key_id) {
+                snapshot.api_key_allowed_provider_keys = allowed_provider_keys.clone();
+            }
+            if let Some(export) = index.export_by_api_key_id.get_mut(&record.api_key_id) {
+                export.allowed_provider_keys = allowed_provider_keys;
             }
         }
         if record.expires_at_present {
@@ -1634,6 +1666,7 @@ mod tests {
             allowed_api_formats: None,
             allowed_models: None,
             ip_rules: None,
+            allowed_provider_keys: None,
             rate_limit: 0,
             concurrent_limit: None,
             force_capabilities: None,
@@ -2017,6 +2050,7 @@ mod tests {
                 concurrent_limit: None,
                 concurrent_limit_present: false,
                 ip_rules: None,
+                allowed_provider_keys: None,
                 feature_settings: Some(Some(serde_json::json!({"must_not_change": true}))),
             })
             .await
@@ -2084,6 +2118,7 @@ mod tests {
                 concurrent_limit: None,
                 concurrent_limit_present: false,
                 ip_rules: None,
+                allowed_provider_keys: None,
                 feature_settings: Some(Some(serde_json::json!({"admin": true}))),
             })
             .await
@@ -2328,6 +2363,7 @@ mod tests {
                 concurrent_limit: Some(11),
                 concurrent_limit_present: true,
                 ip_rules: None,
+                allowed_provider_keys: None,
                 feature_settings: None,
             })
             .await
@@ -2363,6 +2399,7 @@ mod tests {
                 concurrent_limit: None,
                 concurrent_limit_present: true,
                 ip_rules: None,
+                allowed_provider_keys: None,
                 feature_settings: None,
             })
             .await
@@ -2385,6 +2422,7 @@ mod tests {
                 concurrent_limit: None,
                 concurrent_limit_present: false,
                 ip_rules: None,
+                allowed_provider_keys: None,
                 feature_settings: None,
             })
             .await
@@ -2418,6 +2456,7 @@ mod tests {
                 allowed_api_formats: None,
                 allowed_models: None,
                 ip_rules: None,
+                allowed_provider_keys: None,
                 expires_at_present: false,
                 expires_at_unix_secs: None,
                 auto_delete_on_expiry_present: false,
@@ -2486,6 +2525,7 @@ mod tests {
                 allowed_api_formats: None,
                 allowed_models: None,
                 ip_rules: None,
+                allowed_provider_keys: None,
                 expires_at_present: false,
                 expires_at_unix_secs: None,
                 auto_delete_on_expiry_present: false,
@@ -2523,6 +2563,7 @@ mod tests {
                 allowed_api_formats: None,
                 allowed_models: None,
                 ip_rules: None,
+                allowed_provider_keys: None,
                 expires_at_present: false,
                 expires_at_unix_secs: None,
                 auto_delete_on_expiry_present: false,

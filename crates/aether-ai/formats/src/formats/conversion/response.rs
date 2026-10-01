@@ -285,6 +285,7 @@ mod tests {
         assert_eq!(converted["object"], "response");
         assert_eq!(converted["output"][0]["type"], "message");
         assert_eq!(converted["output_text"], "hello");
+        assert_eq!(converted["metadata"], json!({}));
         assert!(converted["created_at"].as_i64().is_some());
         assert!(converted["completed_at"].as_i64().is_some());
     }

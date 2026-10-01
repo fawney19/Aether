@@ -60,6 +60,10 @@ fn enumerate_minimal_candidate_selection_inner(
         ) {
             continue;
         }
+        if !crate::auth_constraints_allow_provider_key(auth_constraints, &row.key_id, &row.key_name)
+        {
+            continue;
+        }
         if require_streaming && !row.supports_streaming() {
             continue;
         }
@@ -128,6 +132,10 @@ pub fn collect_global_model_names_for_required_capability(
         ) {
             continue;
         }
+        if !crate::auth_constraints_allow_provider_key(auth_constraints, &row.key_id, &row.key_name)
+        {
+            continue;
+        }
         if !crate::row_supports_required_capability(&row, required_capability) {
             continue;
         }
@@ -145,4 +153,71 @@ pub fn collect_global_model_names_for_required_capability(
     }
 
     model_names.into_iter().collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::SchedulerAuthConstraints;
+
+    fn sample_row(key_id: &str, key_name: &str) -> StoredMinimalCandidateSelectionRow {
+        StoredMinimalCandidateSelectionRow {
+            provider_id: "provider-1".to_string(),
+            provider_name: "provider".to_string(),
+            provider_type: "custom".to_string(),
+            provider_priority: 10,
+            provider_is_active: true,
+            endpoint_id: "endpoint-1".to_string(),
+            endpoint_api_format: "openai:chat".to_string(),
+            endpoint_api_family: Some("openai".to_string()),
+            endpoint_kind: Some("chat".to_string()),
+            endpoint_is_active: true,
+            key_id: key_id.to_string(),
+            key_name: key_name.to_string(),
+            key_auth_type: "api_key".to_string(),
+            key_is_active: true,
+            key_api_formats: Some(vec!["openai:chat".to_string()]),
+            key_allowed_models: None,
+            key_capabilities: None,
+            key_internal_priority: 10,
+            key_global_priority_by_format: None,
+            model_id: "model-1".to_string(),
+            global_model_id: "global-model-1".to_string(),
+            global_model_name: "gpt-5".to_string(),
+            global_model_mappings: None,
+            global_model_supports_streaming: Some(true),
+            model_provider_model_name: "gpt-5".to_string(),
+            model_provider_model_mappings: None,
+            model_supports_streaming: Some(true),
+            model_is_active: true,
+            model_is_available: true,
+        }
+    }
+
+    #[test]
+    fn enumeration_filters_disallowed_provider_keys() {
+        let constraints = SchedulerAuthConstraints {
+            allowed_provider_keys: Some(vec!["key-allowed".to_string()]),
+            ..Default::default()
+        };
+
+        let candidates =
+            enumerate_minimal_candidate_selection(EnumerateMinimalCandidateSelectionInput {
+                rows: vec![
+                    sample_row("key-denied", "denied"),
+                    sample_row("key-allowed", "allowed"),
+                ],
+                normalized_api_format: "openai:chat",
+                request_operation: None,
+                requested_model_name: "gpt-5",
+                resolved_global_model_name: "gpt-5",
+                require_streaming: false,
+                required_capabilities: None,
+                auth_constraints: Some(&constraints),
+            })
+            .expect("candidate enumeration should succeed");
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].key_id, "key-allowed");
+    }
 }

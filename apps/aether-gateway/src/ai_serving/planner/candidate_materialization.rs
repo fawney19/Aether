@@ -448,6 +448,7 @@ where
             self.client_api_format,
             self.sticky_session_token,
             self.requested_model,
+            self.auth_snapshot,
             self.request_auth_channel,
             &self.build_available_extra_data,
         )
@@ -720,6 +721,7 @@ where
         persistence_policy.skipped.record_runtime_miss_diagnostic,
         sticky_session_token,
         requested_model,
+        auth_snapshot,
         request_auth_channel,
         routing_policy,
         Some(PoolGroupExhaustionPersistenceContext::new(
@@ -750,6 +752,7 @@ fn build_logical_candidate_items<'a>(
     record_runtime_miss_diagnostic: bool,
     sticky_session_token: Option<&str>,
     requested_model: Option<&str>,
+    auth_snapshot: Option<&GatewayAuthApiKeySnapshot>,
     request_auth_channel: Option<&str>,
     routing_policy: Option<&ResolvedRoutingPolicy>,
     pool_exhaustion_persistence: Option<PoolGroupExhaustionPersistenceContext>,
@@ -777,6 +780,7 @@ fn build_logical_candidate_items<'a>(
                     candidate,
                     sticky_session_token,
                     requested_model,
+                    auth_snapshot,
                     request_auth_channel,
                     routing_policy,
                 );
@@ -1044,6 +1048,7 @@ impl<'a> RequestedModelAttemptPageCursor<'a> {
                 self.record_runtime_miss_diagnostic,
                 self.sticky_session_token.as_deref(),
                 Some(&self.requested_model),
+                Some(&self.auth_snapshot),
                 self.request_auth_channel.as_deref(),
                 self.routing_policy.as_ref(),
                 Some(PoolGroupExhaustionPersistenceContext {
@@ -1524,6 +1529,7 @@ async fn materialize_logical_local_execution_candidate_attempts<F>(
     client_api_format: &str,
     sticky_session_token: Option<&str>,
     requested_model: Option<&str>,
+    auth_snapshot: Option<&GatewayAuthApiKeySnapshot>,
     request_auth_channel: Option<&str>,
     build_extra_data: &F,
 ) -> Vec<LocalExecutionCandidateAttempt>
@@ -1556,6 +1562,7 @@ where
                     candidate,
                     sticky_session_token,
                     requested_model,
+                    auth_snapshot,
                     request_auth_channel,
                     routing_policy,
                 )
@@ -2689,6 +2696,7 @@ mod tests {
             None,
             Some("gpt-5"),
             None,
+            None,
             &|_| None,
         )
         .await;
@@ -2904,6 +2912,7 @@ mod tests {
             None,
             Some("gpt-5"),
             None,
+            None,
         );
         let pool_key_attempts = dispatch_sequence_from_attempts(
             build_unpersisted_local_execution_candidate_attempts(
@@ -2958,6 +2967,7 @@ mod tests {
             pool_group,
             None,
             Some("gpt-5"),
+            None,
             None,
         );
 
@@ -3026,6 +3036,7 @@ mod tests {
             pool_group,
             None,
             Some("gpt-5"),
+            None,
             None,
         );
         let pool_exhaustion_persistence = PoolGroupExhaustionPersistenceContext::new(

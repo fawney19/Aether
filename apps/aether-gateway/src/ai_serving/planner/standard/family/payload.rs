@@ -356,6 +356,7 @@ mod tests {
             api_key_allowed_api_formats: None,
             api_key_allowed_models: None,
             api_key_ip_rules: None,
+            api_key_allowed_provider_keys: None,
             currently_usable: true,
         }
     }

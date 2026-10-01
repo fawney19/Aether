@@ -1894,6 +1894,7 @@ mod tests {
                 allowed_api_formats: Some(vec!["openai:responses".to_string()]),
                 allowed_models: Some(vec!["gpt-4.1".to_string()]),
                 ip_rules: None,
+                allowed_provider_keys: None,
                 rate_limit: 60,
                 concurrent_limit: Some(5),
                 force_capabilities: None,

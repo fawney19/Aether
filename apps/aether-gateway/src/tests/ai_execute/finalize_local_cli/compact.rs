@@ -412,6 +412,7 @@ async fn gateway_executes_openai_responses_compact_openai_family_upstream_stream
             "created_at": created_at,
             "completed_at": created_at,
             "output_text": "Hello Compact",
+            "metadata": {},
             "output": [{
                 "type": "message",
                 "id": openai_responses_message_item_id("resp_compact_openai_family_123", 0),

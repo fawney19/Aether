@@ -607,6 +607,7 @@ pub(super) async fn handle_users_me_api_key_create(
         allowed_api_formats: None,
         allowed_models: None,
         ip_rules,
+        allowed_provider_keys: None,
         rate_limit,
         concurrent_limit,
         force_capabilities: None,
@@ -751,6 +752,7 @@ pub(super) async fn handle_users_me_api_key_update(
                 concurrent_limit,
                 concurrent_limit_present,
                 ip_rules,
+                allowed_provider_keys: None,
                 feature_settings,
             },
         )

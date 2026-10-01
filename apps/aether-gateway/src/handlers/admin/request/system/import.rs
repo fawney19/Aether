@@ -7626,6 +7626,10 @@ impl<'a> AdminAppState<'a> {
                 ));
                 let allowed_models =
                     invalid_value!(normalize_imported_user_string_list(key, "allowed_models"));
+                let allowed_provider_keys = invalid_value!(normalize_imported_user_string_list(
+                    key,
+                    "allowed_provider_keys"
+                ));
                 let ip_rules = invalid_value!(normalize_imported_user_ip_rules(key));
                 let imported_rate_limit =
                     invalid_value!(imported_optional_i32(key.get("rate_limit"), "rate_limit"));
@@ -7730,6 +7734,9 @@ impl<'a> AdminAppState<'a> {
                                             || mode.is_rollback_checkpoint(),
                                         ip_rules: imported_ip_rules_present(key)
                                             .then(|| ip_rules.clone()),
+                                        allowed_provider_keys: key
+                                            .contains_key("allowed_provider_keys")
+                                            .then(|| allowed_provider_keys.clone()),
                                         feature_settings: key
                                             .contains_key("feature_settings")
                                             .then(|| feature_settings.clone()),
@@ -7863,6 +7870,7 @@ impl<'a> AdminAppState<'a> {
                         allowed_api_formats,
                         allowed_models,
                         ip_rules,
+                        allowed_provider_keys,
                         rate_limit,
                         concurrent_limit,
                         force_capabilities,
@@ -7971,6 +7979,10 @@ impl<'a> AdminAppState<'a> {
                 ));
                 let allowed_models =
                     invalid_value!(normalize_imported_user_string_list(key, "allowed_models"));
+                let allowed_provider_keys = invalid_value!(normalize_imported_user_string_list(
+                    key,
+                    "allowed_provider_keys"
+                ));
                 let ip_rules = invalid_value!(normalize_imported_user_ip_rules(key));
                 let rate_limit =
                     invalid_value!(imported_optional_i32(key.get("rate_limit"), "rate_limit"))
@@ -8072,6 +8084,9 @@ impl<'a> AdminAppState<'a> {
                                     allowed_models: Some(allowed_models.clone()),
                                     ip_rules: imported_ip_rules_present(key)
                                         .then(|| ip_rules.clone()),
+                                    allowed_provider_keys: key
+                                        .contains_key("allowed_provider_keys")
+                                        .then(|| allowed_provider_keys.clone()),
                                     expires_at_present: false,
                                     expires_at_unix_secs: None,
                                     auto_delete_on_expiry_present: false,
@@ -8200,6 +8215,7 @@ impl<'a> AdminAppState<'a> {
                             allowed_api_formats,
                             allowed_models,
                             ip_rules,
+                            allowed_provider_keys,
                             rate_limit: Some(rate_limit),
                             concurrent_limit,
                             force_capabilities,
