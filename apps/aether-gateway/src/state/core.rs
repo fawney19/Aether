@@ -53,7 +53,9 @@ use super::super::router::RequestAdmissionError;
 use super::super::{control::GatewayControlDecision, error::GatewayError};
 use super::super::{provider_transport, usage};
 
-use crate::codex_profile::spawn_worker as spawn_codex_client_profile_worker;
+use crate::cli_client_profile::{
+    spawn_worker as spawn_cli_client_profile_worker, CLAUDE_CODE_CLI_PROFILE, CODEX_CLI_PROFILE,
+};
 use crate::maintenance::spawn_account_self_check_worker;
 use crate::maintenance::spawn_audit_cleanup_worker;
 use crate::maintenance::spawn_db_maintenance_worker;
@@ -150,7 +152,11 @@ fn system_config_key_affects_provider_transport_snapshot(key: &str) -> bool {
 
 impl AppState {
     pub async fn prewarm_codex_client_profile(&self) -> Result<String, String> {
-        crate::codex_profile::prewarm(self.runtime_state()).await
+        crate::cli_client_profile::prewarm(&CODEX_CLI_PROFILE, self.runtime_state()).await
+    }
+
+    pub async fn prewarm_claude_code_client_profile(&self) -> Result<String, String> {
+        crate::cli_client_profile::prewarm(&CLAUDE_CODE_CLI_PROFILE, self.runtime_state()).await
     }
 
     pub async fn prewarm_chat_pii_redaction_runtime_config(&self) -> Result<bool, String> {
@@ -2349,7 +2355,17 @@ impl AppState {
         );
         supervise_worker(
             crate::task_runtime::TASK_KEY_CODEX_CLIENT_PROFILE,
-            Some(spawn_codex_client_profile_worker(background_state.clone())),
+            Some(spawn_cli_client_profile_worker(
+                &CODEX_CLI_PROFILE,
+                background_state.clone(),
+            )),
+        );
+        supervise_worker(
+            crate::task_runtime::TASK_KEY_CLAUDE_CODE_CLIENT_PROFILE,
+            Some(spawn_cli_client_profile_worker(
+                &CLAUDE_CODE_CLI_PROFILE,
+                background_state.clone(),
+            )),
         );
         supervise_worker(
             crate::task_runtime::TASK_KEY_VIDEO_TASK_POLLER,

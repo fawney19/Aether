@@ -24,7 +24,6 @@ pub use chatgpt_web::{
 pub use claude_code::ClaudeCodeProviderPoolAdapter;
 pub use claude_code::{
     build_claude_code_pool_quota_request, CLAUDE_CODE_OAUTH_BETA, CLAUDE_CODE_OAUTH_USAGE_URL,
-    CLAUDE_CODE_USAGE_USER_AGENT,
 };
 pub use codex::CodexProviderPoolAdapter;
 pub use codex::{

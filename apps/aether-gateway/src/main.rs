@@ -2513,7 +2513,12 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
     }
-    match state.prewarm_codex_client_profile().await {
+    // 两个 CLI 画像的发布检查互不依赖，并发执行以免叠加启动阶段的网络超时。
+    let (codex_profile, claude_code_profile) = tokio::join!(
+        state.prewarm_codex_client_profile(),
+        state.prewarm_claude_code_client_profile(),
+    );
+    match codex_profile {
         Ok(version) => {
             info!(
                 codex_client_version = %version,
@@ -2524,6 +2529,20 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             warn!(
                 error = %err,
                 "failed to refresh Codex client profile; built-in or cached profile remains active"
+            );
+        }
+    }
+    match claude_code_profile {
+        Ok(version) => {
+            info!(
+                claude_code_client_version = %version,
+                "prewarmed Claude Code client profile"
+            );
+        }
+        Err(err) => {
+            warn!(
+                error = %err,
+                "failed to refresh Claude Code client profile; built-in or cached profile remains active"
             );
         }
     }

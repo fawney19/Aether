@@ -11,7 +11,6 @@ use crate::quota_refresh::ProviderPoolQuotaRequestSpec;
 pub const CLAUDE_CODE_OAUTH_USAGE_URL: &str =
     "https://api.anthropic.com/api/oauth/usage?cedar_ember=1&skip_spend=1";
 pub const CLAUDE_CODE_OAUTH_BETA: &str = "oauth-2025-04-20";
-pub const CLAUDE_CODE_USAGE_USER_AGENT: &str = "claude-cli/2.1.284 (external, cli)";
 
 #[derive(Debug, Clone, Default)]
 pub struct ClaudeCodeProviderPoolAdapter;
@@ -62,7 +61,7 @@ pub fn build_claude_code_pool_quota_request(
         ("x-app".to_string(), "cli".to_string()),
         (
             "user-agent".to_string(),
-            CLAUDE_CODE_USAGE_USER_AGENT.to_string(),
+            aether_provider_transport::claude_code::claude_code_client_user_agent(),
         ),
     ]);
 

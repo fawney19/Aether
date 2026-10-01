@@ -25,6 +25,8 @@ pub(crate) const TASK_KEY_USAGE_COUNTER_FLUSH: &str = "usage.counter.flush.worke
 pub(crate) const TASK_KEY_VIDEO_TASK_POLLER: &str = "video.task.poller";
 pub(crate) const TASK_KEY_MODEL_FETCH_WORKER: &str = "model.fetch.worker";
 pub(crate) const TASK_KEY_CODEX_CLIENT_PROFILE: &str = "maintenance.codex.client.profile";
+pub(crate) const TASK_KEY_CLAUDE_CODE_CLIENT_PROFILE: &str =
+    "maintenance.claude_code.client.profile";
 pub(crate) const TASK_KEY_PROVIDER_QUOTA_RESET: &str = "provider.quota.reset.worker";
 pub(crate) const TASK_KEY_ACCOUNT_SELF_CHECK: &str = "account.self_check.worker";
 pub(crate) const TASK_KEY_POOL_SCORE_REBUILD: &str = "pool.score.rebuild.worker";
@@ -205,6 +207,14 @@ const TASK_DEFINITIONS: &[TaskDefinition] = &[
     ),
     TaskDefinition::new(
         TASK_KEY_CODEX_CLIENT_PROFILE,
+        TaskKind::Scheduled,
+        "daily",
+        true,
+        true,
+        RETRY_ONCE,
+    ),
+    TaskDefinition::new(
+        TASK_KEY_CLAUDE_CODE_CLIENT_PROFILE,
         TaskKind::Scheduled,
         "daily",
         true,

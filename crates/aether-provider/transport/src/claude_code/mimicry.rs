@@ -103,7 +103,7 @@ pub fn apply_claude_code_body_mimicry(
         return false;
     }
 
-    let profile = *current_claude_code_transport_identity_profile();
+    let profile = current_claude_code_transport_identity_profile();
     let model = object
         .get("model")
         .and_then(Value::as_str)

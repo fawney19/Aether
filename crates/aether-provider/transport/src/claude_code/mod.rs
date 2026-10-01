@@ -20,8 +20,11 @@ pub use policy::{
     supports_local_claude_code_transport_with_network,
 };
 pub use profile::{
-    current_claude_code_transport_identity_profile, ClaudeCodeBodyCapabilityGate,
+    claude_code_client_profile, claude_code_client_user_agent, claude_code_client_version,
+    current_claude_code_transport_identity_profile, set_claude_code_cli_version,
+    set_claude_code_client_profile, ClaudeCodeBodyCapabilityGate, ClaudeCodeClientProfile,
     ClaudeCodeTransportIdentityProfile, ClaudeCodeTransportIdentityProfileVersion,
+    ClaudeCodeTransportIdentityTemplate, CLAUDE_CODE_BUILTIN_CLI_VERSION,
     CLAUDE_CODE_CONTEXT_MANAGEMENT_BETA, CLAUDE_CODE_TRANSPORT_IDENTITY_2026_04,
 };
 pub use request::{

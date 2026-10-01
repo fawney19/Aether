@@ -177,7 +177,7 @@ fn resolve_claude_code_transport_profile(
         return None;
     }
 
-    let identity_profile = *current_claude_code_transport_identity_profile();
+    let identity_profile = current_claude_code_transport_identity_profile();
     Some(ResolvedTransportProfile {
         profile_id: identity_profile.transport_profile_id().to_string(),
         backend: TRANSPORT_BACKEND_REQWEST_RUSTLS.to_string(),

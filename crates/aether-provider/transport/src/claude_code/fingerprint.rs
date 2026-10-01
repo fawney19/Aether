@@ -14,7 +14,7 @@ pub fn generate_fingerprint(seed: &str) -> Value {
 }
 
 fn generate_header_fingerprint(seed: &str) -> Value {
-    let profile = *current_claude_code_transport_identity_profile();
+    let profile = current_claude_code_transport_identity_profile();
     let vscode_session_id = Uuid::new_v5(
         &Uuid::NAMESPACE_URL,
         format!("aether:fingerprint:{seed}").as_bytes(),
@@ -40,7 +40,7 @@ fn generate_header_fingerprint(seed: &str) -> Value {
 }
 
 fn wrap_header_fingerprint(header_fingerprint: Value) -> Value {
-    let profile = *current_claude_code_transport_identity_profile();
+    let profile = current_claude_code_transport_identity_profile();
     serde_json::json!({
         "transport_profile": {
             "profile_id": profile.transport_profile_id(),

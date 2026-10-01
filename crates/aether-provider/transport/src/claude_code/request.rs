@@ -49,7 +49,7 @@ pub fn build_claude_code_passthrough_headers(
         out.insert("anthropic-beta".to_string(), incoming_beta_values.join(","));
     }
 
-    let profile = *current_claude_code_transport_identity_profile();
+    let profile = current_claude_code_transport_identity_profile();
     profile.apply_fixed_headers(&mut out, stream);
     profile.apply_beta_policy(&mut out, None);
 
@@ -57,15 +57,15 @@ pub fn build_claude_code_passthrough_headers(
 }
 
 pub fn sanitize_claude_code_request_body(body: &mut Value) {
-    let profile = *current_claude_code_transport_identity_profile();
+    let profile = current_claude_code_transport_identity_profile();
     let beta_header = profile.merge_beta_tokens(None, None);
-    sanitize_claude_code_request_body_for_beta_header(body, &beta_header, profile);
+    sanitize_claude_code_request_body_for_beta_header(body, &beta_header, &profile);
 }
 
 pub fn sanitize_claude_code_request_body_for_beta_header(
     body: &mut Value,
     beta_header: &str,
-    profile: ClaudeCodeTransportIdentityProfile,
+    profile: &ClaudeCodeTransportIdentityProfile,
 ) {
     let Some(body_object) = body.as_object_mut() else {
         return;
@@ -303,7 +303,7 @@ mod tests {
 
     #[test]
     fn context_management_body_is_gated_by_the_matching_beta_token() {
-        let profile = *current_claude_code_transport_identity_profile();
+        let profile = current_claude_code_transport_identity_profile();
         let original = json!({
             "context_management": {
                 "edits": [{"type":"clear_thinking_20251015", "keep":"all"}]
@@ -315,7 +315,7 @@ mod tests {
         sanitize_claude_code_request_body_for_beta_header(
             &mut without_beta,
             "oauth-2025-04-20",
-            profile,
+            &profile,
         );
         assert!(without_beta.get("context_management").is_none());
 
@@ -323,7 +323,7 @@ mod tests {
         sanitize_claude_code_request_body_for_beta_header(
             &mut with_beta,
             "oauth-2025-04-20, context-management-2025-06-27",
-            profile,
+            &profile,
         );
         assert_eq!(with_beta, original);
     }

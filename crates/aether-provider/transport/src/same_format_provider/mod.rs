@@ -812,7 +812,7 @@ pub fn build_same_format_provider_headers(
     } else {
         replace_upstream_auth_headers(&mut provider_request_headers, "", "");
     }
-    let claude_code_profile = *current_claude_code_transport_identity_profile();
+    let claude_code_profile = current_claude_code_transport_identity_profile();
     if input.behavior.is_claude_code_transport {
         claude_code_profile.apply_fixed_headers(
             &mut provider_request_headers,
