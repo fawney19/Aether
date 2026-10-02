@@ -75,6 +75,7 @@ use crate::maintenance::spawn_stats_hourly_aggregation_worker;
 use crate::maintenance::spawn_usage_cleanup_worker;
 use crate::maintenance::spawn_usage_counter_flush_worker;
 use crate::maintenance::spawn_wallet_daily_usage_aggregation_worker;
+use crate::xai_profile::spawn_worker as spawn_xai_client_profile_worker;
 
 const SYSTEM_CONFIG_CACHE_TTL: Duration = Duration::from_secs(30);
 // Requests may use a stale value after the fresh window until the entry reaches
@@ -151,6 +152,10 @@ fn system_config_key_affects_provider_transport_snapshot(key: &str) -> bool {
 impl AppState {
     pub async fn prewarm_codex_client_profile(&self) -> Result<String, String> {
         crate::codex_profile::prewarm(self.runtime_state()).await
+    }
+
+    pub async fn prewarm_xai_client_profile(&self) -> Result<String, String> {
+        crate::xai_profile::prewarm(self.runtime_state()).await
     }
 
     pub async fn prewarm_chat_pii_redaction_runtime_config(&self) -> Result<bool, String> {
@@ -2350,6 +2355,10 @@ impl AppState {
         supervise_worker(
             crate::task_runtime::TASK_KEY_CODEX_CLIENT_PROFILE,
             Some(spawn_codex_client_profile_worker(background_state.clone())),
+        );
+        supervise_worker(
+            crate::task_runtime::TASK_KEY_XAI_CLIENT_PROFILE,
+            Some(spawn_xai_client_profile_worker(background_state.clone())),
         );
         supervise_worker(
             crate::task_runtime::TASK_KEY_VIDEO_TASK_POLLER,
