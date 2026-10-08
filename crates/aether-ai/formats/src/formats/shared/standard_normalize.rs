@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 
 use aether_ai_formats::formats::conversion::request::{
     convert_openai_chat_request_to_claude_request, convert_openai_chat_request_to_gemini_request,
@@ -11,7 +12,11 @@ use aether_ai_formats::formats::conversion::request::{
 use aether_ai_formats::{request_conversion_kind, FormatContext, RequestConversionKind};
 use serde_json::{json, Value};
 
+use crate::formats::openai::responses::history::expand_previous_response_for_chat;
 use crate::formats::shared::model_directives::apply_model_directive_overrides_from_request;
+use crate::protocol::canonical::{
+    openai_responses_input_to_canonical_messages, CanonicalContentBlock,
+};
 
 fn is_responses_shaped_body_on_chat_endpoint(body_json: &Value) -> bool {
     body_json
@@ -63,6 +68,94 @@ fn chat_compatible_body_for_openai_chat_endpoint(body_json: &Value) -> Option<Co
             .map(Cow::Owned);
     }
     Some(Cow::Borrowed(body_json))
+}
+
+/// Re-attaches Gemini tool-call thought signatures lost on a Responses -> Chat hop.
+///
+/// Responses clients replay Gemini signatures through reasoning `encrypted_content`
+/// carriers, but OpenAI Chat has no field for them. Without this, the Chat -> Gemini
+/// leg falls back to the `skip_thought_signature_validator` placeholder on every
+/// historical function call. Signatures are matched back by call id.
+pub(crate) fn restore_gemini_tool_signatures_from_openai_responses(
+    gemini_body: &mut Value,
+    responses_body: &Value,
+    history_scope: Option<&str>,
+) -> usize {
+    let signatures = openai_responses_gemini_tool_signatures(responses_body, history_scope);
+    if signatures.is_empty() {
+        return 0;
+    }
+    let Some(contents) = gemini_body
+        .get_mut("contents")
+        .and_then(Value::as_array_mut)
+    else {
+        return 0;
+    };
+    let mut restored = 0usize;
+    for part in contents
+        .iter_mut()
+        .filter_map(|content| content.get_mut("parts").and_then(Value::as_array_mut))
+        .flatten()
+    {
+        let Some(signature) = part
+            .get("functionCall")
+            .and_then(|call| call.get("id"))
+            .and_then(Value::as_str)
+            .and_then(|id| signatures.get(id))
+        else {
+            continue;
+        };
+        if let Some(part) = part.as_object_mut() {
+            part.insert(
+                "thoughtSignature".to_string(),
+                Value::String(signature.clone()),
+            );
+            restored += 1;
+        }
+    }
+    restored
+}
+
+pub(crate) fn is_openai_responses_source_format(api_format: &str) -> bool {
+    matches!(
+        aether_ai_formats::normalize_api_format_alias(api_format).as_str(),
+        "openai:responses" | "openai:responses:compact"
+    )
+}
+
+fn openai_responses_gemini_tool_signatures(
+    body_json: &Value,
+    history_scope: Option<&str>,
+) -> BTreeMap<String, String> {
+    // Replayed history lives behind previous_response_id; the Chat hop expands
+    // it the same way, so the call ids line up with the converted body.
+    let expanded = body_json
+        .get("previous_response_id")
+        .and_then(Value::as_str)
+        .is_some_and(|id| !id.trim().is_empty())
+        .then(|| expand_previous_response_for_chat(body_json, history_scope).ok())
+        .flatten();
+    let body_json = expanded.as_ref().unwrap_or(body_json);
+    let Some(messages) = openai_responses_input_to_canonical_messages(body_json.get("input"))
+    else {
+        return BTreeMap::new();
+    };
+    messages
+        .iter()
+        .flat_map(|message| message.content.iter())
+        .filter_map(|block| {
+            let CanonicalContentBlock::ToolUse { id, extensions, .. } = block else {
+                return None;
+            };
+            let gemini = extensions.get("gemini")?.as_object()?;
+            let signature = gemini
+                .get("thoughtSignature")
+                .or_else(|| gemini.get("thought_signature"))?
+                .as_str()
+                .filter(|value| !value.is_empty())?;
+            Some((id.clone(), signature.to_string()))
+        })
+        .collect()
 }
 
 pub(crate) fn chat_compatible_body_for_standard_source<'a>(
@@ -448,11 +541,21 @@ pub fn build_cross_format_openai_responses_request_body_with_model_directives_an
             mapped_model,
             upstream_is_stream,
         )?,
-        RequestConversionKind::ToGeminiStandard => convert_openai_chat_request_to_gemini_request(
-            chat_like_request.as_ref(),
-            mapped_model,
-            upstream_is_stream,
-        )?,
+        RequestConversionKind::ToGeminiStandard => {
+            let mut provider_request_body = convert_openai_chat_request_to_gemini_request(
+                chat_like_request.as_ref(),
+                mapped_model,
+                upstream_is_stream,
+            )?;
+            if is_openai_responses_source_format(client_api_format) {
+                restore_gemini_tool_signatures_from_openai_responses(
+                    &mut provider_request_body,
+                    body_json,
+                    history_scope,
+                );
+            }
+            provider_request_body
+        }
     };
     let mut provider_request_body = with_model_directive_overrides(
         provider_request_body,
@@ -585,6 +688,68 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn responses_to_gemini_chat_hop_keeps_replayed_tool_signatures() {
+        use crate::api::build_cross_format_openai_responses_request_body_with_provider_context as responses;
+        use crate::formats::openai::responses::{
+            encode_gemini_tool_signature_carrier_with_direction,
+            GeminiToolSignatureCarrierDirection,
+        };
+        let carrier = |signature: &str, direction| {
+            encode_gemini_tool_signature_carrier_with_direction(signature, direction).unwrap()
+        };
+        let input = json!({
+            "model": "client",
+            "include": ["reasoning.encrypted_content"],
+            "input": [
+                {"role": "user", "content": [{"type": "input_text", "text": "go"}]},
+                {"type": "reasoning", "summary": [],
+                 "encrypted_content": carrier("sig-a", GeminiToolSignatureCarrierDirection::Next)},
+                {"type": "function_call", "call_id": "call_a", "name": "read",
+                 "arguments": "{\"path\":\"a\"}"},
+                {"type": "function_call_output", "call_id": "call_a", "output": "A"},
+                {"type": "function_call", "call_id": "call_b", "name": "read",
+                 "arguments": "{\"path\":\"b\"}"},
+                {"type": "reasoning", "summary": [],
+                 "encrypted_content": carrier("sig-b", GeminiToolSignatureCarrierDirection::Previous)},
+                {"type": "function_call_output", "call_id": "call_b", "output": "B"}
+            ],
+            "tools": [{"type": "function", "name": "read",
+                "parameters": {"type": "object", "properties": {"path": {"type": "string"}}}}]
+        });
+        for provider in ["antigravity", "gemini"] {
+            let output = responses(
+                &input,
+                "gemini-test",
+                "openai:responses",
+                provider,
+                "gemini:generate_content",
+                true,
+                false,
+                Some("signature-test"),
+            )
+            .unwrap();
+            let signatures = output["contents"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(|content| content["parts"].as_array().unwrap())
+                .filter(|part| part.get("functionCall").is_some())
+                .map(|part| {
+                    (
+                        part["functionCall"]["id"].as_str().unwrap(),
+                        part["thoughtSignature"].as_str().unwrap(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                signatures,
+                vec![("call_a", "sig-a"), ("call_b", "sig-b")],
+                "{provider}"
+            );
         }
     }
 

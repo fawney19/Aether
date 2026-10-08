@@ -384,9 +384,10 @@ fn lower_schema(
         if types.len() == 1 {
             schema.insert("type".to_string(), json!(types.first().unwrap()));
         } else if !types.is_empty() {
-            schema.entry("anyOf").or_insert_with(|| {
-                Value::Array(types.iter().map(|ty| json!({ "type": ty })).collect())
-            });
+            if !schema.contains_key("anyOf") {
+                let branches = typed_union_branches(&mut schema, &types);
+                schema.insert("anyOf".to_string(), branches);
+            }
         } else if nullable {
             schema.insert("type".to_string(), json!("null"));
         }
@@ -395,6 +396,48 @@ fn lower_schema(
         }
     }
     Value::Object(schema)
+}
+
+/// Splits a `type: [..]` union into typed anyOf branches. Cloud Code validates
+/// type-specific keywords against the node's own type (`items` requires ARRAY),
+/// so they move from the untyped parent into the branch they constrain.
+fn typed_union_branches(schema: &mut Map<String, Value>, types: &BTreeSet<&str>) -> Value {
+    let branches = types
+        .iter()
+        .map(|ty| {
+            let mut branch = Map::new();
+            branch.insert("type".to_string(), json!(ty));
+            for key in type_specific_schema_keywords(ty) {
+                if let Some(value) = schema.get(*key) {
+                    branch.insert((*key).to_string(), value.clone());
+                }
+            }
+            Value::Object(branch)
+        })
+        .collect();
+    for ty in types {
+        for key in type_specific_schema_keywords(ty) {
+            schema.remove(*key);
+        }
+    }
+    Value::Array(branches)
+}
+
+fn type_specific_schema_keywords(schema_type: &str) -> &'static [&'static str] {
+    match schema_type {
+        "array" => &["items", "minItems", "maxItems"],
+        "object" => &[
+            "properties",
+            "required",
+            "propertyOrdering",
+            "additionalProperties",
+            "minProperties",
+            "maxProperties",
+        ],
+        "string" => &["enum", "pattern", "minLength", "maxLength"],
+        "number" | "integer" => &["minimum", "maximum"],
+        _ => &[],
+    }
 }
 
 fn json_schema_type(value: &str) -> Option<&'static str> {
@@ -723,6 +766,57 @@ mod tests {
         assert_eq!(
             lowered(json!({ "type": "integer", "enum": [1, 2] })),
             json!({ "type": "integer" })
+        );
+    }
+
+    #[test]
+    fn type_unions_move_type_specific_keywords_into_their_branches() {
+        // Cloud Code rejected `items` beside an untyped anyOf with
+        // "field predicate failed: $type == Type.ARRAY".
+        assert_eq!(
+            lowered(json!({
+                "description": "point or ref",
+                "type": ["string", "array"],
+                "items": { "type": "number" },
+                "minItems": 2,
+                "maxLength": 16
+            })),
+            json!({
+                "description": "point or ref",
+                "anyOf": [
+                    { "type": "array", "items": { "type": "number" }, "minItems": 2 },
+                    { "type": "string", "maxLength": 16 }
+                ]
+            })
+        );
+        assert_eq!(
+            lowered(json!({
+                "type": ["object", "integer", "null"],
+                "properties": { "a": { "type": "string" } },
+                "required": ["a"],
+                "minimum": 1
+            })),
+            json!({
+                "nullable": true,
+                "anyOf": [
+                    { "type": "integer", "minimum": 1 },
+                    {
+                        "type": "object",
+                        "properties": { "a": { "type": "string" } },
+                        "required": ["a"]
+                    }
+                ]
+            })
+        );
+        // An explicit anyOf keeps describing the alternatives untouched.
+        assert_eq!(
+            lowered(json!({
+                "type": ["string", "array"],
+                "anyOf": [{ "type": "string" }, { "type": "array", "items": { "type": "number" } }]
+            })),
+            json!({
+                "anyOf": [{ "type": "string" }, { "type": "array", "items": { "type": "number" } }]
+            })
         );
     }
 
