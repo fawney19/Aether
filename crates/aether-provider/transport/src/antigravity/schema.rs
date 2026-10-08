@@ -395,7 +395,25 @@ fn lower_schema(
             schema.insert("nullable".to_string(), Value::Bool(true));
         }
     }
+    if let Some(schema_type) = schema.get("type").and_then(Value::as_str) {
+        let schema_type = schema_type.to_string();
+        strip_other_type_keywords(&mut schema, &schema_type);
+    }
     Value::Object(schema)
+}
+
+/// JSON Schema applies type-specific keywords only to instances of that type, so
+/// on a single-typed node the other types' keywords are dead. Cloud Code rejects
+/// them anyway (`items` on a STRING fails "$type == Type.ARRAY").
+fn strip_other_type_keywords(schema: &mut Map<String, Value>, schema_type: &str) {
+    let own = type_specific_schema_keywords(schema_type);
+    for other in ["array", "object", "string", "number"] {
+        for key in type_specific_schema_keywords(other) {
+            if !own.contains(key) {
+                schema.remove(*key);
+            }
+        }
+    }
 }
 
 /// Splits a `type: [..]` union into typed anyOf branches. Cloud Code validates
@@ -434,7 +452,8 @@ fn type_specific_schema_keywords(schema_type: &str) -> &'static [&'static str] {
             "minProperties",
             "maxProperties",
         ],
-        "string" => &["enum", "pattern", "minLength", "maxLength"],
+        // `enum` constrains every instance type, so it stays where it is.
+        "string" => &["pattern", "minLength", "maxLength"],
         "number" | "integer" => &["minimum", "maximum"],
         _ => &[],
     }
@@ -821,6 +840,30 @@ mod tests {
     }
 
     #[test]
+    fn single_typed_nodes_drop_keywords_of_other_types() {
+        // Gemini-native clients may collapse a union to one type but keep `items`
+        // (seen from omp): Cloud Code rejects it with "$type == Type.ARRAY".
+        assert_eq!(
+            lowered(json!({ "type": "string", "items": { "type": "number" } })),
+            json!({ "type": "string" })
+        );
+        assert_eq!(
+            lowered(json!({
+                "type": "integer",
+                "minimum": 1,
+                "maxLength": 4,
+                "properties": { "a": { "type": "string" } },
+                "required": ["a"]
+            })),
+            json!({ "type": "integer", "minimum": 1 })
+        );
+        assert_eq!(
+            lowered(json!({ "type": "string", "enum": ["a", "b"], "pattern": "^[ab]$" })),
+            json!({ "type": "string", "enum": ["a", "b"], "pattern": "^[ab]$" })
+        );
+    }
+
+    #[test]
     fn converts_protobuf_integer_strings_to_draft_2020_numbers() {
         let result = lowered(json!({
             "type": ["OBJECT", "not-a-json-schema-type"],
@@ -849,13 +892,11 @@ mod tests {
                 "minProperties": 1,
                 "required": ["args"],
                 "properties": {
+                    // String/number keywords are dead on an array node and dropped.
                     "args": {
                         "type": "array",
                         "minItems": 2,
                         "maxItems": 3,
-                        "minLength": 4,
-                        "maxLength": 8,
-                        "maximum": 1,
                         "items": { "type": "string", "minLength": 0 }
                     }
                 }
