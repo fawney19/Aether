@@ -33,6 +33,14 @@ impl PostgresBackend {
             .map_postgres_err()?;
         for table_name in table_names {
             let table_name = maintenance_identifier(table_name)?;
+            let exists: bool = sqlx::query_scalar("SELECT to_regclass($1) IS NOT NULL")
+                .bind(format!("public.\"{table_name}\""))
+                .fetch_one(&mut *conn)
+                .await
+                .unwrap_or(true);
+            if !exists {
+                continue;
+            }
             summary.attempted += 1;
             let statement = format!("VACUUM ANALYZE \"{table_name}\"");
             match sqlx::query(&statement)
