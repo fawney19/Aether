@@ -2719,6 +2719,12 @@ pub trait WalletReadRepository: Send + Sync {
         offset: usize,
     ) -> Result<StoredAdminWalletTransactionPage, crate::DataLayerError>;
 
+    async fn find_admin_wallet_transaction(
+        &self,
+        wallet_id: &str,
+        transaction_id: &str,
+    ) -> Result<Option<StoredAdminWalletTransaction>, crate::DataLayerError>;
+
     async fn find_wallet_today_usage(
         &self,
         wallet_id: &str,

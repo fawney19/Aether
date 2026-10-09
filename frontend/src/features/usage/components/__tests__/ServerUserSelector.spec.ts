@@ -86,6 +86,17 @@ afterEach(() => {
 })
 
 describe('ServerUserSelector', () => {
+  it('reports load failures and retries without changing the selection', async () => {
+    getAllUsersMock.mockRejectedValueOnce(new Error('unavailable')).mockResolvedValueOnce([{ id: 'user-1', username: 'alice', email: '' }])
+    const root = mountSelector({ label: '邀请人', placeholder: '邀请人' })
+    const trigger = root.querySelector<HTMLButtonElement>('[aria-label="邀请人"]')!
+    trigger.click(); await nextTick(); await flushPromises()
+    expect(root.querySelector('[role="alert"]')?.textContent).toContain('用户加载失败')
+    root.querySelector<HTMLButtonElement>('[role="alert"] button')!.click(); await nextTick(); await flushPromises()
+    expect(root.querySelector('[role="alert"]')).toBeNull()
+    expect(root.textContent).toContain('alice')
+    expect(trigger.textContent).toContain('邀请人')
+  })
   it('loads the initial user batch when opened', async () => {
     getAllUsersMock.mockResolvedValue([
       { id: 'user-1', username: 'alice', email: 'alice@example.com' },

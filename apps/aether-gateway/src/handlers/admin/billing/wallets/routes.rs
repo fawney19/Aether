@@ -1,12 +1,13 @@
 use super::mutations::{
-    build_admin_wallet_adjust_response, build_admin_wallet_complete_refund_response,
-    build_admin_wallet_fail_refund_response, build_admin_wallet_process_refund_response,
-    build_admin_wallet_recharge_response,
+    build_admin_referral_preview_response, build_admin_wallet_adjust_response,
+    build_admin_wallet_complete_refund_response, build_admin_wallet_fail_refund_response,
+    build_admin_wallet_process_refund_response, build_admin_wallet_recharge_response,
 };
 use super::reads::{
     build_admin_wallet_detail_response, build_admin_wallet_ledger_response,
-    build_admin_wallet_list_response, build_admin_wallet_refund_requests_response,
-    build_admin_wallet_refunds_response, build_admin_wallet_transactions_response,
+    build_admin_wallet_linked_record_response, build_admin_wallet_list_response,
+    build_admin_wallet_refund_requests_response, build_admin_wallet_refunds_response,
+    build_admin_wallet_transactions_response,
 };
 use super::shared::build_admin_wallets_data_unavailable_response;
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
@@ -26,9 +27,21 @@ pub(super) async fn maybe_build_local_admin_wallets_routes_response(
         return Ok(None);
     }
 
+    if request_context.method() == http::Method::GET
+        && matches!(
+            decision.route_kind.as_deref(),
+            Some("wallet_refund_detail" | "wallet_transaction_detail")
+        )
+    {
+        return Ok(Some(
+            build_admin_wallet_linked_record_response(state, request_context).await?,
+        ));
+    }
     let path = request_context.path();
     let is_wallets_route = (request_context.method() == http::Method::GET
         && matches!(path, "/api/admin/wallets" | "/api/admin/wallets/"))
+        || (request_context.method() == http::Method::GET
+            && decision.route_kind.as_deref() == Some("referral_preview"))
         || (request_context.method() == http::Method::GET
             && matches!(
                 path,
@@ -64,6 +77,13 @@ pub(super) async fn maybe_build_local_admin_wallets_routes_response(
 
     if !is_wallets_route {
         return Ok(None);
+    }
+    if decision.route_kind.as_deref() == Some("referral_preview")
+        && request_context.method() == http::Method::GET
+    {
+        return Ok(Some(
+            build_admin_referral_preview_response(state, request_context).await?,
+        ));
     }
 
     if decision.route_kind.as_deref() == Some("wallet_detail")
@@ -126,7 +146,8 @@ pub(super) async fn maybe_build_local_admin_wallets_routes_response(
         && request_context.method() == http::Method::POST
     {
         return Ok(Some(
-            build_admin_wallet_process_refund_response(state, request_context).await?,
+            build_admin_wallet_process_refund_response(state, request_context, request_body)
+                .await?,
         ));
     }
     if decision.route_kind.as_deref() == Some("complete_refund")

@@ -200,6 +200,11 @@ export const authApi = {
     return response.data
   },
 
+  async validateInviteCode(code: string): Promise<{ valid: boolean; reason?: string }> {
+    const response = await apiClient.get<{ valid: boolean; reason?: string }>('/api/auth/invite-code', { params: { code } })
+    return response.data
+  },
+
   async register(data: RegisterRequest): Promise<RegisterResponse> {
     const response = await apiClient.post<RegisterResponse>('/api/auth/register', data)
     return response.data

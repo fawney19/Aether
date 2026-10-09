@@ -2,11 +2,11 @@ use super::{
     build_api_format_health_monitor_payload, build_model_health_monitor_payload,
     build_public_auth_modules_status_payload, build_public_catalog_models_payload,
     build_public_catalog_search_models_payload, build_public_providers_payload,
-    build_related_health_monitor_payload, capability_detail_by_name, ldap_module_config_is_valid,
-    sanitize_public_model_capabilities, sanitize_public_model_config_for_user,
-    sanitize_public_tiered_pricing, serialize_public_capability, supported_capability_names,
-    ApiFormatHealthMonitorOptions, HealthMonitorRelationDimension, ModelHealthMonitorOptions,
-    PUBLIC_CAPABILITY_DEFINITIONS,
+    build_public_user_modules_status_payload, build_related_health_monitor_payload,
+    capability_detail_by_name, ldap_module_config_is_valid, sanitize_public_model_capabilities,
+    sanitize_public_model_config_for_user, sanitize_public_tiered_pricing,
+    serialize_public_capability, supported_capability_names, ApiFormatHealthMonitorOptions,
+    HealthMonitorRelationDimension, ModelHealthMonitorOptions, PUBLIC_CAPABILITY_DEFINITIONS,
 };
 use crate::control::GatewayPublicRequestContext;
 use crate::handlers::shared::{
@@ -730,6 +730,16 @@ async fn build_local_public_support_response(
     }
 
     if decision.route_family.as_deref() == Some("modules") {
+        if decision.route_kind.as_deref() == Some("user_status")
+            && request_context.request_path == "/api/modules/user-status"
+        {
+            return Some(
+                match build_public_user_modules_status_payload(state).await {
+                    Ok(payload) => Json(payload).into_response(),
+                    Err(error) => error.into_response(),
+                },
+            );
+        }
         if decision.route_kind.as_deref() == Some("auth_status")
             && request_context.request_path == "/api/modules/auth-status"
         {

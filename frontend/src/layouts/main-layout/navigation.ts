@@ -58,7 +58,7 @@ const moduleIconMap: Record<string, LucideIcon> = {
 
 function activeModuleItems(modules: ModuleRecord, group: string): NavItem[] {
   return Object.values(modules)
-    .filter(m => m.active && m.admin_route && m.admin_menu_group === group)
+    .filter(m => m.name !== 'referral' && m.active && m.admin_route && m.admin_menu_group === group)
     .sort((a, b) => a.admin_menu_order - b.admin_menu_order)
     .map(m => ({
       name: m.display_name,
@@ -135,6 +135,8 @@ export function buildNavigation(options: {
         { name: t('nav.standaloneKeys'), href: '/admin/keys', icon: Key },
         { name: t('nav.walletManagement'), href: '/admin/wallets', icon: Wallet },
         { name: t('nav.billingManagement'), href: '/admin/billing-plans', icon: Package },
+        // 关闭只停止新增资格；管理员仍需处理历史待发和退款冲回。
+        { name: t('nav.referralRewards'), href: '/admin/referrals', icon: Gift },
         ...activeModuleItems(modules, 'management'),
         { name: t('nav.asyncTasks'), href: '/admin/async-tasks', icon: Zap },
         { name: t('nav.usageRecords'), href: '/admin/usage', icon: BarChart3 },

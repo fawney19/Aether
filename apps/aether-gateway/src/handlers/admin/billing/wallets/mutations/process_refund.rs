@@ -20,6 +20,7 @@ use serde_json::json;
 pub(in super::super) async fn build_admin_wallet_process_refund_response(
     state: &AdminAppState<'_>,
     request_context: &AdminRequestContext<'_>,
+    request_body: Option<&axum::body::Bytes>,
 ) -> Result<Response<Body>, GatewayError> {
     let Some((wallet_id, refund_id)) =
         admin_wallet_refund_ids_from_suffix_path(request_context.path(), "/process")
@@ -42,6 +43,43 @@ pub(in super::super) async fn build_admin_wallet_process_refund_response(
             ADMIN_WALLETS_API_KEY_REFUND_DETAIL,
         ));
     }
+
+    #[derive(Default, serde::Deserialize)]
+    struct Confirmation {
+        referral_shortfall_confirmation: Option<String>,
+    }
+    let confirmation = match request_body.filter(|body| !body.is_empty()) {
+        Some(body) => match serde_json::from_slice::<Confirmation>(body) {
+            Ok(value) => value,
+            Err(_) => return Ok(build_admin_wallets_bad_request_response("请求体格式无效")),
+        },
+        None => Confirmation::default(),
+    };
+    let Some(refund) = state
+        .app()
+        .find_wallet_refund(&wallet_id, &refund_id)
+        .await?
+    else {
+        return Ok(build_admin_wallet_refund_not_found_response());
+    };
+    let refund = super::complete_refund::stored_refund_to_gateway(refund);
+    if !matches!(refund.status.as_str(), "pending_approval" | "approved") {
+        return Ok(build_admin_wallets_bad_request_response(
+            "只有待审批退款可以处理",
+        ));
+    }
+    let referral_preview = match super::referral_preview::check_referral_confirmation(
+        state,
+        request_context,
+        &refund,
+        "process",
+        confirmation.referral_shortfall_confirmation.as_deref(),
+    )
+    .await?
+    {
+        Ok(preview) => preview,
+        Err(response) => return Ok(response),
+    };
 
     let operator_id = admin_wallet_operator_id(request_context);
     match state
@@ -74,6 +112,7 @@ pub(in super::super) async fn build_admin_wallet_process_refund_response(
                     transaction.description.as_deref(),
                     unix_secs_to_rfc3339(stored_timestamp_unix_secs(transaction.created_at_unix_ms)),
                 ),
+                "referral_preview": referral_preview,
             }))
             .into_response();
             Ok(attach_admin_audit_response(

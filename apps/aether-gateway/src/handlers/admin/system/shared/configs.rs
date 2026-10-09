@@ -22,6 +22,42 @@ use serde_json::json;
 
 const ADMIN_EXTERNAL_MODELS_CONFIG_ROUTE: &str = "/api/admin/models/external/config";
 
+pub(crate) async fn apply_admin_referral_settings_update(
+    state: &AdminAppState<'_>,
+    body: &Bytes,
+) -> Result<Result<serde_json::Value, (http::StatusCode, serde_json::Value)>, GatewayError> {
+    let Some(values) = serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| value.as_object().cloned())
+        .filter(|values| !values.is_empty())
+    else {
+        return Ok(Err((
+            http::StatusCode::BAD_REQUEST,
+            json!({ "detail": "请提交需要修改的邀请返利或邮箱验证设置" }),
+        )));
+    };
+    let mut normalized = serde_json::Map::new();
+    for (key, value) in values {
+        if !crate::AppState::is_referral_settings_key(&key) {
+            return Ok(Err((
+                http::StatusCode::BAD_REQUEST,
+                json!({ "detail": "请求包含不支持的邀请返利设置" }),
+            )));
+        }
+        let payload = Bytes::from(json!({ "value": value }).to_string());
+        let update = match parse_admin_system_config_update(&key, &payload) {
+            Ok(update) => update,
+            Err(error) => return Ok(Err(error)),
+        };
+        normalized.insert(update.normalized_key, update.value);
+    }
+    state
+        .app()
+        .update_referral_settings(normalized.clone())
+        .await?;
+    Ok(Ok(json!({ "values": normalized })))
+}
+
 fn is_external_models_proxy_node_config_key(key: &str) -> bool {
     key.trim()
         .eq_ignore_ascii_case(ADMIN_EXTERNAL_MODELS_PROXY_NODE_CONFIG_KEY)
@@ -124,6 +160,23 @@ pub(crate) async fn apply_admin_system_config_update(
     let normalized_key = update.normalized_key;
     let description = update.description;
 
+    if crate::AppState::is_referral_settings_key(&normalized_key) {
+        state
+            .app()
+            .update_referral_settings(
+                [(normalized_key.clone(), value.clone())]
+                    .into_iter()
+                    .collect(),
+            )
+            .await?;
+        return Ok(Ok(build_admin_system_config_updated_payload(
+            normalized_key,
+            value,
+            description,
+            Some(chrono::Utc::now().timestamp().max(0) as u64),
+        )));
+    }
+
     if is_sensitive_admin_system_config_key(&normalized_key)
         && value.as_str().is_some_and(|raw| !raw.is_empty())
     {
@@ -215,6 +268,13 @@ pub(crate) async fn delete_admin_system_config(
 ) -> Result<Result<serde_json::Value, (http::StatusCode, serde_json::Value)>, GatewayError> {
     if let Some(error) = external_models_proxy_node_config_owner_error(requested_key) {
         return Ok(Err(error));
+    }
+    if crate::AppState::is_referral_settings_key(&normalize_admin_system_config_key(requested_key))
+    {
+        return Ok(Err((
+            http::StatusCode::BAD_REQUEST,
+            json!({ "detail": "邀请返利与邮箱验证配置必须通过设置接口修改，不能单独删除" }),
+        )));
     }
     let delete_keys = admin_system_config_delete_keys(requested_key);
     let mut deleted = false;

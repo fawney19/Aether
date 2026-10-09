@@ -31,6 +31,16 @@ pub(super) fn classify_admin_system_family_route(
             "admin:system",
             false,
         ))
+    } else if method == http::Method::PUT
+        && normalized_path == "/api/admin/system/referral-settings"
+    {
+        Some(classified(
+            "admin_proxy",
+            "system_manage",
+            "referral_settings_set",
+            "admin:system",
+            false,
+        ))
     } else if method == http::Method::GET
         && normalized_path == "/api/admin/system/update-capability"
     {
