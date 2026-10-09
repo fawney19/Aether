@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import {
-  Code,
   Server,
   Key,
   Container,
@@ -18,11 +17,6 @@ const activeDeployTab = ref(0)
 const copiedStep = ref<string | null>(null)
 
 const productionSteps = [
-  {
-    title: '克隆代码',
-    code: 'git clone https://github.com/fawney19/Aether.git\ncd Aether',
-    icon: Code
-  },
   {
     title: '配置环境变量',
     note: '生成密钥并填入 .env',
@@ -396,14 +390,6 @@ function copyStep(stepId: string, code: string) {
         <div>
           <h3>1. Aether-Proxy</h3>
           <p>Rust实现, 超小资源占有, 适合性能低的VPS直接使用。</p>
-          <a
-            href="https://github.com/fawney19/Aether/tree/main/aether-tunnel"
-            target="_blank"
-            rel="noopener noreferrer"
-            class="text-[#cc785c] dark:text-[#d4a27f] hover:underline mt-2 inline-block"
-          >
-            GitHub 仓库 >
-          </a>
         </div>
 
         <div>

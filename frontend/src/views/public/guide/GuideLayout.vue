@@ -227,15 +227,6 @@
 
         <div class="flex items-center gap-2">
           <ThemeModeButton />
-          <a
-            href="https://github.com/fawney19/Aether"
-            target="_blank"
-            rel="noopener noreferrer"
-            class="flex h-9 w-9 items-center justify-center rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted/50 transition"
-            :title="t('common.githubRepository')"
-          >
-            <GithubIcon class="h-4 w-4" />
-          </a>
           <LanguageSwitcher />
         </div>
       </header>
@@ -296,7 +287,6 @@ import {
   ChevronRight,
   X
 } from 'lucide-vue-next'
-import GithubIcon from '@/components/icons/GithubIcon.vue'
 import HeaderLogo from '@/components/HeaderLogo.vue'
 import LanguageSwitcher from '@/components/common/LanguageSwitcher.vue'
 import ThemeModeButton from '@/components/common/ThemeModeButton.vue'
