@@ -227,6 +227,7 @@
                 :download-progress-text="updateProgressText"
                 :download-progress-percent="updateProgressPercent"
                 @refresh="handleVersionRefresh"
+                @open-release="openVersionReleasePage"
                 @preview-release="openReleaseUpdateDialog"
                 @apply-update="handleApplySystemUpdate"
                 @rollback="handleRollback"
@@ -428,6 +429,7 @@
             :download-progress-text="updateProgressText"
             :download-progress-percent="updateProgressPercent"
             @refresh="handleVersionRefresh"
+            @open-release="openVersionReleasePage"
             @preview-release="openReleaseUpdateDialog"
             @apply-update="handleApplySystemUpdate"
             @rollback="handleRollback"
@@ -435,6 +437,17 @@
           <LanguageSwitcher />
           <!-- Theme Toggle -->
           <ThemeModeButton />
+          <!-- GitHub Link -->
+          <a
+            href="https://github.com/fawney19/Aether"
+            target="_blank"
+            rel="noopener noreferrer"
+            class="flex h-9 w-9 items-center justify-center rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted/50 transition"
+            :title="t('common.githubRepository')"
+            :aria-label="t('common.githubRepository')"
+          >
+            <GithubIcon class="h-4 w-4" />
+          </a>
         </div>
       </header>
     </template>
@@ -457,10 +470,12 @@
       v-model="showUpdateDialog"
       :current-version="updateInfo.current_version"
       :latest-version="updateInfo.latest_version || ''"
+      :release-url="updateInfo.release_url"
       :release-notes="updateInfo.release_notes"
       :published-at="updateInfo.published_at"
       :dialog-title="updateDialogTitle"
       :version-label="updateDialogVersionLabel"
+      :release-link-label="updateDialogReleaseLinkLabel"
       :updating="applyingSystemUpdate"
       :update-phase="systemUpdatePhase"
       :update-supported="updateSupported"
@@ -504,7 +519,8 @@ import VersionButton from '@/components/common/VersionButton.vue'
 import AnnouncementBell from '@/components/common/AnnouncementBell.vue'
 import AnnouncementDialog from '@/components/common/AnnouncementDialog.vue'
 import { openAnnouncementKey } from '@/components/common/announcementContext'
-import { buildUpdateErrorStatus, normalizeUpdateBlockerForDisplay } from '@/utils/updateStatus'
+import { buildUpdateErrorStatus } from '@/utils/updateStatus'
+import { safeExternalHttpsUrl } from '@/utils/navigationSecurity'
 import {
   Settings,
   AlertTriangle,
@@ -516,6 +532,7 @@ import {
   PanelLeftOpen,
 } from 'lucide-vue-next'
 
+import GithubIcon from '@/components/icons/GithubIcon.vue'
 import { prefetchNavigationTarget } from '@/utils/adminNavigationPrefetch'
 import { useI18n, type MessageKey } from '@/i18n'
 import { buildBreadcrumbs, buildNavigation } from './main-layout/navigation'
@@ -595,6 +612,10 @@ const updateDialogVersionLabel = computed(() => {
     return updateSupported.value ? t('update.version.target') : t('update.version.tag')
   }
   return t('update.version.latest')
+})
+const updateDialogReleaseLinkLabel = computed(() => {
+  if (updateDialogMode.value === 'selected') return t('update.link.tag')
+  return updateSupported.value ? t('update.link.update') : t('update.link.release')
 })
 watch(systemUpdatePhase, (val) => {
   setSessionStorageItem('aether_update_phase', val)
@@ -823,7 +844,7 @@ function applyUpdateCapability(capability: SystemUpdateCapabilityResponse) {
 }
 
 function updateUnsupportedMessage(fallback: MessageKey = MANUAL_UPDATE_HINT): string {
-  return normalizeUpdateBlockerForDisplay(updateCapabilityMessage.value || t(fallback))
+  return updateCapabilityMessage.value || t(fallback)
 }
 
 function syncSystemUpdatePhase(status: CheckUpdateResponse | null) {
@@ -842,6 +863,13 @@ function syncSystemUpdatePhase(status: CheckUpdateResponse | null) {
 
 function handleVersionRefresh() {
   void loadVersionStatus(true)
+}
+
+function openVersionReleasePage() {
+  const releaseUrl = safeExternalHttpsUrl(versionStatus.value?.release_url)
+  if (releaseUrl) {
+    window.open(releaseUrl, '_blank', 'noopener,noreferrer')
+  }
 }
 
 function buildUpdateInfoFromRelease(release: ReleaseEntry): CheckUpdateResponse {

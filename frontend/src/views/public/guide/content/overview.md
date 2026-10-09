@@ -5,14 +5,18 @@
 
 ### 1. 预构建镜像 (Docker Compose)
 ```markdown
-# 1. 配置环境变量
+# 1. 克隆代码
+git clone https://github.com/fawney19/Aether.git
+cd Aether
+
+# 2. 配置环境变量
 cp .env.example .env
 ./generate_keys.sh # 生成密钥, 并将生成的密钥填入 .env
 
-# 2. 部署 / 更新（自动执行数据库迁移）
+# 3. 部署 / 更新（自动执行数据库迁移）
 docker compose pull && docker compose up -d
 
-# 3. 升级前备份
+# 4. 升级前备份
 docker compose exec postgres pg_dump -U postgres aether | gzip > backup_$(date +%Y%m%d_%H%M%S).sql.gz
 ```
 
@@ -97,6 +101,7 @@ make dev
 
 1. **Aether-Proxy**
    Rust实现, 超小资源占有, 适合性能低的vps直接使用。
+   [https://github.com/fawney19/Aether/tree/main/aether-tunnel](https://github.com/fawney19/Aether/tree/main/aether-tunnel)
 
 2. **代理节点**
    在模块管理中, 开启代理模块后可以添加和使用代理功能, 包括手动添加和Aether-Proxy自动连接。

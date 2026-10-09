@@ -139,6 +139,15 @@
               {{ rollingBack ? '回滚中...' : '回滚' }}
             </Button>
             <Button
+              v-if="status?.has_update && status.release_url && !rollbackAvailable"
+              size="sm"
+              class="flex-1"
+              @click="handleOpenRelease"
+            >
+              <ExternalLink class="mr-2 h-3.5 w-3.5" />
+              {{ releaseButtonLabel }}
+            </Button>
+            <Button
               v-if="status?.has_update && canApplyUpdate"
               size="sm"
               class="flex-1"
@@ -220,7 +229,7 @@
                     v-if="release.update_blocker"
                     class="mt-0.5 text-[10px] text-muted-foreground"
                   >
-                    {{ legacyT(normalizeUpdateBlockerForDisplay(release.update_blocker)) }}
+                    {{ release.update_blocker }}
                   </div>
                 </div>
                 <span class="ml-2 shrink-0 text-[10px] font-medium text-muted-foreground">
@@ -304,6 +313,14 @@
         {{ $legacyT('关闭') }}
       </Button>
       <Button
+        v-if="selectedRelease?.release_url"
+        variant="outline"
+        @click="handleOpenSelectedReleasePage"
+      >
+        <ExternalLink class="mr-2 h-3.5 w-3.5" />
+        {{ $legacyT('查看标签页') }}
+      </Button>
+      <Button
         v-if="canUseSelectedRelease"
         :disabled="isBusy"
         @click="handleUseSelectedRelease"
@@ -325,11 +342,12 @@ import { adminApi } from '@/api/admin'
 import { Button, Dialog, Popover, PopoverContent, PopoverTrigger } from '@/components/ui'
 import { normalizeReleaseNotesForDisplay } from '@/utils/releaseNotes'
 import { formatDisplayVersion } from '@/utils/version'
-import { describeUpdateStatus, normalizeUpdateBlockerForDisplay } from '@/utils/updateStatus'
+import { describeUpdateStatus } from '@/utils/updateStatus'
 import { sanitizeMarkdown } from '@/utils/sanitize'
+import { safeExternalHttpsUrl } from '@/utils/navigationSecurity'
 import { useI18n } from '@/i18n'
 import { marked } from 'marked'
-import { ChevronRight, Info, RefreshCw } from 'lucide-vue-next'
+import { ChevronRight, ExternalLink, Info, RefreshCw } from 'lucide-vue-next'
 
 const props = defineProps<{
   status: CheckUpdateResponse | null
@@ -344,11 +362,14 @@ const props = defineProps<{
 }>()
 const emit = defineEmits<{
   refresh: []
+  openRelease: []
   applyUpdate: []
   previewRelease: [release: ReleaseEntry]
   rollback: []
 }>()
 const { legacyT, locale } = useI18n()
+const SOURCE_BUILD_UPDATE_HINT = '当前为源码构建，请使用 git pull 后重新编译。'
+const SOURCE_BUILD_RELEASE_HINT = '当前为源码构建，请手动切换到对应标签后重新编译。'
 
 const isOpen = ref(false)
 const showReleases = ref(false)
@@ -380,8 +401,12 @@ const progressBarWidth = computed(() => {
   return downloadProgressPercent.value === null ? '35%' : `${downloadProgressPercent.value}%`
 })
 const updateBlockerText = computed(() => {
-  return legacyT(normalizeUpdateBlockerForDisplay(props.status?.update_blocker))
+  if (!updateSupported.value) {
+    return legacyT(props.status?.update_blocker || SOURCE_BUILD_UPDATE_HINT)
+  }
+  return legacyT(props.status?.update_blocker || '当前版本暂不支持在线更新')
 })
+const releaseButtonLabel = computed(() => legacyT(updateSupported.value ? '查看更新' : '查看发布'))
 const buttonClass = computed(() => {
   const classes = []
 
@@ -466,9 +491,9 @@ const selectedReleaseHelpText = computed(() => {
   if (!selectedRelease.value) return ''
   if (selectedRelease.value.is_current) return legacyT('当前正在运行这个版本。')
   if (!updateSupported.value) {
-    return legacyT(normalizeUpdateBlockerForDisplay(selectedRelease.value.update_blocker))
+    return legacyT(selectedRelease.value.update_blocker || SOURCE_BUILD_RELEASE_HINT)
   }
-  if (selectedRelease.value.update_blocker) return legacyT(normalizeUpdateBlockerForDisplay(selectedRelease.value.update_blocker))
+  if (selectedRelease.value.update_blocker) return legacyT(selectedRelease.value.update_blocker)
   return legacyT(selectedRelease.value.is_newer
     ? '将这个版本作为在线更新目标。'
     : '将切换到这个历史版本。')
@@ -541,6 +566,18 @@ function handleRefresh() {
     fetchReleases(true)
   }
   emit('refresh')
+}
+
+function handleOpenRelease() {
+  isOpen.value = false
+  emit('openRelease')
+}
+
+function handleOpenSelectedReleasePage() {
+  const releaseUrl = safeExternalHttpsUrl(selectedRelease.value?.release_url)
+  if (releaseUrl) {
+    window.open(releaseUrl, '_blank', 'noopener,noreferrer')
+  }
 }
 
 function handleUseSelectedRelease() {

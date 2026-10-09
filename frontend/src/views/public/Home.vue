@@ -58,6 +58,15 @@
           </button>
           <ThemeModeButton size="sm" />
           <LanguageSwitcher />
+          <a
+            href="https://github.com/fawney19/Aether"
+            target="_blank"
+            rel="noopener noreferrer"
+            class="flex h-8 w-8 items-center justify-center rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted/50 transition"
+            :title="t('common.githubRepository')"
+          >
+            <GithubIcon class="h-3.5 w-3.5" />
+          </a>
         </div>
       </div>
 
@@ -140,10 +149,19 @@
           </button>
         </div>
 
-        <!-- Right: Theme Toggle + Language -->
+        <!-- Right: Theme Toggle + GitHub Icons -->
         <div class="flex items-center gap-1 shrink-0">
           <ThemeModeButton />
           <LanguageSwitcher />
+          <a
+            href="https://github.com/fawney19/Aether"
+            target="_blank"
+            rel="noopener noreferrer"
+            class="flex h-9 w-9 items-center justify-center rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted/50 transition"
+            :title="t('common.githubRepository')"
+          >
+            <GithubIcon class="h-4 w-4" />
+          </a>
         </div>
       </div>
     </header>
@@ -412,6 +430,7 @@ import {
   Sparkles,
   Terminal
 } from 'lucide-vue-next'
+import GithubIcon from '@/components/icons/GithubIcon.vue'
 import { useAuthStore } from '@/stores/auth'
 import { useDarkMode } from '@/composables/useDarkMode'
 import { useClipboard } from '@/composables/useClipboard'
