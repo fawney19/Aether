@@ -708,6 +708,9 @@ mod tests {
                 {"role": "user", "content": [{"type": "input_text", "text": "go"}]},
                 {"type": "reasoning", "summary": [],
                  "encrypted_content": carrier("sig-a", GeminiToolSignatureCarrierDirection::Next)},
+                // omp replays reasoning text between the carrier and its call.
+                {"type": "reasoning", "summary": [],
+                 "content": [{"type": "reasoning_text", "text": "plan a"}]},
                 {"type": "function_call", "call_id": "call_a", "name": "read",
                  "arguments": "{\"path\":\"a\"}"},
                 {"type": "function_call_output", "call_id": "call_a", "output": "A"},
