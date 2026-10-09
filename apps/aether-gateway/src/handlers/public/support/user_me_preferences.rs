@@ -84,6 +84,7 @@ fn build_users_me_preferences_payload(
         "theme": preferences.theme,
         "language": preferences.language,
         "timezone": preferences.timezone,
+        "allow_wallet_overage": preferences.allow_wallet_overage,
         "notifications": {
             "email": preferences.email_notifications,
             "usage_alerts": preferences.usage_alerts,
@@ -345,6 +346,17 @@ pub(super) async fn handle_users_me_preferences_put(
         };
     if let Some(announcement_notifications) = announcement_notifications {
         preferences.announcement_notifications = announcement_notifications;
+    }
+
+    let allow_wallet_overage =
+        match parse_users_me_optional_bool_field(payload, "allow_wallet_overage") {
+            Ok(value) => value,
+            Err(detail) => {
+                return build_auth_error_response(http::StatusCode::BAD_REQUEST, detail, false)
+            }
+        };
+    if let Some(allow_wallet_overage) = allow_wallet_overage {
+        preferences.allow_wallet_overage = allow_wallet_overage;
     }
 
     match state.write_user_preferences(&preferences).await {

@@ -1630,11 +1630,22 @@ const mockHandlers: Record<string, (config: AxiosRequestConfig) => Promise<Axios
 
   'GET /api/users/me/preferences': async () => {
     await delay()
-    return createMockResponse(getCurrentProfile().preferences || { theme: 'auto', language: 'zh-CN' })
+    return createMockResponse({
+      allow_wallet_overage: false,
+      ...(getCurrentProfile().preferences || { theme: 'auto', language: 'zh-CN' }),
+    })
   },
 
-  'PUT /api/users/me/preferences': async () => {
+  'PUT /api/users/me/preferences': async (config) => {
     await delay()
+    const payload = mockRequestObject(config)
+    if (typeof payload.allow_wallet_overage === 'boolean') {
+      const profile = getCurrentProfile()
+      profile.preferences = {
+        ...(profile.preferences || { theme: 'auto', language: 'zh-CN' }),
+        allow_wallet_overage: payload.allow_wallet_overage,
+      }
+    }
     return createMockResponse({ message: '偏好设置已更新（演示模式）' })
   },
 

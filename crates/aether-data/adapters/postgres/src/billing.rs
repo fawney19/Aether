@@ -1193,10 +1193,8 @@ WHERE id = $1
             r#"
 SELECT
     user_plan_entitlements.id,
-    user_plan_entitlements.entitlements_snapshot,
-    billing_plans.entitlements_json AS plan_entitlements_json
+    user_plan_entitlements.entitlements_snapshot
 FROM user_plan_entitlements
-JOIN billing_plans ON billing_plans.id = user_plan_entitlements.plan_id
 WHERE user_plan_entitlements.user_id = $1
     AND user_plan_entitlements.status = 'active'
     AND user_plan_entitlements.starts_at <= NOW()
@@ -1216,12 +1214,9 @@ ORDER BY user_plan_entitlements.expires_at ASC,
             let entitlement_id: String = row.try_get("id").map_postgres_err()?;
             let entitlements: serde_json::Value =
                 row.try_get("entitlements_snapshot").map_postgres_err()?;
-            let plan_entitlements: serde_json::Value =
-                row.try_get("plan_entitlements_json").map_postgres_err()?;
             grants.extend(daily_quota_grants_from_entitlement(
                 &entitlement_id,
                 &entitlements,
-                daily_quota_wallet_overage_policy(&plan_entitlements),
                 now,
             )?);
         }
@@ -1229,9 +1224,15 @@ ORDER BY user_plan_entitlements.expires_at ASC,
         let mut total_quota_usd = 0.0;
         let mut used_usd = 0.0;
         let mut remaining_usd = 0.0;
-        let mut allow_wallet_overage = true;
+        let allow_wallet_overage = sqlx::query_scalar::<_, bool>(
+            "SELECT allow_wallet_overage FROM user_preferences WHERE user_id = $1",
+        )
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_postgres_err()?
+        .unwrap_or(false);
         for grant in &grants {
-            allow_wallet_overage &= grant.allow_wallet_overage;
             let used = sqlx::query_scalar::<_, Option<f64>>(
                 r#"
 SELECT CAST(COALESCE(SUM(amount_usd), 0) AS DOUBLE PRECISION)
@@ -1336,7 +1337,6 @@ struct DailyQuotaGrant {
     entitlement_id: String,
     daily_quota_usd: f64,
     usage_date: String,
-    allow_wallet_overage: bool,
 }
 
 fn daily_quota_usage_date(
@@ -1355,7 +1355,6 @@ fn daily_quota_usage_date(
 fn daily_quota_grants_from_entitlement(
     entitlement_id: &str,
     entitlements: &serde_json::Value,
-    current_allow_wallet_overage: Option<bool>,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<Vec<DailyQuotaGrant>, DataLayerError> {
     let mut grants = Vec::new();
@@ -1381,25 +1380,9 @@ fn daily_quota_grants_from_entitlement(
                     .and_then(serde_json::Value::as_str),
                 now,
             )?,
-            allow_wallet_overage: current_allow_wallet_overage.unwrap_or_else(|| {
-                item.get("allow_wallet_overage")
-                    .and_then(serde_json::Value::as_bool)
-                    .unwrap_or(false)
-            }),
         });
     }
     Ok(grants)
-}
-
-fn daily_quota_wallet_overage_policy(entitlements: &serde_json::Value) -> Option<bool> {
-    entitlements.as_array()?.iter().find_map(|item| {
-        (item.get("type").and_then(serde_json::Value::as_str) == Some("daily_quota"))
-            .then(|| {
-                item.get("allow_wallet_overage")
-                    .and_then(serde_json::Value::as_bool)
-            })
-            .flatten()
-    })
 }
 
 fn map_payment_gateway_config_row(

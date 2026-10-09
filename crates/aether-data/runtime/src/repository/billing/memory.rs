@@ -92,14 +92,12 @@ fn billing_plan_from_input(
 
 fn daily_quota_availability_from_entitlements(
     entitlements: impl IntoIterator<Item = UserPlanEntitlementRecord>,
-    billing_plans: &BTreeMap<String, BillingPlanRecord>,
     now: u64,
 ) -> UserDailyQuotaAvailabilityRecord {
     let mut has_active_daily_quota = false;
     let mut total_quota_usd = 0.0;
     let used_usd = 0.0;
     let mut remaining_usd = 0.0;
-    let mut allow_wallet_overage = true;
     for entitlement in entitlements {
         if entitlement.status != "active"
             || entitlement.starts_at_unix_secs > now
@@ -110,9 +108,6 @@ fn daily_quota_availability_from_entitlements(
         let Some(items) = entitlement.entitlements_snapshot.as_array() else {
             continue;
         };
-        let current_allow_wallet_overage = billing_plans
-            .get(&entitlement.plan_id)
-            .and_then(|plan| daily_quota_wallet_overage_policy(&plan.entitlements_json));
         for item in items {
             if item.get("type").and_then(serde_json::Value::as_str) != Some("daily_quota") {
                 continue;
@@ -127,11 +122,6 @@ fn daily_quota_availability_from_entitlements(
             has_active_daily_quota = true;
             total_quota_usd += daily_quota_usd;
             remaining_usd += daily_quota_usd;
-            allow_wallet_overage &= current_allow_wallet_overage.unwrap_or_else(|| {
-                item.get("allow_wallet_overage")
-                    .and_then(serde_json::Value::as_bool)
-                    .unwrap_or(false)
-            });
         }
     }
     UserDailyQuotaAvailabilityRecord {
@@ -139,19 +129,9 @@ fn daily_quota_availability_from_entitlements(
         total_quota_usd,
         used_usd,
         remaining_usd,
-        allow_wallet_overage,
+        // The gateway combines this quota with the user's stored preference.
+        allow_wallet_overage: false,
     }
-}
-
-fn daily_quota_wallet_overage_policy(entitlements: &serde_json::Value) -> Option<bool> {
-    entitlements.as_array()?.iter().find_map(|item| {
-        (item.get("type").and_then(serde_json::Value::as_str) == Some("daily_quota"))
-            .then(|| {
-                item.get("allow_wallet_overage")
-                    .and_then(serde_json::Value::as_bool)
-            })
-            .flatten()
-    })
 }
 
 #[async_trait]
@@ -578,13 +558,8 @@ impl BillingReadRepository for InMemoryBillingReadRepository {
             .filter(|item| item.user_id == user_id)
             .cloned()
             .collect::<Vec<_>>();
-        let billing_plans = self
-            .billing_plans_by_id
-            .read()
-            .expect("billing repository lock");
         Ok(Some(daily_quota_availability_from_entitlements(
             entitlements,
-            &billing_plans,
             now,
         )))
     }

@@ -5414,3 +5414,21 @@ fn attach_usage_settlement_pricing_snapshot_metadata_adds_missing_values_without
         })
     );
 }
+
+#[test]
+fn provider_breakdown_labels_resolve_catalog_name_before_recorded_name_and_id() {
+    let sql = super::analytics::ANALYTICS_PROVIDER_LABEL_SQL;
+    let catalog = sql
+        .find("provider_catalog.name")
+        .expect("provider catalog name");
+    let recorded = sql
+        .find("page.provider_name")
+        .expect("recorded provider name snapshot");
+    let raw_id = sql
+        .find("page.group_id::text")
+        .expect("raw provider id fallback");
+    // 成本分析“提供商”列的解析顺序：目录名称 → 使用记录里的名称快照 → 原始 provider_id。
+    assert!(catalog < recorded && recorded < raw_id);
+    // 历史占位值不能被当成提供商名称展示。
+    assert!(sql.contains("'unknown', 'unknow', 'pending'"));
+}

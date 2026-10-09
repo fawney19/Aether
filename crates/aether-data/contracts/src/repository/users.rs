@@ -776,6 +776,8 @@ pub struct StoredUserPreferenceRecord {
     pub email_notifications: bool,
     pub usage_alerts: bool,
     pub announcement_notifications: bool,
+    #[serde(default)]
+    pub allow_wallet_overage: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -925,6 +927,7 @@ impl StoredUserPreferenceRecord {
             email_notifications: true,
             usage_alerts: true,
             announcement_notifications: true,
+            allow_wallet_overage: false,
         }
     }
 }
@@ -1967,5 +1970,14 @@ mod tests {
         assert!(record.email_notifications);
         assert!(record.usage_alerts);
         assert!(record.announcement_notifications);
+        assert!(!record.allow_wallet_overage);
+        let mut legacy_json = serde_json::to_value(&record).expect("preferences should serialize");
+        legacy_json
+            .as_object_mut()
+            .expect("preferences object")
+            .remove("allow_wallet_overage");
+        let restored: StoredUserPreferenceRecord =
+            serde_json::from_value(legacy_json).expect("legacy preferences should deserialize");
+        assert!(!restored.allow_wallet_overage);
     }
 }

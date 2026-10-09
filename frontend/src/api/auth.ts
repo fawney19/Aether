@@ -21,6 +21,7 @@ export interface UserPreferences {
   theme?: 'light' | 'dark' | 'auto'
   language?: string
   notifications_enabled?: boolean
+  allow_wallet_overage?: boolean
   [key: string]: unknown // 允许扩展其他偏好设置
 }
 

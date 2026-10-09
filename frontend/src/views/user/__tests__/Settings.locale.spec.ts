@@ -227,3 +227,72 @@ describe('Settings language preferences', () => {
     expect(meApiMock.updatePreferences).not.toHaveBeenCalled()
   })
 })
+
+describe('Settings wallet fallback preferences', () => {
+  function walletSwitch(root: HTMLElement): HTMLButtonElement {
+    const control = root.querySelector<HTMLButtonElement>('#allow-wallet-overage')
+    if (!control) throw new Error('The wallet fallback switch was not rendered')
+    return control
+  }
+
+  it('defaults to off for existing users and waits for preferences before allowing changes', async () => {
+    const preferences = deferred<ReturnType<typeof serverPreferences>>()
+    meApiMock.getPreferences.mockReturnValueOnce(preferences.promise)
+    const root = mountSettings()
+    const control = walletSwitch(root)
+
+    expect(control.getAttribute('aria-checked')).toBe('false')
+    expect(control.disabled).toBe(true)
+    control.click()
+    expect(meApiMock.updatePreferences).not.toHaveBeenCalled()
+
+    preferences.resolve(serverPreferences())
+    await flushPromises()
+    expect(control.disabled).toBe(false)
+    expect(control.getAttribute('aria-checked')).toBe('false')
+  })
+
+  it('loads the saved choice and persists both disabling and enabling without changing other preferences', async () => {
+    meApiMock.getPreferences.mockResolvedValue({ ...serverPreferences(), allow_wallet_overage: true })
+    const root = mountSettings()
+    await flushPromises()
+    const control = walletSwitch(root)
+
+    expect(control.getAttribute('aria-checked')).toBe('true')
+    control.click()
+    await flushPromises()
+    expect(meApiMock.updatePreferences).toHaveBeenLastCalledWith({ allow_wallet_overage: false })
+    expect(control.getAttribute('aria-checked')).toBe('false')
+
+    control.click()
+    await flushPromises()
+    expect(meApiMock.updatePreferences).toHaveBeenLastCalledWith({ allow_wallet_overage: true })
+    expect(control.getAttribute('aria-checked')).toBe('true')
+
+    chooseEnglish(root)
+    await flushPromises()
+    expect(meApiMock.updatePreferences.mock.lastCall?.[0]).not.toHaveProperty('allow_wallet_overage')
+  })
+
+  it('prevents duplicate saves and restores the saved choice when saving fails', async () => {
+    let reject!: (reason: Error) => void
+    meApiMock.updatePreferences.mockReturnValueOnce(new Promise<void>((_, fail) => { reject = fail }))
+    const root = mountSettings()
+    await flushPromises()
+    const control = walletSwitch(root)
+
+    control.click()
+    await nextTick()
+    expect(control.disabled).toBe(true)
+    expect(control.getAttribute('aria-checked')).toBe('true')
+    control.click()
+    expect(meApiMock.updatePreferences).toHaveBeenCalledTimes(1)
+
+    reject(new Error('Save failed'))
+    await flushPromises()
+    expect(control.disabled).toBe(false)
+    expect(control.getAttribute('aria-checked')).toBe('false')
+    expect(toastMock.error).toHaveBeenCalledWith('保存设置失败')
+    expect(toastMock.success).not.toHaveBeenCalled()
+  })
+})

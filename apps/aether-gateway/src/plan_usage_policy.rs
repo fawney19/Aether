@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -7,9 +8,10 @@ use aether_data_contracts::repository::billing::{
     UsagePolicyWindow, UserPlanEntitlementRecord, USAGE_POLICY_COST_UNITS_PER_USD,
 };
 use aether_data_contracts::repository::settlement::{
-    ReconcileUsagePolicyCostInput, ReserveUsagePolicyCostInput, ReserveUsagePolicyCostOutcome,
-    ReserveUsagePolicyRequestInput, ReserveUsagePolicyRequestOutcome,
-    UsagePolicyCostReservationState, UsagePolicyCostWindow, UsagePolicyRequestWindow,
+    ReconcileUsagePolicyCostInput, ReleaseUsagePolicyRequestAdmissionInput,
+    ReserveUsagePolicyCostInput, ReserveUsagePolicyCostOutcome, ReserveUsagePolicyRequestInput,
+    ReserveUsagePolicyRequestOutcome, UsagePolicyCostReservationState, UsagePolicyCostWindow,
+    UsagePolicyRequestWindow,
 };
 use aether_runtime::AdmissionPermit;
 use aether_runtime_state::{
@@ -33,9 +35,12 @@ pub(crate) struct PlanUsagePolicySnapshot {
     pub(crate) admitted_at_unix_secs: u64,
     subject_id: Arc<str>,
     policy: Arc<EffectivePlanUsagePolicy>,
+    admission_event_id: Arc<str>,
+    wallet_fallback: Arc<AtomicBool>,
 }
 
 impl PlanUsagePolicySnapshot {
+    #[cfg(test)]
     fn for_admission(
         subject_id: &str,
         policy: EffectivePlanUsagePolicy,
@@ -48,7 +53,32 @@ impl PlanUsagePolicySnapshot {
             admitted_at_unix_secs,
             subject_id: subject_id.to_string().into(),
             policy: Arc::new(policy),
+            admission_event_id: "".into(),
+            wallet_fallback: Arc::new(AtomicBool::new(false)),
         })
+    }
+
+    fn with_admission(
+        subject_id: &str,
+        policy: EffectivePlanUsagePolicy,
+        admitted_at_unix_secs: u64,
+        event_id: &str,
+        wallet_fallback: bool,
+    ) -> Option<Self> {
+        if policy.cost_rules.is_empty() && !wallet_fallback {
+            return None;
+        }
+        Some(Self {
+            admitted_at_unix_secs,
+            subject_id: subject_id.into(),
+            policy: Arc::new(policy),
+            admission_event_id: event_id.into(),
+            wallet_fallback: Arc::new(AtomicBool::new(wallet_fallback)),
+        })
+    }
+
+    pub(crate) fn uses_wallet_fallback(&self) -> bool {
+        self.wallet_fallback.load(Ordering::Acquire)
     }
 
     pub(crate) fn new_reservation_context(&self) -> PlanUsageReservationContext {
@@ -86,6 +116,8 @@ impl PlanUsageReservationContext {
                 admitted_at_unix_secs,
                 subject_id: subject_id.into(),
                 policy: Arc::new(policy),
+                admission_event_id: "".into(),
+                wallet_fallback: Arc::new(AtomicBool::new(false)),
             },
             token: token.into(),
         }
@@ -105,6 +137,10 @@ impl PlanUsageReservationContext {
 
     pub(crate) const fn admitted_at_unix_secs(&self) -> u64 {
         self.policy_snapshot.admitted_at_unix_secs
+    }
+
+    pub(crate) fn uses_wallet_fallback(&self) -> bool {
+        self.policy_snapshot.uses_wallet_fallback()
     }
 }
 
@@ -182,6 +218,7 @@ pub(crate) struct PlanUsagePolicyRejection {
 pub(crate) enum PlanUsageCostReservationOutcome {
     NotRequired,
     Reserved,
+    WalletFallback,
     Rejected(PlanUsagePolicyRejection),
 }
 
@@ -203,13 +240,12 @@ pub(crate) async fn reserve_admitted_http_plan_usage_policy_cost(
             "plan usage reservation subject does not match the admitted request".to_string(),
         ));
     }
-    reserve_plan_usage_policy_cost_with_policy(
+    reserve_cost_with_wallet_fallback(
         state,
         decision,
         plan,
         report_context,
-        reservation.policy(),
-        reservation.admitted_at_unix_secs(),
+        &reservation.policy_snapshot,
         reservation.token(),
     )
     .await
@@ -234,7 +270,58 @@ pub(crate) async fn reserve_admitted_plan_usage_policy_cost(
             "plan usage reservation subject does not match the admitted request".to_string(),
         ));
     }
-    reserve_plan_usage_policy_cost_with_policy(
+    reserve_cost_with_wallet_fallback(
+        state,
+        decision,
+        plan,
+        report_context,
+        snapshot,
+        reservation_token,
+    )
+    .await
+}
+
+async fn wallet_fallback_available(
+    state: &AppState,
+    auth: &crate::control::GatewayControlAuthContext,
+    required_cost_usd: Option<f64>,
+) -> Result<bool, GatewayError> {
+    if !state
+        .read_user_preferences(&auth.user_id)
+        .await?
+        .is_some_and(|preferences| preferences.allow_wallet_overage)
+    {
+        return Ok(false);
+    }
+    let wallet = state
+        .read_wallet_snapshot_for_auth_uncached(
+            &auth.user_id,
+            &auth.api_key_id,
+            auth.api_key_is_standalone,
+        )
+        .await?;
+    Ok(wallet.is_some_and(|wallet| {
+        wallet.status.eq_ignore_ascii_case("active")
+            && (wallet.limit_mode.eq_ignore_ascii_case("unlimited") || {
+                let available = wallet.balance.max(0.0) + wallet.gift_balance.max(0.0);
+                available > 0.000_000_01
+                    && required_cost_usd.is_none_or(|cost| cost <= available + 0.000_000_01)
+            })
+    }))
+}
+
+async fn reserve_cost_with_wallet_fallback(
+    state: &AppState,
+    decision: &GatewayControlDecision,
+    plan: &aether_contracts::ExecutionPlan,
+    report_context: Option<&serde_json::Value>,
+    snapshot: &PlanUsagePolicySnapshot,
+    reservation_token: &str,
+) -> Result<PlanUsageCostReservationOutcome, GatewayError> {
+    if snapshot.uses_wallet_fallback() {
+        return Ok(PlanUsageCostReservationOutcome::WalletFallback);
+    }
+    let outcome = reserve_plan_usage_policy_cost_with_policy(
         state,
         decision,
         plan,
@@ -243,7 +330,52 @@ pub(crate) async fn reserve_admitted_plan_usage_policy_cost(
         snapshot.admitted_at_unix_secs,
         reservation_token,
     )
-    .await
+    .await?;
+    if !matches!(outcome, PlanUsageCostReservationOutcome::Rejected(_)) {
+        return Ok(outcome);
+    }
+    let Some(auth) = plan_usage_auth_context(decision) else {
+        return Ok(outcome);
+    };
+    let estimated =
+        crate::control::estimate_execution_plan_cost_upper_bound_usd(state, plan, report_context)
+            .await?;
+    let Some(estimated) = estimated else {
+        return Ok(outcome);
+    };
+    if !wallet_fallback_available(state, auth, Some(estimated)).await? {
+        return Ok(outcome);
+    }
+    // A previous provider attempt may have reserved a smaller cost. A paid retry must
+    // release it, and must not extend the plan's long request-count recovery window.
+    release_plan_usage_policy_cost(
+        state,
+        decision,
+        plan,
+        reservation_token,
+        crate::clock::current_unix_secs(),
+    )
+    .await?;
+    if !snapshot.admission_event_id.is_empty()
+        && snapshot
+            .policy
+            .request_rules
+            .iter()
+            .any(|rule| !request_rule_uses_runtime_state(&rule))
+    {
+        state
+            .data
+            .release_usage_policy_request_admission(ReleaseUsagePolicyRequestAdmissionInput {
+                request_id: snapshot.admission_event_id.to_string(),
+                subject_id: auth.user_id.clone(),
+                event_token: snapshot.admission_event_id.to_string(),
+                released_at_unix_secs: crate::clock::current_unix_secs(),
+            })
+            .await
+            .map_err(|error| GatewayError::Internal(error.to_string()))?;
+    }
+    snapshot.wallet_fallback.store(true, Ordering::Release);
+    Ok(PlanUsageCostReservationOutcome::WalletFallback)
 }
 
 fn plan_usage_auth_context(
@@ -458,16 +590,16 @@ pub(crate) async fn check_and_acquire_plan_usage_policy_admission(
 
     let admitted_at_unix_secs = now_unix_ms / 1_000;
     let policy = load_effective_policy(state, &auth.user_id, admitted_at_unix_secs).await?;
-    let permit = check_and_acquire_compiled_plan_usage_policy(
-        state,
+    let (permit, wallet_fallback) =
+        check_and_acquire_compiled_plan_usage_policy(state, auth, &policy, event_id, now_unix_ms)
+            .await?;
+    let policy_snapshot = PlanUsagePolicySnapshot::with_admission(
         &auth.user_id,
-        &policy,
+        policy,
+        admitted_at_unix_secs,
         event_id,
-        now_unix_ms,
-    )
-    .await?;
-    let policy_snapshot =
-        PlanUsagePolicySnapshot::for_admission(&auth.user_id, policy, admitted_at_unix_secs);
+        wallet_fallback,
+    );
     Ok(PlanUsageAdmission {
         permit,
         policy_snapshot,
@@ -476,14 +608,33 @@ pub(crate) async fn check_and_acquire_plan_usage_policy_admission(
 
 async fn check_and_acquire_compiled_plan_usage_policy(
     state: &AppState,
-    subject_id: &str,
+    auth: &crate::control::GatewayControlAuthContext,
     policy: &EffectivePlanUsagePolicy,
     event_id: &str,
     now_unix_ms: u64,
-) -> Result<Option<AdmissionPermit>, PlanUsageAdmissionError> {
+) -> Result<(Option<AdmissionPermit>, bool), PlanUsageAdmissionError> {
+    let daily_quota_exhausted = if !policy.cost_rules.is_empty()
+        || policy
+            .request_rules
+            .iter()
+            .any(|rule| !request_rule_uses_runtime_state(&rule))
+    {
+        state
+            .find_user_daily_quota_availability_for_auth(&auth.user_id)
+            .await?
+            .is_some_and(|quota| {
+                quota.has_active_daily_quota && quota.remaining_usd <= 0.000_000_01
+            })
+    } else {
+        false
+    };
+    let wallet_fallback =
+        daily_quota_exhausted && wallet_fallback_available(state, auth, None).await?;
     if policy.request_rules.is_empty() && policy.concurrency_limit.is_none() {
-        return Ok(None);
+        return Ok((None, wallet_fallback));
     }
+
+    let subject_id = auth.user_id.as_str();
 
     let now_unix_secs = now_unix_ms / 1_000;
 
@@ -570,6 +721,7 @@ async fn check_and_acquire_compiled_plan_usage_policy(
 
     let durable_rules = durable_request_rules
         .iter()
+        .filter(|_| !wallet_fallback)
         .map(|rule| durable_request_rule(rule, now_unix_secs))
         .collect::<Result<Vec<_>, _>>()?;
     if !durable_rules.is_empty() {
@@ -630,6 +782,11 @@ async fn check_and_acquire_compiled_plan_usage_policy(
                 limit_requests,
                 ..
             } => {
+                // Only long quota windows may use paid fallback. Concurrency and
+                // short QPS/RPM rules above remain enforced and retain their permit.
+                if wallet_fallback_available(state, auth, None).await? {
+                    return Ok((AdmissionPermit::from_parts(None, plan_permit), true));
+                }
                 release_runtime_usage_limits_best_effort(
                     state,
                     &runtime_inputs,
@@ -678,7 +835,10 @@ async fn check_and_acquire_compiled_plan_usage_policy(
         }
     }
 
-    Ok(AdmissionPermit::from_parts(None, plan_permit))
+    Ok((
+        AdmissionPermit::from_parts(None, plan_permit),
+        wallet_fallback,
+    ))
 }
 
 pub(crate) async fn check_and_acquire_http_plan_usage_policy(
@@ -705,17 +865,17 @@ pub(crate) async fn check_and_acquire_http_plan_usage_policy(
 
     let admitted_at_unix_secs = now_unix_ms / 1_000;
     let policy = load_effective_policy(state, &auth.user_id, admitted_at_unix_secs).await?;
-    let permit = check_and_acquire_compiled_plan_usage_policy(
-        state,
+    let (permit, wallet_fallback) =
+        check_and_acquire_compiled_plan_usage_policy(state, auth, &policy, event_id, now_unix_ms)
+            .await?;
+    let reservation_context = PlanUsagePolicySnapshot::with_admission(
         &auth.user_id,
-        &policy,
+        policy,
+        admitted_at_unix_secs,
         event_id,
-        now_unix_ms,
+        wallet_fallback,
     )
-    .await?;
-    let reservation_context =
-        PlanUsagePolicySnapshot::for_admission(&auth.user_id, policy, admitted_at_unix_secs)
-            .map(|snapshot| snapshot.new_reservation_context());
+    .map(|snapshot| snapshot.new_reservation_context());
     Ok(HttpPlanUsageAdmission {
         permit,
         reservation_context,
@@ -1228,6 +1388,367 @@ fn date_overflow() -> PlanUsageAdmissionError {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn fallback_test_state(enabled: bool, balance: f64) -> AppState {
+        use aether_data::repository::billing::InMemoryBillingReadRepository;
+        use aether_data::repository::settlement::InMemorySettlementRepository;
+        use aether_data::repository::usage::InMemoryUsageReadRepository;
+        use aether_data::repository::wallet::{InMemoryWalletRepository, StoredWalletSnapshot};
+        use aether_data_contracts::repository::billing::StoredBillingModelContext;
+        let wallet = StoredWalletSnapshot::new(
+            "wallet-user-1".into(),
+            Some("user-1".into()),
+            None,
+            balance,
+            0.0,
+            "finite".into(),
+            "USD".into(),
+            "active".into(),
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            100,
+        )
+        .unwrap();
+        let mut preferences = crate::GatewayUserPreferenceView::default_for_user("user-1");
+        preferences.allow_wallet_overage = enabled;
+        let data = crate::data::GatewayDataState::with_usage_billing_and_wallet_for_tests(
+            Arc::new(InMemoryUsageReadRepository::default()),
+            Arc::new(InMemoryBillingReadRepository::seed([
+                StoredBillingModelContext::new(
+                    "provider-1".into(),
+                    None,
+                    Some("key-1".into()),
+                    None,
+                    None,
+                    "global-model-1".into(),
+                    "gpt-5".into(),
+                    None,
+                    Some(0.25),
+                    None,
+                    Some("model-1".into()),
+                    Some("gpt-5".into()),
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap(),
+            ])),
+            Arc::new(InMemoryWalletRepository::seed([wallet])),
+        )
+        .with_settlement_writer_for_tests(Arc::new(InMemorySettlementRepository::default()))
+        .with_user_preferences_for_tests([preferences.into()]);
+        AppState::new()
+            .unwrap()
+            .with_data_state_for_tests(data)
+            .with_usage_runtime_for_tests(crate::usage::UsageRuntimeConfig {
+                enabled: true,
+                ..Default::default()
+            })
+    }
+
+    fn fallback_test_auth() -> crate::control::GatewayControlAuthContext {
+        crate::control::GatewayControlAuthContext {
+            user_id: "user-1".into(),
+            api_key_id: "api-key-1".into(),
+            username: None,
+            api_key_name: None,
+            balance_remaining: None,
+            access_allowed: true,
+            user_rate_limit: None,
+            api_key_rate_limit: None,
+            api_key_is_standalone: false,
+            admin_bypass_limits: false,
+            local_rejection: None,
+            allowed_models: None,
+            ip_rules: None,
+            verified_api_key_hash: None,
+        }
+    }
+
+    fn fallback_test_policy(short_limit: u64) -> EffectivePlanUsagePolicy {
+        compile_effective_policy(&[entitlement("ent-1", json!([{
+            "type":"usage_policy", "rules":[
+                {"metric":"request_count","window":{"kind":"rolling","seconds":3600},"limit":1},
+                {"metric":"request_count","window":{"kind":"rolling","seconds":60},"limit":short_limit},
+                {"metric":"concurrency","window":{"kind":"concurrent"},"limit":1}
+            ]
+        }]))], 2_000).unwrap()
+    }
+
+    #[tokio::test]
+    async fn wallet_fallback_requires_opt_in_and_actual_wallet_capacity() {
+        let auth = fallback_test_auth();
+        assert!(
+            !wallet_fallback_available(&fallback_test_state(false, 20.0), &auth, None)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !wallet_fallback_available(&fallback_test_state(true, 0.0), &auth, None)
+                .await
+                .unwrap()
+        );
+        let state = fallback_test_state(true, 20.0);
+        assert!(wallet_fallback_available(&state, &auth, Some(20.0))
+            .await
+            .unwrap());
+        assert!(!wallet_fallback_available(&state, &auth, Some(20.01))
+            .await
+            .unwrap());
+    }
+
+    #[tokio::test]
+    async fn wallet_fallback_preserves_short_limits_and_concurrency() {
+        let state = fallback_test_state(true, 20.0);
+        let auth = fallback_test_auth();
+        let policy = fallback_test_policy(2);
+        let mut quota_only_policy = policy.clone();
+        quota_only_policy.concurrency_limit = None;
+        let (permit, fallback) = check_and_acquire_compiled_plan_usage_policy(
+            &state,
+            &auth,
+            &quota_only_policy,
+            "first",
+            2_000_000,
+        )
+        .await
+        .unwrap();
+        assert!(!fallback);
+        drop(permit);
+        let (permit, fallback) = check_and_acquire_compiled_plan_usage_policy(
+            &state, &auth, &policy, "second", 2_000_001,
+        )
+        .await
+        .unwrap();
+        assert!(fallback);
+        // The fallback turn retains the concurrency permit; this is the exact
+        // protection we need to assert. A third turn cannot enter concurrently.
+        assert!(matches!(
+            check_and_acquire_compiled_plan_usage_policy(
+                &state,
+                &auth,
+                &policy,
+                "concurrent",
+                2_000_002
+            )
+            .await,
+            Err(PlanUsageAdmissionError::Runtime(
+                RuntimeSemaphoreError::Saturated { .. }
+            ))
+        ));
+        drop(permit);
+        assert!(matches!(
+            check_and_acquire_compiled_plan_usage_policy(
+                &state,
+                &auth,
+                &quota_only_policy,
+                "third",
+                2_000_003
+            )
+            .await,
+            Err(PlanUsageAdmissionError::Rejected(
+                PlanUsagePolicyRejection {
+                    retry_after: 1..=60,
+                    ..
+                }
+            ))
+        ));
+    }
+
+    #[tokio::test]
+    async fn disabled_wallet_fallback_keeps_long_window_rejection() {
+        let state = fallback_test_state(false, 20.0);
+        let auth = fallback_test_auth();
+        let mut policy = fallback_test_policy(10);
+        // This assertion exercises durable quota; concurrency is tested separately.
+        policy.concurrency_limit = None;
+        let (permit, _) = check_and_acquire_compiled_plan_usage_policy(
+            &state, &auth, &policy, "first", 2_000_000,
+        )
+        .await
+        .unwrap();
+        drop(permit);
+        assert!(matches!(
+            check_and_acquire_compiled_plan_usage_policy(
+                &state, &auth, &policy, "second", 2_000_001
+            )
+            .await,
+            Err(PlanUsageAdmissionError::Rejected(_))
+        ));
+    }
+
+    #[test]
+    fn wallet_fallback_snapshot_survives_http_and_websocket_retries_without_cost_rules() {
+        let snapshot = PlanUsagePolicySnapshot::with_admission(
+            "user-1",
+            EffectivePlanUsagePolicy::default(),
+            2_000,
+            "event",
+            true,
+        )
+        .unwrap();
+        assert!(snapshot.clone().uses_wallet_fallback());
+        assert!(snapshot.new_reservation_context().uses_wallet_fallback());
+    }
+
+    #[tokio::test]
+    async fn exhausted_daily_quota_wallet_fallback_does_not_consume_long_plan_windows() {
+        use aether_data_contracts::repository::billing::UserDailyQuotaAvailabilityRecord;
+        let state = fallback_test_state(true, 20.0);
+        let auth = fallback_test_auth();
+        let mut policy = fallback_test_policy(10);
+        policy.concurrency_limit = None;
+        state.auth_daily_quota_availability_cache.insert(
+            "user-1".into(),
+            Some(UserDailyQuotaAvailabilityRecord {
+                has_active_daily_quota: true,
+                total_quota_usd: 10.0,
+                used_usd: 10.0,
+                remaining_usd: 0.0,
+                allow_wallet_overage: true,
+            }),
+            Duration::from_secs(60),
+        );
+        let (_, fallback) = check_and_acquire_compiled_plan_usage_policy(
+            &state,
+            &auth,
+            &policy,
+            "paid-request",
+            2_000_000,
+        )
+        .await
+        .unwrap();
+        assert!(fallback);
+        // After the daily allowance recovers, the paid request must not exhaust
+        // the independent long-window plan request allowance.
+        state.auth_daily_quota_availability_cache.clear();
+        let (_, fallback) = check_and_acquire_compiled_plan_usage_policy(
+            &state,
+            &auth,
+            &policy,
+            "plan-request",
+            2_000_001,
+        )
+        .await
+        .unwrap();
+        assert!(!fallback);
+    }
+
+    #[tokio::test]
+    async fn wallet_fallback_releases_reserved_cost_and_long_request_quota() {
+        let state = fallback_test_state(true, 20.0);
+        let auth = fallback_test_auth();
+        let mut decision = GatewayControlDecision::synthetic(
+            "/v1/chat/completions",
+            Some("ai_public".into()),
+            Some("openai".into()),
+            Some("chat".into()),
+            Some("openai:chat".into()),
+        );
+        decision.auth_context = Some(auth.clone());
+        let policy = compile_effective_policy(&[entitlement("ent-cost", json!([{
+            "type":"usage_policy", "rules":[
+                {"metric":"actual_cost_usd","window":{"kind":"rolling","seconds":3600},"limit":0.1},
+                {"metric":"request_count","window":{"kind":"rolling","seconds":3600},"limit":1}
+            ]
+        }]))], 2_000).unwrap();
+        let (_, fallback) = check_and_acquire_compiled_plan_usage_policy(
+            &state, &auth, &policy, "event", 2_000_000,
+        )
+        .await
+        .unwrap();
+        assert!(!fallback);
+        let snapshot = PlanUsagePolicySnapshot::with_admission(
+            "user-1",
+            policy.clone(),
+            2_000,
+            "event",
+            false,
+        )
+        .unwrap();
+        let reservation = snapshot.new_reservation_context();
+        let rule = runtime_cost_rule(&policy.cost_rules[0], 2_000).unwrap();
+        let previous = ReserveUsagePolicyCostInput {
+            request_id: "request-cost".into(),
+            subject_id: "user-1".into(),
+            reservation_token: reservation.token().into(),
+            admitted_at_unix_secs: 2_000,
+            reserved_cost_units: 5_000_000,
+            reservation_expires_at_unix_secs: 88_400,
+            retain_until_unix_secs: 32 * 86_400 + 2_000,
+            windows: vec![rule.window],
+        };
+        assert!(matches!(
+            state
+                .data
+                .reserve_usage_policy_cost(previous.clone())
+                .await
+                .unwrap(),
+            Some(ReserveUsagePolicyCostOutcome::Allowed { .. })
+        ));
+        let plan = aether_contracts::ExecutionPlan {
+            request_id: "request-cost".into(),
+            candidate_id: None,
+            provider_name: Some("provider".into()),
+            provider_id: "provider-1".into(),
+            endpoint_id: "endpoint-1".into(),
+            key_id: "key-1".into(),
+            method: "POST".into(),
+            url: "https://example.com/v1/chat/completions".into(),
+            headers: Default::default(),
+            content_type: Some("application/json".into()),
+            content_encoding: None,
+            body: aether_contracts::RequestBody::from_json(
+                json!({"model":"gpt-5","messages":[],"max_tokens":16}),
+            ),
+            stream: false,
+            client_api_format: "openai:chat".into(),
+            provider_api_format: "openai:chat".into(),
+            model_name: Some("gpt-5".into()),
+            proxy: None,
+            transport_profile: None,
+            timeouts: None,
+        };
+        let context = json!({"model_id":"model-1","global_model_name":"gpt-5"});
+        assert_eq!(
+            reserve_admitted_http_plan_usage_policy_cost(
+                &state,
+                &decision,
+                &plan,
+                Some(&context),
+                Some(&reservation)
+            )
+            .await
+            .unwrap(),
+            PlanUsageCostReservationOutcome::WalletFallback
+        );
+        assert!(snapshot.uses_wallet_fallback());
+        assert!(matches!(
+            state
+                .data
+                .reserve_usage_policy_cost(previous)
+                .await
+                .unwrap(),
+            Some(ReserveUsagePolicyCostOutcome::AlreadyTerminal {
+                state: UsagePolicyCostReservationState::Released
+            })
+        ));
+        let (_, fallback) = check_and_acquire_compiled_plan_usage_policy(
+            &state,
+            &auth,
+            &policy,
+            "next-event",
+            2_000_001,
+        )
+        .await
+        .unwrap();
+        assert!(
+            !fallback,
+            "paid fallback must release the long plan request window"
+        );
+    }
 
     fn entitlement(id: &str, snapshot: serde_json::Value) -> UserPlanEntitlementRecord {
         UserPlanEntitlementRecord {

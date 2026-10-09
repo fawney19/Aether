@@ -1,13 +1,14 @@
 import { createApp, nextTick, type App } from 'vue'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { OverviewDashboardSummary } from '@/api/overview'
+import type { OverviewDashboardCharts, OverviewDashboardSummary, OverviewDashboardChartMetrics, OverviewRange, OverviewResponse } from '@/api/overview'
 import { dashboardSummary } from '@/features/overview/__tests__/fixtures/dashboardSummary'
 import Dashboard from '../Dashboard.vue'
 
-const api = vi.hoisted(() => ({ dashboardSummary: vi.fn(), summary: vi.fn(), dashboardTotal: vi.fn(), daily: vi.fn() }))
+const api = vi.hoisted(() => ({ dashboardSummary: vi.fn(), summary: vi.fn(), dashboardTotal: vi.fn(), dashboardCharts: vi.fn() }))
+const legacyDaily = vi.hoisted(() => vi.fn())
 vi.mock('@/stores/auth', () => ({ useAuthStore: () => ({ canAccessAdmin: true, isAdmin: true, isAuditAdmin: false }) }))
 vi.mock('@/api/overview', () => ({ overviewApi: api }))
-vi.mock('@/api/dashboard', () => ({ dashboardApi: { getDailyStats: api.daily } }))
+vi.mock('@/api/dashboard', () => ({ dashboardApi: { getDailyStats: legacyDaily } }))
 vi.mock('@/features/overview/dashboard/DashboardActivity.vue', async () => {
   const { defineComponent, h } = await import('vue')
   return {
@@ -32,6 +33,33 @@ vi.mock('@/components/charts/BarChart.vue', () => ({ default: { render: () => nu
 vi.mock('@/components/charts/DoughnutChart.vue', () => ({ default: { render: () => null } }))
 vi.mock('@/components/charts/LineChart.vue', () => ({ default: { render: () => null } }))
 
+function dashboardCharts(range: OverviewRange = {
+  from: '2026-09-19T00:00:00Z', to: '2026-09-19T04:00:00Z', timezone: 'UTC',
+}): OverviewResponse<OverviewDashboardCharts> {
+  const amount = { value: '0', currency: 'USD', basis: 'billable', status: 'known' }
+  const summary: OverviewDashboardChartMetrics = {
+    request_count: 0, successful_request_count: 0, failed_request_count: 0,
+    cancelled_request_count: 0, in_flight_request_count: 0, unclassified_failure_count: null,
+    input_tokens: null, output_tokens: null, total_tokens: 0, usage_active_users: null, slow_request_count: null,
+    success_rate: { value: null, numerator: 0, denominator: 0 },
+    latency_ms: { avg: null, p50: null, p95: null, p99: null, sample_count: 0 },
+    rated_amount: amount, billable_amount: amount, quota_covered_amount: amount,
+    wallet_consumed_amount: amount, wallet_debit_amount: amount,
+  }
+  return {
+    meta: {
+      schema_version: 1, metric_version: 'test', scope: { kind: 'admin' },
+      range: { ...range, time_basis: 'request_started_at' },
+      generated_at: range.to, data_through: range.to, read_revision: 'test',
+      coverage: {
+        status: 'complete', request_count: 0, usage_available_count: 0,
+        pricing_available_count: 0, settled_count: 0,
+      },
+    },
+    data: { summary, series: [], models: [], providers: [] },
+  }
+}
+
 function deferred<T>() {
   let resolve!: (value: T) => void
   let reject!: (reason: Error) => void
@@ -52,13 +80,13 @@ beforeEach(() => {
   vi.useFakeTimers()
   vi.resetAllMocks()
   api.dashboardSummary.mockResolvedValue(dashboardSummary())
-  api.daily.mockResolvedValue({ daily_stats: [], provider_summary: [] })
+  api.dashboardCharts.mockImplementation((range: OverviewRange) => Promise.resolve(dashboardCharts(range)))
 })
 afterEach(() => { app?.unmount(); app = undefined; vi.useRealTimers() })
 
 describe('dashboard snapshot loading', () => {
   it('shows today and total from one compact snapshot independently of pending charts', async () => {
-    api.daily.mockReturnValue(new Promise(() => {}))
+    api.dashboardCharts.mockReturnValue(new Promise(() => {}))
     const root = mount()
     await settle()
     expect(root.textContent).toContain('总请求 12,345')
@@ -68,9 +96,14 @@ describe('dashboard snapshot loading', () => {
     expect(api.dashboardSummary).toHaveBeenCalledWith(Intl.DateTimeFormat().resolvedOptions().timeZone, expect.any(AbortSignal))
     expect(api.summary).not.toHaveBeenCalled()
     expect(api.dashboardTotal).not.toHaveBeenCalled()
+    expect(api.dashboardCharts).toHaveBeenCalledWith({
+      from: expect.any(String), to: expect.any(String),
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    }, expect.any(AbortSignal))
+    expect(legacyDaily).not.toHaveBeenCalled()
     await vi.advanceTimersByTimeAsync(240_000)
     expect(api.dashboardSummary).toHaveBeenCalledTimes(1)
-    expect(api.daily).toHaveBeenCalledTimes(1)
+    expect(api.dashboardCharts).toHaveBeenCalledTimes(1)
   })
 
   it('labels restored history with its UTC activity dates independently of the dashboard timezone', async () => {
@@ -181,7 +214,29 @@ describe('dashboard snapshot loading', () => {
     expect(root.querySelector('[data-request-metric="stream"]')?.textContent).toContain('—')
     await vi.advanceTimersByTimeAsync(61_000)
     expect(api.dashboardSummary).toHaveBeenCalledTimes(1)
-    expect(api.daily.mock.calls.length).toBeLessThanOrEqual(2)
+    expect(api.dashboardCharts.mock.calls.length).toBeLessThanOrEqual(2)
+    expect(legacyDaily).not.toHaveBeenCalled()
+  })
+
+  it('aborts the chart request when unmounted and ignores late success', async () => {
+    const charts = deferred<OverviewResponse<OverviewDashboardCharts>>()
+    api.dashboardCharts.mockReturnValue(charts.promise)
+    const root = mount()
+    await settle()
+    const [range, signal] = api.dashboardCharts.mock.calls[0] as [OverviewRange, AbortSignal]
+    expect(signal.aborted).toBe(false)
+    expect(root.textContent).toContain('总请求 12,345')
+    app?.unmount()
+    app = undefined
+    expect(signal.aborted).toBe(true)
+    const response = dashboardCharts(range)
+    response.data.series = [{ ...response.data.summary, bucket_start: range.from, request_count: 987654 }]
+    charts.resolve(response)
+    await settle()
+    expect(root.textContent).toBe('')
+    await vi.advanceTimersByTimeAsync(240_000)
+    expect(api.dashboardCharts).toHaveBeenCalledTimes(1)
+    expect(legacyDaily).not.toHaveBeenCalled()
   })
 
   it('aborts the compact snapshot request when unmounted and ignores late success', async () => {

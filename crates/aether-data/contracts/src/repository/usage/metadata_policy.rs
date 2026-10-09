@@ -82,13 +82,36 @@ pub fn preserve_usage_routing_group_snapshot(
             captured,
         );
     }
-    let Some(Value::Object(snapshot)) = sanitize_usage_request_metadata_object(&snapshot) else {
+    let snapshot = sanitize_usage_request_metadata_object(&snapshot)
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+    if snapshot.is_empty()
+        && previous
+            .get("plan_wallet_fallback")
+            .and_then(Value::as_bool)
+            != Some(true)
+    {
         return incoming;
-    };
+    }
     let mut metadata = incoming
         .and_then(|value| value.as_object().cloned())
         .unwrap_or_default();
     metadata.extend(snapshot);
+    if previous
+        .get("plan_wallet_fallback")
+        .and_then(Value::as_bool)
+        == Some(true)
+    {
+        metadata.insert("plan_wallet_fallback".to_string(), Value::Bool(true));
+    }
+    if metadata
+        .get("plan_wallet_fallback")
+        .and_then(Value::as_bool)
+        == Some(true)
+    {
+        metadata.remove(PLAN_USAGE_RESERVATION_TOKEN_KEY);
+        metadata.remove(PLAN_USAGE_RESERVATION_DEFERRED_METADATA_KEY);
+    }
     Some(Value::Object(metadata))
 }
 
@@ -152,6 +175,7 @@ pub fn sanitize_usage_request_metadata_object(source: &Map<String, Value>) -> Op
         "client_requested_stream",
         UPSTREAM_IS_STREAM_KEY,
         "api_key_is_standalone",
+        "plan_wallet_fallback",
         WEBSOCKET_MODE_METADATA_KEY,
         PLAN_USAGE_RESERVATION_DEFERRED_METADATA_KEY,
         "transport_error",
@@ -1368,6 +1392,26 @@ mod tests {
         billing_multiplier_snapshot, preserve_usage_routing_group_snapshot,
         sanitize_usage_request_metadata, sanitize_usage_request_metadata_ref,
     };
+
+    #[test]
+    fn wallet_fallback_survives_sparse_video_completion_and_removes_plan_reservation() {
+        let token = "550e8400-e29b-41d4-a716-446655440000";
+        let previous = json!({"plan_wallet_fallback": true, "plan_usage_reservation_token": token});
+        let preserved = preserve_usage_routing_group_snapshot(None, Some(&previous)).unwrap();
+        assert_eq!(preserved["plan_wallet_fallback"], true);
+        assert!(preserved.get("plan_usage_reservation_token").is_none());
+        let incoming = json!({"plan_wallet_fallback": true});
+        let previous =
+            json!({"plan_wallet_fallback": false, "plan_usage_reservation_token": token});
+        let preserved =
+            preserve_usage_routing_group_snapshot(Some(incoming), Some(&previous)).unwrap();
+        assert_eq!(preserved["plan_wallet_fallback"], true);
+        assert!(preserved.get("plan_usage_reservation_token").is_none());
+        assert!(
+            sanitize_usage_request_metadata(Some(json!({"plan_wallet_fallback": "true"})))
+                .is_none()
+        );
+    }
 
     #[test]
     fn billing_multiplier_snapshot_projection_preserves_invalid_marker_and_immutable_factors() {

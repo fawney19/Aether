@@ -103,6 +103,7 @@ pub(crate) fn retain_first_byte_request_metadata(value: Option<Value>) -> Option
                 | "client_requested_stream"
                 | "upstream_is_stream"
                 | "api_key_is_standalone"
+                | "plan_wallet_fallback"
                 | "plan_usage_reservation_token"
                 | "request_path"
                 | "request_query_string"

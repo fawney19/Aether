@@ -205,7 +205,7 @@ CREATE TRIGGER overview_usage_delete_attribution BEFORE DELETE ON public.usage
 -- procurement cost remains in actual_total_cost_usd for legacy reporting.
 CREATE OR REPLACE FUNCTION public.usage_customer_billable_amount(
   metadata jsonb, base_cost numeric, legacy_cost numeric
-) RETURNS numeric LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE AS $$
+) RETURNS numeric LANGUAGE plpgsql IMMUTABLE PARALLEL UNSAFE AS $$
 DECLARE factor jsonb; multiplier numeric; amount numeric;
   factor_name text; factor_value jsonb; factor_number double precision;
   expected_multiplier double precision := 1.0; factor_count integer := 0;

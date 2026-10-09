@@ -388,7 +388,8 @@ async fn reserve_responses_plan_usage_cost_owned(
     )
     .await?;
     match outcome {
-        crate::plan_usage_policy::PlanUsageCostReservationOutcome::NotRequired => {
+        crate::plan_usage_policy::PlanUsageCostReservationOutcome::NotRequired
+        | crate::plan_usage_policy::PlanUsageCostReservationOutcome::WalletFallback => {
             Ok(ResponsesPlanUsageCostReservationStart::NotRequired)
         }
         crate::plan_usage_policy::PlanUsageCostReservationOutcome::Reserved => {
@@ -565,7 +566,14 @@ pub(super) async fn begin_unowned_responses_websocket_turn(
             ));
         }
     };
-    let mut report_context = attempt.report_context;
+    let mut report_context = crate::usage::attach_plan_wallet_fallback_context(
+        state,
+        attempt.report_context,
+        plan_usage_policy_snapshot
+            .as_ref()
+            .is_some_and(PlanUsagePolicySnapshot::uses_wallet_fallback),
+    )
+    .await?;
 
     let balance_rejection = execution_plan_balance_capacity_rejection(
         state,
@@ -695,6 +703,14 @@ pub(super) async fn begin_unowned_responses_websocket_turn(
         }
     };
 
+    report_context = crate::usage::attach_plan_wallet_fallback_context(
+        state,
+        report_context,
+        plan_usage_policy_snapshot
+            .as_ref()
+            .is_some_and(PlanUsagePolicySnapshot::uses_wallet_fallback),
+    )
+    .await?;
     let lifecycle = ExecutionAttemptLifecycle::begin(
         state,
         AttemptLifecycleSeed {

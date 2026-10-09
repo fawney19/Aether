@@ -28,6 +28,8 @@ use crate::lifecycle::bootstrap::postgres::{
 };
 
 mod customer_billing_upgrade;
+mod dashboard_chart_billing;
+mod dashboard_chart_history;
 mod dashboard_user_anonymization;
 mod legacy_overview_upgrade;
 mod migration_deadlines;
@@ -37,6 +39,7 @@ mod overview_migration_safety;
 mod policy_nulls;
 mod provider_expenses;
 mod scoped_provider_creation;
+mod user_preferences;
 
 /// A clean PostgreSQL database is bootstrapped from the schema snapshot first;
 /// migrations after the privacy/security frontier are intentionally left
@@ -1599,6 +1602,8 @@ fn pending_migrations_from_applied_skips_versions_already_applied() {
             20261001000000,
             20261004000000,
             20261007000000,
+            20261008000000,
+            20261009000000,
         ]
     );
 }

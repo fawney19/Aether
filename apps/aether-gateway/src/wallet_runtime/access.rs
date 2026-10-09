@@ -272,6 +272,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn wallet_fallback_is_opt_in_and_preference_changes_refresh_cached_admission() {
+        let mut wallet = empty_user_wallet();
+        wallet.balance = 10.0;
+        // A legacy plan allowing overage cannot silently enable wallet charges.
+        let state = state_with_wallet_and_quota(wallet, Some(quota_availability(10.0, 0.0, true)));
+        let auth_snapshot = ordinary_user_api_key_snapshot();
+        let denied = resolve_wallet_auth_gate(&state, &auth_snapshot)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(denied.failure, Some(WalletAccessFailure::BalanceDenied));
+
+        let mut preferences = crate::GatewayUserPreferenceView::default_for_user("user-1");
+        preferences.allow_wallet_overage = true;
+        state
+            .write_user_preferences(&preferences)
+            .await
+            .unwrap()
+            .unwrap();
+        let allowed = resolve_wallet_auth_gate(&state, &auth_snapshot)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(allowed.allowed);
+        assert_eq!(allowed.remaining, Some(10.0));
+
+        preferences.allow_wallet_overage = false;
+        state
+            .write_user_preferences(&preferences)
+            .await
+            .unwrap()
+            .unwrap();
+        let denied_again = resolve_wallet_auth_gate(&state, &auth_snapshot)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            denied_again.failure,
+            Some(WalletAccessFailure::BalanceDenied)
+        );
+    }
+
+    #[tokio::test]
+    async fn wallet_fallback_requires_available_wallet_balance() {
+        let state = state_with_wallet_and_quota(
+            empty_user_wallet(),
+            Some(quota_availability(10.0, 0.0, false)),
+        );
+        let mut preferences = crate::GatewayUserPreferenceView::default_for_user("user-1");
+        preferences.allow_wallet_overage = true;
+        state
+            .write_user_preferences(&preferences)
+            .await
+            .unwrap()
+            .unwrap();
+        let denied = resolve_wallet_auth_gate(&state, &ordinary_user_api_key_snapshot())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(denied.failure, Some(WalletAccessFailure::BalanceDenied));
+    }
+
+    #[tokio::test]
     async fn unlimited_wallet_ignores_exhausted_non_overage_quota() {
         let mut wallet = empty_user_wallet();
         wallet.limit_mode = "unlimited".to_string();
@@ -373,7 +436,8 @@ mod tests {
             usage_repository,
             billing_repository,
             wallet_repository,
-        );
+        )
+        .with_user_preferences_for_tests([]);
         AppState::new()
             .expect("state should build")
             .with_data_state_for_tests(data)

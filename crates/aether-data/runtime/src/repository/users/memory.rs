@@ -3226,6 +3226,7 @@ mod tests {
             email_notifications: true,
             usage_alerts: true,
             announcement_notifications: true,
+            allow_wallet_overage: true,
         };
         let repository = InMemoryUserReadRepository::seed_auth_users([admin.clone()])
             .with_export_users([export_row])
@@ -4029,6 +4030,7 @@ mod tests {
             email_notifications: false,
             usage_alerts: true,
             announcement_notifications: false,
+            allow_wallet_overage: true,
         };
 
         assert!(repository

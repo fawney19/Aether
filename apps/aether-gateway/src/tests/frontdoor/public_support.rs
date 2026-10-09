@@ -6253,6 +6253,7 @@ async fn gateway_handles_users_me_preferences_locally_without_proxying_upstream(
     assert_eq!(get_payload["theme"], "light");
     assert_eq!(get_payload["language"], "zh-CN");
     assert_eq!(get_payload["timezone"], "Asia/Shanghai");
+    assert_eq!(get_payload["allow_wallet_overage"], false);
     assert_eq!(get_payload["notifications"]["email"], true);
     assert_eq!(get_payload["default_provider_id"], "provider-openai");
     assert!(get_payload.get("default_provider").is_none());
@@ -6270,6 +6271,7 @@ async fn gateway_handles_users_me_preferences_locally_without_proxying_upstream(
             "email_notifications": false,
             "usage_alerts": false,
             "announcement_notifications": true,
+            "allow_wallet_overage": true,
         }))
         .send()
         .await
@@ -6295,9 +6297,46 @@ async fn gateway_handles_users_me_preferences_locally_without_proxying_upstream(
     assert_eq!(verify_payload["language"], "en-US");
     assert_eq!(verify_payload["timezone"], "UTC");
     assert_eq!(verify_payload["bio"], "hello");
+    assert_eq!(verify_payload["allow_wallet_overage"], true);
     assert_eq!(verify_payload["notifications"]["email"], false);
     assert_eq!(verify_payload["notifications"]["usage_alerts"], false);
     assert_eq!(verify_payload["notifications"]["announcements"], true);
+    for (payload, expected_status, expected_overage) in [
+        (
+            json!({"allow_wallet_overage": "true"}),
+            StatusCode::BAD_REQUEST,
+            true,
+        ),
+        (json!({"theme": "light"}), StatusCode::OK, true),
+        (
+            json!({"allow_wallet_overage": false}),
+            StatusCode::OK,
+            false,
+        ),
+    ] {
+        let response = client
+            .put(format!("{gateway_url}/api/users/me/preferences"))
+            .header("authorization", format!("Bearer {access_token}"))
+            .header("x-client-device-id", "device-user-pref-1")
+            .header("user-agent", "AetherTest/1.0")
+            .json(&payload)
+            .send()
+            .await
+            .expect("preference update should succeed");
+        assert_eq!(response.status(), expected_status);
+        let preferences: serde_json::Value = client
+            .get(format!("{gateway_url}/api/users/me/preferences"))
+            .header("authorization", format!("Bearer {access_token}"))
+            .header("x-client-device-id", "device-user-pref-1")
+            .header("user-agent", "AetherTest/1.0")
+            .send()
+            .await
+            .expect("preference lookup should succeed")
+            .json()
+            .await
+            .expect("preferences should parse");
+        assert_eq!(preferences["allow_wallet_overage"], expected_overage);
+    }
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();

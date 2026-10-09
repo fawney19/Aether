@@ -153,13 +153,18 @@ export interface OverviewDashboardSummary {
   }
 }
 export interface OverviewPage<T> { items: T[]; total: number; limit: number; offset: number }
-export interface OverviewSeriesPoint extends OverviewMetrics { bucket_start: string }
+export interface OverviewSeriesPoint extends OverviewMetrics { bucket_start: string; unique_providers?: number | null }
 export interface OverviewBreakdown extends OverviewMetrics { id: string | null; label: string | null }
+export interface OverviewDashboardChartMetrics extends Omit<OverviewMetrics, 'usage_active_users' | 'unclassified_failure_count'> {
+  usage_active_users: number | null
+  slow_request_count: number | null
+  unclassified_failure_count: number | null
+}
 export interface OverviewDashboardCharts {
-  summary: OverviewMetrics
-  series: OverviewSeriesPoint[]
-  models: (OverviewBreakdown & { bucket_start: string })[]
-  providers: OverviewBreakdown[]
+  summary: OverviewDashboardChartMetrics
+  series: (OverviewDashboardChartMetrics & { bucket_start: string; unique_providers?: number | null })[]
+  models: (OverviewDashboardChartMetrics & { id: string | null; label: string | null; bucket_start: string })[]
+  providers: (OverviewDashboardChartMetrics & { id: string | null; label: string | null })[]
 }
 export interface OverviewEmployee extends OverviewMetrics {
   user_id: string

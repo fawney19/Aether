@@ -161,6 +161,52 @@ async fn overview_model_performance_merges_provider_samples_without_pagination()
 }
 
 #[tokio::test]
+async fn overview_provider_breakdown_labels_rows_with_provider_name() {
+    use aether_data_contracts::repository::usage::*;
+    let at = chrono::DateTime::parse_from_rfc3339("2026-09-12T10:05:00Z").unwrap();
+    // 同一 provider_id 的两条记录，展示标签应解析成提供商名称而不是 provider_id。
+    let mut first = sample_usage("provider-label-1", at.timestamp());
+    first.provider_id = Some("provider-1".into());
+    first.provider_name = "Provider One".into();
+    let mut second = sample_usage("provider-label-2", at.timestamp());
+    second.provider_id = Some("provider-1".into());
+    second.provider_name = "Provider One".into();
+    // 名称为历史占位值时回退到 provider_id。
+    let mut unnamed = sample_usage("provider-label-3", at.timestamp());
+    unnamed.provider_id = Some("provider-2".into());
+    unnamed.provider_name = "unknown".into();
+    // provider_id 为空说明无法归属，标签保持为空，由前端显示“未归属提供商”。
+    let mut unattributed = sample_usage("provider-label-4", at.timestamp());
+    unattributed.provider_id = None;
+    unattributed.provider_name = "legacy".into();
+    let repo = InMemoryUsageReadRepository::seed([first, second, unnamed, unattributed]);
+    let result = repo
+        .query_usage_analytics(&UsageAnalyticsQuery {
+            from_unix_ms: (at - chrono::Duration::minutes(5)).timestamp_millis() as u64,
+            to_unix_ms: (at + chrono::Duration::minutes(55)).timestamp_millis() as u64,
+            timezone: "UTC".into(),
+            view: UsageAnalyticsView::Breakdown,
+            group_by: UsageAnalyticsGroupBy::Provider,
+            limit: 25,
+            descending: true,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(result.total, 3);
+    let rows = result
+        .rows
+        .iter()
+        .map(|row| (row.id.as_deref(), row.label.as_deref()))
+        .collect::<Vec<_>>();
+    assert!(rows.contains(&(Some("provider-1"), Some("Provider One"))));
+    assert!(rows.contains(&(Some("provider-2"), Some("provider-2"))));
+    assert!(rows.contains(&(None, None)));
+    // 明细分组不填充 bucket_start。
+    assert!(result.rows.iter().all(|row| row.bucket_start.is_none()));
+}
+
+#[tokio::test]
 async fn overview_memory_chart_hour_buckets_are_utc_in_half_hour_zones() {
     use aether_data_contracts::repository::usage::*;
     let at = chrono::DateTime::parse_from_rfc3339("2026-09-12T10:05:00Z").unwrap();

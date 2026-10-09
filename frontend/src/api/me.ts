@@ -42,6 +42,7 @@ export interface UserPreferences {
   theme: string
   language: string
   timezone?: string
+  allow_wallet_overage?: boolean
   notifications?: {
     email?: boolean
     usage_alerts?: boolean

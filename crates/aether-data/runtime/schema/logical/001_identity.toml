@@ -789,6 +789,11 @@ type = "bool"
 default = true
 
 [[table.user_preferences.columns]]
+name = "allow_wallet_overage"
+type = "bool"
+default = false
+
+[[table.user_preferences.columns]]
 name = "created_at"
 type = "unix_seconds"
 

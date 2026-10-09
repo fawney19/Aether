@@ -7,7 +7,7 @@ const dashboardApiMocks = vi.hoisted(() => ({
   getStats: vi.fn(),
   getDailyStats: vi.fn(),
 }))
-const overviewApiMocks = vi.hoisted(() => ({ dashboard: vi.fn(), dashboardTotal: vi.fn(), summary: vi.fn(), dashboardSummary: vi.fn() }))
+const overviewApiMocks = vi.hoisted(() => ({ dashboard: vi.fn(), dashboardTotal: vi.fn(), summary: vi.fn(), dashboardSummary: vi.fn(), dashboardCharts: vi.fn() }))
 const announcementApiMocks = vi.hoisted(() => ({ getAnnouncements: vi.fn(), markAsRead: vi.fn() }))
 
 vi.mock('@/api/overview', () => ({ overviewApi: overviewApiMocks }))
@@ -130,6 +130,7 @@ beforeEach(() => {
   overviewApiMocks.dashboardTotal.mockReset()
   overviewApiMocks.summary.mockReset()
   overviewApiMocks.dashboardSummary.mockReset()
+  overviewApiMocks.dashboardCharts.mockReset()
   dashboardApiMocks.getStats.mockReset()
   dashboardApiMocks.getDailyStats.mockReset()
   dashboardApiMocks.getDailyStats.mockResolvedValue({
@@ -176,6 +177,7 @@ describe('Dashboard ordinary user wallet card', () => {
     expect(overviewApiMocks.dashboardTotal).not.toHaveBeenCalled()
     expect(overviewApiMocks.summary).not.toHaveBeenCalled()
     expect(overviewApiMocks.dashboardSummary).not.toHaveBeenCalled()
+    expect(overviewApiMocks.dashboardCharts).not.toHaveBeenCalled()
     expect(root.querySelector('#announcements-section')).not.toBeNull()
     expect(root.querySelector('[role="dialog"]')).toBeNull()
     expect(root.textContent).toContain('系统公告')
@@ -216,6 +218,7 @@ describe('Dashboard refresh controls', () => {
       expect(root.textContent).not.toContain('自动刷新')
       expect(dashboardApiMocks.getStats).toHaveBeenCalledTimes(1)
       expect(dashboardApiMocks.getDailyStats).toHaveBeenCalledTimes(1)
+      expect(overviewApiMocks.dashboardCharts).not.toHaveBeenCalled()
       expect(announcementApiMocks.getAnnouncements).not.toHaveBeenCalled()
       expect(overviewApiMocks.dashboard).not.toHaveBeenCalled()
 

@@ -505,6 +505,35 @@
 
             <div class="space-y-3">
               <h4 class="font-medium text-foreground">
+                额度使用
+              </h4>
+              <div class="flex items-center justify-between gap-4 py-2">
+                <div class="flex-1">
+                  <Label
+                    for="allow-wallet-overage"
+                    class="text-sm font-medium cursor-pointer"
+                  >
+                    套餐额度不可用时使用余额
+                  </Label>
+                  <p
+                    id="allow-wallet-overage-description"
+                    class="text-xs text-muted-foreground mt-1"
+                  >
+                    默认关闭，套餐额度不足时不会自动扣除钱包余额。开启后优先使用套餐额度，额度耗尽、不可用或处于恢复期时使用钱包余额。
+                  </p>
+                </div>
+                <Switch
+                  id="allow-wallet-overage"
+                  :model-value="allowWalletOverage"
+                  :disabled="!billingPreferencesLoaded || savingWalletOverage"
+                  aria-describedby="allow-wallet-overage-description"
+                  @update:model-value="updateWalletOverage"
+                />
+              </div>
+            </div>
+
+            <div class="space-y-3">
+              <h4 class="font-medium text-foreground">
                 通知设置
               </h4>
               <div class="space-y-3">
@@ -744,6 +773,9 @@ const featureSettingsForm = ref({
 
 const savingProfile = ref(false)
 const savingFeatureSettings = ref(false)
+const allowWalletOverage = ref(false)
+const billingPreferencesLoaded = ref(false)
+const savingWalletOverage = ref(false)
 const changingPassword = ref(false)
 const sessionsLoading = ref(false)
 const sessionActionLoading = ref<string | null>(null)
@@ -1001,6 +1033,8 @@ async function handleUnbind(providerType: string) {
 async function loadPreferences() {
   try {
     const prefs = await meApi.getPreferences()
+    allowWalletOverage.value = prefs.allow_wallet_overage === true
+    billingPreferencesLoaded.value = true
 
     // 主题以本地 localStorage 为准（useDarkMode 在应用启动时已初始化）
     // 这样可以避免刷新页面时主题被服务端旧值覆盖
@@ -1166,6 +1200,23 @@ async function handleRevokeOtherSessions() {
     showError(getErrorMessage(error, '退出其他设备失败'))
   } finally {
     sessionActionLoading.value = null
+  }
+}
+
+async function updateWalletOverage(enabled: boolean) {
+  if (!billingPreferencesLoaded.value || savingWalletOverage.value) return
+  const previous = allowWalletOverage.value
+  allowWalletOverage.value = enabled
+  savingWalletOverage.value = true
+  try {
+    await meApi.updatePreferences({ allow_wallet_overage: enabled })
+    success('设置已保存')
+  } catch (error) {
+    allowWalletOverage.value = previous
+    log.error('更新额度使用设置失败:', error)
+    showError('保存设置失败')
+  } finally {
+    savingWalletOverage.value = false
   }
 }
 

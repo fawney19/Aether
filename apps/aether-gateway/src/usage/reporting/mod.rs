@@ -15,7 +15,8 @@ use crate::{AppState, GatewayError};
 mod context;
 pub(crate) mod failure;
 pub(crate) use context::{
-    attach_internal_gateway_report_capability, resolve_bound_internal_gateway_report_context,
+    attach_internal_gateway_report_capability, attach_plan_wallet_fallback_context,
+    resolve_bound_internal_gateway_report_context,
 };
 use context::{report_context_is_locally_actionable, resolve_locally_actionable_report_context};
 

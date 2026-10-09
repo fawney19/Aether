@@ -286,6 +286,15 @@ fn usage_api_key_is_standalone(usage: &StoredRequestUsageAudit) -> bool {
 }
 
 fn usage_policy_reservation_token(usage: &StoredRequestUsageAudit) -> Option<&str> {
+    if usage
+        .request_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("plan_wallet_fallback"))
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+    {
+        return None;
+    }
     usage
         .request_metadata
         .as_ref()
@@ -296,6 +305,16 @@ fn usage_policy_reservation_token(usage: &StoredRequestUsageAudit) -> Option<&st
 }
 
 fn event_usage_policy_reservation_token(event: &UsageEvent) -> Option<&str> {
+    if event
+        .data
+        .request_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("plan_wallet_fallback"))
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+    {
+        return None;
+    }
     event
         .data
         .request_metadata

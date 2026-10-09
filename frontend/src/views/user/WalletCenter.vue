@@ -47,7 +47,7 @@
               已用 {{ formatCurrency(dailyQuotaUsed) }} / 每日 {{ formatCurrency(dailyQuotaTotal) }}
             </div>
             <div class="text-xs text-muted-foreground">
-              {{ dailyQuota?.allow_wallet_overage ? '套餐不足时继续扣钱包余额' : '套餐额度不足时会拒绝请求' }}
+              {{ dailyQuota?.allow_wallet_overage ? '已开启套餐不足时使用钱包余额' : '套餐额度不足时会拒绝请求，可在个人设置中开启使用余额' }}
             </div>
           </div>
           <div

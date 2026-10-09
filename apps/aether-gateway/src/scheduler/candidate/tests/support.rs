@@ -56,6 +56,14 @@ pub(super) fn sample_row() -> StoredMinimalCandidateSelectionRow {
     }
 }
 
+/// 共享夹具默认把上游名映射限定在 openai 格式；需要其它端点/格式的用例
+/// 用本函数移除映射约束（无映射的行在所有端点按默认上游名可用）。
+pub(super) fn sample_row_without_model_mappings() -> StoredMinimalCandidateSelectionRow {
+    let mut row = sample_row();
+    row.model_provider_model_mappings = None;
+    row
+}
+
 pub(super) fn sample_provider(
     id: &str,
     concurrent_limit: Option<i32>,

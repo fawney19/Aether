@@ -302,6 +302,8 @@ pub(crate) struct GatewayUserPreferenceView {
     pub(crate) email_notifications: bool,
     pub(crate) usage_alerts: bool,
     pub(crate) announcement_notifications: bool,
+    #[serde(default)]
+    pub(crate) allow_wallet_overage: bool,
 }
 
 impl GatewayUserPreferenceView {
@@ -318,6 +320,7 @@ impl GatewayUserPreferenceView {
             email_notifications: true,
             usage_alerts: true,
             announcement_notifications: true,
+            allow_wallet_overage: false,
         }
     }
 }
@@ -336,6 +339,7 @@ impl From<crate::data::state::StoredUserPreferenceRecord> for GatewayUserPrefere
             email_notifications: value.email_notifications,
             usage_alerts: value.usage_alerts,
             announcement_notifications: value.announcement_notifications,
+            allow_wallet_overage: value.allow_wallet_overage,
         }
     }
 }
@@ -360,6 +364,7 @@ impl From<GatewayUserPreferenceView> for crate::data::state::StoredUserPreferenc
             email_notifications: value.email_notifications,
             usage_alerts: value.usage_alerts,
             announcement_notifications: value.announcement_notifications,
+            allow_wallet_overage: value.allow_wallet_overage,
         }
     }
 }

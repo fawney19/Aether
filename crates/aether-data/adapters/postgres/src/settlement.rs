@@ -18,6 +18,7 @@ use crate::PostgresTransactionRunner;
 const FIND_USAGE_FOR_SETTLEMENT_SQL: &str = r#"
 SELECT
   usage_record.request_id,
+  usage_record.request_metadata,
   COALESCE(usage_settlement_snapshots.wallet_id, usage_record.wallet_id) AS wallet_id,
   COALESCE(usage_settlement_snapshots.billing_status, usage_record.billing_status) AS billing_status,
   COALESCE(
@@ -465,7 +466,6 @@ struct DailyQuotaGrant {
     entitlement_id: String,
     daily_quota_usd: f64,
     usage_date: String,
-    allow_wallet_overage: bool,
 }
 
 fn daily_quota_usage_date(
@@ -484,7 +484,6 @@ fn daily_quota_usage_date(
 fn daily_quota_grants_from_entitlement(
     entitlement_id: &str,
     entitlements: &serde_json::Value,
-    current_allow_wallet_overage: Option<bool>,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<Vec<DailyQuotaGrant>, DataLayerError> {
     let mut grants = Vec::new();
@@ -511,25 +510,9 @@ fn daily_quota_grants_from_entitlement(
             entitlement_id: entitlement_id.to_string(),
             daily_quota_usd,
             usage_date,
-            allow_wallet_overage: current_allow_wallet_overage.unwrap_or_else(|| {
-                item.get("allow_wallet_overage")
-                    .and_then(serde_json::Value::as_bool)
-                    .unwrap_or(false)
-            }),
         });
     }
     Ok(grants)
-}
-
-fn daily_quota_wallet_overage_policy(entitlements: &serde_json::Value) -> Option<bool> {
-    entitlements.as_array()?.iter().find_map(|item| {
-        (item.get("type").and_then(serde_json::Value::as_str) == Some("daily_quota"))
-            .then(|| {
-                item.get("allow_wallet_overage")
-                    .and_then(serde_json::Value::as_bool)
-            })
-            .flatten()
-    })
 }
 
 async fn consume_daily_quota_postgres(
@@ -549,16 +532,13 @@ async fn consume_daily_quota_postgres(
         return Ok(DailyQuotaDebitResult::default());
     }
     let now = chrono::Utc::now();
-    // Serialize each entitlement's debits. Read the shared plan's current overage policy
-    // from this statement's snapshot without locking every subscriber's plan row.
+    // Serialize each entitlement's debits without locking the shared plan row.
     let entitlement_rows = sqlx::query(
         r#"
 SELECT
     user_plan_entitlements.id,
-    user_plan_entitlements.entitlements_snapshot,
-    billing_plans.entitlements_json AS plan_entitlements_json
+    user_plan_entitlements.entitlements_snapshot
 FROM user_plan_entitlements
-JOIN billing_plans ON billing_plans.id = user_plan_entitlements.plan_id
 WHERE user_plan_entitlements.user_id = $1
     AND user_plan_entitlements.status = 'active'
     AND user_plan_entitlements.starts_at <= NOW()
@@ -578,12 +558,9 @@ FOR UPDATE OF user_plan_entitlements
         let entitlement_id: String = row.try_get("id").map_postgres_err()?;
         let entitlements: serde_json::Value =
             row.try_get("entitlements_snapshot").map_postgres_err()?;
-        let plan_entitlements: serde_json::Value =
-            row.try_get("plan_entitlements_json").map_postgres_err()?;
         grants.extend(daily_quota_grants_from_entitlement(
             &entitlement_id,
             &entitlements,
-            daily_quota_wallet_overage_policy(&plan_entitlements),
             now,
         )?);
     }
@@ -593,9 +570,16 @@ FOR UPDATE OF user_plan_entitlements
 
     let mut grants_with_remaining = Vec::new();
     let mut total_remaining = 0.0;
-    let mut allow_wallet_overage = true;
+    // Wallet fallback is the user's explicit choice, never the plan's legacy default.
+    let allow_wallet_overage = sqlx::query_scalar::<_, bool>(
+        "SELECT allow_wallet_overage FROM user_preferences WHERE user_id = $1",
+    )
+    .bind(user_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_postgres_err()?
+    .unwrap_or(false);
     for grant in grants {
-        allow_wallet_overage &= grant.allow_wallet_overage;
         let used = sqlx::query_scalar::<_, Option<f64>>(
             r#"
 SELECT CAST(COALESCE(SUM(amount_usd), 0) AS DOUBLE PRECISION)
@@ -1293,33 +1277,43 @@ LIMIT 1
                         }
 
                         let billable_cost_usd = settlement_billable_cost_usd(&input);
-                        let wallet_debit_cost_usd = if !api_key_is_standalone {
-                            if let Some(user_id) =
-                                input.user_id.as_deref().filter(|value| !value.is_empty())
-                            {
-                                let quota = consume_daily_quota_postgres(
-                                    tx,
-                                    user_id,
-                                    &input.request_id,
-                                    billable_cost_usd,
-                                    wallet_available_usd,
-                                    wallet_can_overdraft,
-                                )
-                                .await?;
-                                if quota.insufficient {
-                                    final_billing_status = "insufficient_quota".to_string();
-                                    settlement.billing_status = final_billing_status.clone();
-                                    0.0
+                        let plan_wallet_fallback = usage_row
+                            .try_get::<Option<serde_json::Value>, _>("request_metadata")
+                            .map_postgres_err()?
+                            .and_then(|metadata| {
+                                metadata
+                                    .get("plan_wallet_fallback")
+                                    .and_then(serde_json::Value::as_bool)
+                            })
+                            .unwrap_or(false);
+                        let wallet_debit_cost_usd =
+                            if !api_key_is_standalone && !plan_wallet_fallback {
+                                if let Some(user_id) =
+                                    input.user_id.as_deref().filter(|value| !value.is_empty())
+                                {
+                                    let quota = consume_daily_quota_postgres(
+                                        tx,
+                                        user_id,
+                                        &input.request_id,
+                                        billable_cost_usd,
+                                        wallet_available_usd,
+                                        wallet_can_overdraft,
+                                    )
+                                    .await?;
+                                    if quota.insufficient {
+                                        final_billing_status = "insufficient_quota".to_string();
+                                        settlement.billing_status = final_billing_status.clone();
+                                        0.0
+                                    } else {
+                                        quota_covered = quota.debited_usd;
+                                        (billable_cost_usd - quota.debited_usd).max(0.0)
+                                    }
                                 } else {
-                                    quota_covered = quota.debited_usd;
-                                    (billable_cost_usd - quota.debited_usd).max(0.0)
+                                    billable_cost_usd
                                 }
                             } else {
                                 billable_cost_usd
-                            }
-                        } else {
-                            billable_cost_usd
-                        };
+                            };
                         if final_billing_status != "settled" {
                             sync_usage_settlement_snapshot(&mut **tx, &settlement).await?;
                             sqlx::query(FINALIZE_USAGE_BILLING_SQL)
@@ -1496,6 +1490,7 @@ mod tests {
             "user_plan_entitlements",
             "entitlement_usage_ledgers",
             "users",
+            "user_preferences",
             "usage_request_admissions",
             "usage_cost_reservations",
         ] {
@@ -1524,17 +1519,20 @@ mod tests {
             for (scenario, charge, quota_covered) in [
                 ("wallet", 20.0, 0.0),
                 ("quota_and_wallet", 20.0, 7.0),
+                ("wallet_fallback", 20.0, 0.0),
                 ("zero_charge", 0.0, 0.0),
             ] {
                 sqlx::query("INSERT INTO users (id, username, email_verified) VALUES ($1, $1, false)")
                     .bind(scenario).execute(&pool).await.expect("user should insert");
+                sqlx::query("INSERT INTO user_preferences (id, user_id, allow_wallet_overage) VALUES ($1, $1, true)")
+                    .bind(scenario).execute(&pool).await.expect("wallet fallback preference should insert");
                 sqlx::query("INSERT INTO wallets (id, user_id, balance, gift_balance, total_consumed, limit_mode, created_at, updated_at) VALUES ($1, $1, 100, 0, 0, 'finite', NOW(), NOW())")
                     .bind(scenario).execute(&pool).await.expect("wallet should insert");
                 // A zero-charge request must leave an active quota untouched too.
                 if scenario != "wallet" {
                     let grant = serde_json::json!([{
                         "type": "daily_quota", "daily_quota_usd": 7.0,
-                        "reset_timezone": "UTC", "allow_wallet_overage": true,
+                        "reset_timezone": "UTC", "allow_wallet_overage": false,
                     }]);
                     sqlx::query("INSERT INTO billing_plans (id, title, price_amount, duration_unit, duration_value, entitlements_json, created_at, updated_at) VALUES ($1, $1, 10, 'month', 1, $2, NOW(), NOW())")
                         .bind(scenario).bind(&grant).execute(&pool).await.expect("plan should insert");
@@ -1542,7 +1540,7 @@ mod tests {
                         .bind(scenario).bind(&grant).execute(&pool).await.expect("entitlement should insert");
                 }
                 let multiplier = charge / 10.0;
-                let metadata = serde_json::json!({"billing_multiplier_snapshot": {
+                let metadata = serde_json::json!({"plan_wallet_fallback": scenario == "wallet_fallback", "billing_multiplier_snapshot": {
                     "version": 1, "factors": {"routing_group": multiplier}, "multiplier": multiplier,
                 }});
                 sqlx::query("INSERT INTO usage (id, request_id, user_id, provider_id, provider_name, model, status, billing_status, total_cost_usd, actual_total_cost_usd, request_metadata) VALUES ($1, $1, $1, 'provider', 'Provider', 'model', 'completed', 'pending', 10, 5, $2)")
@@ -1701,6 +1699,8 @@ mod tests {
             .await
             .expect("shared plan should insert");
             for user_id in ["user-a", "user-b"] {
+                sqlx::query("INSERT INTO users (id, username, email_verified) VALUES ($1, $1, false)")
+                    .bind(user_id).execute(&pool).await.expect("user should insert");
                 sqlx::query(
                     "INSERT INTO user_plan_entitlements (id, user_id, plan_id, payment_order_id, starts_at, expires_at, entitlements_snapshot, created_at, updated_at) VALUES ($1, $1, 'shared-plan', $1, NOW() - INTERVAL '1 hour', NOW() + INTERVAL '1 day', $2, NOW(), NOW())",
                 )
@@ -1786,14 +1786,52 @@ mod tests {
             held.rollback().await.expect("held quota debit should roll back");
 
             let mut after_edit = pool.begin().await.expect("fresh transaction should start");
+            let unchanged_policy = super::consume_daily_quota_postgres(
+                &mut after_edit, "user-a", "request-plan-policy-after", 2.0, Some(5.0), true,
+            )
+            .await
+            .expect("plan changes must not opt the user into wallet charges");
+            assert!(unchanged_policy.insufficient);
+            after_edit.rollback().await.expect("default policy verification should roll back");
+            sqlx::query("INSERT INTO user_preferences (id, user_id, allow_wallet_overage) VALUES ('user-a', 'user-a', true)")
+                .execute(&pool).await.expect("user should enable wallet fallback");
+            let mut after_edit = pool.begin().await.expect("user preference transaction should start");
             let updated_policy = super::consume_daily_quota_postgres(
                 &mut after_edit, "user-a", "request-policy-after", 2.0, Some(5.0), true,
             )
             .await
-            .expect("fresh quota read should use current plan configuration");
+            .expect("fresh quota read should use the user preference");
             assert!(!updated_policy.insufficient);
             assert_eq!(updated_policy.debited_usd, 1.0);
-            after_edit.rollback().await.expect("policy verification should roll back");
+            after_edit.commit().await.expect("enabled wallet fallback should commit");
+            let mut exhausted = pool.begin().await.expect("exhausted quota transaction should start");
+            let debit = super::consume_daily_quota_postgres(
+                &mut exhausted, "user-a", "request-exhausted", 2.0, Some(5.0), false,
+            ).await.expect("exhausted quota should fall back to wallet");
+            assert!(!debit.insufficient);
+            assert_eq!(debit.debited_usd, 0.0);
+            let debit = super::consume_daily_quota_postgres(
+                &mut exhausted, "user-a", "request-exhausted-no-wallet", 2.0, Some(0.0), false,
+            ).await.expect("empty wallet should reject exhausted quota fallback");
+            assert!(debit.insufficient);
+            exhausted.rollback().await.expect("exhausted quota verification should roll back");
+
+            use aether_data_contracts::repository::billing::BillingReadRepository;
+            let billing = crate::SqlxBillingReadRepository::new(pool.clone());
+            let quota = billing.find_user_daily_quota_availability("user-a").await.unwrap().unwrap();
+            assert!(quota.allow_wallet_overage);
+            assert_eq!(quota.remaining_usd, 0.0);
+            sqlx::query("UPDATE user_preferences SET allow_wallet_overage = false WHERE user_id = 'user-a'")
+                .execute(&pool).await.expect("user should disable wallet fallback");
+            let quota = billing.find_user_daily_quota_availability("user-a").await.unwrap().unwrap();
+            assert!(!quota.allow_wallet_overage);
+            let mut disabled = pool.begin().await.expect("disabled fallback transaction should start");
+            let debit = super::consume_daily_quota_postgres(
+                &mut disabled, "user-a", "request-disabled", 2.0, Some(5.0), true,
+            ).await.expect("disabled preference should prevent wallet charges");
+            assert!(debit.insufficient);
+            assert_eq!(debit.debited_usd, 0.0);
+            disabled.rollback().await.expect("disabled fallback verification should roll back");
         })
         .catch_unwind()
         .await;

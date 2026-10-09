@@ -1,7 +1,7 @@
 use super::{envelope, metrics_value, parse_overview_query, OverviewRequest};
 use aether_data_contracts::repository::usage::{
-    StoredUsageAnalytics, StoredUsageDashboardAnalytics, UsageAnalyticsQuery, UsageAnalyticsRow,
-    UsageAnalyticsView, UsageDashboardAnalyticsQuery,
+    StoredUsageAnalytics, StoredUsageDashboardAnalytics, UsageAnalyticsMetrics,
+    UsageAnalyticsQuery, UsageAnalyticsRow, UsageAnalyticsView, UsageDashboardAnalyticsQuery,
 };
 use chrono::DateTime;
 use serde_json::{json, Value};
@@ -39,22 +39,42 @@ pub fn parse_dashboard_charts_query(raw: Option<&str>) -> Result<OverviewRequest
 const OVERVIEW_CHART_LIMIT: u32 = 10_000;
 
 pub fn dashboard_charts_value(snapshot: &StoredUsageAnalytics) -> Value {
+    // The chart read deliberately computes only its displayed metrics. Avoid
+    // presenting unmeasured diagnostics as zero through the shared serializer.
+    let chart_metrics = |metrics: &UsageAnalyticsMetrics| {
+        let mut value = metrics_value(metrics);
+        for field in [
+            "input_tokens",
+            "output_tokens",
+            "usage_active_users",
+            "slow_request_count",
+            "unclassified_failure_count",
+        ] {
+            value[field] = Value::Null;
+        }
+        value["usage_source"] = json!("unknown");
+        value["usage_source_counts"] = json!({
+            "reported": 0, "estimated": 0, "mixed": 0, "unknown": metrics.request_count,
+        });
+        value
+    };
     let rows = |items: &[UsageAnalyticsRow]| {
         items
             .iter()
             .map(|row| {
-                let mut value = metrics_value(&row.metrics);
+                let mut value = chart_metrics(&row.metrics);
                 if snapshot.unrecoverable_bucket_count > 0 {
                     mark_incomplete_amounts(&mut value);
                 }
                 value["id"] = json!(row.id);
                 value["label"] = json!(row.label);
                 value["bucket_start"] = json!(row.bucket_start);
+                value["unique_providers"] = json!(row.metrics.unique_providers);
                 value
             })
             .collect::<Vec<_>>()
     };
-    let mut summary = metrics_value(&snapshot.summary);
+    let mut summary = chart_metrics(&snapshot.summary);
     if snapshot.unrecoverable_bucket_count > 0 {
         mark_incomplete_amounts(&mut summary);
     }
@@ -293,6 +313,9 @@ mod tests {
             ..Default::default()
         };
         snapshot.summary.billable_amount = Some("2.00000000".into());
+        snapshot.summary.request_count = 1;
+        snapshot.summary.total_tokens = 42;
+        snapshot.summary.usage_available_count = 1;
         let row = UsageAnalyticsRow {
             id: Some("model-1".into()),
             label: None,
@@ -303,6 +326,25 @@ mod tests {
         snapshot.model_rows.push(row.clone());
         snapshot.provider_rows.push(row);
         let data = dashboard_charts_value(&snapshot);
+        for metrics in [
+            &data["summary"],
+            &data["series"][0],
+            &data["models"][0],
+            &data["providers"][0],
+        ] {
+            assert_eq!(metrics["total_tokens"], 42);
+            assert_eq!(metrics["usage_source"], "unknown");
+            assert_eq!(metrics["usage_source_counts"]["unknown"], 1);
+            for field in [
+                "input_tokens",
+                "output_tokens",
+                "usage_active_users",
+                "slow_request_count",
+                "unclassified_failure_count",
+            ] {
+                assert!(metrics[field].is_null(), "{field} was not measured");
+            }
+        }
         assert_eq!(
             data["summary"]["billable_amount"]["status"],
             "known_subtotal"

@@ -665,6 +665,13 @@ async fn live_overview_settlement_allocations_preserve_unlimited_and_finite_wall
             _ => 0.0,
         };
         if quota > 0.0 {
+            sqlx::query(
+                "INSERT INTO user_preferences(id,user_id,allow_wallet_overage) VALUES($1,$1,true)",
+            )
+            .bind(&user)
+            .execute(&pool)
+            .await
+            .unwrap();
             let grant = serde_json::json!([{"type":"daily_quota","daily_quota_usd":quota,"reset_timezone":"UTC","allow_wallet_overage":true}]);
             sqlx::query("INSERT INTO billing_plans(id,title,price_amount,duration_unit,duration_value,entitlements_json,created_at,updated_at) VALUES($1,'test',1,'month',1,$2,NOW(),NOW())").bind(&user).bind(&grant).execute(&pool).await.unwrap();
             sqlx::query("INSERT INTO payment_orders(id,order_no,wallet_id,user_id,amount_usd,payment_method,created_at) VALUES($1,$1,$2,$1,1,'test',NOW())").bind(&user).bind(&wallet).execute(&pool).await.unwrap();

@@ -336,6 +336,7 @@ async fn data_state_checks_user_uniqueness_through_user_reader() {
         email_notifications: false,
         usage_alerts: true,
         announcement_notifications: false,
+        allow_wallet_overage: true,
     };
     assert_eq!(
         state

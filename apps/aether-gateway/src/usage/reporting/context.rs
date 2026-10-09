@@ -25,6 +25,72 @@ const INTERNAL_REPORT_CAPABILITY_MINT_ATTEMPTS: usize = 4;
 const PLAN_USAGE_RESERVATION_TOKEN_FIELD: &str = "plan_usage_reservation_token";
 const PLAN_USAGE_RESERVATION_DEFERRED_FIELD: &str = "plan_usage_reservation_deferred";
 
+/// The funding decision is made after planning. Bind the server's decision to the
+/// already-issued capability, rather than allowing a reporting peer to select it.
+pub(crate) async fn attach_plan_wallet_fallback_context(
+    state: &AppState,
+    report_context: Option<Value>,
+    wallet_fallback: bool,
+) -> Result<Option<Value>, crate::GatewayError> {
+    let Some(Value::Object(mut context)) = report_context else {
+        return Ok(wallet_fallback.then(|| serde_json::json!({"plan_wallet_fallback": true})));
+    };
+    if !wallet_fallback && !context.contains_key("plan_wallet_fallback") {
+        return Ok(Some(Value::Object(context)));
+    }
+    let capability = context
+        .get(INTERNAL_REPORT_CAPABILITY_FIELD)
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let previous_digest = protected_internal_report_context_sha256(&context)?;
+    context.remove("plan_wallet_fallback");
+    if wallet_fallback {
+        context.insert("plan_wallet_fallback".to_string(), Value::Bool(true));
+        context.remove(PLAN_USAGE_RESERVATION_TOKEN_FIELD);
+        context.remove(PLAN_USAGE_RESERVATION_DEFERRED_FIELD);
+    }
+    let updated_digest = protected_internal_report_context_sha256(&context)?;
+    if updated_digest == previous_digest {
+        return Ok(Some(Value::Object(context)));
+    }
+    if let Some(capability) = capability {
+        let key = internal_report_capability_storage_key(&capability);
+        let serialized = state
+            .runtime_state
+            .kv_get(&key)
+            .await
+            .map_err(|error| crate::GatewayError::Internal(error.to_string()))?
+            .ok_or_else(|| {
+                crate::GatewayError::Internal(
+                    "report capability expired before execution".to_string(),
+                )
+            })?;
+        let mut record: InternalReportCapabilityRecord = serde_json::from_str(&serialized)
+            .map_err(|error| crate::GatewayError::Internal(error.to_string()))?;
+        if record.protected_context_sha256 == updated_digest {
+            return Ok(Some(Value::Object(context)));
+        }
+        if record.protected_context_sha256 != previous_digest
+            && record.kiro_web_search_context_sha256.as_deref() != Some(previous_digest.as_str())
+        {
+            return Err(crate::GatewayError::Internal(
+                "report capability context changed before funding decision".to_string(),
+            ));
+        }
+        record.protected_context_sha256 = updated_digest;
+        record.kiro_web_search_context_sha256 =
+            kiro_web_search_internal_report_context_sha256(&context)?;
+        let serialized = serde_json::to_string(&record)
+            .map_err(|error| crate::GatewayError::Internal(error.to_string()))?;
+        state
+            .runtime_state
+            .kv_set(&key, serialized, Some(INTERNAL_REPORT_CAPABILITY_TTL))
+            .await
+            .map_err(|error| crate::GatewayError::Internal(error.to_string()))?;
+    }
+    Ok(Some(Value::Object(context)))
+}
+
 /// Fields produced while observing an upstream response. Everything else in the
 /// planner-issued context is immutable and covered by the capability digest.
 ///
@@ -449,4 +515,70 @@ fn video_task_matches_requested_user(
         return true;
     };
     task.user_id.as_deref().map(str::trim) == Some(requested_user_id)
+}
+
+#[cfg(test)]
+mod wallet_fallback_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn wallet_fallback_is_server_bound_and_cannot_be_changed_by_a_reporting_peer() {
+        let state = AppState::new().unwrap();
+        let mut original = Some(json!({"request_id":"request-1", "user_id":"user-1"}));
+        attach_internal_gateway_report_capability(
+            &state,
+            "trace-1",
+            Some("openai_chat_sync"),
+            &BTreeMap::new(),
+            &mut original,
+        )
+        .await
+        .unwrap();
+        let rebound = attach_plan_wallet_fallback_context(&state, original.clone(), true)
+            .await
+            .unwrap();
+        let retried = attach_plan_wallet_fallback_context(&state, original, true)
+            .await
+            .unwrap();
+        assert_eq!(rebound, retried);
+        let mut forged = rebound.clone().unwrap();
+        forged
+            .as_object_mut()
+            .unwrap()
+            .remove("plan_wallet_fallback");
+        assert!(resolve_bound_internal_gateway_report_context(
+            &state,
+            "trace-1",
+            "openai_chat_sync",
+            Some(&forged),
+        )
+        .await
+        .unwrap()
+        .is_none());
+        let verified = resolve_bound_internal_gateway_report_context(
+            &state,
+            "trace-1",
+            "openai_chat_sync",
+            rebound.as_ref(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(verified["plan_wallet_fallback"], true);
+    }
+
+    #[tokio::test]
+    async fn wallet_fallback_seed_is_cleared_when_server_uses_plan() {
+        let state = AppState::new().unwrap();
+        let context = attach_plan_wallet_fallback_context(
+            &state,
+            Some(json!({"plan_wallet_fallback":true})),
+            false,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(context.get("plan_wallet_fallback").is_none());
+    }
 }

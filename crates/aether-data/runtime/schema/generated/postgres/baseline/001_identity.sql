@@ -191,6 +191,7 @@ CREATE TABLE IF NOT EXISTS public.user_preferences (
     email_notifications boolean DEFAULT true NOT NULL,
     usage_alerts boolean DEFAULT true NOT NULL,
     announcement_notifications boolean DEFAULT true NOT NULL,
+    allow_wallet_overage boolean DEFAULT false NOT NULL,
     created_at bigint NOT NULL,
     updated_at bigint NOT NULL
 );

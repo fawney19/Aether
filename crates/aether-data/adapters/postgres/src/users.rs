@@ -524,7 +524,8 @@ SELECT
   up.timezone,
   up.email_notifications,
   up.usage_alerts,
-  up.announcement_notifications
+  up.announcement_notifications,
+  up.allow_wallet_overage
 FROM user_preferences up
 LEFT JOIN providers p
   ON p.id = up.default_provider_id
@@ -546,6 +547,7 @@ WITH upserted AS (
     email_notifications,
     usage_alerts,
     announcement_notifications,
+    allow_wallet_overage,
     created_at,
     updated_at
   ) VALUES (
@@ -560,6 +562,7 @@ WITH upserted AS (
     $9,
     $10,
     $11,
+    $12,
     NOW(),
     NOW()
   )
@@ -573,6 +576,7 @@ WITH upserted AS (
     email_notifications = EXCLUDED.email_notifications,
     usage_alerts = EXCLUDED.usage_alerts,
     announcement_notifications = EXCLUDED.announcement_notifications,
+    allow_wallet_overage = EXCLUDED.allow_wallet_overage,
     updated_at = NOW()
   RETURNING
     user_id,
@@ -584,7 +588,8 @@ WITH upserted AS (
     timezone,
     email_notifications,
     usage_alerts,
-    announcement_notifications
+    announcement_notifications,
+    allow_wallet_overage
 )
 SELECT
   upserted.user_id,
@@ -597,7 +602,8 @@ SELECT
   upserted.timezone,
   upserted.email_notifications,
   upserted.usage_alerts,
-  upserted.announcement_notifications
+  upserted.announcement_notifications,
+  upserted.allow_wallet_overage
 FROM upserted
 LEFT JOIN providers p
   ON p.id = upserted.default_provider_id
@@ -2931,6 +2937,7 @@ LIMIT 1
             .bind(preferences.email_notifications)
             .bind(preferences.usage_alerts)
             .bind(preferences.announcement_notifications)
+            .bind(preferences.allow_wallet_overage)
             .fetch_optional(&self.pool)
             .await
             .map_postgres_err()?;
@@ -3220,6 +3227,7 @@ fn map_user_preference_row(
         announcement_notifications: row
             .try_get("announcement_notifications")
             .map_postgres_err()?,
+        allow_wallet_overage: row.try_get("allow_wallet_overage").map_postgres_err()?,
     })
 }
 

@@ -356,12 +356,31 @@
       </h3>
       <TimeRangePicker
         v-model="dailyTimeRange"
-        :allow-hourly="true"
+        :allow-hourly="!isAdmin"
+        :show-granularity="!isAdmin"
       />
     </div>
 
+    <div
+      v-if="dailyError"
+      role="alert"
+      class="flex items-center justify-between gap-3 rounded-lg border border-border p-4 text-sm text-muted-foreground"
+    >
+      <span>{{ dailyError }}</span>
+      <Button
+        variant="outline"
+        size="sm"
+        @click="loadDailyStats"
+      >
+        {{ t('重试', 'Retry') }}
+      </Button>
+    </div>
+
     <!-- 趋势图表区域 -->
-    <div class="grid grid-cols-1 gap-6 lg:grid-cols-2">
+    <div
+      v-if="!dailyError"
+      class="grid grid-cols-1 gap-6 lg:grid-cols-2"
+    >
       <!-- 每日使用趋势（折线图）- 普通用户可见 -->
       <Card
         v-if="!isAdmin"
@@ -399,7 +418,7 @@
         </div>
       </Card>
 
-      <!-- 每日模型成本（堆叠柱状图）- 仅管理员可见 -->
+      <!-- 每日模型费用（堆叠柱状图）- 仅管理员可见 -->
       <Card
         v-if="isAdmin"
         class="p-5"
@@ -407,7 +426,7 @@
         <h4
           class="mb-3 text-xs font-semibold text-foreground uppercase tracking-wider"
         >
-          每日模型成本
+          每日模型费用
         </h4>
         <div
           v-if="loadingDaily"
@@ -422,7 +441,7 @@
           <BarChart
             v-if="
               dailyModelCostChartData.labels &&
-                dailyModelCostChartData.labels.length > 0
+                dailyModelCostChartData.labels.length > 0 && hasDailyModelCost
             "
             :data="dailyModelCostChartData"
             :options="dailyModelCostChartOptions"
@@ -431,12 +450,12 @@
             v-else
             class="flex h-full items-center justify-center text-xs text-muted-foreground"
           >
-            暂无数据
+            {{ dailyCostEmptyLabel }}
           </div>
         </div>
       </Card>
 
-      <!-- 提供商成本分布（环形图）- 仅管理员可见 -->
+      <!-- 提供商费用分布（环形图）- 仅管理员可见 -->
       <Card
         v-if="isAdmin"
         class="p-5"
@@ -444,7 +463,7 @@
         <h4
           class="mb-3 text-xs font-semibold text-foreground uppercase tracking-wider"
         >
-          提供商成本分布
+          提供商费用分布
         </h4>
         <div
           v-if="loadingDaily"
@@ -468,12 +487,12 @@
             v-else
             class="flex h-full items-center justify-center text-xs text-muted-foreground"
           >
-            暂无数据
+            {{ dailyCostEmptyLabel }}
           </div>
         </div>
       </Card>
 
-      <!-- 每日模型成本（堆叠柱状图）- 普通用户可见 -->
+      <!-- 每日模型费用（堆叠柱状图）- 普通用户可见 -->
       <Card
         v-if="!isAdmin"
         class="p-5"
@@ -481,7 +500,7 @@
         <h4
           class="mb-3 text-xs font-semibold text-foreground uppercase tracking-wider"
         >
-          每日模型成本
+          每日模型费用
         </h4>
         <div
           v-if="loadingDaily"
@@ -511,8 +530,18 @@
       </Card>
     </div>
 
+    <p
+      v-if="dailyCostsPartial && !loadingDaily"
+      class="mt-3 text-xs text-amber-700 dark:text-amber-400"
+    >
+      {{ t('统计为已知数据小计，分布占比按已知金额计算', 'Statistics are known subtotals; distribution shares use known amounts') }}
+    </p>
+
     <!-- 每日统计 -->
-    <Card class="overflow-hidden mt-6">
+    <Card
+      v-if="!dailyError"
+      class="overflow-hidden mt-6"
+    >
       <!-- 移动端：卡片列表 -->
       <div class="sm:hidden">
         <div class="px-4 py-3 border-b border-border/60">
@@ -528,7 +557,7 @@
           <span class="ml-2 text-muted-foreground text-xs">加载中...</span>
         </div>
         <div
-          v-else-if="dailyStats.length === 0"
+          v-else-if="displayDailyStats.length === 0"
           class="py-8 text-center text-muted-foreground text-xs"
         >
           暂无数据
@@ -538,19 +567,20 @@
           class="divide-y divide-border/60"
         >
           <div
-            v-for="stat in dailyStats.slice().reverse()"
+            v-for="stat in displayDailyStats.slice().reverse()"
             :key="stat.date"
             class="p-4 space-y-2"
           >
             <div class="flex items-center justify-between">
               <span class="font-medium text-sm">{{
-                formatDate(stat.date)
+                formatDailyDate(stat.date)
               }}</span>
               <Badge
                 variant="success"
                 class="text-[10px]"
               >
-                ${{ stat.cost.toFixed(4) }}
+                {{ formatDailyCost(stat.cost) }}
+                <span v-if="stat.billableAmount">{{ amountStatus(stat.billableAmount, t) }}</span>
               </Badge>
             </div>
             <div class="grid grid-cols-2 gap-2 text-xs">
@@ -560,7 +590,7 @@
               </div>
               <div class="flex justify-between">
                 <span class="text-muted-foreground">Tokens</span>
-                <span>{{ formatTokens(stat.tokens) }}</span>
+                <span>{{ compactTokens(stat.tokens) }}</span>
               </div>
               <div class="flex justify-between">
                 <span class="text-muted-foreground">响应</span>
@@ -617,7 +647,7 @@
               </div>
             </TableCell>
           </TableRow>
-          <TableRow v-else-if="dailyStats.length === 0">
+          <TableRow v-else-if="displayDailyStats.length === 0">
             <TableCell
               :colspan="isAdmin ? 7 : 6"
               class="text-center py-8 text-muted-foreground text-xs"
@@ -627,11 +657,12 @@
           </TableRow>
           <template v-else>
             <TableRow
-              v-for="stat in dailyStats.slice().reverse()"
+              v-for="stat in displayDailyStats.slice().reverse()"
               :key="stat.date"
+              :data-daily-date="stat.date"
             >
               <TableCell class="font-medium text-xs">
-                {{ formatDate(stat.date) }}
+                {{ formatDailyDate(stat.date) }}
               </TableCell>
               <TableCell class="text-center text-xs">
                 {{ stat.requests.toLocaleString() }}
@@ -641,7 +672,7 @@
                   variant="secondary"
                   class="text-[10px]"
                 >
-                  {{ formatTokens(stat.tokens) }}
+                  {{ compactTokens(stat.tokens) }}
                 </Badge>
               </TableCell>
               <TableCell class="text-center">
@@ -649,7 +680,8 @@
                   variant="success"
                   class="text-[10px]"
                 >
-                  ${{ stat.cost.toFixed(4) }}
+                  {{ formatDailyCost(stat.cost) }}
+                  <span v-if="stat.billableAmount">{{ amountStatus(stat.billableAmount, t) }}</span>
                 </Badge>
               </TableCell>
               <TableCell class="text-center">
@@ -667,7 +699,7 @@
                 v-if="isAdmin"
                 class="text-center text-xs"
               >
-                {{ stat.unique_providers }}
+                {{ stat.unique_providers ?? '—' }}
               </TableCell>
             </TableRow>
           </template>
@@ -676,8 +708,9 @@
 
       <!-- 汇总信息 -->
       <div
-        v-if="dailyStats.length > 0"
+        v-if="displayDailyStats.length > 0 && !loadingDaily"
         class="border-t border-border bg-muted/30 backdrop-blur-sm px-4 py-3 text-xs"
+        data-daily-total
       >
         <div class="grid grid-cols-2 gap-4 sm:grid-cols-4">
           <div class="text-center">
@@ -693,7 +726,7 @@
               总Tokens
             </div>
             <div class="font-semibold text-book-cloth dark:text-kraft">
-              {{ formatTokens(totalStats.tokens) }}
+              {{ compactTokens(totalStats.tokens) }}
             </div>
           </div>
           <div class="text-center">
@@ -701,7 +734,8 @@
               总费用
             </div>
             <div class="font-semibold text-amber-600 dark:text-amber-400">
-              ${{ totalStats.cost.toFixed(4) }}
+              {{ formatDailyCost(totalStats.cost) }}
+              <span v-if="adminDailyCharts">{{ amountStatus(adminDailyCharts.summary.billable_amount, t) }}</span>
             </div>
           </div>
           <div class="text-center">
@@ -741,8 +775,10 @@ import {
   type DailyStat,
   type ProviderSummary,
 } from "@/api/dashboard";
-import { overviewApi, type OverviewDashboardSummary } from "@/api/overview";
-import { amountValue } from "@/features/overview/dashboard/amount";
+import { overviewApi, type OverviewAmount, type OverviewDashboardCharts, type OverviewDashboardSummary, type OverviewRange } from "@/api/overview";
+import { amountStatus, amountValue } from "@/features/overview/dashboard/amount";
+import { chartDate, dashboardChartRange, modelDatasets, providerSlices } from "@/features/overview/dashboard/charts";
+import { zonedInput } from "@/features/overview/query";
 import { count, percent, timestamp } from "@/features/overview/format";
 import DashboardActivity from "@/features/overview/dashboard/DashboardActivity.vue";
 import DashboardAnnouncements from "@/features/overview/dashboard/DashboardAnnouncements.vue";
@@ -926,19 +962,43 @@ const tokenBreakdown = ref<{
 
 const dailyStats = ref<DailyStat[]>([]);
 const providerSummary = ref<ProviderSummary[]>([]);
+const adminDailyCharts = ref<OverviewDashboardCharts | null>(null);
+const adminDailyRange = ref<OverviewRange | null>(null);
+type DisplayDailyStat = Omit<DailyStat, 'tokens' | 'cost' | 'avg_response_time' | 'model_breakdown' | 'unique_providers'> & {
+  tokens: number | null;
+  cost: number | null;
+  avg_response_time: number | null;
+  unique_providers?: number | null;
+  billableAmount?: OverviewAmount;
+};
+const displayDailyStats = computed<DisplayDailyStat[]>(() => {
+  if (!isAdmin.value || (import.meta.env.DEV && isDemo.value)) return dailyStats.value;
+  const charts = adminDailyCharts.value;
+  if (!charts) return [];
+  return charts.series.map(day => ({
+    date: day.bucket_start,
+    requests: day.request_count,
+    tokens: day.total_tokens,
+    cost: amountValue(day.billable_amount),
+    billableAmount: day.billable_amount,
+    avg_response_time: day.latency_ms.avg === null ? null : day.latency_ms.avg / 1000,
+    unique_models: new Set(charts.models.filter(model => Date.parse(model.bucket_start) === Date.parse(day.bucket_start) && model.id !== null).map(model => model.id)).size,
+    unique_providers: day.unique_providers,
+  }));
+});
 const dailyTimeRange = ref<DateRangeParams>(
-  getDateRangeFromPeriod("last7days"),
+  { ...getDateRangeFromPeriod("last7days"), granularity: 'day' },
 );
 // 统计周期
 const loadingDaily = ref(false);
+const dailyError = ref('');
 const loading = ref(false);
 const dashboardError = ref("");
 let dashboardRequestId = 0;
 let dashboardController: AbortController | null = null;
 let dashboardTimezone: string | null = null;
 let dailyStatsRequestId = 0;
-let dailyStatsLoadPromise: Promise<void> | null = null;
-let hasPendingDailyStatsLoad = false;
+let dailyStatsController: AbortController | null = null;
 let dailyStatsDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 
 
@@ -975,6 +1035,15 @@ const emptyStatPlaceholders = computed(() => {
 const statSkeletonCount = computed(() => emptyStatPlaceholders.value.length);
 
 const totalStats = computed(() => {
+  if (isAdmin.value && adminDailyCharts.value) {
+    const summary = adminDailyCharts.value.summary;
+    return {
+      requests: summary.request_count,
+      tokens: summary.total_tokens,
+      cost: amountValue(summary.billable_amount),
+      avgResponseTime: summary.latency_ms.avg === null ? null : summary.latency_ms.avg / 1000,
+    };
+  }
   if (dailyStats.value.length === 0) {
     return { requests: 0, tokens: 0, cost: 0, avgResponseTime: 0 };
   }
@@ -997,7 +1066,7 @@ const totalStats = computed(() => {
   };
 });
 
-// 每日模型成本（堆叠柱状图）
+// 每日模型费用（堆叠柱状图）
 const MODEL_COLORS = [
   "rgba(59, 130, 246, 0.8)", // blue
   "rgba(239, 68, 68, 0.8)", // red
@@ -1010,6 +1079,13 @@ const MODEL_COLORS = [
 ];
 
 const dailyModelCostChartData = computed<ChartData<"bar">>(() => {
+  if (isAdmin.value && adminDailyCharts.value && adminDailyRange.value) {
+    const timezone = adminDailyRange.value.timezone;
+    return {
+      labels: adminDailyCharts.value.series.map(day => chartDate(day.bucket_start, timezone)),
+      datasets: modelDatasets(adminDailyCharts.value, t('未知模型', 'Unknown model'), t('其他模型', 'Other models')),
+    };
+  }
   if (dailyStats.value.length === 0) {
     return { labels: [], datasets: [] };
   }
@@ -1055,6 +1131,23 @@ const dailyModelCostChartData = computed<ChartData<"bar">>(() => {
     labels: dailyStats.value.map((stat) => formatDateForChart(stat.date)),
     datasets,
   };
+});
+
+const hasDailyModelCost = computed(() => dailyModelCostChartData.value.datasets.some(dataset => dataset.data.some(value => typeof value === 'number' && value !== 0)));
+const dailyCostsPartial = computed(() => {
+  const data = adminDailyCharts.value;
+  if (!data) return false;
+  const amounts = [data.summary, ...data.series, ...data.models, ...data.providers].map(row => row.billable_amount);
+  return amounts.some(amount => amountValue(amount) !== null)
+    && amounts.some(amount => amountValue(amount) === null || amount.status === 'known_subtotal' || amount.status === 'estimated_subtotal');
+});
+const dailyCostEmptyLabel = computed(() => {
+  const data = adminDailyCharts.value;
+  if (!data) return t('暂无数据', 'No data');
+  const amount = amountValue(data.summary.billable_amount);
+  if (amount === null || dailyCostsPartial.value) return t('费用尚未确认', 'Cost not yet known');
+  if (amount > 0) return t('暂无费用明细', 'No cost breakdown available');
+  return data.summary.request_count === 0 ? t('暂无数据', 'No data') : t('此周期暂无计费费用', 'No billable cost in this period');
 });
 
 const dailyModelCostChartOptions = computed<ChartOptions<"bar">>(() => ({
@@ -1106,7 +1199,7 @@ const dailyModelCostChartOptions = computed<ChartOptions<"bar">>(() => ({
   },
 }));
 
-// 提供商成本分布（环形图）
+// 提供商费用分布（环形图）
 const PROVIDER_COLORS = [
   "rgba(59, 130, 246, 0.8)", // blue
   "rgba(239, 68, 68, 0.8)", // red
@@ -1119,6 +1212,13 @@ const PROVIDER_COLORS = [
 ];
 
 const providerCostChartData = computed<ChartData<"doughnut">>(() => {
+  if (isAdmin.value && adminDailyCharts.value) {
+    const slices = providerSlices(adminDailyCharts.value.providers, t('未知提供商', 'Unknown provider'), t('其他提供商', 'Other providers'));
+    return {
+      labels: slices.map(slice => slice.label),
+      datasets: [{ data: slices.map(slice => slice.value), backgroundColor: slices.map((_, i) => PROVIDER_COLORS[i % PROVIDER_COLORS.length]), borderWidth: 2, borderColor: 'rgba(255, 255, 255, 0.1)' }],
+    };
+  }
   if (providerSummary.value.length === 0) {
     return { labels: [], datasets: [] };
   }
@@ -1275,9 +1375,9 @@ onBeforeUnmount(() => {
     clearTimeout(dailyStatsDebounceTimer);
     dailyStatsDebounceTimer = null;
   }
-  hasPendingDailyStatsLoad = false;
-  dailyStatsLoadPromise = null;
   dailyStatsRequestId += 1;
+  dailyStatsController?.abort();
+  dailyStatsController = null;
   dashboardRequestId += 1;
   dashboardController?.abort();
   dashboardController = null;
@@ -1380,40 +1480,50 @@ function adminStatCards(snapshot: OverviewDashboardSummary): DashboardStatCard[]
 }
 
 async function loadDailyStats() {
-  if (dailyStatsLoadPromise) {
-    hasPendingDailyStatsLoad = true;
-    return dailyStatsLoadPromise;
-  }
+  dailyStatsController?.abort();
+  const controller = new AbortController();
+  dailyStatsController = controller;
   const requestId = ++dailyStatsRequestId;
   loadingDaily.value = true;
-  dailyStatsLoadPromise = (async () => {
-    try {
+  dailyError.value = '';
+  try {
+    if (isAdmin.value && !(import.meta.env.DEV && isDemo.value)) {
+      const range = dashboardChartRange(dailyTimeRange.value);
+      const response = await overviewApi.dashboardCharts(range, controller.signal);
+      if (requestId !== dailyStatsRequestId || controller.signal.aborted) return;
+      adminDailyCharts.value = response.data;
+      adminDailyRange.value = range;
+      dailyStats.value = [];
+      providerSummary.value = [];
+    } else {
       const response = import.meta.env.DEV && isDemo.value
         ? (await import('@/features/overview/dashboard/demo')).createDashboardDailyDemo(dailyTimeRange.value)
         : await dashboardApi.getDailyStats(dailyTimeRange.value);
-      if (requestId !== dailyStatsRequestId) return;
+      if (requestId !== dailyStatsRequestId || controller.signal.aborted) return;
+      adminDailyCharts.value = null;
+      adminDailyRange.value = null;
       dailyStats.value = response.daily_stats;
       providerSummary.value = response.provider_summary || [];
-    } catch {
-      if (requestId !== dailyStatsRequestId) return;
-      dailyStats.value = [];
-      providerSummary.value = [];
-    } finally {
-      if (requestId === dailyStatsRequestId) {
-        loadingDaily.value = false;
-      }
     }
-  })().finally(() => {
-    dailyStatsLoadPromise = null;
-    if (hasPendingDailyStatsLoad) {
-      hasPendingDailyStatsLoad = false;
-      void loadDailyStats();
+  } catch {
+    if (requestId !== dailyStatsRequestId || controller.signal.aborted) return;
+    if (isAdmin.value) dailyError.value = t('统计加载失败，请重试', 'Statistics could not be loaded. Please retry.');
+    dailyStats.value = [];
+    providerSummary.value = [];
+    adminDailyCharts.value = null;
+    adminDailyRange.value = null;
+  } finally {
+    if (requestId === dailyStatsRequestId) {
+      loadingDaily.value = false;
+      dailyStatsController = null;
     }
-  });
-  return dailyStatsLoadPromise;
+  }
 }
 
 function scheduleDailyStatsLoad() {
+  dailyStatsController?.abort();
+  dailyStatsRequestId += 1;
+  loadingDaily.value = true;
   if (dailyStatsDebounceTimer) {
     clearTimeout(dailyStatsDebounceTimer);
   }
@@ -1423,15 +1533,24 @@ function scheduleDailyStatsLoad() {
   }, 120);
 }
 
-watch(dailyTimeRange, scheduleDailyStatsLoad, { deep: true });
+watch(() => JSON.stringify([
+  dailyTimeRange.value.from, dailyTimeRange.value.to,
+  dailyTimeRange.value.start_date, dailyTimeRange.value.end_date,
+  dailyTimeRange.value.preset, dailyTimeRange.value.granularity,
+  dailyTimeRange.value.timezone, dailyTimeRange.value.tz_offset_minutes,
+]), scheduleDailyStatsLoad);
 watch(isDemo, () => {
   dashboardController?.abort();
   dashboardController = null;
   dashboardSnapshot.value = null;
   demoTimeline.value = null;
   dailyStatsRequestId += 1;
+  dailyStatsController?.abort();
   dailyStats.value = [];
   providerSummary.value = [];
+  adminDailyCharts.value = null;
+  adminDailyRange.value = null;
+  dailyError.value = '';
   void loadDashboardData();
   void loadDailyStats();
 });
@@ -1463,7 +1582,25 @@ function formatDateForChart(dateString: string): string {
   return date.toLocaleDateString(getI18nLocale(), { month: "numeric", day: "numeric" });
 }
 
-function formatResponseTime(seconds: number): string {
+function formatDailyCost(cost: number | null): string {
+  return cost === null ? '—' : `$${cost.toFixed(4)}`;
+}
+
+function formatDailyDate(value: string): string {
+  if (isAdmin.value && adminDailyRange.value) {
+    const timezone = adminDailyRange.value.timezone;
+    const date = zonedInput(value, timezone).slice(0, 10);
+    const today = zonedInput(new Date(), timezone).slice(0, 10);
+    const yesterday = new Date(Date.parse(`${today}T00:00:00Z`) - 86_400_000).toISOString().slice(0, 10);
+    if (date === today) return formatRelativeTime(0, 'day');
+    if (date === yesterday) return formatRelativeTime(-1, 'day');
+    return parseDateLike(date).toLocaleDateString(getI18nLocale(), { month: '2-digit', day: '2-digit', weekday: 'short' });
+  }
+  return formatDate(value);
+}
+
+function formatResponseTime(seconds: number | null): string {
+  if (seconds === null) return '—';
   if (seconds === 0) return "-";
   if (seconds < 1) return `${(seconds * 1000).toFixed(0)}ms`;
   return `${seconds.toFixed(2)}s`;

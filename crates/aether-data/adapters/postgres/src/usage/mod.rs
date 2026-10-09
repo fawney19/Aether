@@ -66,6 +66,7 @@ mod analytics_tests;
 mod attribution;
 pub mod cleanup;
 mod dashboard;
+mod dashboard_charts;
 mod dashboard_history;
 #[cfg(test)]
 mod dashboard_history_tests;

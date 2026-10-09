@@ -3,9 +3,11 @@ use std::collections::BTreeMap;
 use aether_ai_formats::UPSTREAM_IS_STREAM_KEY;
 use aether_contracts::{ExecutionPlan, ExecutionTelemetry};
 use aether_data_contracts::repository::usage::{
-    UpsertUsageRecord, UsageBodyCaptureState, LIVE_SESSION_METADATA_KEY,
-    USAGE_AVAILABLE_METADATA_KEY, USAGE_PRICING_AVAILABLE_METADATA_KEY,
-    WEBSOCKET_MODE_METADATA_KEY, WEBSOCKET_TRANSPORT_METADATA_KEY,
+    UpsertUsageRecord, UsageBodyCaptureState, BILLING_MULTIPLIER_SNAPSHOT_METADATA_KEY,
+    LIVE_SESSION_METADATA_KEY, ROUTING_GROUP_BILLING_MULTIPLIER_METADATA_KEY,
+    ROUTING_GROUP_ID_METADATA_KEY, ROUTING_GROUP_NAME_METADATA_KEY, USAGE_AVAILABLE_METADATA_KEY,
+    USAGE_PRICING_AVAILABLE_METADATA_KEY, WEBSOCKET_MODE_METADATA_KEY,
+    WEBSOCKET_TRANSPORT_METADATA_KEY,
 };
 use aether_data_contracts::DataLayerError;
 use serde_json::{json, Map, Value};
@@ -2214,6 +2216,23 @@ fn build_runtime_request_metadata_seed_from_parts(
     provider_request_body_base64: Option<&str>,
 ) -> Option<Value> {
     let mut metadata = Map::new();
+    // Lifecycle writes need the same immutable routing and billing identity as terminal
+    // writes, without retaining the larger report-context payloads.
+    let routing_snapshot = Map::from_iter(
+        [
+            ROUTING_GROUP_ID_METADATA_KEY,
+            ROUTING_GROUP_NAME_METADATA_KEY,
+            ROUTING_GROUP_BILLING_MULTIPLIER_METADATA_KEY,
+            BILLING_MULTIPLIER_SNAPSHOT_METADATA_KEY,
+        ]
+        .into_iter()
+        .filter_map(|key| context_value_ref(context, key).map(|value| (key.into(), value.clone()))),
+    );
+    if let Some(Value::Object(snapshot)) =
+        sanitize_usage_request_metadata(Some(Value::Object(routing_snapshot)))
+    {
+        metadata.extend(snapshot);
+    }
     for key in ["analytics_attribution", "analytics_failure"] {
         if let Some(value) = context_value_ref(context, key) {
             metadata.insert(key.into(), value.clone());
@@ -2244,6 +2263,12 @@ fn build_runtime_request_metadata_seed_from_parts(
         metadata.insert(
             "api_key_is_standalone".to_string(),
             Value::Bool(api_key_is_standalone),
+        );
+    }
+    if let Some(wallet_fallback) = context_bool(context, "plan_wallet_fallback") {
+        metadata.insert(
+            "plan_wallet_fallback".to_string(),
+            Value::Bool(wallet_fallback),
         );
     }
     if let Some(websocket_mode) = context_bool(context, WEBSOCKET_MODE_METADATA_KEY) {
@@ -3921,6 +3946,14 @@ mod tests {
                 Some(&json!({
                     "candidate_id": "cand-pending-event-1",
                     "candidate_index": 3,
+                    "routing_group_id": "group-free",
+                    "routing_group_name": "免费分组",
+                    "routing_group_billing_multiplier": 0.0,
+                    "billing_multiplier_snapshot": {
+                        "version": 1,
+                        "factors": {"routing_group": 0.0},
+                        "multiplier": 0.0
+                    },
                     "websocket_mode": true,
                     "websocket_transport": "responses",
                     "original_request_body": {"messages": [{"content": "omit me"}]},
@@ -3945,6 +3978,17 @@ mod tests {
         assert!(record.provider_request_body.is_none());
         assert_eq!(record.candidate_id.as_deref(), Some("cand-pending-event-1"));
         assert_eq!(record.candidate_index, Some(3));
+        let metadata = record.request_metadata.as_ref().expect("routing snapshot");
+        assert_eq!(metadata["routing_group_id"], "group-free");
+        assert_eq!(metadata["routing_group_name"], "免费分组");
+        assert_eq!(metadata["routing_group_billing_multiplier"], 0.0);
+        assert_eq!(
+            aether_data_contracts::repository::usage::billing_multiplier_snapshot(Some(metadata))
+                .unwrap()
+                .unwrap()
+                .multiplier(),
+            0.0
+        );
         assert_eq!(
             record
                 .request_metadata
@@ -3993,6 +4037,14 @@ mod tests {
                 Some(&json!({
                     "candidate_id": "cand-streaming-event-1",
                     "candidate_index": 4,
+                    "routing_group_id": "group-discount",
+                    "routing_group_name": "折扣分组",
+                    "routing_group_billing_multiplier": 0.5,
+                    "billing_multiplier_snapshot": {
+                        "version": 1,
+                        "factors": {"routing_group": 0.5},
+                        "multiplier": 0.5
+                    },
                     "provider_request_body": {"input": "omit me"}
                 })),
             ),
@@ -4017,6 +4069,115 @@ mod tests {
             Some("cand-streaming-event-1")
         );
         assert_eq!(record.candidate_index, Some(4));
+        let metadata = record.request_metadata.as_ref().expect("routing snapshot");
+        assert_eq!(metadata["routing_group_id"], "group-discount");
+        assert_eq!(metadata["routing_group_name"], "折扣分组");
+        assert_eq!(metadata["routing_group_billing_multiplier"], 0.5);
+        assert_eq!(
+            aether_data_contracts::repository::usage::billing_multiplier_snapshot(Some(metadata))
+                .unwrap()
+                .unwrap()
+                .multiplier(),
+            0.5
+        );
+    }
+
+    #[test]
+    fn lifecycle_routing_snapshot_preserves_legacy_factors_and_invalid_markers() {
+        use aether_data_contracts::repository::usage::billing_multiplier_snapshot;
+
+        let plan = ExecutionPlan {
+            request_id: "req-lifecycle-snapshot".to_string(),
+            candidate_id: None,
+            provider_name: Some("OpenAI".to_string()),
+            provider_id: "provider-1".to_string(),
+            endpoint_id: "endpoint-1".to_string(),
+            key_id: "key-1".to_string(),
+            method: "POST".to_string(),
+            url: "https://example.com/v1/responses".to_string(),
+            headers: BTreeMap::new(),
+            content_type: Some("application/json".to_string()),
+            content_encoding: None,
+            body: RequestBody::from_json(json!({"model": "gpt-5.4"})),
+            stream: true,
+            client_api_format: "openai:responses".to_string(),
+            provider_api_format: "openai:responses".to_string(),
+            model_name: Some("gpt-5.4".to_string()),
+            proxy: None,
+            transport_profile: None,
+            timeouts: None,
+        };
+
+        for (snapshot, expected_multiplier) in [
+            (json!({"routing_group_billing_multiplier": 2.0}), Some(2.0)),
+            (json!({"routing_group_billing_multiplier": -1}), None),
+            (
+                json!({
+                    "routing_group_billing_multiplier": 0.5,
+                    "billing_multiplier_snapshot": null
+                }),
+                None,
+            ),
+            (
+                json!({
+                    "routing_group_billing_multiplier": 0.5,
+                    "billing_multiplier_snapshot": {
+                        "version": 1,
+                        "factors": {"routing_group": 2.0},
+                        "multiplier": 1.0
+                    }
+                }),
+                None,
+            ),
+        ] {
+            let mut context = snapshot;
+            context["routing_group_id"] = json!("group-1");
+            context["routing_group_name"] = json!("请求时分组");
+            context["original_request_body"] = json!({"secret": "do not capture"});
+            context["billing_snapshot"] = json!({"payload": "x".repeat(32 * 1024)});
+            let seed = super::build_lifecycle_usage_seed(&plan, Some(&context));
+            let pending_event =
+                build_pending_usage_event_from_owned_seed(seed.clone(), 1_700_000_000).unwrap();
+            let streaming_event =
+                build_streaming_usage_event_from_owned_seed(seed.clone(), 200, None, 1_700_000_001)
+                    .unwrap();
+            let records = [
+                build_pending_usage_record(&plan, Some(&context), 1_700_000_000).unwrap(),
+                build_streaming_usage_record(&plan, Some(&context), 200, None, 1_700_000_001)
+                    .unwrap(),
+                build_upsert_usage_record_from_event(&pending_event).unwrap(),
+                build_upsert_usage_record_from_event(&streaming_event).unwrap(),
+            ];
+
+            for metadata in std::iter::once(seed.request_metadata.as_ref()).chain(
+                records.iter().map(|record| {
+                    assert!(record.request_body.is_none());
+                    assert!(record.provider_request_body.is_none());
+                    record.request_metadata.as_ref()
+                }),
+            ) {
+                let metadata = metadata.expect("lifecycle routing snapshot");
+                assert_eq!(metadata["routing_group_id"], "group-1");
+                assert_eq!(metadata["routing_group_name"], "请求时分组");
+                assert!(metadata.get("original_request_body").is_none());
+                assert!(metadata.get("billing_snapshot").is_none());
+                if let Some(expected) = expected_multiplier {
+                    assert_eq!(
+                        billing_multiplier_snapshot(Some(metadata))
+                            .unwrap()
+                            .unwrap()
+                            .multiplier(),
+                        expected
+                    );
+                } else {
+                    assert_eq!(
+                        metadata.get("billing_multiplier_snapshot"),
+                        Some(&Value::Null)
+                    );
+                    assert!(billing_multiplier_snapshot(Some(metadata)).is_err());
+                }
+            }
+        }
     }
 
     #[test]

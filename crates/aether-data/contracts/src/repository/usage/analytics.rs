@@ -196,6 +196,8 @@ impl UsageAnalyticsQuery {
 #[serde(default)]
 pub struct UsageAnalyticsMetrics {
     pub request_count: u64,
+    // Populated for dashboard chart buckets; distinct counts are not additive.
+    pub unique_providers: Option<u64>,
     pub successful_request_count: u64,
     pub failed_request_count: u64,
     pub cancelled_request_count: u64,
@@ -429,6 +431,7 @@ pub fn fill_usage_analytics_timeseries(
                     label: Some(start.clone()),
                     bucket_start: Some(start),
                     metrics: UsageAnalyticsMetrics {
+                        unique_providers: Some(0),
                         rated_amount: Some("0.00000000".into()),
                         billable_amount: Some("0.00000000".into()),
                         ..Default::default()
