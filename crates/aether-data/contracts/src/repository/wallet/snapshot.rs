@@ -228,6 +228,17 @@ impl WalletReadSnapshot {
         })
     }
 
+    pub fn find_admin_wallet_transaction(
+        &self,
+        wallet_id: &str,
+        transaction_id: &str,
+    ) -> Option<StoredAdminWalletTransaction> {
+        self.wallet_transactions
+            .get(transaction_id)
+            .filter(|tx| tx.wallet_id == wallet_id)
+            .cloned()
+    }
+
     pub fn list_admin_wallet_refunds(
         &self,
         wallet_id: &str,

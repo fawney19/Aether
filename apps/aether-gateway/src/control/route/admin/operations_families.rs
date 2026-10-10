@@ -7,7 +7,27 @@ pub(super) fn classify_admin_operations_family_route(
     normalized_path: &str,
     normalized_path_no_trailing: &str,
 ) -> Option<ClassifiedRoute> {
-    if method == http::Method::GET
+    if method == http::Method::GET && normalized_path_no_trailing == "/api/admin/referrals/overview"
+    {
+        Some(classified(
+            "admin_proxy",
+            "referrals_manage",
+            "referrals_overview",
+            "admin:billing",
+            false,
+        ))
+    } else if method == http::Method::GET
+        && normalized_path_no_trailing.starts_with("/api/admin/referral-rewards/")
+        && normalized_path_no_trailing.matches('/').count() == 4
+    {
+        Some(classified(
+            "admin_proxy",
+            "referrals_manage",
+            "referral_reward_detail",
+            "admin:billing",
+            false,
+        ))
+    } else if method == http::Method::GET
         && matches!(
             normalized_path,
             "/api/admin/referrals" | "/api/admin/referrals/"
@@ -572,6 +592,38 @@ pub(super) fn classify_admin_operations_family_route(
             "admin_proxy",
             "wallets_manage",
             "wallet_detail",
+            "admin:wallets",
+            false,
+        ))
+    } else if method == http::Method::GET
+        && normalized_path_no_trailing.starts_with("/api/admin/wallets/")
+        && normalized_path_no_trailing.matches('/').count() == 6
+        && matches!(
+            normalized_path_no_trailing.split('/').nth(5),
+            Some("refunds" | "transactions")
+        )
+    {
+        Some(classified(
+            "admin_proxy",
+            "wallets_manage",
+            if normalized_path_no_trailing.split('/').nth(5) == Some("refunds") {
+                "wallet_refund_detail"
+            } else {
+                "wallet_transaction_detail"
+            },
+            "admin:wallets",
+            false,
+        ))
+    } else if method == http::Method::GET
+        && normalized_path.starts_with("/api/admin/wallets/")
+        && normalized_path.contains("/refunds/")
+        && normalized_path.ends_with("/referral-preview")
+        && normalized_path.matches('/').count() == 7
+    {
+        Some(classified(
+            "admin_proxy",
+            "wallets_manage",
+            "referral_preview",
             "admin:wallets",
             false,
         ))

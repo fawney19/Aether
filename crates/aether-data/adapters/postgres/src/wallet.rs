@@ -8,6 +8,7 @@ use aether_data_contracts::repository::billing::{
     checked_plan_duration_days_from_snapshot, entitlements_have_replacement_selector,
     entitlements_should_replace_existing,
 };
+use aether_data_contracts::repository::referrals::preserve_referral_snapshot;
 use aether_data_contracts::repository::wallet::{
     canonicalize_payment_method, canonicalize_wallet_refund_fields,
     payment_callback_amount_matches_order, payment_callback_method_matches_order,
@@ -1156,6 +1157,26 @@ impl WalletReadRepository for SqlxWalletRepository {
         )
         .await?;
         Ok(StoredAdminWalletRefundRequestPage { items, total })
+    }
+
+    async fn find_admin_wallet_transaction(
+        &self,
+        wallet_id: &str,
+        transaction_id: &str,
+    ) -> Result<Option<StoredAdminWalletTransaction>, DataLayerError> {
+        let sql = LIST_ADMIN_WALLET_TRANSACTIONS_SQL.replace(
+            "ORDER BY tx.created_at DESC\nOFFSET $2\nLIMIT $3",
+            "AND tx.id = $2",
+        );
+        let row = sqlx::query(&sql)
+            .bind(wallet_id)
+            .bind(transaction_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_postgres_err()?;
+        row.as_ref()
+            .map(map_admin_wallet_transaction_row)
+            .transpose()
     }
 
     async fn list_admin_wallet_transactions(
@@ -4022,6 +4043,7 @@ VALUES ($1, $2, $3, $4, 'active', $5, $6, $7, NOW(), NOW())
                             )
                             .await?;
                         }
+                        let referral_snapshot = crate::referrals::capture_paid_referral_obligations(tx, &order_id).await?;
                         let updated_order_row = sqlx::query(
                             r#"
 UPDATE payment_orders
@@ -4065,16 +4087,17 @@ RETURNING
                         )
                         .bind(&order_id)
                         .bind(effective_gateway_order_id)
-                        .bind(input.gateway_response_projection(
+                        .bind(preserve_referral_snapshot(Some(&referral_snapshot), input.gateway_response_projection(
                             &order_no,
                             effective_gateway_order_id,
-                        ))
+                        )))
                         .bind(input.pay_amount)
                         .bind(input.pay_currency.as_deref())
                         .bind(input.exchange_rate)
                         .fetch_one(&mut **tx)
                         .await
                         .map_postgres_err()?;
+
                         mark_payment_callback_processed(
                             tx,
                             &callback_id,
@@ -4239,6 +4262,7 @@ VALUES (
                     .await
                     .map_postgres_err()?;
 
+                    let referral_snapshot = crate::referrals::capture_paid_referral_obligations(tx, &order_id).await?;
                     let updated_order_row = sqlx::query(
                         r#"
 UPDATE payment_orders
@@ -4280,16 +4304,17 @@ RETURNING
                     )
                     .bind(&order_id)
                         .bind(effective_gateway_order_id)
-                    .bind(input.gateway_response_projection(
+                    .bind(preserve_referral_snapshot(Some(&referral_snapshot), input.gateway_response_projection(
                         &order_no,
                         effective_gateway_order_id,
-                    ))
+                    )))
                     .bind(input.pay_amount)
                     .bind(input.pay_currency.as_deref())
                     .bind(input.exchange_rate)
                     .fetch_one(&mut **tx)
                     .await
                     .map_postgres_err()?;
+
                     mark_payment_callback_processed(tx, &callback_id, &input, &order_id, &order_no)
                         .await?;
                     Ok(ProcessPaymentCallbackOutcome::Applied {
@@ -6592,6 +6617,12 @@ VALUES ($1, $2, $3, $4, 'active', $5, $6, $7, NOW(), NOW())
                             .paid_at_unix_secs
                             .or(Some(now.timestamp().max(0) as u64));
 
+                        let referral_snapshot =
+                            crate::referrals::capture_paid_referral_obligations(
+                                tx,
+                                &input.order_id,
+                            )
+                            .await?;
                         let row = sqlx::query(
                             r#"
 UPDATE payment_orders
@@ -6633,7 +6664,10 @@ RETURNING
                         )
                         .bind(&input.order_id)
                         .bind(next_gateway_order_id)
-                        .bind(serde_json::Value::Object(gateway_response))
+                        .bind(preserve_referral_snapshot(
+                            Some(&referral_snapshot),
+                            serde_json::Value::Object(gateway_response),
+                        ))
                         .bind(next_pay_amount)
                         .bind(next_pay_currency)
                         .bind(next_exchange_rate)
@@ -6646,6 +6680,7 @@ RETURNING
                         .fetch_one(&mut **tx)
                         .await
                         .map_postgres_err()?;
+
                         return Ok(WalletMutationOutcome::Applied((
                             map_admin_payment_order_row(&row)?,
                             true,
@@ -6795,6 +6830,9 @@ VALUES (
                     let next_exchange_rate = input.exchange_rate.or(order.exchange_rate);
                     let next_paid_at_unix_secs = order.paid_at_unix_secs.or(Some(now_unix_secs));
 
+                    let referral_snapshot =
+                        crate::referrals::capture_paid_referral_obligations(tx, &input.order_id)
+                            .await?;
                     let row = sqlx::query(
                         r#"
 UPDATE payment_orders
@@ -6834,7 +6872,10 @@ RETURNING
                     )
                     .bind(&input.order_id)
                     .bind(next_gateway_order_id)
-                    .bind(serde_json::Value::Object(gateway_response))
+                    .bind(preserve_referral_snapshot(
+                        Some(&referral_snapshot),
+                        serde_json::Value::Object(gateway_response),
+                    ))
                     .bind(next_pay_amount)
                     .bind(next_pay_currency)
                     .bind(next_exchange_rate)
@@ -6845,6 +6886,7 @@ RETURNING
                     .fetch_one(&mut **tx)
                     .await
                     .map_postgres_err()?;
+
                     Ok(WalletMutationOutcome::Applied((
                         map_admin_payment_order_row(&row)?,
                         true,
@@ -6964,7 +7006,7 @@ VALUES (
                             .await;
                             match insert_result {
                                 Ok(_) => {
-                                    break (normalized.clone(), format_redeem_code(&normalized))
+                                    break (normalized.clone(), format_redeem_code(&normalized));
                                 }
                                 Err(sqlx::Error::Database(err))
                                     if err.code().as_deref() == Some("23505") =>
@@ -8942,6 +8984,11 @@ mod tests {
             .await
             .expect("test database should connect");
         for table in [
+            "users",
+            "system_configs",
+            "user_invite_codes",
+            "user_referrals",
+            "referral_rewards",
             "api_keys",
             "wallets",
             "payment_orders",
@@ -9383,6 +9430,260 @@ mod tests {
             .unwrap();
         assert_eq!(transaction_count, 0);
         pool.close().await;
+    }
+
+    async fn seed_referral_credit_fixture(pool: &sqlx::PgPool, invitee: &str) -> String {
+        let inviter = uuid::Uuid::new_v4().to_string();
+        let referral = uuid::Uuid::new_v4().to_string();
+        for user in [&inviter, invitee] {
+            sqlx::query("INSERT INTO users(id,username,email_verified,is_active,is_deleted,created_at,updated_at) VALUES($1,$1,FALSE,TRUE,FALSE,NOW(),NOW())")
+                .bind(user).execute(pool).await.unwrap();
+        }
+        sqlx::query("INSERT INTO user_referrals(id,inviter_user_id,invitee_user_id,invite_code_snapshot) VALUES($1,$2,$3,'AE-TEST')")
+            .bind(&referral).bind(&inviter).bind(invitee).execute(pool).await.unwrap();
+        for (key, value) in [
+            ("referral_enabled", serde_json::json!(true)),
+            ("referral_reward_mode", serde_json::json!("both")),
+            ("referral_recharge_percent", serde_json::json!(10)),
+            ("referral_headcount_amount_usd", serde_json::json!(2)),
+            (
+                "referral_headcount_trigger",
+                serde_json::json!("first_paid_order"),
+            ),
+        ] {
+            sqlx::query("INSERT INTO system_configs(id,key,value) VALUES($1,$2,$3)")
+                .bind(uuid::Uuid::new_v4().to_string())
+                .bind(key)
+                .bind(value)
+                .execute(pool)
+                .await
+                .unwrap();
+        }
+        referral
+    }
+
+    #[tokio::test]
+    #[ignore = "requires explicit AETHER_TEST_DATABASE_URL and PostgreSQL bootstrap; uses only temp tables"]
+    async fn live_referral_credit_all_four_paths_capture_rules_once() {
+        use aether_data_contracts::repository::referrals::REFERRAL_SNAPSHOT_KEY;
+        for (kind, manual) in [
+            ("wallet_recharge", true),
+            ("plan_purchase", true),
+            ("wallet_recharge", false),
+            ("plan_purchase", false),
+        ] {
+            let pool = isolated_wallet_test_pool().await;
+            let (wallet, user) = seed_wallet(&pool).await;
+            let referral = seed_referral_credit_fixture(&pool, &user).await;
+            let order_id = seed_pending_order(&pool, &wallet, &user, kind).await;
+            let repository = SqlxWalletRepository::new(pool.clone());
+            if manual {
+                repository
+                    .credit_admin_payment_order(CreditAdminPaymentOrderInput {
+                        order_id: order_id.clone(),
+                        gateway_order_id: None,
+                        pay_amount: None,
+                        pay_currency: None,
+                        exchange_rate: None,
+                        gateway_response_patch: Some(
+                            serde_json::json!({REFERRAL_SNAPSHOT_KEY:{"enabled":false}}),
+                        ),
+                        operator_id: None,
+                    })
+                    .await
+                    .unwrap();
+            } else {
+                repository
+                    .process_payment_callback(payment_callback_input(&order_id))
+                    .await
+                    .unwrap();
+            }
+            let order = repository
+                .find_admin_payment_order(&order_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                order.gateway_response.as_ref().unwrap()[REFERRAL_SNAPSHOT_KEY]["enabled"],
+                true
+            );
+            let keys:Vec<String>=sqlx::query_scalar("SELECT idempotency_key FROM referral_rewards WHERE referral_id=$1 ORDER BY idempotency_key").bind(&referral).fetch_all(&pool).await.unwrap();
+            assert_eq!(keys.len(), 2);
+            let first: String =
+                sqlx::query_scalar("SELECT first_paid_order_id FROM user_referrals WHERE id=$1")
+                    .bind(&referral)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(first, order_id);
+            sqlx::query(
+                "UPDATE system_configs SET value='false'::JSON WHERE key='referral_enabled'",
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+            if manual {
+                repository
+                    .credit_admin_payment_order(CreditAdminPaymentOrderInput {
+                        order_id: order_id.clone(),
+                        gateway_order_id: None,
+                        pay_amount: None,
+                        pay_currency: None,
+                        exchange_rate: None,
+                        gateway_response_patch: Some(
+                            serde_json::json!({REFERRAL_SNAPSHOT_KEY:{"enabled":false}}),
+                        ),
+                        operator_id: None,
+                    })
+                    .await
+                    .unwrap();
+            } else {
+                repository
+                    .process_payment_callback(payment_callback_input(&order_id))
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(
+                repository
+                    .find_admin_payment_order(&order_id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .gateway_response,
+                order.gateway_response
+            );
+            let count: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM referral_rewards WHERE referral_id=$1")
+                    .bind(&referral)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(count, 2);
+            pool.close().await;
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires explicit AETHER_TEST_DATABASE_URL and PostgreSQL bootstrap; uses only temp tables"]
+    async fn live_referral_disabled_credit_tracks_first_payment_without_retroactive_rewards() {
+        use aether_data_contracts::repository::referrals::REFERRAL_SNAPSHOT_KEY;
+        let pool = isolated_wallet_test_pool().await;
+        let (wallet, user) = seed_wallet(&pool).await;
+        let referral = seed_referral_credit_fixture(&pool, &user).await;
+        sqlx::query("UPDATE system_configs SET value='false'::JSON WHERE key='referral_enabled'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let first = seed_pending_order(&pool, &wallet, &user, "wallet_recharge").await;
+        let repository = SqlxWalletRepository::new(pool.clone());
+        repository
+            .process_payment_callback(payment_callback_input(&first))
+            .await
+            .unwrap();
+        assert_eq!(
+            repository
+                .find_admin_payment_order(&first)
+                .await
+                .unwrap()
+                .unwrap()
+                .gateway_response
+                .unwrap()[REFERRAL_SNAPSHOT_KEY]["enabled"],
+            false
+        );
+        sqlx::query("UPDATE system_configs SET value='true'::JSON WHERE key='referral_enabled'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let second = seed_pending_order(&pool, &wallet, &user, "wallet_recharge").await;
+        repository
+            .process_payment_callback(payment_callback_input(&second))
+            .await
+            .unwrap();
+        let recorded: String =
+            sqlx::query_scalar("SELECT first_paid_order_id FROM user_referrals WHERE id=$1")
+                .bind(&referral)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(recorded, first);
+        let types: Vec<String> =
+            sqlx::query_scalar("SELECT reward_type FROM referral_rewards WHERE referral_id=$1")
+                .bind(&referral)
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(types, ["percent"]);
+        repository
+            .process_payment_callback(payment_callback_input(&first))
+            .await
+            .unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM referral_rewards WHERE source_order_id=$1"
+            )
+            .bind(&first)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+            0
+        );
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires explicit AETHER_TEST_DATABASE_URL and PostgreSQL bootstrap; uses only temp tables"]
+    async fn live_referral_legacy_paid_null_first_does_not_award_another_first() {
+        let pool = isolated_wallet_test_pool().await;
+        let (wallet, user) = seed_wallet(&pool).await;
+        let referral = seed_referral_credit_fixture(&pool, &user).await;
+        let first = seed_pending_order(&pool, &wallet, &user, "wallet_recharge").await;
+        sqlx::query("UPDATE payment_orders SET status='credited',credited_at=NOW()-INTERVAL '1 day',refunded_amount_usd=amount_usd WHERE id=$1").bind(&first).execute(&pool).await.unwrap();
+        let next = seed_pending_order(&pool, &wallet, &user, "wallet_recharge").await;
+        let repository = SqlxWalletRepository::new(pool.clone());
+        repository
+            .process_payment_callback(payment_callback_input(&next))
+            .await
+            .unwrap();
+        let recorded: String =
+            sqlx::query_scalar("SELECT first_paid_order_id FROM user_referrals WHERE id=$1")
+                .bind(&referral)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(recorded, first);
+        let types: Vec<String> =
+            sqlx::query_scalar("SELECT reward_type FROM referral_rewards WHERE referral_id=$1")
+                .bind(&referral)
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(types, ["percent"]);
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires explicit AETHER_TEST_DATABASE_URL and PostgreSQL bootstrap; uses only temp tables"]
+    async fn live_referral_headcount_trigger_changes_preserve_all_prior_states() {
+        for trigger in ["registration", "email_verified"] {
+            for status in ["pending", "failed", "applied", "voided", "reversed"] {
+                let pool = isolated_wallet_test_pool().await;
+                let (wallet, user) = seed_wallet(&pool).await;
+                let referral = seed_referral_credit_fixture(&pool, &user).await;
+                sqlx::query("INSERT INTO referral_rewards(id,referral_id,inviter_user_id,invitee_user_id,reward_type,trigger_point,amount_usd,status,idempotency_key) SELECT $1,id,inviter_user_id,invitee_user_id,'headcount',$2,2,$3,$4 FROM user_referrals WHERE id=$5")
+                    .bind(uuid::Uuid::new_v4().to_string()).bind(trigger).bind(status).bind(format!("referral:{referral}:headcount:{trigger}")).bind(&referral).execute(&pool).await.unwrap();
+                let order = seed_pending_order(&pool, &wallet, &user, "wallet_recharge").await;
+                let repository = SqlxWalletRepository::new(pool.clone());
+                repository
+                    .process_payment_callback(payment_callback_input(&order))
+                    .await
+                    .unwrap();
+                let count:i64=sqlx::query_scalar("SELECT COUNT(*) FROM referral_rewards WHERE referral_id=$1 AND reward_type='headcount'").bind(&referral).fetch_one(&pool).await.unwrap();
+                assert_eq!(count, 1, "{trigger}/{status}");
+                let retained:String=sqlx::query_scalar("SELECT status FROM referral_rewards WHERE referral_id=$1 AND reward_type='headcount'").bind(&referral).fetch_one(&pool).await.unwrap();
+                assert_eq!(retained, status);
+                pool.close().await;
+            }
+        }
     }
 
     async fn assert_admin_payment_order_credit(order_kind: &str) {

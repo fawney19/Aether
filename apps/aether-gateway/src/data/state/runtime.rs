@@ -790,6 +790,21 @@ impl GatewayDataState {
         }
     }
 
+    pub(crate) async fn find_admin_wallet_transaction(
+        &self,
+        wallet_id: &str,
+        transaction_id: &str,
+    ) -> Result<Option<StoredAdminWalletTransaction>, DataLayerError> {
+        match &self.wallet_reader {
+            Some(repository) => {
+                repository
+                    .find_admin_wallet_transaction(wallet_id, transaction_id)
+                    .await
+            }
+            None => Ok(None),
+        }
+    }
+
     pub(crate) async fn list_admin_wallet_transactions(
         &self,
         wallet_id: &str,

@@ -27,6 +27,8 @@ export interface AuthModuleInfo {
   active: boolean
 }
 
+export type UserModuleStatus = Pick<ModuleStatus, 'name' | 'available' | 'enabled' | 'active'>
+
 export type ChatPiiRedactionTtlSeconds = 300 | 3600
 
 export interface ChatPiiRedactionRuleFeatures {
@@ -187,6 +189,11 @@ async function getAllSystemConfigValues(): Promise<Map<string, unknown>> {
 }
 
 export const modulesApi = {
+  /** 用户入口只需要功能状态，不读取管理员配置。 */
+  async getUserStatus(): Promise<Record<string, UserModuleStatus>> {
+    const response = await apiClient.get<Record<string, UserModuleStatus>>('/api/modules/user-status')
+    return response.data
+  },
   /**
    * 获取所有模块状态（管理员）
    */

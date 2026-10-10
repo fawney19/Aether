@@ -85,13 +85,23 @@ impl<'a> AdminAppState<'a> {
         }
 
         let enabled_config_key = admin_system_modules::admin_module_enabled_config_key(module);
-        let _ = self
-            .upsert_system_config_json_value(
-                &enabled_config_key,
-                &json!(payload.enabled),
-                Some(&format!("模块 [{}] 启用状态", module.display_name)),
-            )
-            .await?;
+        if module.name == "referral" {
+            self.app()
+                .update_referral_settings(
+                    [(enabled_config_key.clone(), json!(payload.enabled))]
+                        .into_iter()
+                        .collect(),
+                )
+                .await?;
+        } else {
+            let _ = self
+                .upsert_system_config_json_value(
+                    &enabled_config_key,
+                    &json!(payload.enabled),
+                    Some(&format!("模块 [{}] 启用状态", module.display_name)),
+                )
+                .await?;
+        }
         let updated_runtime = admin_system_modules::build_admin_module_runtime_state(self).await?;
         Ok(Ok(admin_system_modules::build_admin_module_status_payload(
             self,

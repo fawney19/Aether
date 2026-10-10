@@ -19,9 +19,9 @@ export async function checkModuleAccess(
   }
 
   // 确保模块状态已加载
-  if (!moduleStore.loaded) {
+  if (!moduleStore.userLoaded) {
     try {
-      await moduleStore.fetchModules()
+      await moduleStore.fetchUserModules()
     } catch (error) {
       // fail-close: 获取模块状态失败时拒绝访问
       log.warn('Failed to fetch modules status, denying access', { error })
@@ -30,7 +30,7 @@ export async function checkModuleAccess(
   }
 
   // 用户侧需要检查模块是否激活（active），而不仅仅是可用（available）
-  if (!moduleStore.isActive(moduleName)) {
+  if (!moduleStore.isUserActive(moduleName)) {
     log.warn(`Module ${moduleName} is not active, redirecting to user dashboard`)
     return '/dashboard'
   }

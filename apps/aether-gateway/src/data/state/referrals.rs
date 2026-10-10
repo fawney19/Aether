@@ -4,12 +4,101 @@ use aether_data::DataLayerError;
 use super::GatewayDataState;
 
 pub(crate) use aether_data::backend::{
-    ReferralAdminStats, ReferralMutationStatus, ReferralReconciliationSummary,
-    ReferralRelationshipListQuery, ReferralRelationshipRecord, ReferralRewardConfig,
+    ReferralAdminOverviewStats, ReferralAdminStats, ReferralMutationStatus,
+    ReferralReconciliationSummary, ReferralRefundPreview, ReferralRelationshipListQuery,
+    ReferralRelationshipRecord, ReferralRewardConfig, ReferralRewardDetail,
     ReferralRewardListQuery, ReferralRewardRecord, ReferralUserDashboard,
 };
 
 impl GatewayDataState {
+    pub(crate) async fn register_local_auth_user_with_referral(
+        &self,
+        email: Option<String>,
+        email_verified: bool,
+        username: String,
+        password_hash: String,
+        initial_gift_usd: f64,
+        unlimited: bool,
+        invite_code: Option<&str>,
+        source: Option<serde_json::Value>,
+        config: Option<ReferralRewardConfig>,
+        privacy_version: Option<&str>,
+        default_group_id: Option<&str>,
+    ) -> Result<
+        Option<(
+            aether_data::repository::users::StoredUserAuthRecord,
+            aether_data::repository::wallet::StoredWalletSnapshot,
+            bool,
+        )>,
+        DataLayerError,
+    > {
+        self.referrals()
+            .register_local_auth_user_with_referral(
+                email,
+                email_verified,
+                username,
+                password_hash,
+                initial_gift_usd,
+                unlimited,
+                invite_code,
+                source,
+                config,
+                privacy_version,
+                default_group_id,
+            )
+            .await
+    }
+    pub(crate) async fn update_referral_settings(
+        &self,
+        values: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<(), DataLayerError> {
+        self.referrals().update_referral_settings(values).await
+    }
+
+    pub(crate) async fn validate_referral_invite_code(
+        &self,
+        code: Option<&str>,
+    ) -> Result<(), DataLayerError> {
+        self.referrals().validate_referral_invite_code(code).await
+    }
+
+    pub(crate) async fn settle_paid_order_referral_rewards(
+        &self,
+        order_id: &str,
+    ) -> Result<Vec<ReferralRewardRecord>, DataLayerError> {
+        self.referrals()
+            .settle_paid_order_referral_rewards(order_id)
+            .await
+    }
+
+    pub(crate) async fn settle_registration_referral_rewards(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<ReferralRewardRecord>, DataLayerError> {
+        self.referrals()
+            .settle_registration_referral_rewards(user_id)
+            .await
+    }
+
+    pub(crate) async fn referral_refund_preview(
+        &self,
+        order_id: &str,
+        amount: f64,
+    ) -> Result<Vec<ReferralRefundPreview>, DataLayerError> {
+        self.referrals()
+            .referral_refund_preview(order_id, amount)
+            .await
+    }
+
+    pub(crate) async fn referral_order_reversal_summary(
+        &self,
+        order_id: &str,
+    ) -> Result<aether_data::backend::ReferralReversalSummary, DataLayerError> {
+        self.referrals()
+            .referral_order_reversal_summary(order_id)
+            .await
+    }
+
     fn referrals(&self) -> ReferralDataState<'_> {
         ReferralDataState::new(self.backends.as_ref())
     }
@@ -52,36 +141,16 @@ impl GatewayDataState {
         self.referrals().list_admin_referral_rewards(query).await
     }
 
-    pub(crate) async fn bind_referral_invite_code(
+    pub(crate) async fn referral_admin_overview_stats(
         &self,
-        invitee_user_id: &str,
-        invite_code: Option<&str>,
-        source: Option<serde_json::Value>,
-    ) -> Result<Option<ReferralRelationshipRecord>, DataLayerError> {
-        self.referrals()
-            .bind_referral_invite_code(invitee_user_id, invite_code, source)
-            .await
+    ) -> Result<Option<ReferralAdminOverviewStats>, DataLayerError> {
+        self.referrals().referral_admin_overview_stats().await
     }
-
-    pub(crate) async fn apply_registration_referral_reward(
+    pub(crate) async fn referral_reward_detail(
         &self,
-        invitee_user_id: &str,
-        amount_usd: f64,
-        trigger_point: &str,
-    ) -> Result<Vec<ReferralRewardRecord>, DataLayerError> {
-        self.referrals()
-            .apply_registration_referral_reward(invitee_user_id, amount_usd, trigger_point)
-            .await
-    }
-
-    pub(crate) async fn apply_paid_order_referral_rewards(
-        &self,
-        order_id: &str,
-        config: ReferralRewardConfig,
-    ) -> Result<Vec<ReferralRewardRecord>, DataLayerError> {
-        self.referrals()
-            .apply_paid_order_referral_rewards(order_id, config)
-            .await
+        reward_id: &str,
+    ) -> Result<Option<ReferralRewardDetail>, DataLayerError> {
+        self.referrals().referral_reward_detail(reward_id).await
     }
 
     pub(crate) async fn retry_referral_reward(

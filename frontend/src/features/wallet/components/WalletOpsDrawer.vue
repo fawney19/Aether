@@ -442,9 +442,15 @@
       </div>
     </Transition>
   </Teleport>
+  <RefundReferralReview
+    ref="referralReview"
+    :active="open"
+    :context-key="`${wallet?.id || ''}:${actionRefund?.id || ''}`"
+  />
 </template>
 
 <script setup lang="ts">
+import RefundReferralReview from '@/features/wallet/components/RefundReferralReview.vue'
 import { computed, ref, watch } from 'vue'
 import {
   Badge,
@@ -513,6 +519,8 @@ const emit = defineEmits<{
   close: []
   changed: []
 }>()
+
+const referralReview = ref<InstanceType<typeof RefundReferralReview> | null>(null)
 
 const { success, error } = useToast()
 const { confirm } = useConfirm()
@@ -886,9 +894,15 @@ function canCompleteRefund(status: string) {
 
 async function processRefund(refund: RefundRequest) {
   if (!localWallet.value) return
+  const walletId = localWallet.value.id
+  const refundId = refund.id
+  const canReject = canFailRefund(refund)
   submittingRefundAction.value = true
   try {
-    const resp = await adminWalletApi.processRefund(localWallet.value.id, refund.id)
+    const review = await referralReview.value?.review(walletId, refundId, 'process', canReject)
+    if (review?.decision === 'reject') { openFailRefund(refund); return }
+    if (review?.decision !== 'approve') return
+    const resp = await adminWalletApi.processRefund(walletId, refundId, { referral_shortfall_confirmation: review.token })
     localWallet.value = resp.wallet
     success('退款已进入 processing')
     await refreshDrawerData()
@@ -942,13 +956,26 @@ async function submitFailRefund() {
 async function submitCompleteRefund() {
   if (!localWallet.value || !actionRefund.value) return
 
+  const walletId = localWallet.value.id
+  const selectedRefund = actionRefund.value
+  const refundId = selectedRefund.id
+  const canReject = canFailRefund(selectedRefund)
+  const payload = {
+    gateway_refund_id: refundGatewayRefundId.value || undefined,
+    payout_reference: refundPayoutReference.value || undefined,
+  }
   submittingRefundAction.value = true
   try {
-    await adminWalletApi.completeRefund(localWallet.value.id, actionRefund.value.id, {
-      gateway_refund_id: refundGatewayRefundId.value || undefined,
-      payout_reference: refundPayoutReference.value || undefined,
+    const review = await referralReview.value?.review(walletId, refundId, 'complete', canReject)
+    if (review?.decision === 'reject') { openFailRefund(selectedRefund); return }
+    if (review?.decision !== 'approve') return
+    const response = await adminWalletApi.completeRefund(walletId, refundId, {
+      referral_shortfall_confirmation: review.token,
+      ...payload,
     })
-    success('退款已完成')
+    success(response.referral_reversal
+      ? `退款已完成；该订单累计冲回 $${response.referral_reversal.reversed_amount_usd.toFixed(2)}，当前待冲回 $${response.referral_reversal.pending_reversal_amount_usd.toFixed(2)}`
+      : '退款已完成')
     resetRefundActionForm()
     await refreshDrawerData()
     emit('changed')

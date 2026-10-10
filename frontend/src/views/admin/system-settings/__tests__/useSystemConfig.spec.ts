@@ -1,14 +1,16 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { getAllSystemConfigsMock, updateSystemConfigMock } = vi.hoisted(() => ({
+const { getAllSystemConfigsMock, updateSystemConfigMock, updateReferralSettingsMock } = vi.hoisted(() => ({
   getAllSystemConfigsMock: vi.fn(),
   updateSystemConfigMock: vi.fn(),
+  updateReferralSettingsMock: vi.fn(),
 }))
 
 vi.mock('@/api/admin', () => ({
   adminApi: {
     getAllSystemConfigs: getAllSystemConfigsMock,
     updateSystemConfig: updateSystemConfigMock,
+    updateReferralSettings: updateReferralSettingsMock,
     getSystemVersion: vi.fn(),
   },
 }))
@@ -38,6 +40,7 @@ describe('useSystemConfig', () => {
   beforeEach(() => {
     getAllSystemConfigsMock.mockReset()
     updateSystemConfigMock.mockReset()
+    updateReferralSettingsMock.mockReset()
   })
 
   it('loads config keys in one request and keeps change detection disabled until the baseline is ready', async () => {
@@ -99,4 +102,33 @@ describe('useSystemConfig', () => {
     )
     expect(state.hasProxyConfigChanges.value).toBe(false)
   })
+  it('saves referral rules together without overwriting email verification or issuing individual referral writes', async () => {
+    getAllSystemConfigsMock.mockResolvedValue([])
+    updateReferralSettingsMock.mockResolvedValue(undefined)
+    updateSystemConfigMock.mockResolvedValue(undefined)
+    const state = useSystemConfig()
+    await state.loadSystemConfig()
+    state.systemConfig.value.referral_enabled = true
+    state.systemConfig.value.referral_reward_mode = 'headcount'
+    state.systemConfig.value.referral_headcount_trigger = 'email_verified'
+    await state.saveBasicConfig()
+    expect(updateReferralSettingsMock).toHaveBeenCalledExactlyOnceWith({
+      referral_enabled: true, referral_reward_mode: 'headcount', referral_headcount_trigger: 'email_verified',
+      referral_recharge_percent: 5, referral_headcount_amount_usd: 0,
+    })
+    expect(updateSystemConfigMock.mock.calls.map(([key]) => key).some(key => key.startsWith('referral_'))).toBe(false)
+    expect(state.hasBasicConfigChanges.value).toBe(false)
+  })
+
+  it('retains unsaved changes and avoids other writes when combined referral validation fails', async () => {
+    getAllSystemConfigsMock.mockResolvedValue([])
+    updateReferralSettingsMock.mockRejectedValue(new Error('email verification required'))
+    const state = useSystemConfig()
+    await state.loadSystemConfig()
+    state.systemConfig.value.referral_enabled = true
+    await state.saveBasicConfig()
+    expect(updateSystemConfigMock).not.toHaveBeenCalled()
+    expect(state.hasBasicConfigChanges.value).toBe(true)
+  })
+
 })
