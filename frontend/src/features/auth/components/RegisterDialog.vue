@@ -224,21 +224,13 @@
             :model-value="inviteCode"
             type="text"
             :placeholder="registerUi.inviteCodePlaceholder"
-            :readonly="inviteCodeLocked"
             :disabled="isLoading"
             :aria-invalid="!!inviteCodeError"
-            :aria-describedby="inviteCodeError ? 'reg-invite-code-error' : inviteCodeLocked ? 'reg-invite-code-hint' : undefined"
+            :aria-describedby="inviteCodeError ? 'reg-invite-code-error' : undefined"
             disable-autofill
             @update:model-value="updateInviteCode"
             @blur="!isLoading && validateInviteCode()"
           />
-          <p
-            v-if="inviteCodeLocked"
-            id="reg-invite-code-hint"
-            class="text-xs text-muted-foreground"
-          >
-            {{ registerUi.inviteCodeLocked }}
-          </p>
           <p
             v-if="inviteCodeError"
             id="reg-invite-code-error"
@@ -416,7 +408,6 @@ const registerUi = computed(() => ({
   passwordMismatch: t('auth.register.passwordMismatch'),
   inviteCodeLabel: t('auth.register.inviteCodeLabel'),
   inviteCodePlaceholder: t('auth.register.inviteCodePlaceholder'),
-  inviteCodeLocked: t('auth.register.inviteCodeLocked'),
   privacyPrefix: t('auth.register.privacyPrefix'),
   privacyTitle: t('site.privacy.title'),
   openInNewWindow: t('auth.register.openInNewWindow'),
@@ -562,7 +553,6 @@ const handleTurnstileError = (message: string) => {
 }
 
 const inviteCode = ref('')
-const inviteCodeLocked = ref(false)
 const inviteCodeError = ref('')
 let inviteValidationSequence = 0
 const privacyAccepted = ref(false)
@@ -581,7 +571,6 @@ const renderedPrivacyPolicy = computed(() => {
 
 function loadInviteCode(): string {
   inviteValidationSequence++
-  inviteCodeLocked.value = false
   if (typeof window === 'undefined') return ''
   const fromQuery = new URLSearchParams(window.location.search).get('invite')
   let cached = ''
@@ -590,23 +579,30 @@ function loadInviteCode(): string {
     .trim()
     .toUpperCase()
   if (!normalized) return ''
-  // 邀请链接及其缓存属于邀请注册，重新打开表单也不能改换邀请人。
-  inviteCodeLocked.value = true
   try { localStorage.setItem(INVITE_CODE_STORAGE_KEY, normalized) } catch { /* 邀请码仍可从本次页面使用。 */ }
   return normalized
 }
 
 function updateInviteCode(value: string | number) {
-  if (inviteCodeLocked.value || isLoading.value) return
+  if (isLoading.value) return
   inviteValidationSequence++
   inviteCode.value = String(value).trim().toUpperCase()
   inviteCodeError.value = ''
+  try {
+    if (inviteCode.value) localStorage.setItem(INVITE_CODE_STORAGE_KEY, inviteCode.value)
+    else localStorage.removeItem(INVITE_CODE_STORAGE_KEY)
+  } catch { /* 浏览器禁用存储时仍使用用户当前填写的值。 */ }
+  // 用户编辑后以表单值为准，避免重新打开时被原邀请链接覆盖。
+  const url = new URL(window.location.href)
+  if (url.searchParams.has('invite')) {
+    url.searchParams.delete('invite')
+    window.history.replaceState(window.history.state, '', url)
+  }
 }
 
 function cleanupInviteCodeAfterRegistration() {
   inviteValidationSequence++
   inviteCode.value = ''
-  inviteCodeLocked.value = false
   inviteCodeError.value = ''
   try { localStorage.removeItem(INVITE_CODE_STORAGE_KEY) } catch { /* 缓存清理失败不能把已完成注册显示成失败。 */ }
   // 注册成功后清理邀请来源，避免后续注册继续使用已消费的邀请上下文。
