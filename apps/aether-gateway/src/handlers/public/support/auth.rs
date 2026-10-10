@@ -331,6 +331,49 @@ pub(super) async fn maybe_build_local_auth_response(
     }
 
     match decision.route_kind.as_deref() {
+        Some("invite_code") if request_context.request_path == "/api/auth/invite-code" => {
+            if let Err(response) =
+                enforce_auth_ip_rate_limit(state, AUTH_INVITE_CODE_RATE_LIMIT, client_ip).await
+            {
+                return Some(response);
+            }
+            let code =
+                super::query_param_value(request_context.request_query_string.as_deref(), "code");
+            if code
+                .as_deref()
+                .is_none_or(|code| code.trim().is_empty() || code.len() > 64)
+            {
+                return Some(build_auth_json_response(
+                    http::StatusCode::OK,
+                    json!({"valid":false,"reason":"邀请码无效"}),
+                    None,
+                ));
+            }
+            if !state.has_referral_data_backend() {
+                return Some(build_auth_error_response(
+                    http::StatusCode::SERVICE_UNAVAILABLE,
+                    "邀请码验证暂不可用",
+                    false,
+                ));
+            }
+            Some(
+                match state.validate_referral_invite_code(code.as_deref()).await {
+                    Ok(()) => {
+                        build_auth_json_response(http::StatusCode::OK, json!({"valid":true}), None)
+                    }
+                    Err(GatewayError::Client { message, .. }) => build_auth_json_response(
+                        http::StatusCode::OK,
+                        json!({"valid":false,"reason":message}),
+                        None,
+                    ),
+                    Err(_) => build_auth_error_response(
+                        http::StatusCode::SERVICE_UNAVAILABLE,
+                        "邀请码验证暂不可用",
+                        false,
+                    ),
+                },
+            )
+        }
         Some("send_verification_code")
             if request_context.request_path == "/api/auth/send-verification-code" =>
         {

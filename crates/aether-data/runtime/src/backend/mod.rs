@@ -24,9 +24,10 @@ pub use leases::DataLeaseBackends;
 pub use postgres::PostgresBackend;
 pub use read::DataReadRepositories;
 pub use referrals::{
-    ReferralAdminStats, ReferralDataState, ReferralMutationStatus, ReferralReconciliationSummary,
-    ReferralRelationshipListQuery, ReferralRelationshipRecord, ReferralRewardConfig,
-    ReferralRewardListQuery, ReferralRewardRecord, ReferralUserDashboard,
+    ReferralAdminOverviewStats, ReferralAdminStats, ReferralDataState, ReferralMutationStatus,
+    ReferralReconciliationSummary, ReferralRefundPreview, ReferralRelationshipListQuery,
+    ReferralRelationshipRecord, ReferralReversalSummary, ReferralRewardConfig,
+    ReferralRewardDetail, ReferralRewardListQuery, ReferralRewardRecord, ReferralUserDashboard,
 };
 pub use transactions::DataTransactionBackends;
 pub use write::DataWriteRepositories;

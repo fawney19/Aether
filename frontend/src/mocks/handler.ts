@@ -6,6 +6,8 @@
 import { AxiosHeaders, type AxiosRequestConfig, type AxiosResponse } from 'axios'
 import { isDemoMode, DEMO_ACCOUNTS } from '@/config/demo'
 import { log } from '@/utils/logger'
+import { handleReferralWalletLocationMock } from './referral-wallet-locations'
+import type { ReferralRelationshipRecord, ReferralRewardDetail, ReferralRewardRecord } from '@/api/referrals'
 import {
   MOCK_ADMIN_USER,
   MOCK_NORMAL_USER,
@@ -1469,6 +1471,25 @@ const mockHandlers: Record<string, (config: AxiosRequestConfig) => Promise<Axios
     })
   },
 
+  'GET /api/users/me/referral': async () => {
+    await delay()
+    if (!currentUserToken) {
+      throw { response: createMockResponse({ detail: '请先登录' }, 401) }
+    }
+    const inviteCode = isCurrentUserAdmin() ? 'DEMOADMIN' : 'DEMOUSER'
+    return createMockResponse({
+      invite_code: inviteCode,
+      invitation_link: `/register?invite=${inviteCode}`,
+      summary: {
+        total_invites: 0,
+        effective_invites: 0,
+        paid_reward_usd: 0,
+        pending_reward_usd: 0,
+        reversed_reward_usd: 0,
+      },
+    })
+  },
+
   'POST /api/users/me/api-keys': async (config) => {
     await delay()
     const body = JSON.parse(config.data || '{}')
@@ -1693,10 +1714,14 @@ const mockHandlers: Record<string, (config: AxiosRequestConfig) => Promise<Axios
   },
 
   // ========== Admin: 用户管理 ==========
-  'GET /api/admin/users': async () => {
+  'GET /api/admin/users': async config => {
     await delay()
     requireAdmin()
-    return createMockResponse(MOCK_ALL_USERS)
+    const query = mockReferralQuery(config)
+    const users = mockSelectableUsers().filter(user => mockReferralMatches(query.search, user.id, user.username, user.email))
+    const skip = Math.max(0, Number(query.skip) || 0)
+    const limit = Math.max(1, Number(query.limit) || users.length)
+    return createMockResponse(users.slice(skip, skip + limit))
   },
 
   'GET /api/admin/user-groups': async () => {
@@ -2128,9 +2153,18 @@ const mockHandlers: Record<string, (config: AxiosRequestConfig) => Promise<Axios
   },
 
   // ========== Admin: Modules ==========
+  'GET /api/modules/user-status': async () => {
+    await delay()
+    refreshMockReferralModuleStatus()
+    return createMockResponse(Object.fromEntries(['referral', 'management_tokens'].map(name => {
+      const { available, enabled, active } = MOCK_MODULE_STATUSES[name]
+      return [name, { name, available, enabled: available && enabled, active }]
+    })))
+  },
   'GET /api/admin/modules/status': async () => {
     await delay()
     requireAdmin()
+    refreshMockReferralModuleStatus()
     return createMockResponse(MOCK_MODULE_STATUSES)
   },
 
@@ -2364,6 +2398,8 @@ export async function handleMockRequest(config: AxiosRequestConfig): Promise<Axi
   if (!isDemoMode()) {
     return null
   }
+  const financeLocation = handleReferralWalletLocationMock(config, isCurrentUserAdmin())
+  if (financeLocation) return financeLocation
 
   const method = config.method?.toUpperCase() || 'GET'
   const url = config.url || ''
@@ -2716,6 +2752,112 @@ function refreshMockModelDirectivesModuleStatus() {
   }
 }
 
+function refreshMockReferralModuleStatus() {
+  const moduleStatus = MOCK_MODULE_STATUSES.referral
+  if (!moduleStatus) return
+  const enabled = mockSystemConfigValue('referral_enabled') === true
+  MOCK_MODULE_STATUSES.referral = {
+    ...moduleStatus,
+    enabled,
+    active: moduleStatus.available && enabled && moduleStatus.config_validated,
+  }
+}
+
+function validateMockReferralSettings(values: Record<string, unknown>) {
+  const mode = values.referral_reward_mode ?? mockSystemConfigValue('referral_reward_mode') ?? 'percent'
+  const trigger = values.referral_headcount_trigger ?? mockSystemConfigValue('referral_headcount_trigger') ?? 'registration'
+  const verification = values.require_email_verification ?? mockSystemConfigValue('require_email_verification') ?? false
+  const enabled = values.referral_enabled ?? mockSystemConfigValue('referral_enabled') ?? false
+  if (enabled === true && (mode === 'headcount' || mode === 'both') && trigger === 'email_verified' && verification !== true) {
+    throw { response: createMockResponse({ detail: '邮箱验证返利需要先启用注册邮箱验证' }, 400) }
+  }
+}
+
+// 演示记录只存于当前页面会话，不影响真实返利或用户端的空统计契约。
+const mockReferralRelationships: ReferralRelationshipRecord[] = Array.from({ length: 7 }, (_, index) => ({
+  id: `demo-referral-${index + 1}`, inviter_user_id: MOCK_NORMAL_USER.id, inviter_username: 'Demo User', invitee_user_id: `demo-invitee-${index + 1}`, invitee_username: `受邀用户 ${index + 1}`, invite_code_snapshot: 'DEMOUSER',
+  first_paid_order_id: index === 3 ? 'demo-order-referral' : index === 4 ? 'demo-order-referral-full' : index > 4 ? 'demo-order-referral-paid' : null, first_paid_at_unix_secs: index > 2 ? 1791460000 : null, created_at_unix_secs: 1791370000 + index * 300,
+}))
+function mockSelectableUsers() {
+  return [...MOCK_ALL_USERS, ...mockReferralRelationships.map(item => ({ ...MOCK_NORMAL_USER, id: item.invitee_user_id, username: item.invitee_username || item.invitee_user_id, email: `${item.invitee_user_id}@demo.aether.io` }))]
+}
+const mockReferralRewards: ReferralRewardRecord[] = [
+  { status: 'failed', reward_type: 'headcount', trigger_point: 'registration', amount_usd: 2, reversed_amount_usd: 0, pending_reversal_amount_usd: 0 },
+  { status: 'pending', reward_type: 'headcount', trigger_point: 'registration', amount_usd: 2, reversed_amount_usd: 0, pending_reversal_amount_usd: 0 },
+  { status: 'applied', reward_type: 'headcount', trigger_point: 'email_verified', amount_usd: 0.00000001, reversed_amount_usd: 0, pending_reversal_amount_usd: 0 },
+  { status: 'applied', reward_type: 'percent', trigger_point: 'paid_order', amount_usd: 10, reversed_amount_usd: 4, pending_reversal_amount_usd: 2 },
+  { status: 'reversed', reward_type: 'headcount', trigger_point: 'first_paid_order', amount_usd: 2, reversed_amount_usd: 2, pending_reversal_amount_usd: 0 },
+  { status: 'applying', reward_type: 'percent', trigger_point: 'paid_order', amount_usd: 3, reversed_amount_usd: 0, pending_reversal_amount_usd: 0 },
+  { status: 'applied', reward_type: 'percent', trigger_point: 'paid_order', amount_usd: 5, reversed_amount_usd: 0, pending_reversal_amount_usd: 0 },
+].map((record, index) => ({ ...record, id: `demo-reward-${index + 1}`, referral_id: mockReferralRelationships[index].id, inviter_user_id: MOCK_NORMAL_USER.id, inviter_username: 'Demo User', inviter_wallet_id: 'wallet-demo-user', invitee_user_id: mockReferralRelationships[index].invitee_user_id, invitee_username: mockReferralRelationships[index].invitee_username, source_order_id: mockReferralRelationships[index].first_paid_order_id, source_order_no: index === 3 ? 'PO-DEMO-REFERRAL' : index === 4 ? 'PO-DEMO-REFERRAL-FULL' : index > 4 ? 'PO-DEMO-REFERRAL-PAID' : null, wallet_transaction_id: index === 3 ? 'demo-ledger-referral' : ['applied', 'reversed'].includes(record.status) ? `demo-referral-ledger-${index + 1}` : null, created_at_unix_secs: 1791370000 + index * 300, updated_at_unix_secs: 1791460000 + index * 300 }))
+function mockReferralStats() {
+  const sum = (pick: (record: ReferralRewardRecord) => number) => mockReferralRewards.reduce((value, record) => value + pick(record), 0)
+  return { total_invites: mockReferralRelationships.length, effective_invites: mockReferralRelationships.filter(item => item.first_paid_order_id).length, paid_reward_usd: sum(item => item.status === 'applied' ? item.amount_usd : 0), pending_reward_usd: sum(item => ['pending', 'failed', 'applying'].includes(item.status) ? item.amount_usd : 0), reversed_reward_usd: sum(item => item.reversed_amount_usd), cumulative_reward_usd: sum(item => item.wallet_transaction_id ? item.amount_usd : 0), failed_reward_count: mockReferralRewards.filter(item => item.status === 'failed').length, pending_reversal_reward_usd: sum(item => item.pending_reversal_amount_usd), pending_reversal_reward_count: mockReferralRewards.filter(item => item.pending_reversal_amount_usd > 0).length }
+}
+function mockReferralQuery(config: AxiosRequestConfig): Record<string, unknown> {
+  return { ...Object.fromEntries(new URLSearchParams(config.url?.split('?')[1] || '')), ...config.params }
+}
+function mockReferralPage<T>(items: T[], query: Record<string, unknown>) {
+  const limit = Math.min(100, Math.max(1, Number(query.limit) || 20)); const offset = Math.max(0, Number(query.offset) || 0)
+  const { total_invites, effective_invites, paid_reward_usd, pending_reward_usd, reversed_reward_usd } = mockReferralStats()
+  return createMockResponse({ items: items.slice(offset, offset + limit), total: items.length, limit, offset, stats: { total_invites, effective_invites, paid_reward_usd, pending_reward_usd, reversed_reward_usd } })
+}
+function mockReferralMatches(query: unknown, ...values: Array<string | null | undefined>) {
+  return !query || values.some(value => value?.toLowerCase().includes(String(query).toLowerCase()))
+}
+mockHandlers['GET /api/admin/referrals/overview'] = async () => {
+  await delay(); requireAdmin()
+  return createMockResponse({ stats: mockReferralStats(), rules: { available: MOCK_MODULE_STATUSES.referral?.available ?? true, enabled: mockSystemConfigValue('referral_enabled') === true, reward_mode: mockSystemConfigValue('referral_reward_mode') || 'percent', recharge_percent: Number(mockSystemConfigValue('referral_recharge_percent') || 0), headcount_amount_usd: Number(mockSystemConfigValue('referral_headcount_amount_usd') || 0), headcount_trigger: mockSystemConfigValue('referral_headcount_trigger') || 'registration' } })
+}
+mockHandlers['GET /api/admin/referrals'] = async config => {
+  await delay(); requireAdmin(); const query = mockReferralQuery(config)
+  return mockReferralPage(mockReferralRelationships.filter(item => mockReferralMatches(query.inviter, item.inviter_user_id, item.inviter_username) && mockReferralMatches(query.invitee, item.invitee_user_id, item.invitee_username) && mockReferralMatches(query.invite_code, item.invite_code_snapshot) && (query.first_paid === undefined || !!item.first_paid_order_id === (String(query.first_paid) === 'true'))), query)
+}
+mockHandlers['GET /api/admin/referral-rewards'] = async config => {
+  await delay(); requireAdmin(); const q = mockReferralQuery(config)
+  return mockReferralPage(mockReferralRewards.filter(item => mockReferralMatches(q.inviter, item.inviter_user_id, item.inviter_username) && mockReferralMatches(q.invitee, item.invitee_user_id, item.invitee_username) && (!q.referral_id || item.referral_id === q.referral_id) && (!q.order_id || item.source_order_id === q.order_id) && mockReferralMatches(q.order_no, item.source_order_no) && (!q.reward_type || item.reward_type === q.reward_type) && (!q.status || item.status === q.status) && (!q.trigger_point || item.trigger_point === q.trigger_point) && (q.pending_reversal === undefined || (item.pending_reversal_amount_usd > 0) === (String(q.pending_reversal) === 'true'))), q)
+}
+registerDynamicRoute('GET', '/api/admin/referral-rewards/:rewardId', async (_config, params) => {
+  await delay(); requireAdmin(); const reward = mockReferralRewards.find(item => item.id === params.rewardId)
+  if (!reward) throw { response: createMockResponse({ detail: '返利记录不存在' }, 404) }
+  const ledger_entries = reward.wallet_transaction_id ? [{ id: reward.wallet_transaction_id, reason_code: 'referral_reward', amount_usd: reward.amount_usd, created_at_unix_secs: reward.created_at_unix_secs }] : []
+  if (reward.reversed_amount_usd > 0) ledger_entries.push({ id: reward.id === 'demo-reward-4' ? 'demo-ledger-referral-reversal' : 'demo-referral-reversal-full', reason_code: 'referral_reward_reversal', amount_usd: -reward.reversed_amount_usd, created_at_unix_secs: reward.updated_at_unix_secs })
+  const refunded = reward.id === 'demo-reward-4' ? 60 : reward.id === 'demo-reward-5' ? 100 : 0
+  const detail: ReferralRewardDetail = {
+    reward,
+    relationship: mockReferralRelationships.find(item => item.id === reward.referral_id) || null,
+    rule_snapshot: reward.id === 'demo-reward-7' ? null : { percent_enabled: reward.reward_type === 'percent', percent_rate: reward.amount_usd, headcount_enabled: reward.reward_type === 'headcount', headcount_amount_usd: reward.amount_usd, headcount_trigger: reward.trigger_point },
+    source_order: reward.source_order_id ? { id: reward.source_order_id, order_no: reward.source_order_no || reward.source_order_id, wallet_id: 'wallet-demo-user', order_kind: 'recharge', amount_usd: 100, refunded_amount_usd: refunded, status: 'credited' } : null,
+    ledger_entries,
+    refunds: refunded > 0 ? [{ id: reward.id === 'demo-reward-5' ? 'demo-refund-referral-full' : 'demo-refund-referral', refund_no: reward.id === 'demo-reward-5' ? 'RF-DEMO-REFERRAL-FULL' : 'RF-DEMO-REFERRAL', status: 'succeeded', refund_mode: 'original_channel', wallet_id: 'wallet-demo-user', refund_amount_usd: refunded, created_at_unix_secs: reward.updated_at_unix_secs }] : [],
+  }
+  return createMockResponse(detail)
+})
+for (const action of ['retry', 'void'] as const) registerDynamicRoute('POST', `/api/admin/referral-rewards/:rewardId/${action}`, async (config, params) => {
+  await delay(); requireAdmin(); const reward = mockReferralRewards.find(item => item.id === params.rewardId)
+  if (!reward) throw { response: createMockResponse({ detail: '返利记录不存在' }, 404) }
+  const body = typeof config.data === 'string' ? JSON.parse(config.data || '{}') : config.data || {}
+  if (action === 'retry' ? reward.status !== 'failed' : !['pending', 'failed'].includes(reward.status)) throw { response: createMockResponse({ detail: '返利状态已变化' }, 409) }
+  reward.status = action === 'retry' ? 'applied' : 'voided'; reward.admin_operator_id = MOCK_ADMIN_USER.id; reward.admin_note = body.note || null; reward.updated_at_unix_secs = Math.floor(Date.now() / 1000)
+  if (action === 'retry') reward.wallet_transaction_id = `demo-referral-ledger-${reward.id}`
+  return createMockResponse({ reward })
+})
+
+registerDynamicRoute('PUT', '/api/admin/system/referral-settings', async (config) => {
+  await delay()
+  requireAdmin()
+  const body = JSON.parse(config.data || '{}') as Record<string, unknown>
+  validateMockReferralSettings(body)
+  for (const [key, value] of Object.entries(body)) {
+    if (!key.startsWith('referral_') && key !== 'require_email_verification') continue
+    const entry = MOCK_SYSTEM_CONFIGS.find(item => item.key === key)
+    if (entry) entry.value = value
+    else MOCK_SYSTEM_CONFIGS.push({ key, value })
+  }
+  refreshMockReferralModuleStatus()
+  return createMockResponse({ message: '邀请返利配置已保存' })
+})
+
 // 系统配置详情
 registerDynamicRoute('GET', '/api/admin/system/configs/:configKey', async (_config, params) => {
   await delay()
@@ -2742,6 +2884,7 @@ registerDynamicRoute('PUT', '/api/admin/system/configs/:configKey', async (confi
   requireAdmin()
   const key = decodeURIComponent(params.configKey)
   const body = JSON.parse(config.data || '{}') as { value?: unknown; description?: string }
+  if (key.startsWith('referral_') || key === 'require_email_verification') validateMockReferralSettings({ [key]: body.value })
   const index = MOCK_SYSTEM_CONFIGS.findIndex(item => item.key === key)
   const entry = {
     key,
@@ -2761,6 +2904,9 @@ registerDynamicRoute('PUT', '/api/admin/system/configs/:configKey', async (confi
   }
   if (key === 'enable_model_directives') {
     refreshMockModelDirectivesModuleStatus()
+  }
+  if (key === 'referral_enabled') {
+    refreshMockReferralModuleStatus()
   }
   return createMockResponse(entry)
 })
@@ -2800,6 +2946,14 @@ registerDynamicRoute('PUT', '/api/admin/modules/status/:moduleName/enabled', asy
   }
   const body = JSON.parse(config.data || '{}') as { enabled?: boolean }
   const enabled = body.enabled === true
+  if (params.moduleName === 'referral') {
+    const index = MOCK_SYSTEM_CONFIGS.findIndex(item => item.key === 'referral_enabled')
+    const entry = { key: 'referral_enabled', value: enabled, description: '邀请返利开关' }
+    if (index === -1) MOCK_SYSTEM_CONFIGS.push(entry)
+    else MOCK_SYSTEM_CONFIGS[index] = { ...MOCK_SYSTEM_CONFIGS[index], ...entry }
+    refreshMockReferralModuleStatus()
+    return createMockResponse(MOCK_MODULE_STATUSES.referral)
+  }
   if (params.moduleName === 'model_directives') {
     const index = MOCK_SYSTEM_CONFIGS.findIndex(item => item.key === 'enable_model_directives')
     const entry = {
@@ -3824,7 +3978,7 @@ registerDynamicRoute('DELETE', '/api/announcements/:announcementId', async (_con
 registerDynamicRoute('GET', '/api/admin/users/:userId', async (_config, params) => {
   await delay()
   requireAdmin()
-  const user = MOCK_ALL_USERS.find(u => u.id === params.userId)
+  const user = mockSelectableUsers().find(u => u.id === params.userId)
   if (!user) {
     throw { response: createMockResponse({ detail: '用户不存在' }, 404) }
   }

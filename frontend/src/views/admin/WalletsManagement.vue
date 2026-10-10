@@ -13,6 +13,80 @@
       </div>
 
       <div class="px-5 py-5">
+        <div
+          v-if="locationId"
+          class="mb-5 space-y-3 rounded-xl border border-border/60 p-4"
+          data-testid="wallet-location"
+          aria-live="polite"
+        >
+          <div class="flex flex-wrap items-center justify-between gap-2">
+            <span class="text-sm font-semibold">{{ locationLoading ? '正在定位目标...' : locationError ? '定位失败' : '已定位目标' }}</span>
+            <div class="flex items-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                @click="copyLocationId"
+              >
+                复制 ID
+              </Button>
+              <Button
+                v-if="locationError"
+                variant="outline"
+                size="sm"
+                @click="retryLocation"
+              >
+                重试定位
+              </Button>
+            </div>
+          </div>
+          <p class="break-all font-mono text-xs text-muted-foreground">
+            {{ locationId }}
+          </p>
+          <p
+            v-if="locationError"
+            role="alert"
+            class="text-sm text-rose-600"
+          >
+            {{ locationError }}
+          </p>
+          <div
+            v-if="locationTarget?.kind === 'wallets'"
+            class="grid gap-2 text-sm sm:grid-cols-4"
+          >
+            <span>{{ ownerDisplayName(locationTarget.item.owner_name, locationTarget.item.owner_type) }}</span>
+            <span>充值余额 {{ formatCurrency(locationTarget.item.recharge_balance) }}</span>
+            <span>赠款余额 {{ formatCurrency(locationTarget.item.gift_balance) }}</span>
+            <span>{{ walletStatusLabel(locationTarget.item.status) }}</span>
+          </div>
+          <div
+            v-if="locationTarget?.kind === 'orders'"
+            class="grid gap-2 text-sm sm:grid-cols-4"
+          >
+            <span class="break-all">订单 {{ locationTarget.item.order_no }}</span>
+            <span>{{ formatCurrency(locationTarget.item.amount_usd) }}</span>
+            <span>{{ paymentStatusLabel(locationTarget.item.status) }}</span>
+            <span>退款及处理中占用 {{ formatCurrency(locationTarget.item.refunded_amount_usd) }}</span>
+          </div>
+          <Button
+            v-if="locationTarget?.kind === 'refunds'"
+            variant="outline"
+            size="sm"
+            @click="openRefundDrawer(locationTarget.item)"
+          >
+            查看目标退款
+          </Button>
+          <Button
+            v-if="locationTarget?.kind === 'ledger'"
+            variant="outline"
+            size="sm"
+            @click="openLedgerDrawer(locationTarget.item)"
+          >
+            查看目标流水
+          </Button>
+          <p class="text-xs text-muted-foreground">
+            目标详情独立于分页；下方仍为全局列表。
+          </p>
+        </div>
         <Tabs v-model="activeTab">
           <TabsList class="tabs-button-list grid w-full max-w-[960px] grid-cols-5">
             <TabsTrigger value="ledger">
@@ -1220,6 +1294,7 @@
               >
                 <Label>驳回原因</Label>
                 <Input
+                  id="refund-fail-reason"
                   v-model="failRefundForm.reason"
                   placeholder="请填写驳回原因"
                 />
@@ -1335,9 +1410,16 @@
       </template>
     </Dialog>
   </div>
+  <RefundReferralReview
+    ref="referralReview"
+    :active="showRefundDrawer"
+    :context-key="currentRefund?.id || ''"
+  />
 </template>
 
 <script setup lang="ts">
+import RefundReferralReview from '@/features/wallet/components/RefundReferralReview.vue'
+import { useWalletLocation } from '@/features/wallet/useWalletLocation'
 import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import {
@@ -1380,7 +1462,7 @@ import {
   type RedeemCodeBatch,
   type RedeemCodeRecord,
 } from '@/api/admin-payments'
-import type { PaymentOrder } from '@/api/wallet'
+import type { PaymentOrder, RefundRequest } from '@/api/wallet'
 import { parseApiError } from '@/utils/errorParser'
 import { useToast } from '@/composables/useToast'
 import { getI18nLocale, useI18n } from '@/i18n'
@@ -1408,6 +1490,8 @@ type LedgerReasonOption = {
   label: string
   category: LedgerCategory
 }
+
+const referralReview = ref<InstanceType<typeof RefundReferralReview> | null>(null)
 
 const LEDGER_REASON_OPTIONS: LedgerReasonOption[] = [
   { value: 'topup_admin_manual', label: '人工充值', category: 'recharge' },
@@ -1519,6 +1603,7 @@ const currentRefund = ref<AdminGlobalRefund | null>(null)
 const loadingLedgerOrderNo = ref(false)
 const ledgerPaymentOrderNo = ref<string | null>(null)
 const ledgerPaymentMethod = ref<string | null>(null)
+let ledgerDetailSequence = 0
 
 const showCreditDialog = ref(false)
 const currentOrder = ref<PaymentOrder | null>(null)
@@ -1538,6 +1623,27 @@ const creditForm = reactive({
   pay_currency: '',
   exchange_rate: undefined as number | undefined,
 })
+
+const {
+  target: locationTarget, loading: locationLoading, error: locationError,
+  targetId: locationId, retry: retryLocation,
+} = useWalletLocation(() => route.query, () => {
+  closeLedgerDrawer()
+  closeRefundDrawer()
+  showCreditDialog.value = false
+}, (target) => {
+  if (target.kind === 'refunds') openRefundDrawer(target.item)
+  if (target.kind === 'ledger') openLedgerDrawer(target.item)
+})
+
+async function copyLocationId() {
+  try {
+    await navigator.clipboard.writeText(locationId.value)
+    success('ID 已复制')
+  } catch {
+    showError('复制失败，请手动复制上方 ID')
+  }
+}
 
 watch([ledgerCategoryFilter, ledgerReasonFilter, ledgerOwnerFilter], () => {
   ledgerPage.value = 1
@@ -1589,7 +1695,9 @@ watch(
   () => route.query.tab,
   (tab) => {
     const tabValue = Array.isArray(tab) ? tab[0] : tab
-    if (isValidTab(tabValue)) {
+    if (tabValue === 'wallets') {
+      activeTab.value = 'ledger'
+    } else if (isValidTab(tabValue)) {
       activeTab.value = tabValue
     }
   },
@@ -1952,6 +2060,8 @@ function openLedgerDrawer(tx: AdminLedgerTransaction) {
 }
 
 async function resolveLedgerRechargeOrderNo(tx: AdminLedgerTransaction) {
+  const generation = ++ledgerDetailSequence
+  loadingLedgerOrderNo.value = false
   if (tx.link_type !== 'payment_order' || !tx.link_id) {
     ledgerPaymentOrderNo.value = null
     ledgerPaymentMethod.value = null
@@ -1967,18 +2077,21 @@ async function resolveLedgerRechargeOrderNo(tx: AdminLedgerTransaction) {
   loadingLedgerOrderNo.value = true
   try {
     const resp = await adminPaymentsApi.getOrder(tx.link_id)
+    if (generation !== ledgerDetailSequence || !showLedgerDrawer.value || currentLedger.value?.id !== tx.id) return
     ledgerPaymentOrderNo.value = resp.order.order_no || null
     ledgerPaymentMethod.value = resp.order.payment_method || null
   } catch (error) {
+    if (generation !== ledgerDetailSequence) return
     log.error('加载关联充值订单失败:', error)
     ledgerPaymentOrderNo.value = null
     ledgerPaymentMethod.value = null
   } finally {
-    loadingLedgerOrderNo.value = false
+    if (generation === ledgerDetailSequence) loadingLedgerOrderNo.value = false
   }
 }
 
 function closeLedgerDrawer() {
+  ledgerDetailSequence++
   showLedgerDrawer.value = false
 }
 
@@ -1995,19 +2108,35 @@ function closeRefundDrawer() {
 }
 
 function syncCurrentRefund(refundId: string) {
+  if (currentRefund.value?.id !== refundId) return
   const latest = refundItems.value.find((item) => item.id === refundId)
   if (latest) {
     currentRefund.value = latest
   }
 }
 
+function applyRefundUpdate(refundId: string, refund: RefundRequest) {
+  if (currentRefund.value?.id === refundId) currentRefund.value = { ...currentRefund.value, ...refund }
+  const target = locationTarget.value
+  if (target?.kind === 'refunds' && target.item.id === refundId) {
+    locationTarget.value = { kind: 'refunds', item: { ...target.item, ...refund } }
+  }
+}
+
 async function processRefund(refund: AdminGlobalRefund) {
+  const walletId = refund.wallet_id
+  const refundId = refund.id
+  const canReject = canFailRefund(refund)
   submittingRefundAction.value = true
   try {
-    await adminWalletApi.processRefund(refund.wallet_id, refund.id)
+    const review = await referralReview.value?.review(walletId, refundId, 'process', canReject)
+    if (review?.decision === 'reject') { await nextTick(); document.querySelector<HTMLInputElement>('#refund-fail-reason')?.focus(); return }
+    if (review?.decision !== 'approve') return
+    const response = await adminWalletApi.processRefund(walletId, refundId, { referral_shortfall_confirmation: review.token })
+    applyRefundUpdate(refundId, response.refund)
     success('退款已进入 processing')
     await Promise.all([loadRefunds(), loadLedger()])
-    syncCurrentRefund(refund.id)
+    syncCurrentRefund(refundId)
   } catch (error) {
     log.error('处理退款失败:', error)
     showError(parseApiError(error, '处理退款失败'))
@@ -2023,14 +2152,18 @@ async function submitFailRefund() {
     return
   }
 
+  const walletId = currentRefund.value.wallet_id
+  const refundId = currentRefund.value.id
+  const reason = failRefundForm.reason.trim()
   submittingRefundAction.value = true
   try {
-    await adminWalletApi.failRefund(currentRefund.value.wallet_id, currentRefund.value.id, {
-      reason: failRefundForm.reason.trim(),
+    const response = await adminWalletApi.failRefund(walletId, refundId, {
+      reason,
     })
+    applyRefundUpdate(refundId, response.refund)
     success('退款已驳回')
     await Promise.all([loadRefunds(), loadLedger()])
-    syncCurrentRefund(currentRefund.value.id)
+    syncCurrentRefund(refundId)
   } catch (error) {
     log.error('驳回退款失败:', error)
     showError(parseApiError(error, '驳回退款失败'))
@@ -2042,15 +2175,28 @@ async function submitFailRefund() {
 async function submitCompleteRefund() {
   if (!currentRefund.value) return
 
+  const walletId = currentRefund.value.wallet_id
+  const refundId = currentRefund.value.id
+  const canReject = canFailRefund(currentRefund.value)
+  const payload = {
+    gateway_refund_id: completeRefundForm.gateway_refund_id || undefined,
+    payout_reference: completeRefundForm.payout_reference || undefined,
+  }
   submittingRefundAction.value = true
   try {
-    await adminWalletApi.completeRefund(currentRefund.value.wallet_id, currentRefund.value.id, {
-      gateway_refund_id: completeRefundForm.gateway_refund_id || undefined,
-      payout_reference: completeRefundForm.payout_reference || undefined,
+    const review = await referralReview.value?.review(walletId, refundId, 'complete', canReject)
+    if (review?.decision === 'reject') { await nextTick(); document.querySelector<HTMLInputElement>('#refund-fail-reason')?.focus(); return }
+    if (review?.decision !== 'approve') return
+    const response = await adminWalletApi.completeRefund(walletId, refundId, {
+      referral_shortfall_confirmation: review.token,
+      ...payload,
     })
-    success('退款已完成')
+    applyRefundUpdate(refundId, response.refund)
+    success(response.referral_reversal
+      ? `退款已完成；该订单累计冲回 $${response.referral_reversal.reversed_amount_usd.toFixed(2)}，当前待冲回 $${response.referral_reversal.pending_reversal_amount_usd.toFixed(2)}`
+      : '退款已完成')
     await Promise.all([loadRefunds(), loadLedger()])
-    syncCurrentRefund(currentRefund.value.id)
+    syncCurrentRefund(refundId)
   } catch (error) {
     log.error('完成退款失败:', error)
     showError(parseApiError(error, '完成退款失败'))

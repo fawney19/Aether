@@ -39,6 +39,8 @@ pub(super) const AUTH_SEND_VERIFICATION_RATE_LIMIT: AuthRateLimitPolicy =
     AuthRateLimitPolicy::new("send-verification-code", 3_600, 20, 3);
 pub(super) const AUTH_REGISTER_RATE_LIMIT: AuthRateLimitPolicy =
     AuthRateLimitPolicy::new("register", 3_600, 10, 5);
+pub(super) const AUTH_INVITE_CODE_RATE_LIMIT: AuthRateLimitPolicy =
+    AuthRateLimitPolicy::new("invite-code", 60, 60, 60);
 pub(super) const AUTH_VERIFY_EMAIL_RATE_LIMIT: AuthRateLimitPolicy =
     AuthRateLimitPolicy::new("verify-email", 300, 30, 10);
 pub(super) const AUTH_VERIFICATION_STATUS_RATE_LIMIT: AuthRateLimitPolicy =

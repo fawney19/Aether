@@ -50,6 +50,32 @@ use chrono::{TimeZone, Utc};
 const TEST_EMAIL_VERIFICATION_TOKEN: &str =
     "test-email-verification-token-00000000000000000000000000000000";
 
+#[tokio::test]
+async fn referral_invite_prevalidation_does_not_consume_registration_rate_limit() {
+    let (gateway_url, handle) =
+        start_server(build_router_with_state(AppState::new().expect("state"))).await;
+    let client = reqwest::Client::new();
+    for attempt in 0..20 {
+        let response = client
+            .get(format!("{gateway_url}/api/auth/invite-code?code="))
+            .send()
+            .await
+            .expect("preview request");
+        assert_eq!(response.status(), StatusCode::OK, "preview {attempt}");
+        let payload: serde_json::Value = response.json().await.expect("json");
+        assert_eq!(payload, json!({"valid":false,"reason":"邀请码无效"}));
+    }
+    let response = client
+        .post(format!("{gateway_url}/api/auth/register"))
+        .send()
+        .await
+        .expect("registration request");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = response.json().await.expect("json");
+    assert_eq!(body["detail"], "输入验证失败");
+    handle.abort();
+}
+
 #[path = "public_support/announcement_user_list.rs"]
 mod announcement_user_list;
 mod api_key_routing;
@@ -57,6 +83,8 @@ mod api_key_routing;
 mod auth_cookie;
 #[path = "public_support/dashboard.rs"]
 mod dashboard;
+#[path = "public_support/module_status.rs"]
+mod module_status;
 #[path = "public_support/routing_groups.rs"]
 mod routing_groups;
 #[path = "public_support/vscodex.rs"]

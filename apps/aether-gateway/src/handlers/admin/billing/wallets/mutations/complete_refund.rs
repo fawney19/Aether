@@ -32,7 +32,7 @@ fn gateway_refund_mode_allowed(refund_mode: &str) -> bool {
     refund_mode.trim().eq_ignore_ascii_case("original_channel")
 }
 
-fn stored_refund_to_gateway(
+pub(super) fn stored_refund_to_gateway(
     refund: aether_data::repository::wallet::StoredAdminWalletRefund,
 ) -> crate::AdminWalletRefundRecord {
     crate::AdminWalletRefundRecord {
@@ -154,26 +154,35 @@ pub(in super::super) async fn build_admin_wallet_complete_refund_response(
     }
     if refund_before_complete.status == "succeeded" {
         if let Some(order_id) = refund_before_complete.payment_order_id.as_deref() {
-            if let Err(err) = state
+            match state
                 .app()
                 .reverse_referral_rewards_for_order(order_id, refund_before_complete.amount_usd)
                 .await
             {
-                warn!(
-                    error = ?err,
-                    order_id = %order_id,
-                    refund_id = %refund_before_complete.id,
-                    "failed to reconcile referral rewards for completed refund"
-                );
-                return Ok(build_admin_wallets_data_unavailable_response());
+                Err(err) => {
+                    warn!(
+                        error = ?err,
+                        order_id = %order_id,
+                        refund_id = %refund_before_complete.id,
+                        "failed to reconcile referral rewards for completed refund"
+                    );
+                    return Ok(build_admin_wallets_data_unavailable_response());
+                }
+                Ok(_) => {}
             }
         }
+        let referral_reversal = super::referral_preview::reversal_summary(
+            state,
+            refund_before_complete.payment_order_id.as_deref(),
+        )
+        .await?;
         let response = Json(json!({
             "refund": build_admin_wallet_refund_payload(
                 &wallet,
                 &owner,
                 &refund_before_complete,
             ),
+            "referral_reversal": referral_reversal,
         }))
         .into_response();
         return Ok(attach_admin_audit_response(
@@ -184,6 +193,24 @@ pub(in super::super) async fn build_admin_wallet_complete_refund_response(
             &refund_id,
         ));
     }
+    // 在任何外部退款请求之前核验管理员已批准且已占款。
+    if refund_before_complete.status != "processing" {
+        return Ok(build_admin_wallets_bad_request_response(
+            "只有 processing 状态的退款可以标记完成",
+        ));
+    }
+    let referral_preview = match super::referral_preview::check_referral_confirmation(
+        state,
+        request_context,
+        &refund_before_complete,
+        "complete",
+        payload.referral_shortfall_confirmation.as_deref(),
+    )
+    .await?
+    {
+        Ok(preview) => preview,
+        Err(response) => return Ok(response),
+    };
     let mut gateway_refund_id = gateway_refund_id;
     let mut payout_proof = payload.payout_proof;
     if payload.gateway_refund {
@@ -272,6 +299,7 @@ pub(in super::super) async fn build_admin_wallet_complete_refund_response(
                                 "id": result.gateway_refund_id,
                                 "status": result.status,
                             },
+                            "referral_preview": referral_preview,
                         })),
                     )
                         .into_response();
@@ -343,22 +371,31 @@ pub(in super::super) async fn build_admin_wallet_complete_refund_response(
     {
         crate::AdminWalletMutationOutcome::Applied(refund) => {
             if let Some(order_id) = refund.payment_order_id.as_deref() {
-                if let Err(err) = state
+                match state
                     .app()
                     .reverse_referral_rewards_for_order(order_id, refund.amount_usd)
                     .await
                 {
-                    warn!(
-                        error = ?err,
-                        order_id = %order_id,
-                        refund_id = %refund.id,
-                        "failed to reverse referral rewards for completed refund"
-                    );
-                    return Ok(build_admin_wallets_data_unavailable_response());
+                    Err(err) => {
+                        warn!(
+                            error = ?err,
+                            order_id = %order_id,
+                            refund_id = %refund.id,
+                            "failed to reverse referral rewards for completed refund"
+                        );
+                        return Ok(build_admin_wallets_data_unavailable_response());
+                    }
+                    Ok(_) => {}
                 }
             }
+            let referral_reversal = super::referral_preview::reversal_summary(
+                state,
+                refund.payment_order_id.as_deref(),
+            )
+            .await?;
             let response = Json(json!({
                 "refund": build_admin_wallet_refund_payload(&wallet, &owner, &refund),
+                "referral_reversal": referral_reversal,
             }))
             .into_response();
             Ok(attach_admin_audit_response(

@@ -1644,6 +1644,16 @@ pub(crate) async fn refund_direct_gateway_order(
     amount_usd: f64,
     reason: Option<&str>,
 ) -> Result<Option<DirectGatewayRefundResult>, String> {
+    #[cfg(test)]
+    if let Some(counter) = refund_test_counters()
+        .lock()
+        .expect("refund stub lock")
+        .get(refund_no)
+        .cloned()
+    {
+        counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        return Err("test gateway refund temporarily unavailable".to_string());
+    }
     match order.payment_method.as_str() {
         "alipay" => {
             let order_no = validated_payment_identifier(
@@ -1760,6 +1770,31 @@ pub(crate) async fn refund_direct_gateway_order(
             }))
         }
         _ => Ok(None),
+    }
+}
+
+#[cfg(test)]
+fn refund_test_counters() -> &'static std::sync::Mutex<
+    std::collections::HashMap<String, std::sync::Arc<std::sync::atomic::AtomicUsize>>,
+> {
+    static COUNTERS: std::sync::OnceLock<
+        std::sync::Mutex<
+            std::collections::HashMap<String, std::sync::Arc<std::sync::atomic::AtomicUsize>>,
+        >,
+    > = std::sync::OnceLock::new();
+    COUNTERS.get_or_init(Default::default)
+}
+
+#[cfg(test)]
+pub(crate) fn set_refund_failure_stub_for_tests(
+    refund_no: &str,
+    counter: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
+) {
+    let mut counters = refund_test_counters().lock().expect("refund stub lock");
+    if let Some(counter) = counter {
+        counters.insert(refund_no.to_string(), counter);
+    } else {
+        counters.remove(refund_no);
     }
 }
 

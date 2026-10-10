@@ -1077,7 +1077,7 @@ impl AppState {
         self.candidate_resolved_page_cache.clear();
     }
 
-    fn remember_system_config_write(&self, key: &str, value: Option<serde_json::Value>) {
+    pub(super) fn remember_system_config_write(&self, key: &str, value: Option<serde_json::Value>) {
         self.system_config_cache
             .insert(key.to_string(), value, SYSTEM_CONFIG_CACHE_MAX_STALENESS);
         if system_config_key_affects_scheduler(key) {
