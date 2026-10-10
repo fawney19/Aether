@@ -5304,14 +5304,12 @@ pub(crate) fn write_openai_generation_config(
         output.insert("top_k".to_string(), Value::from(value));
     }
     if let Some(values) = &config.stop_sequences {
-        output.insert(
-            "stop".to_string(),
-            if values.len() == 1 {
-                Value::String(values[0].clone())
-            } else {
-                Value::Array(values.iter().cloned().map(Value::String).collect())
-            },
-        );
+        if !values.is_empty() {
+            output.insert(
+                "stop".to_string(),
+                Value::Array(values.iter().cloned().map(Value::String).collect()),
+            );
+        }
     }
     if let Some(value) = config.n {
         output.insert("n".to_string(), Value::from(value));
@@ -7360,10 +7358,11 @@ mod tests {
         from_gemini_to_canonical_request, from_gemini_to_canonical_response,
         from_openai_chat_to_canonical_request, from_openai_chat_to_canonical_response,
         from_openai_responses_to_canonical_request, from_openai_responses_to_canonical_response,
-        CanonicalContentBlock, CanonicalEmbedding, CanonicalEmbeddingContent,
-        CanonicalEmbeddingInput, CanonicalEmbeddingRequest, CanonicalRole, CanonicalUsage,
+        write_openai_generation_config, CanonicalContentBlock, CanonicalEmbedding,
+        CanonicalEmbeddingContent, CanonicalEmbeddingInput, CanonicalEmbeddingRequest,
+        CanonicalGenerationConfig, CanonicalRole, CanonicalUsage,
     };
-    use serde_json::{json, Value};
+    use serde_json::{json, Map, Value};
 
     #[test]
     fn canonical_embedding_request_accepts_axonhub_input_shapes() {
@@ -8138,6 +8137,61 @@ mod tests {
         assert_eq!(rebuilt["messages"], request["messages"]);
         assert_eq!(rebuilt["stop"], Value::Array(vec![json!("x"), json!("y")]));
         assert_eq!(rebuilt["n"], 2);
+    }
+
+    #[test]
+    fn test_write_openai_generation_config_stop_always_array() {
+        let mut output = Map::new();
+        let config = CanonicalGenerationConfig {
+            stop_sequences: Some(vec!["</block>".to_string()]),
+            ..Default::default()
+        };
+        write_openai_generation_config(&mut output, &config);
+
+        assert_eq!(
+            output.get("stop"),
+            Some(&Value::Array(vec![Value::String("</block>".to_string())]))
+        );
+
+        let mut output_multi = Map::new();
+        let config_multi = CanonicalGenerationConfig {
+            stop_sequences: Some(vec!["stop1".to_string(), "stop2".to_string()]),
+            ..Default::default()
+        };
+        write_openai_generation_config(&mut output_multi, &config_multi);
+        assert_eq!(
+            output_multi.get("stop"),
+            Some(&Value::Array(vec![
+                Value::String("stop1".to_string()),
+                Value::String("stop2".to_string()),
+            ]))
+        );
+
+        let mut output_empty = Map::new();
+        let config_empty = CanonicalGenerationConfig {
+            stop_sequences: Some(vec![]),
+            ..Default::default()
+        };
+        write_openai_generation_config(&mut output_empty, &config_empty);
+        assert!(output_empty.get("stop").is_none());
+    }
+
+    #[test]
+    fn claude_to_openai_chat_request_stop_sequences_always_array() {
+        let claude_request = json!({
+            "model": "claude-3-7-sonnet-20250219",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 1024,
+            "stop_sequences": ["</block>"]
+        });
+        let canonical =
+            from_claude_to_canonical_request(&claude_request).expect("canonical request");
+        let openai_chat =
+            canonical_to_openai_chat_request(&canonical).expect("openai chat request");
+        assert_eq!(
+            openai_chat.get("stop"),
+            Some(&Value::Array(vec![Value::String("</block>".to_string())]))
+        );
     }
 
     #[test]
