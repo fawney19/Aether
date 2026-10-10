@@ -118,9 +118,10 @@ mod postgres_tests {
                 .await
                 .unwrap();
         }
-        let mut backends = DataBackends::default();
-        backends.postgres = Some(backend);
-        backends
+        DataBackends {
+            postgres: Some(backend),
+            ..Default::default()
+        }
     }
 
     #[tokio::test]

@@ -154,21 +154,18 @@ pub(in super::super) async fn build_admin_wallet_complete_refund_response(
     }
     if refund_before_complete.status == "succeeded" {
         if let Some(order_id) = refund_before_complete.payment_order_id.as_deref() {
-            match state
+            if let Err(err) = state
                 .app()
                 .reverse_referral_rewards_for_order(order_id, refund_before_complete.amount_usd)
                 .await
             {
-                Err(err) => {
-                    warn!(
-                        error = ?err,
-                        order_id = %order_id,
-                        refund_id = %refund_before_complete.id,
-                        "failed to reconcile referral rewards for completed refund"
-                    );
-                    return Ok(build_admin_wallets_data_unavailable_response());
-                }
-                Ok(_) => {}
+                warn!(
+                    error = ?err,
+                    order_id = %order_id,
+                    refund_id = %refund_before_complete.id,
+                    "failed to reconcile referral rewards for completed refund"
+                );
+                return Ok(build_admin_wallets_data_unavailable_response());
             }
         }
         let referral_reversal = super::referral_preview::reversal_summary(
@@ -371,21 +368,18 @@ pub(in super::super) async fn build_admin_wallet_complete_refund_response(
     {
         crate::AdminWalletMutationOutcome::Applied(refund) => {
             if let Some(order_id) = refund.payment_order_id.as_deref() {
-                match state
+                if let Err(err) = state
                     .app()
                     .reverse_referral_rewards_for_order(order_id, refund.amount_usd)
                     .await
                 {
-                    Err(err) => {
-                        warn!(
-                            error = ?err,
-                            order_id = %order_id,
-                            refund_id = %refund.id,
-                            "failed to reverse referral rewards for completed refund"
-                        );
-                        return Ok(build_admin_wallets_data_unavailable_response());
-                    }
-                    Ok(_) => {}
+                    warn!(
+                        error = ?err,
+                        order_id = %order_id,
+                        refund_id = %refund.id,
+                        "failed to reverse referral rewards for completed refund"
+                    );
+                    return Ok(build_admin_wallets_data_unavailable_response());
                 }
             }
             let referral_reversal = super::referral_preview::reversal_summary(
