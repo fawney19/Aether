@@ -6,20 +6,22 @@ use aether_data_contracts::repository::usage::{
     StoredUsageCacheAffinityIntervalRow, StoredUsageCacheHitSummary, StoredUsageCostSavingsSummary,
     StoredUsageDashboardDailyBreakdownRow, StoredUsageDashboardProviderCount,
     StoredUsageDashboardStatsSummary, StoredUsageDashboardSummary, StoredUsageErrorDistributionRow,
-    StoredUsageLeaderboardSummary, StoredUsagePerformancePercentilesRow,
-    StoredUsageProviderPerformance, StoredUsageProviderPerformanceProviderRow,
-    StoredUsageProviderPerformanceSummary, StoredUsageProviderPerformanceTimelineRow,
-    StoredUsageSettledCostSummary, StoredUsageTimeSeriesBucket, StoredUsageUserTotals,
-    UsageAuditAggregationGroupBy, UsageAuditAggregationQuery, UsageAuditKeywordSearchQuery,
-    UsageAuditSummaryQuery, UsageBodyCaptureState, UsageBodyField, UsageBreakdownGroupBy,
-    UsageBreakdownSummaryQuery, UsageCacheAffinityHitSummaryQuery,
-    UsageCacheAffinityIntervalGroupBy, UsageCacheAffinityIntervalQuery, UsageCacheHitSummaryQuery,
-    UsageCleanupExecutionMode, UsageCleanupSummary, UsageCleanupTargets, UsageCleanupWindow,
-    UsageCostSavingsSummaryQuery, UsageDashboardDailyBreakdownQuery,
-    UsageDashboardProviderCountsQuery, UsageDashboardSummaryQuery, UsageErrorDistributionQuery,
-    UsageLeaderboardGroupBy, UsageLeaderboardQuery, UsageMonitoringErrorCountQuery,
-    UsageMonitoringErrorListQuery, UsagePerformancePercentilesQuery, UsageProviderPerformanceQuery,
-    UsageSettledCostSummaryQuery, UsageTimeSeriesGranularity, UsageTimeSeriesQuery,
+    StoredUsageHealthTimelineRow, StoredUsageLeaderboardSummary,
+    StoredUsagePerformancePercentilesRow, StoredUsageProviderPerformance,
+    StoredUsageProviderPerformanceProviderRow, StoredUsageProviderPerformanceSummary,
+    StoredUsageProviderPerformanceTimelineRow, StoredUsageSettledCostSummary,
+    StoredUsageTimeSeriesBucket, StoredUsageUserTotals, UsageAuditAggregationGroupBy,
+    UsageAuditAggregationQuery, UsageAuditKeywordSearchQuery, UsageAuditSummaryQuery,
+    UsageBodyCaptureState, UsageBodyField, UsageBreakdownGroupBy, UsageBreakdownSummaryQuery,
+    UsageCacheAffinityHitSummaryQuery, UsageCacheAffinityIntervalGroupBy,
+    UsageCacheAffinityIntervalQuery, UsageCacheHitSummaryQuery, UsageCleanupExecutionMode,
+    UsageCleanupSummary, UsageCleanupTargets, UsageCleanupWindow, UsageCostSavingsSummaryQuery,
+    UsageDashboardDailyBreakdownQuery, UsageDashboardProviderCountsQuery,
+    UsageDashboardSummaryQuery, UsageErrorDistributionQuery, UsageHealthTimelineGroupBy,
+    UsageHealthTimelineQuery, UsageLeaderboardGroupBy, UsageLeaderboardQuery,
+    UsageMonitoringErrorCountQuery, UsageMonitoringErrorListQuery,
+    UsagePerformancePercentilesQuery, UsageProviderPerformanceQuery, UsageSettledCostSummaryQuery,
+    UsageTimeSeriesGranularity, UsageTimeSeriesQuery,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -204,6 +206,132 @@ fn push_postgres_usage_excluded_status_codes(
         separated.push_bind(i32::from(*status_code));
     }
     separated.push_unseparated("))");
+}
+
+/// 构建健康监控时间线条（History 状态条）的分段聚合 SQL。
+///
+/// 抽成独立函数是为了能在没有真实数据库的环境里断言生成的 SQL 结构
+/// （本仓库的 PostgreSQL 集成测试需要 AETHER_TEST_DATABASE_URL，默认不执行）。
+///
+/// Note: 为什么必须走库内全窗口聚合、放弃了哪些替代方案，见 `.agents/notes/implemented/bug-fix/2026-10-09-model-health-history-timeline-truncated-sample.md`。
+///
+/// 关键点：
+/// - 与 `summarize_usage_breakdown_raw` 使用同一张 `usage_billing_facts` 视图，
+///   并复用同样的 `status`/`provider_name` 过滤与成功判定表达式，保证时间线条
+///   与卡片头部的请求数、可用率可以逐字对账。
+/// - 分桶（`FLOOR(偏移秒 / 分段宽度)`）在数据库侧完成，因此不受事件样本条数影响。
+fn build_usage_health_timeline_query(
+    query: &UsageHealthTimelineQuery,
+) -> Option<QueryBuilder<'static, Postgres>> {
+    if query.segments == 0 || query.created_from_unix_secs >= query.created_until_unix_secs {
+        return None;
+    }
+    if query.group_values.is_empty() {
+        return None;
+    }
+
+    let group_key_expr = match query.group_by {
+        UsageHealthTimelineGroupBy::Model => "\"usage\".model",
+        UsageHealthTimelineGroupBy::Provider => "\"usage\".provider_name",
+        UsageHealthTimelineGroupBy::ApiFormat => "\"usage\".api_format",
+    };
+    let segments_i64 = i64::from(query.segments);
+    let width_secs = (query.created_until_unix_secs - query.created_from_unix_secs) as f64
+        / f64::from(query.segments);
+
+    let mut builder = QueryBuilder::<Postgres>::new("WITH filtered_usage AS ( SELECT ");
+    builder.push(group_key_expr).push(" AS group_key, ");
+    // 分段序号：先算出事件相对窗口起点的秒偏移，再按分段宽度向下取整；
+    // 最后夹取到 [0, segments-1]，避免浮点边界让事件落到窗口外。
+    builder
+        .push("GREATEST(0, LEAST(FLOOR(EXTRACT(EPOCH FROM (\"usage\".created_at - TO_TIMESTAMP(");
+    builder.push_bind(query.created_from_unix_secs as f64);
+    builder.push("::double precision))) / ");
+    builder.push_bind(width_secs);
+    builder.push(")::bigint, ");
+    builder.push_bind(segments_i64 - 1);
+    builder.push(")) AS segment_idx, ");
+    builder.push(
+        r#"
+    CASE
+      WHEN "usage".status <> 'failed'
+           AND ("usage".status_code IS NULL OR "usage".status_code < 400)
+           AND "usage".error_message IS NULL
+      THEN 1
+      ELSE 0
+    END AS success_flag,
+    CASE
+      WHEN "usage".response_time_ms IS NOT NULL
+      THEN GREATEST(COALESCE("usage".response_time_ms, 0), 0)::DOUBLE PRECISION
+      ELSE 0
+    END AS response_time_ms,
+    CASE WHEN "usage".response_time_ms IS NOT NULL THEN 1 ELSE 0 END AS response_time_sample,
+    CASE
+      WHEN "usage".first_byte_time_ms IS NOT NULL
+      THEN GREATEST(COALESCE("usage".first_byte_time_ms, 0), 0)::DOUBLE PRECISION
+      ELSE 0
+    END AS first_byte_time_ms,
+    CASE WHEN "usage".first_byte_time_ms IS NOT NULL THEN 1 ELSE 0 END AS first_byte_time_sample,
+    GREATEST(COALESCE("usage".output_tokens, 0), 0)::BIGINT AS output_tokens
+  FROM usage_billing_facts AS "usage"
+ WHERE "#,
+    );
+    builder
+        .push("\"usage\".created_at >= TO_TIMESTAMP(")
+        .push_bind(query.created_from_unix_secs as f64)
+        .push("::double precision)");
+    builder
+        .push(" AND \"usage\".created_at < TO_TIMESTAMP(")
+        .push_bind(query.created_until_unix_secs as f64)
+        .push("::double precision)");
+    // 与 summarize_usage_breakdown_raw 保持逐字一致的排除条件。
+    builder.push(" AND \"usage\".status NOT IN ('pending', 'streaming')");
+    builder.push(" AND \"usage\".provider_name NOT IN ('unknown', 'pending')");
+    // ApiFormat 维度需要排除空格式，与 breakdown 的 filtered_extra_where 一致。
+    if matches!(query.group_by, UsageHealthTimelineGroupBy::ApiFormat) {
+        builder.push(" AND \"usage\".api_format IS NOT NULL");
+    }
+    if let Some(provider_name) = query.provider_name.as_deref() {
+        builder.push(" AND \"usage\".provider_name = ");
+        builder.push_bind(provider_name.to_string());
+    }
+    if let Some(model) = query.model.as_deref() {
+        builder.push(" AND \"usage\".model = ");
+        builder.push_bind(model.to_string());
+    }
+    if let Some(api_format) = query.api_format.as_deref() {
+        builder.push(" AND \"usage\".api_format = ");
+        builder.push_bind(api_format.to_string());
+    }
+    builder.push(" AND ");
+    builder.push(group_key_expr);
+    builder.push(" = ANY(");
+    builder.push_bind(query.group_values.clone());
+    builder.push(")");
+    let mut has_where = true;
+    push_postgres_usage_excluded_status_codes(
+        &mut builder,
+        &mut has_where,
+        &query.exclude_status_codes,
+    );
+    builder.push(
+        r#"
+)
+SELECT
+  group_key,
+  segment_idx,
+  COUNT(*)::BIGINT AS request_count,
+  COALESCE(SUM(success_flag), 0)::BIGINT AS success_count,
+  COALESCE(SUM(response_time_ms), 0) AS response_time_sum_ms,
+  COALESCE(SUM(response_time_sample), 0)::BIGINT AS response_time_samples,
+  COALESCE(SUM(first_byte_time_ms), 0) AS first_byte_sum_ms,
+  COALESCE(SUM(first_byte_time_sample), 0)::BIGINT AS first_byte_samples,
+  COALESCE(SUM(output_tokens), 0)::BIGINT AS output_tokens
+FROM filtered_usage
+GROUP BY group_key, segment_idx
+"#,
+    );
+    Some(builder)
 }
 
 fn dashboard_utc_midnight(value: DateTime<Utc>) -> DateTime<Utc> {
@@ -5625,6 +5753,53 @@ ORDER BY request_count DESC, group_key ASC
         Ok(items)
     }
 
+    /// 按时间分段聚合健康监控时间线条（History 状态条）。
+    ///
+    /// 这里与 `summarize_usage_breakdown_raw` 使用同一张 `usage_billing_facts` 视图、
+    /// 同一套过滤条件与成功判定表达式，保证"时间线条"与卡片头部的请求数/可用率同源可对账；
+    /// 分桶在数据库侧完成，因此不会因为内存样本被 LIMIT 截断而丢失历史时段。
+    pub async fn aggregate_usage_health_timeline(
+        &self,
+        query: &UsageHealthTimelineQuery,
+    ) -> Result<Vec<StoredUsageHealthTimelineRow>, DataLayerError> {
+        let Some(mut builder) = build_usage_health_timeline_query(query) else {
+            return Ok(Vec::new());
+        };
+
+        let mut rows = builder.build().fetch(&self.pool);
+        let mut items = Vec::new();
+        while let Some(row) = rows.try_next().await.map_postgres_err()? {
+            let raw_segment_idx = row.try_get::<i64, _>("segment_idx").map_postgres_err()?;
+            items.push(StoredUsageHealthTimelineRow {
+                group_key: row.try_get("group_key").map_postgres_err()?,
+                segment_idx: u32::try_from(raw_segment_idx.max(0)).unwrap_or(u32::MAX),
+                request_count: row
+                    .try_get::<i64, _>("request_count")
+                    .map_postgres_err()?
+                    .max(0) as u64,
+                success_count: row
+                    .try_get::<i64, _>("success_count")
+                    .map_postgres_err()?
+                    .max(0) as u64,
+                response_time_sum_ms: row.try_get("response_time_sum_ms").map_postgres_err()?,
+                response_time_samples: row
+                    .try_get::<i64, _>("response_time_samples")
+                    .map_postgres_err()?
+                    .max(0) as u64,
+                first_byte_sum_ms: row.try_get("first_byte_sum_ms").map_postgres_err()?,
+                first_byte_samples: row
+                    .try_get::<i64, _>("first_byte_samples")
+                    .map_postgres_err()?
+                    .max(0) as u64,
+                output_tokens: row
+                    .try_get::<i64, _>("output_tokens")
+                    .map_postgres_err()?
+                    .max(0) as u64,
+            });
+        }
+        Ok(items)
+    }
+
     pub async fn summarize_usage_breakdown(
         &self,
         query: &UsageBreakdownSummaryQuery,
@@ -10726,6 +10901,13 @@ impl UsageReadRepository for SqlxUsageReadRepository {
         query: &UsageBreakdownSummaryQuery,
     ) -> Result<Vec<StoredUsageBreakdownSummaryRow>, DataLayerError> {
         Self::summarize_usage_breakdown(self, query).await
+    }
+
+    async fn aggregate_usage_health_timeline(
+        &self,
+        query: &UsageHealthTimelineQuery,
+    ) -> Result<Vec<StoredUsageHealthTimelineRow>, DataLayerError> {
+        Self::aggregate_usage_health_timeline(self, query).await
     }
 
     async fn count_monitoring_usage_errors(

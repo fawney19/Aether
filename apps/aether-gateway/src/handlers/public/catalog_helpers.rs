@@ -15,8 +15,9 @@ use aether_data_contracts::repository::provider_catalog::{
     StoredProviderCatalogKey, StoredProviderCatalogProvider,
 };
 use aether_data_contracts::repository::usage::{
-    StoredRequestUsageAudit, StoredUsageBreakdownSummaryRow, UsageAuditListQuery,
-    UsageBreakdownGroupBy, UsageBreakdownSummaryQuery,
+    StoredRequestUsageAudit, StoredUsageBreakdownSummaryRow, StoredUsageHealthTimelineRow,
+    UsageAuditListQuery, UsageBreakdownGroupBy, UsageBreakdownSummaryQuery,
+    UsageHealthTimelineGroupBy, UsageHealthTimelineQuery,
 };
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
@@ -1089,6 +1090,30 @@ pub(crate) async fn build_model_health_monitor_payload(
         .take(model_limit)
         .collect::<Vec<_>>();
 
+    // 时间线条必须来自数据库侧的全窗口分段聚合：
+    // 之前用 "最新 per_model_limit 条事件" 分桶，导致高流量模型的早期时段被判成"无请求"，
+    // 与同一张卡片上的"265 次请求 / 可用率"自相矛盾。
+    // Note: 取舍与残留问题见 .agents/notes/implemented/bug-fix/2026-10-09-model-health-history-timeline-truncated-sample.md
+    let timeline_buckets = load_usage_health_timeline_buckets(
+        state,
+        UsageHealthTimelineQuery {
+            created_from_unix_secs: since_unix_secs,
+            created_until_unix_secs: now_unix_secs,
+            group_by: UsageHealthTimelineGroupBy::Model,
+            group_values: selected_models
+                .iter()
+                .map(|row| row.group_key.clone())
+                .collect::<Vec<_>>(),
+            provider_name: None,
+            model: None,
+            api_format: None,
+            segments: MODEL_HEALTH_TIMELINE_SEGMENTS,
+            exclude_status_codes: vec![USER_CANCELLED_STATUS_CODE],
+        },
+        "model",
+    )
+    .await;
+
     let mut models = Vec::with_capacity(selected_models.len());
     for row in selected_models {
         let events = state
@@ -1105,20 +1130,29 @@ pub(crate) async fn build_model_health_monitor_payload(
             .ok()
             .unwrap_or_default();
 
-        let (timeline, time_range_start, time_range_end) = build_model_health_timeline(
-            &events,
-            since_unix_secs,
-            now_unix_secs,
-            MODEL_HEALTH_TIMELINE_SEGMENTS,
-        );
-        let timeline_details = build_usage_health_timeline_details(
-            &events,
+        // 该分组拿不到聚合结果（查询失败或缺少 usage reader）时退回事件样本，
+        // 保证卡片不整条变灰；内存仓储已实现聚合，正常不会走到这里。
+        let buckets = timeline_buckets.get(&row.group_key);
+        let fallback_buckets = buckets.is_none().then(|| {
+            usage_health_buckets_from_events(
+                &events,
+                since_unix_secs,
+                now_unix_secs,
+                MODEL_HEALTH_TIMELINE_SEGMENTS,
+            )
+        });
+        let empty_buckets = BTreeMap::new();
+        let buckets = buckets
+            .or(fallback_buckets.as_ref())
+            .unwrap_or(&empty_buckets);
+        let (timeline, timeline_details) = build_usage_health_timeline_from_buckets(
+            buckets,
             since_unix_secs,
             now_unix_secs,
             MODEL_HEALTH_TIMELINE_SEGMENTS,
         );
         let provider_count = model_health_provider_count(&events);
-        let first_byte_average = model_health_average_first_byte_ms(&events);
+        let first_byte_average = usage_health_average_first_byte_ms(buckets);
         let last_event_at = events
             .first()
             .and_then(|item| unix_secs_to_rfc3339(item.created_at_unix_ms));
@@ -1153,8 +1187,8 @@ pub(crate) async fn build_model_health_monitor_payload(
             "events": event_payload,
             "timeline": timeline,
             "timeline_details": timeline_details,
-            "time_range_start": unix_secs_to_rfc3339(time_range_start),
-            "time_range_end": unix_secs_to_rfc3339(time_range_end),
+            "time_range_start": unix_secs_to_rfc3339(since_unix_secs),
+            "time_range_end": unix_secs_to_rfc3339(now_unix_secs),
         });
         if options.include_provider_count {
             model_payload["provider_count"] = json!(provider_count);
@@ -1213,14 +1247,39 @@ pub(crate) async fn build_provider_health_monitor_payload(
         .map(|row| (row.group_key.clone(), row))
         .collect::<BTreeMap<_, _>>();
 
+    // 提供商主条一次性批量聚合：避免为每个提供商各发一次查询（最多 50 个）。
+    let provider_timeline_buckets = load_usage_health_timeline_buckets(
+        state,
+        UsageHealthTimelineQuery {
+            created_from_unix_secs: since_unix_secs,
+            created_until_unix_secs: now_unix_secs,
+            group_by: UsageHealthTimelineGroupBy::Provider,
+            group_values: providers
+                .iter()
+                .map(|provider| provider.name.clone())
+                .collect::<Vec<_>>(),
+            provider_name: None,
+            model: None,
+            api_format: None,
+            segments: MODEL_HEALTH_TIMELINE_SEGMENTS,
+            exclude_status_codes: vec![USER_CANCELLED_STATUS_CODE],
+        },
+        "provider",
+    )
+    .await;
+
     let mut payload = Vec::with_capacity(providers.len());
     for provider in providers {
         let provider_stats = provider_breakdown.get(&provider.name);
+        // 先按名字取出时间条（provider 随后被移动进构造函数，不能同时借用它的字段）。
+        let provider_name = provider.name.clone();
+        let timeline_buckets = provider_timeline_buckets.get(&provider_name);
         payload.push(
             build_provider_health_payload(
                 state,
                 provider,
                 provider_stats,
+                timeline_buckets,
                 since_unix_secs,
                 now_unix_secs,
                 per_provider_model_limit,
@@ -1597,9 +1656,36 @@ where
             .then_with(|| right.request_count.cmp(&left.request_count))
             .then_with(|| left.group_key.cmp(&right.group_key))
     });
+    let selected_rows = rows.into_iter().take(related_limit).collect::<Vec<_>>();
+
+    // 关联项的时间线条同样改用全窗口分段聚合，口径与其头部 breakdown 保持一致。
+    let timeline_group_by = match query.group_by {
+        UsageBreakdownGroupBy::Model => UsageHealthTimelineGroupBy::Model,
+        UsageBreakdownGroupBy::Provider => UsageHealthTimelineGroupBy::Provider,
+        UsageBreakdownGroupBy::ApiFormat => UsageHealthTimelineGroupBy::ApiFormat,
+    };
+    let timeline_buckets = load_usage_health_timeline_buckets(
+        state,
+        UsageHealthTimelineQuery {
+            created_from_unix_secs: since_unix_secs,
+            created_until_unix_secs: now_unix_secs,
+            group_by: timeline_group_by,
+            group_values: selected_rows
+                .iter()
+                .map(|row| row.group_key.clone())
+                .collect::<Vec<_>>(),
+            provider_name: query.provider_name.clone(),
+            model: query.model.clone(),
+            api_format: query.api_format.clone(),
+            segments: MODEL_HEALTH_TIMELINE_SEGMENTS,
+            exclude_status_codes: query.exclude_status_codes.clone(),
+        },
+        "related",
+    )
+    .await;
 
     let mut items = Vec::new();
-    for row in rows.into_iter().take(related_limit) {
+    for row in selected_rows {
         let events = state
             .list_usage_audits(&build_events_query(&row))
             .await
@@ -1610,6 +1696,7 @@ where
             kind,
             &row,
             &events,
+            timeline_buckets.get(&row.group_key),
             display_name,
             meta_text,
             since_unix_secs,
@@ -1624,19 +1711,27 @@ fn related_health_item_payload(
     kind: &'static str,
     row: &StoredUsageBreakdownSummaryRow,
     events: &[StoredRequestUsageAudit],
+    buckets: Option<&BTreeMap<u32, StoredUsageHealthTimelineRow>>,
     display_name: String,
     meta_text: Option<String>,
     since_unix_secs: u64,
     now_unix_secs: u64,
 ) -> serde_json::Value {
-    let (timeline, time_range_start, time_range_end) = build_model_health_timeline(
-        events,
-        since_unix_secs,
-        now_unix_secs,
-        MODEL_HEALTH_TIMELINE_SEGMENTS,
-    );
-    let timeline_details = build_usage_health_timeline_details(
-        events,
+    // 优先使用全窗口分段聚合；聚合不可用时退回事件样本。
+    let fallback_buckets = buckets.is_none().then(|| {
+        usage_health_buckets_from_events(
+            events,
+            since_unix_secs,
+            now_unix_secs,
+            MODEL_HEALTH_TIMELINE_SEGMENTS,
+        )
+    });
+    let empty_buckets = BTreeMap::new();
+    let buckets = buckets
+        .or(fallback_buckets.as_ref())
+        .unwrap_or(&empty_buckets);
+    let (timeline, timeline_details) = build_usage_health_timeline_from_buckets(
+        buckets,
         since_unix_secs,
         now_unix_secs,
         MODEL_HEALTH_TIMELINE_SEGMENTS,
@@ -1663,13 +1758,13 @@ fn related_health_item_payload(
         "failed_count": failed_count,
         "success_rate": success_rate,
         "avg_latency_ms": model_health_average_latency_ms(row),
-        "avg_first_byte_ms": model_health_average_first_byte_ms(events),
+        "avg_first_byte_ms": usage_health_average_first_byte_ms(buckets),
         "avg_tps": model_health_average_tps(row),
         "last_event_at": last_event_at,
         "timeline": timeline,
         "timeline_details": timeline_details,
-        "time_range_start": unix_secs_to_rfc3339(time_range_start),
-        "time_range_end": unix_secs_to_rfc3339(time_range_end),
+        "time_range_start": unix_secs_to_rfc3339(since_unix_secs),
+        "time_range_end": unix_secs_to_rfc3339(now_unix_secs),
     })
 }
 
@@ -1722,6 +1817,7 @@ async fn build_provider_health_payload(
     state: &AppState,
     provider: StoredProviderCatalogProvider,
     provider_stats: Option<&StoredUsageBreakdownSummaryRow>,
+    provider_timeline_buckets: Option<&BTreeMap<u32, StoredUsageHealthTimelineRow>>,
     since_unix_secs: u64,
     now_unix_secs: u64,
     per_provider_model_limit: usize,
@@ -1763,6 +1859,29 @@ async fn build_provider_health_payload(
         .filter(|row| !row.group_key.trim().is_empty())
         .take(per_provider_model_limit)
         .collect::<Vec<_>>();
+
+    // 提供商主条与内嵌模型条都改用全窗口分段聚合，避免用被 LIMIT 截断的事件样本画历史。
+    // 主条由调用方一次性批量聚合后传入，内嵌模型条按"该提供商范围内的模型"聚合。
+    let model_timeline_buckets = load_usage_health_timeline_buckets(
+        state,
+        UsageHealthTimelineQuery {
+            created_from_unix_secs: since_unix_secs,
+            created_until_unix_secs: now_unix_secs,
+            group_by: UsageHealthTimelineGroupBy::Model,
+            group_values: selected_model_rows
+                .iter()
+                .map(|row| row.group_key.clone())
+                .collect::<Vec<_>>(),
+            provider_name: Some(provider.name.clone()),
+            model: None,
+            api_format: None,
+            segments: MODEL_HEALTH_TIMELINE_SEGMENTS,
+            exclude_status_codes: vec![USER_CANCELLED_STATUS_CODE],
+        },
+        "provider_model",
+    )
+    .await;
+
     let mut events_by_model = selected_model_rows
         .iter()
         .map(|row| (row.group_key.clone(), Vec::new()))
@@ -1781,6 +1900,7 @@ async fn build_provider_health_payload(
         models.push(model_health_payload_from_row(
             row,
             &events,
+            model_timeline_buckets.get(&row.group_key),
             since_unix_secs,
             now_unix_secs,
             None,
@@ -1809,14 +1929,21 @@ async fn build_provider_health_payload(
             (0, 0, 0, 1.0, None, None)
         };
 
-    let (timeline, time_range_start, time_range_end) = build_model_health_timeline(
-        &provider_events,
-        since_unix_secs,
-        now_unix_secs,
-        MODEL_HEALTH_TIMELINE_SEGMENTS,
-    );
-    let timeline_details = build_usage_health_timeline_details(
-        &provider_events,
+    // 提供商主条的时间线条同样取自全窗口聚合；聚合不可用时退回事件样本。
+    let provider_fallback_buckets = provider_timeline_buckets.is_none().then(|| {
+        usage_health_buckets_from_events(
+            &provider_events,
+            since_unix_secs,
+            now_unix_secs,
+            MODEL_HEALTH_TIMELINE_SEGMENTS,
+        )
+    });
+    let empty_buckets = BTreeMap::new();
+    let provider_buckets = provider_timeline_buckets
+        .or(provider_fallback_buckets.as_ref())
+        .unwrap_or(&empty_buckets);
+    let (timeline, timeline_details) = build_usage_health_timeline_from_buckets(
+        provider_buckets,
         since_unix_secs,
         now_unix_secs,
         MODEL_HEALTH_TIMELINE_SEGMENTS,
@@ -1836,14 +1963,14 @@ async fn build_provider_health_payload(
         "failed_count": failed_count,
         "success_rate": success_rate,
         "avg_latency_ms": avg_latency_ms,
-        "avg_first_byte_ms": model_health_average_first_byte_ms(&provider_events),
+        "avg_first_byte_ms": usage_health_average_first_byte_ms(provider_buckets),
         "avg_tps": avg_tps,
         "model_count": model_breakdown.len(),
         "last_event_at": last_event_at,
         "timeline": timeline,
         "timeline_details": timeline_details,
-        "time_range_start": unix_secs_to_rfc3339(time_range_start),
-        "time_range_end": unix_secs_to_rfc3339(time_range_end),
+        "time_range_start": unix_secs_to_rfc3339(since_unix_secs),
+        "time_range_end": unix_secs_to_rfc3339(now_unix_secs),
         "models": models,
     })
 }
@@ -1872,18 +1999,26 @@ fn provider_health_sort_rank(provider: &serde_json::Value) -> u8 {
 fn model_health_payload_from_row(
     row: &StoredUsageBreakdownSummaryRow,
     events: &[StoredRequestUsageAudit],
+    buckets: Option<&BTreeMap<u32, StoredUsageHealthTimelineRow>>,
     since_unix_secs: u64,
     now_unix_secs: u64,
     provider_count: Option<usize>,
 ) -> serde_json::Value {
-    let (timeline, time_range_start, time_range_end) = build_model_health_timeline(
-        events,
-        since_unix_secs,
-        now_unix_secs,
-        MODEL_HEALTH_TIMELINE_SEGMENTS,
-    );
-    let timeline_details = build_usage_health_timeline_details(
-        events,
+    // 优先使用全窗口分段聚合；聚合不可用时退回事件样本，避免整条历史变灰。
+    let fallback_buckets = buckets.is_none().then(|| {
+        usage_health_buckets_from_events(
+            events,
+            since_unix_secs,
+            now_unix_secs,
+            MODEL_HEALTH_TIMELINE_SEGMENTS,
+        )
+    });
+    let empty_buckets = BTreeMap::new();
+    let buckets = buckets
+        .or(fallback_buckets.as_ref())
+        .unwrap_or(&empty_buckets);
+    let (timeline, timeline_details) = build_usage_health_timeline_from_buckets(
+        buckets,
         since_unix_secs,
         now_unix_secs,
         MODEL_HEALTH_TIMELINE_SEGMENTS,
@@ -1914,14 +2049,14 @@ fn model_health_payload_from_row(
         "failed_count": failed_count,
         "success_rate": success_rate,
         "avg_latency_ms": model_health_average_latency_ms(row),
-        "avg_first_byte_ms": model_health_average_first_byte_ms(events),
+        "avg_first_byte_ms": usage_health_average_first_byte_ms(buckets),
         "avg_tps": model_health_average_tps(row),
         "last_event_at": last_event_at,
         "events": event_payload,
         "timeline": timeline,
         "timeline_details": timeline_details,
-        "time_range_start": unix_secs_to_rfc3339(time_range_start),
-        "time_range_end": unix_secs_to_rfc3339(time_range_end),
+        "time_range_start": unix_secs_to_rfc3339(since_unix_secs),
+        "time_range_end": unix_secs_to_rfc3339(now_unix_secs),
     });
     if let Some(provider_count) = provider_count {
         model_payload["provider_count"] = json!(provider_count);
@@ -2184,78 +2319,158 @@ pub(crate) fn build_public_health_timeline_details(
         .collect()
 }
 
-fn build_usage_health_timeline_details(
-    events: &[StoredRequestUsageAudit],
+/// 健康时间线条的按段索引：分组键 -> 段序号 -> 聚合桶。
+type UsageHealthTimelineBuckets = BTreeMap<String, BTreeMap<u32, StoredUsageHealthTimelineRow>>;
+
+/// 把数据库返回的分段聚合行整理成按分组键索引的桶。
+fn index_usage_health_timeline_rows(
+    rows: Vec<StoredUsageHealthTimelineRow>,
+) -> UsageHealthTimelineBuckets {
+    let mut indexed = UsageHealthTimelineBuckets::new();
+    for row in rows {
+        indexed
+            .entry(row.group_key.clone())
+            .or_default()
+            .insert(row.segment_idx, row);
+    }
+    indexed
+}
+
+/// 拉取全窗口分段聚合。
+///
+/// 失败（仓储不可用或查询报错）时返回空结果，调用方会退回被截断的事件样本；
+/// 这条降级路径会静默丢掉历史时段，因此必须留下告警日志，否则线上只会表现为
+/// "时间条又变灰了"，无从定位。
+async fn load_usage_health_timeline_buckets(
+    state: &AppState,
+    query: UsageHealthTimelineQuery,
+    scope: &'static str,
+) -> UsageHealthTimelineBuckets {
+    match state.aggregate_usage_health_timeline(&query).await {
+        Ok(rows) => index_usage_health_timeline_rows(rows),
+        Err(error) => {
+            tracing::warn!(
+                scope,
+                error = ?error,
+                "usage health timeline aggregation unavailable; falling back to truncated event sample"
+            );
+            UsageHealthTimelineBuckets::new()
+        }
+    }
+}
+
+/// 把分段聚合桶转换成前端 Tooltip 使用的指标结构。
+fn usage_health_metric_bucket(row: &StoredUsageHealthTimelineRow) -> HealthTimelineMetricBucket {
+    HealthTimelineMetricBucket {
+        total_count: row.request_count,
+        success_count: row.success_count,
+        failed_count: row.request_count.saturating_sub(row.success_count),
+        latency_sum_ms: row.response_time_sum_ms as u64,
+        latency_samples: row.response_time_samples,
+        first_byte_sum_ms: row.first_byte_sum_ms as u64,
+        first_byte_samples: row.first_byte_samples,
+        output_tokens: row.output_tokens,
+        response_time_sum_ms: row.response_time_sum_ms as u64,
+    }
+}
+
+/// 用分段聚合桶生成时间线状态数组与每段 Tooltip 明细。
+///
+/// 桶必须来自数据库侧的全窗口聚合：若改用"取最近 N 条事件再分桶"，
+/// 高流量模型/提供商的早期时段会因为没有样本而被判成"无请求"灰条，
+/// 与卡片头部的全窗口请求数、可用率对不上。
+fn build_usage_health_timeline_from_buckets(
+    buckets: &BTreeMap<u32, StoredUsageHealthTimelineRow>,
     since_unix_secs: u64,
     until_unix_secs: u64,
     segments: u32,
-) -> Vec<serde_json::Value> {
-    let usage_metrics =
-        aggregate_usage_timeline_metrics(events, since_unix_secs, until_unix_secs, segments);
+) -> (Vec<&'static str>, Vec<serde_json::Value>) {
     let window = HealthTimelineWindow {
         since_unix_secs,
         until_unix_secs,
         segments,
     };
-    usage_metrics
-        .into_iter()
-        .enumerate()
-        .map(|(index, metrics)| {
-            let status = health_timeline_status(metrics.success_count, metrics.failed_count);
-            health_timeline_detail_payload(
-                index as u32,
-                HealthTimelineDetailCounts {
-                    status,
-                    total_attempts: metrics.total_count,
-                    success_count: metrics.success_count,
-                    failed_count: metrics.failed_count,
-                },
-                metrics,
-                window,
-            )
-        })
-        .collect()
+    let mut timeline = Vec::with_capacity(segments as usize);
+    let mut details = Vec::with_capacity(segments as usize);
+    for segment_idx in 0..segments {
+        let bucket = buckets.get(&segment_idx);
+        let total_attempts = bucket.map(|row| row.request_count).unwrap_or(0);
+        let success_count = bucket.map(|row| row.success_count).unwrap_or(0);
+        let failed_count = total_attempts.saturating_sub(success_count);
+        let status = health_timeline_status(success_count, failed_count);
+        let metrics = bucket.map(usage_health_metric_bucket).unwrap_or_default();
+        details.push(health_timeline_detail_payload(
+            segment_idx,
+            HealthTimelineDetailCounts {
+                status,
+                total_attempts,
+                success_count,
+                failed_count,
+            },
+            metrics,
+            window,
+        ));
+        timeline.push(status);
+    }
+    (timeline, details)
 }
 
-fn build_model_health_timeline(
+/// 降级路径：数据库聚合不可用时退回用事件样本分桶，避免整条历史变灰。
+fn usage_health_buckets_from_events(
     events: &[StoredRequestUsageAudit],
     since_unix_secs: u64,
     until_unix_secs: u64,
     segments: u32,
-) -> (Vec<&'static str>, u64, u64) {
-    #[derive(Default)]
-    struct Bucket {
-        success_count: u64,
-        failed_count: u64,
-    }
-
-    let safe_range = until_unix_secs.saturating_sub(since_unix_secs).max(1);
-    let mut buckets = (0..segments).map(|_| Bucket::default()).collect::<Vec<_>>();
-
+) -> BTreeMap<u32, StoredUsageHealthTimelineRow> {
+    let mut buckets = BTreeMap::new();
     for event in events {
-        let timestamp = event.created_at_unix_ms;
-        if timestamp < since_unix_secs || timestamp > until_unix_secs {
+        let Some(segment_idx) = health_timeline_segment_index(
+            event.created_at_unix_ms,
+            since_unix_secs,
+            until_unix_secs,
+            segments,
+        ) else {
             continue;
-        }
-        let offset = timestamp.saturating_sub(since_unix_secs);
-        let mut segment_idx = ((offset as u128 * segments as u128) / safe_range as u128) as usize;
-        if segment_idx >= segments as usize {
-            segment_idx = segments.saturating_sub(1) as usize;
-        }
-        let bucket = &mut buckets[segment_idx];
+        };
+        let bucket =
+            buckets
+                .entry(segment_idx as u32)
+                .or_insert_with(|| StoredUsageHealthTimelineRow {
+                    segment_idx: segment_idx as u32,
+                    ..StoredUsageHealthTimelineRow::default()
+                });
+        bucket.request_count = bucket.request_count.saturating_add(1);
         if model_health_event_success(event) {
             bucket.success_count = bucket.success_count.saturating_add(1);
-        } else {
-            bucket.failed_count = bucket.failed_count.saturating_add(1);
         }
+        if let Some(response_time_ms) = event.response_time_ms {
+            bucket.response_time_sum_ms += response_time_ms as f64;
+            bucket.response_time_samples = bucket.response_time_samples.saturating_add(1);
+        }
+        if let Some(first_byte_time_ms) = event.first_byte_time_ms {
+            bucket.first_byte_sum_ms += first_byte_time_ms as f64;
+            bucket.first_byte_samples = bucket.first_byte_samples.saturating_add(1);
+        }
+        bucket.output_tokens = bucket.output_tokens.saturating_add(event.output_tokens);
     }
+    buckets
+}
 
-    let timeline = buckets
-        .into_iter()
-        .map(|bucket| health_timeline_status(bucket.success_count, bucket.failed_count))
-        .collect::<Vec<_>>();
-
-    (timeline, since_unix_secs, until_unix_secs)
+/// 从全窗口分段聚合中取平均 TTFB，口径与卡片头部保持一致。
+fn usage_health_average_first_byte_ms(
+    buckets: &BTreeMap<u32, StoredUsageHealthTimelineRow>,
+) -> Option<f64> {
+    let mut sum = 0.0f64;
+    let mut count = 0u64;
+    for row in buckets.values() {
+        sum += row.first_byte_sum_ms;
+        count = count.saturating_add(row.first_byte_samples);
+    }
+    if count == 0 {
+        None
+    } else {
+        Some(sum / count as f64)
+    }
 }
 
 fn model_health_display_name(model: &str) -> String {
@@ -2344,14 +2559,80 @@ pub(crate) fn api_format_display_name(api_format: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
+        build_usage_health_timeline_from_buckets, index_usage_health_timeline_rows,
         public_request_candidate_health_event, request_candidate_event_unix_ms,
         sanitize_public_model_capabilities, sanitize_public_model_config_for_user,
-        sanitize_public_tiered_pricing,
+        sanitize_public_tiered_pricing, usage_health_average_first_byte_ms,
+        usage_health_buckets_from_events,
     };
-    use crate::handlers::shared::unix_ms_to_rfc3339;
+    use crate::handlers::shared::{unix_ms_to_rfc3339, unix_secs_to_rfc3339};
     use aether_data_contracts::repository::candidates::{
         RequestCandidateStatus, StoredRequestCandidate,
     };
+    use aether_data_contracts::repository::usage::StoredUsageHealthTimelineRow;
+
+    /// 全窗口聚合出 60 段数据时，时间线条必须段段有状态，且计数可对账。
+    #[test]
+    fn usage_health_timeline_paints_every_segment_covered_by_aggregation() {
+        let segments = 60u32;
+        let since = 1_800_000_000u64;
+        let until = since + 6 * 3600;
+        // 模拟 6 小时内 265 次请求均匀分布：全窗口聚合会覆盖绝大部分分段。
+        let width = (until - since) as f64 / f64::from(segments);
+        let rows = (0..265u64)
+            .map(|index| {
+                let at = since as f64 + index as f64 * (until - since) as f64 / 265.0;
+                StoredUsageHealthTimelineRow {
+                    group_key: "deepseek-v4.1-flash".to_string(),
+                    segment_idx: (((at - since as f64) / width).floor() as u32).min(segments - 1),
+                    request_count: 1,
+                    success_count: 1,
+                    response_time_sum_ms: 100.0,
+                    response_time_samples: 1,
+                    first_byte_sum_ms: 50.0,
+                    first_byte_samples: 1,
+                    output_tokens: 10,
+                }
+            })
+            .collect::<Vec<_>>();
+        let indexed = index_usage_health_timeline_rows(rows);
+        let buckets = indexed.get("deepseek-v4.1-flash").expect("bucket exists");
+
+        let (timeline, details) =
+            build_usage_health_timeline_from_buckets(buckets, since, until, segments);
+
+        assert_eq!(timeline.len(), segments as usize);
+        assert_eq!(details.len(), segments as usize);
+        // 用户报告的缺陷正是"265 次请求却大片灰条"，这里要求绝大多数分段不是"无请求"。
+        let painted = timeline
+            .iter()
+            .filter(|status| **status != "unknown")
+            .count();
+        assert!(
+            painted >= segments as usize - 1,
+            "265 次请求应铺满整个窗口，实际只有 {painted} 段有状态"
+        );
+        assert!(timeline.iter().all(|status| *status == "healthy"));
+        assert!(!details.is_empty());
+        assert_eq!(
+            details[0]["time_range_start"].as_str(),
+            unix_secs_to_rfc3339(since).as_deref()
+        );
+    }
+
+    /// 聚合桶为空（仓储不可用）时，降级路径仍应能画出采样到的分段，而不是整条变灰。
+    #[test]
+    fn usage_health_timeline_falls_back_to_event_sample_when_aggregation_missing() {
+        let segments = 60u32;
+        let since = 1_800_000_000u64;
+        let until = since + 6 * 3600;
+        let buckets = usage_health_buckets_from_events(&[], since, until, segments);
+        let (timeline, _) =
+            build_usage_health_timeline_from_buckets(&buckets, since, until, segments);
+        assert_eq!(timeline.len(), segments as usize);
+        assert!(timeline.iter().all(|status| *status == "unknown"));
+        assert_eq!(usage_health_average_first_byte_ms(&buckets), None);
+    }
 
     #[test]
     fn request_candidate_event_timestamp_uses_millisecond_precision() {

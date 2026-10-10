@@ -1,12 +1,12 @@
 use chrono::{TimeZone, Utc};
 use serde_json::json;
-use sqlx::{Postgres, QueryBuilder, Row};
+use sqlx::{Execute, Postgres, QueryBuilder, Row};
 use std::sync::Arc;
 
 use super::{
     attach_compressed_body_refs, attach_usage_http_audit_body_refs,
     attach_usage_routing_snapshot_metadata, attach_usage_settlement_pricing_snapshot_metadata,
-    clear_previous_request_body_facts, inflate_usage_json_value,
+    build_usage_health_timeline_query, clear_previous_request_body_facts, inflate_usage_json_value,
     prepare_request_metadata_for_body_storage, prepare_usage_body_storage,
     prepare_usage_for_persistence, push_postgres_usage_websocket_filter,
     request_body_capture_replaces_derived_facts, resolved_read_usage_body_ref,
@@ -22,8 +22,10 @@ use super::{
 use crate::{PostgresPoolConfig, PostgresPoolFactory};
 use aether_data_contracts::repository::usage::{
     UpsertUsageRecord, UsageAuditListQuery, UsageBodyCaptureState, UsageBodyField,
-    UsageCostSavingsSummaryQuery, UsageDashboardDailyBreakdownQuery, UsageDashboardSummaryQuery,
-    UsageProviderPerformanceQuery, UsageTimeSeriesGranularity, UsageWriteRepository,
+    UsageBreakdownGroupBy, UsageBreakdownSummaryQuery, UsageCostSavingsSummaryQuery,
+    UsageDashboardDailyBreakdownQuery, UsageDashboardSummaryQuery, UsageHealthTimelineGroupBy,
+    UsageHealthTimelineQuery, UsageProviderPerformanceQuery, UsageTimeSeriesGranularity,
+    UsageWriteRepository,
 };
 
 fn normalize_newlines(value: &str) -> String {
@@ -5431,4 +5433,510 @@ fn provider_breakdown_labels_resolve_catalog_name_before_recorded_name_and_id() 
     assert!(catalog < recorded && recorded < raw_id);
     // 历史占位值不能被当成提供商名称展示。
     assert!(sql.contains("'unknown', 'unknow', 'pending'"));
+}
+
+/// 回归测试：健康监控时间线条必须走数据库侧的全窗口分段聚合，而不是"最新 N 条事件"样本。
+///
+/// 这里断言生成的 SQL 结构：数据源、过滤条件、成功判定必须与
+/// `summarize_usage_breakdown_raw` 一致，且**不允许出现 LIMIT**——一旦有人把时间线
+/// 改回带 LIMIT 的样本查询，高流量模型/提供商的早期时段就会再次被判成"无请求"。
+#[test]
+fn usage_health_timeline_sql_buckets_full_window_without_sample_limit() {
+    let query = UsageHealthTimelineQuery {
+        created_from_unix_secs: 1_800_000_000,
+        created_until_unix_secs: 1_800_021_600,
+        group_by: UsageHealthTimelineGroupBy::Model,
+        group_values: vec!["deepseek-v4.1-flash".to_string()],
+        provider_name: None,
+        model: None,
+        api_format: None,
+        segments: 60,
+        exclude_status_codes: vec![499],
+    };
+    let mut builder = build_usage_health_timeline_query(&query).expect("query should build");
+    let sql = builder.build().sql().to_string();
+
+    // 与卡片头部统计同源：同一张 billing 事实视图。
+    assert!(sql.contains("FROM usage_billing_facts AS \"usage\""));
+    // 过滤条件与 summarize_usage_breakdown_raw 逐字对齐，保证两处数字可对账。
+    assert!(sql.contains("\"usage\".status NOT IN ('pending', 'streaming')"));
+    assert!(sql.contains("\"usage\".provider_name NOT IN ('unknown', 'pending')"));
+    assert!(sql.contains("\"usage\".status <> 'failed'"));
+    assert!(sql.contains("(\"usage\".status_code IS NULL OR \"usage\".status_code < 400)"));
+    assert!(sql.contains("\"usage\".error_message IS NULL"));
+    // 分桶在库内完成，按 (分组键, 分段序号) 聚合。
+    assert!(sql.contains("EXTRACT(EPOCH FROM"));
+    assert!(sql.contains("AS segment_idx"));
+    assert!(sql.contains("GROUP BY group_key, segment_idx"));
+    // 窗口右端必须是开区间，与 breakdown 的 created_at < until 一致。
+    assert!(sql.contains("\"usage\".created_at < TO_TIMESTAMP("));
+    // 关键回归点：不允许出现 LIMIT，否则会退回"截断样本"的错误实现。
+    assert!(
+        !sql.to_uppercase().contains("LIMIT"),
+        "健康时间线聚合不能被 LIMIT 截断：{sql}"
+    );
+    // 分组键通过绑定参数传入，不做字符串拼接。
+    assert!(sql.contains("= ANY("));
+    assert!(!sql.contains("deepseek-v4.1-flash"));
+}
+
+/// ApiFormat 维度必须排除空格式，与 breakdown 的 filtered_extra_where 一致。
+#[test]
+fn usage_health_timeline_sql_excludes_null_api_format_for_api_format_dimension() {
+    let query = UsageHealthTimelineQuery {
+        created_from_unix_secs: 1_800_000_000,
+        created_until_unix_secs: 1_800_021_600,
+        group_by: UsageHealthTimelineGroupBy::ApiFormat,
+        group_values: vec!["openai:chat".to_string()],
+        provider_name: Some("codebuddy2api".to_string()),
+        model: Some("deepseek-v4.1-flash".to_string()),
+        api_format: None,
+        segments: 60,
+        exclude_status_codes: vec![499],
+    };
+    let mut builder = build_usage_health_timeline_query(&query).expect("query should build");
+    let sql = builder.build().sql().to_string();
+
+    assert!(sql.contains("AND \"usage\".api_format IS NOT NULL"));
+    assert!(sql.contains("\"usage\".provider_name = "));
+    assert!(sql.contains("\"usage\".model = "));
+}
+
+/// 非法窗口（空分段、空分组键、时间倒挂）不产生查询。
+#[test]
+fn usage_health_timeline_query_rejects_invalid_windows() {
+    let base = UsageHealthTimelineQuery {
+        created_from_unix_secs: 1_800_000_000,
+        created_until_unix_secs: 1_800_021_600,
+        group_by: UsageHealthTimelineGroupBy::Model,
+        group_values: vec!["gpt-4.1".to_string()],
+        provider_name: None,
+        model: None,
+        api_format: None,
+        segments: 60,
+        exclude_status_codes: Vec::new(),
+    };
+    assert!(build_usage_health_timeline_query(&base).is_some());
+
+    let mut no_segments = base.clone();
+    no_segments.segments = 0;
+    assert!(build_usage_health_timeline_query(&no_segments).is_none());
+
+    let mut no_groups = base.clone();
+    no_groups.group_values.clear();
+    assert!(build_usage_health_timeline_query(&no_groups).is_none());
+
+    let mut inverted = base.clone();
+    inverted.created_until_unix_secs = inverted.created_from_unix_secs;
+    assert!(build_usage_health_timeline_query(&inverted).is_none());
+}
+
+/// Live 回归测试：时间线条聚合 SQL 必须能在真实 PostgreSQL 上执行，并按窗口偏移正确分桶。
+///
+/// 用会话级临时表 + 同名临时视图替换 `usage_billing_facts`（`pg_temp` 在 search_path 中最靠前），
+/// 因此**不写入任何业务表、也不需要建库权限**，只验证聚合 SQL 本身的语法、参数绑定、
+/// 分桶数学与过滤条件；临时对象随连接断开自动消失。
+///
+/// 运行：`AETHER_TEST_DATABASE_URL=... cargo test -p aether-data-postgres --lib -- --ignored live_usage_health_timeline`
+#[tokio::test]
+#[ignore = "requires AETHER_TEST_DATABASE_URL"]
+async fn live_usage_health_timeline_buckets_by_window_offset() {
+    use aether_data_contracts::repository::usage::StoredUsageHealthTimelineRow;
+
+    let url = std::env::var("AETHER_TEST_DATABASE_URL")
+        .expect("AETHER_TEST_DATABASE_URL must point at the test database");
+    // 与仓库其它 live 测试保持一致：走 PostgresPoolFactory，显式关闭 SSL。
+    let factory = PostgresPoolFactory::new(PostgresPoolConfig {
+        database_url: url,
+        min_connections: 1,
+        max_connections: 2,
+        acquire_timeout_ms: 10_000,
+        idle_timeout_ms: 30_000,
+        max_lifetime_ms: 60_000,
+        statement_cache_capacity: 64,
+        require_ssl: false,
+    })
+    .expect("pool factory should build");
+    let pool = factory.connect_lazy().expect("lazy pool should build");
+    // 临时对象只在同一条连接上可见，后续所有语句都必须复用这个连接。
+    let mut conn = pool.acquire().await.expect("connection should acquire");
+
+    let from = 1_800_000_000u64;
+    let until = from + 3600;
+    let segments = 6u32;
+
+    let setup = [
+        r#"CREATE TEMP TABLE usage_rows (
+             created_at timestamptz NOT NULL,
+             model text NOT NULL,
+             provider_name text NOT NULL,
+             api_format text,
+             status text NOT NULL,
+             status_code int,
+             error_message text,
+             response_time_ms int,
+             first_byte_time_ms int,
+             output_tokens bigint NOT NULL DEFAULT 0
+           )"#,
+        "CREATE TEMP VIEW usage_billing_facts AS SELECT * FROM usage_rows",
+    ];
+    for statement in setup {
+        sqlx::query(statement)
+            .execute(&mut *conn)
+            .await
+            .expect("probe schema should build");
+    }
+
+    // 事件构造：窗口 [from, until)，宽度 600 秒。
+    // 前 5 条用于验证分段归属，后面几条验证窗口与状态过滤。
+    // 测试用的事件表，位置含义由下面的解构语句给出；拆成结构体会让这张表更难横向对比。
+    #[allow(clippy::type_complexity)]
+    let events: Vec<(
+        i64,
+        &str,
+        &str,
+        &str,
+        Option<i32>,
+        Option<&str>,
+        i32,
+        i32,
+        i64,
+    )> = vec![
+        (0, "m1", "p1", "completed", Some(200), None, 100, 50, 10),
+        (599, "m1", "p1", "completed", Some(200), None, 200, 60, 20),
+        (600, "m1", "p1", "completed", Some(200), None, 300, 70, 30),
+        (1500, "m1", "p1", "completed", Some(200), None, 400, 80, 40),
+        (3599, "m1", "p1", "completed", Some(200), None, 500, 90, 50),
+        // 窗口右端为开区间：正好落在 until 的事件不计入。
+        (
+            3600,
+            "m1",
+            "p1",
+            "completed",
+            Some(200),
+            None,
+            999,
+            999,
+            999,
+        ),
+        // 窗口左端之前的事件不计入。
+        (-1, "m1", "p1", "completed", Some(200), None, 999, 999, 999),
+        // 失败事件计入失败数。
+        (
+            300,
+            "m1",
+            "p1",
+            "failed",
+            Some(500),
+            Some("boom"),
+            60,
+            20,
+            0,
+        ),
+        // 用户取消（499）按 exclude_status_codes 排除。
+        (300, "m1", "p1", "completed", Some(499), None, 60, 20, 0),
+        // 进行中的请求被排除。
+        (300, "m1", "p1", "pending", None, None, 0, 0, 0),
+        // 归属未定的提供商被排除。
+        (300, "m1", "unknown", "completed", Some(200), None, 0, 0, 0),
+        // error_message 为空串（非 NULL）按 breakdown 口径计为失败。
+        (300, "m1", "p1", "completed", Some(200), Some(""), 60, 20, 0),
+        // 其他模型不属于本次分组。
+        (100, "m2", "p1", "completed", Some(200), None, 1, 1, 1),
+    ];
+    for (
+        offset,
+        model,
+        provider,
+        status,
+        status_code,
+        error_message,
+        latency,
+        first_byte,
+        tokens,
+    ) in events
+    {
+        sqlx::query(
+            r#"INSERT INTO usage_rows
+               (created_at, model, provider_name, api_format, status, status_code, error_message,
+                response_time_ms, first_byte_time_ms, output_tokens)
+               VALUES (to_timestamp($1), $2, $3, 'openai:chat', $4, $5, $6, $7, $8, $9)"#,
+        )
+        .bind(from as f64 + offset as f64)
+        .bind(model)
+        .bind(provider)
+        .bind(status)
+        .bind(status_code)
+        .bind(error_message)
+        .bind(latency)
+        .bind(first_byte)
+        .bind(tokens)
+        .execute(&mut *conn)
+        .await
+        .expect("probe row should insert");
+    }
+
+    // pg_temp 在 search_path 中最靠前，未限定的 usage_billing_facts 会解析到上面的临时视图。
+    sqlx::query("SET search_path TO pg_temp, public")
+        .execute(&mut *conn)
+        .await
+        .expect("search_path should switch");
+
+    let query = UsageHealthTimelineQuery {
+        created_from_unix_secs: from,
+        created_until_unix_secs: until,
+        group_by: UsageHealthTimelineGroupBy::Model,
+        group_values: vec!["m1".to_string()],
+        provider_name: None,
+        model: None,
+        api_format: None,
+        segments,
+        exclude_status_codes: vec![499],
+    };
+    let mut builder = build_usage_health_timeline_query(&query).expect("query should build");
+    let rows = builder
+        .build()
+        .fetch_all(&mut *conn)
+        .await
+        .expect("health timeline SQL should execute against PostgreSQL");
+    let buckets = rows
+        .into_iter()
+        .map(|row| {
+            use sqlx::Row;
+            StoredUsageHealthTimelineRow {
+                group_key: row.get("group_key"),
+                segment_idx: row.get::<i64, _>("segment_idx") as u32,
+                request_count: row.get::<i64, _>("request_count") as u64,
+                success_count: row.get::<i64, _>("success_count") as u64,
+                response_time_sum_ms: row.get("response_time_sum_ms"),
+                response_time_samples: row.get::<i64, _>("response_time_samples") as u64,
+                first_byte_sum_ms: row.get("first_byte_sum_ms"),
+                first_byte_samples: row.get::<i64, _>("first_byte_samples") as u64,
+                output_tokens: row.get::<i64, _>("output_tokens") as u64,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let by_segment = buckets
+        .iter()
+        .map(|row| (row.segment_idx, row))
+        .collect::<std::collections::BTreeMap<_, _>>();
+
+    // 分段归属：0 / 599 落在第 0 段，600 落在第 1 段，1500 落在第 2 段，3599 落在第 5 段；
+    // 第 3、4 段没有事件。窗口外、499、pending、unknown 提供商、其他模型全部被排除。
+    assert_eq!(
+        by_segment.keys().copied().collect::<Vec<_>>(),
+        vec![0, 1, 2, 5],
+        "分段归属不符合窗口偏移（实际 {buckets:?}）"
+    );
+    assert_eq!(by_segment[&0].request_count, 4);
+    assert_eq!(by_segment[&0].success_count, 2);
+    assert_eq!(by_segment[&1].request_count, 1);
+    assert_eq!(by_segment[&1].success_count, 1);
+    assert_eq!(by_segment[&2].request_count, 1);
+    assert_eq!(by_segment[&5].request_count, 1);
+
+    let total: u64 = buckets.iter().map(|row| row.request_count).sum();
+    assert_eq!(total, 7, "窗口内符合条件的请求数应为 7");
+    let success: u64 = buckets.iter().map(|row| row.success_count).sum();
+    assert_eq!(
+        success, 5,
+        "成功数应与 status/status_code/error_message 判定一致"
+    );
+
+    // 指标聚合：第 0 段的耗时 = 100 + 200 + 60 + 60。
+    assert_eq!(by_segment[&0].response_time_sum_ms, 420.0);
+    assert_eq!(by_segment[&0].response_time_samples, 4);
+    assert_eq!(by_segment[&0].first_byte_sum_ms, 150.0);
+    // 所有分段都必须落在 [0, segments) 内。
+    assert!(buckets.iter().all(|row| row.segment_idx < segments));
+
+    // 按提供商维度聚合时，同一批请求落在 p1 下，且总数一致。
+    let provider_query = UsageHealthTimelineQuery {
+        created_from_unix_secs: from,
+        created_until_unix_secs: until,
+        group_by: UsageHealthTimelineGroupBy::Provider,
+        group_values: vec!["p1".to_string()],
+        provider_name: None,
+        model: None,
+        api_format: None,
+        segments,
+        exclude_status_codes: vec![499],
+    };
+    let mut provider_builder =
+        build_usage_health_timeline_query(&provider_query).expect("query should build");
+    let provider_rows = provider_builder
+        .build()
+        .fetch_all(&mut *conn)
+        .await
+        .expect("provider dimension SQL should execute");
+    let provider_total: i64 = provider_rows
+        .iter()
+        .map(|row| {
+            use sqlx::Row;
+            row.get::<i64, _>("request_count")
+        })
+        .sum();
+    assert_eq!(
+        provider_total, 8,
+        "提供商维度还包含 m2 的一条请求（分组过滤只作用于提供的 group_values）"
+    );
+
+    sqlx::query("SET search_path TO public")
+        .execute(&mut *conn)
+        .await
+        .ok();
+    drop(conn);
+    pool.close().await;
+}
+
+/// Live 对账测试：时间线条各分段计数之和必须等于卡片头部（breakdown）的请求数。
+///
+/// 这是用户可见缺陷的核心契约——同一张卡片上的"265 次请求"与 History 状态条必须同源。
+/// 写入的行用唯一的 request_id 前缀，结束后原地删除。
+///
+/// 运行：`AETHER_TEST_DATABASE_URL=... cargo nextest run -p aether-data-postgres --run-ignored ignored-only -E 'test(live_usage_health_timeline_totals_match_breakdown)'`
+#[tokio::test]
+#[ignore = "requires AETHER_TEST_DATABASE_URL and PostgreSQL migrations"]
+async fn live_usage_health_timeline_totals_match_breakdown() {
+    let factory = PostgresPoolFactory::new(PostgresPoolConfig {
+        database_url: std::env::var("AETHER_TEST_DATABASE_URL")
+            .expect("AETHER_TEST_DATABASE_URL must point at the test database"),
+        min_connections: 1,
+        max_connections: 4,
+        acquire_timeout_ms: 10_000,
+        idle_timeout_ms: 30_000,
+        max_lifetime_ms: 60_000,
+        statement_cache_capacity: 64,
+        require_ssl: false,
+    })
+    .expect("pool factory should build");
+    let repository = SqlxUsageReadRepository::new(factory.connect_lazy().expect("lazy pool"));
+    crate::run_migrations(repository.pool())
+        .await
+        .expect("migrations should apply");
+
+    let now_unix_secs = Utc::now().timestamp() as u64;
+    let since_unix_secs = now_unix_secs - 6 * 3600;
+    let segments = 60u32;
+    let run_id = uuid::Uuid::new_v4().simple().to_string();
+    let model = format!("health-live-{run_id}");
+    let provider = format!("health-live-provider-{run_id}");
+    let total_rows = 265usize;
+
+    let mut request_ids = Vec::with_capacity(total_rows);
+    for index in 0..total_rows {
+        let request_id = format!("req-health-live-{run_id}-{index}");
+        let mut record = fast_clear_usage_record(
+            &request_id,
+            &provider,
+            now_unix_secs,
+            true,
+            UsageBodyCaptureState::Inline,
+            None,
+        );
+        record.model = model.clone();
+        // 每 20 条造一个失败，用来验证成功/失败判定在两条查询路径上完全一致。
+        if index % 20 == 0 {
+            record.status = "failed".to_string();
+            record.status_code = Some(500);
+            record.error_message = Some("live timeline probe failure".to_string());
+        }
+        repository.upsert(record).await.expect("usage should write");
+        request_ids.push(request_id);
+    }
+
+    // 把本次写入的行等距铺满整个 6 小时窗口（只动本次 run 的 request_id）。
+    let step_secs = (6.0 * 3600.0) / total_rows as f64;
+    sqlx::query(
+        r#"UPDATE "usage" AS u
+              SET created_at = TO_TIMESTAMP($1::double precision)
+                             + ((s.row_number - 1) * $3::double precision * INTERVAL '1 second')
+             FROM (
+                   SELECT request_id, row_number() OVER (ORDER BY request_id) AS row_number
+                     FROM "usage"
+                    WHERE request_id = ANY($2)
+                  ) AS s
+            WHERE u.request_id = s.request_id"#,
+    )
+    .bind(since_unix_secs as f64)
+    .bind(&request_ids)
+    .bind(step_secs)
+    .execute(repository.pool())
+    .await
+    .expect("probe rows should spread across the window");
+
+    let buckets = repository
+        .aggregate_usage_health_timeline(&UsageHealthTimelineQuery {
+            created_from_unix_secs: since_unix_secs,
+            created_until_unix_secs: now_unix_secs,
+            group_by: UsageHealthTimelineGroupBy::Model,
+            group_values: vec![model.clone()],
+            provider_name: None,
+            model: None,
+            api_format: None,
+            segments,
+            exclude_status_codes: vec![499],
+        })
+        .await
+        .expect("health timeline aggregation should succeed");
+
+    let breakdown = repository
+        .summarize_usage_breakdown(&UsageBreakdownSummaryQuery {
+            created_from_unix_secs: since_unix_secs,
+            created_until_unix_secs: now_unix_secs,
+            user_id: None,
+            provider_name: None,
+            model: Some(model.clone()),
+            api_format: None,
+            exclude_status_codes: vec![499],
+            group_by: UsageBreakdownGroupBy::Model,
+        })
+        .await
+        .expect("breakdown should succeed");
+
+    let headline = breakdown
+        .iter()
+        .find(|row| row.group_key == model)
+        .expect("headline row for the probe model");
+    let timeline_total: u64 = buckets.iter().map(|row| row.request_count).sum();
+    let timeline_success: u64 = buckets.iter().map(|row| row.success_count).sum();
+
+    // 核心契约：状态条与头部数字必须同源。这正是用户报告的"265 次请求却大片灰条"。
+    assert_eq!(
+        headline.request_count, total_rows as u64,
+        "头部应看到窗口内的全部请求"
+    );
+    assert_eq!(
+        timeline_total, headline.request_count,
+        "时间线条各段请求数之和必须等于头部请求数"
+    );
+    assert_eq!(
+        timeline_success, headline.success_count,
+        "时间线条各段成功数之和必须等于头部成功数"
+    );
+    assert!(
+        buckets.len() >= segments as usize - 1,
+        "265 次等距请求应铺满几乎全部 {segments} 段，实际只有 {} 段",
+        buckets.len()
+    );
+    let failure_segments = buckets
+        .iter()
+        .filter(|row| row.success_count < row.request_count)
+        .count();
+    assert!(failure_segments > 0, "构造的失败请求必须体现在状态条上");
+
+    // 清理：只删除本次 run 写入的行，并确认没有残留。
+    sqlx::query("DELETE FROM \"usage\" WHERE request_id = ANY($1)")
+        .bind(&request_ids)
+        .execute(repository.pool())
+        .await
+        .expect("probe rows should clean up");
+    let remaining: i64 =
+        sqlx::query_scalar("SELECT COUNT(*)::BIGINT FROM \"usage\" WHERE request_id = ANY($1)")
+            .bind(&request_ids)
+            .fetch_one(repository.pool())
+            .await
+            .expect("cleanup verification query");
+    assert_eq!(remaining, 0, "探针数据必须清理干净，不能留在测试库里");
 }

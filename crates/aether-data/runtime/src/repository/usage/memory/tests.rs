@@ -3631,3 +3631,80 @@ async fn future_dashboard_summary_streak_uses_local_days_before_heatmap_truncati
         today.pred_opt().unwrap().to_string()
     );
 }
+
+/// 回归测试：健康监控时间线条必须覆盖完整回溯窗口。
+///
+/// 历史缺陷：时间线条此前是用"最近 N 条事件样本"在内存里分桶，
+/// 于是 6 小时内请求数超过 N 的模型，早期时段会被判成"无请求"（灰条），
+/// 与卡片头部的全窗口请求数自相矛盾。这里验证聚合直接按全窗口分桶，不受样本条数影响。
+#[tokio::test]
+async fn usage_health_timeline_covers_full_window_regardless_of_sample_size() {
+    use aether_data_contracts::repository::usage::{
+        UsageHealthTimelineGroupBy, UsageHealthTimelineQuery,
+    };
+
+    let segments = 60u32;
+    let window_secs = 6 * 3600u64; // 6 小时回溯窗口
+    let now = 1_800_000_000u64;
+    let since = now - window_secs;
+    // 265 次请求均匀铺满整个窗口，远多于旧的默认样本上限（60/100 条）。
+    let rows = (0..265u64)
+        .map(|index| {
+            let at = since + index * window_secs / 265;
+            let mut usage = sample_usage(&format!("health-timeline-{index}"), at as i64);
+            usage.model = "deepseek-v4.1-flash".to_string();
+            usage.provider_name = "codebuddy2api".to_string();
+            usage
+        })
+        .collect::<Vec<_>>();
+    let repo = InMemoryUsageReadRepository::seed(rows);
+
+    let buckets = repo
+        .aggregate_usage_health_timeline(&UsageHealthTimelineQuery {
+            created_from_unix_secs: since,
+            created_until_unix_secs: now,
+            group_by: UsageHealthTimelineGroupBy::Model,
+            group_values: vec!["deepseek-v4.1-flash".to_string()],
+            provider_name: None,
+            model: None,
+            api_format: None,
+            segments,
+            exclude_status_codes: vec![499],
+        })
+        .await
+        .unwrap();
+
+    // 全窗口分桶：几乎每一段都应有样本，总请求数必须等于窗口内的全部请求。
+    assert!(
+        buckets.len() >= (segments as usize) - 1,
+        "时间线应覆盖整个窗口，实际只有 {} 段有数据",
+        buckets.len()
+    );
+    let total_requests: u64 = buckets.iter().map(|row| row.request_count).sum();
+    assert_eq!(total_requests, 265);
+    assert!(buckets.iter().all(|row| row.segment_idx < segments));
+    assert!(buckets
+        .iter()
+        .all(|row| row.success_count == row.request_count));
+
+    // 按提供商维度聚合时，同一批请求应落在同一个分组键下。
+    let provider_buckets = repo
+        .aggregate_usage_health_timeline(&UsageHealthTimelineQuery {
+            created_from_unix_secs: since,
+            created_until_unix_secs: now,
+            group_by: UsageHealthTimelineGroupBy::Provider,
+            group_values: vec!["codebuddy2api".to_string()],
+            provider_name: None,
+            model: None,
+            api_format: None,
+            segments,
+            exclude_status_codes: vec![499],
+        })
+        .await
+        .unwrap();
+    let provider_total: u64 = provider_buckets.iter().map(|row| row.request_count).sum();
+    assert_eq!(
+        provider_total, total_requests,
+        "唯一提供商下的模型与提供商自身必须看到同一批请求"
+    );
+}

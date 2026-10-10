@@ -9,17 +9,18 @@ use aether_data_contracts::repository::usage::{
     StoredUsageAuditSummary, StoredUsageBreakdownSummaryRow, StoredUsageCacheAffinityHitSummary,
     StoredUsageCacheAffinityIntervalRow, StoredUsageCacheHitSummary, StoredUsageCostSavingsSummary,
     StoredUsageDashboardDailyBreakdownRow, StoredUsageDashboardProviderCount,
-    StoredUsageDashboardSummary, StoredUsageErrorDistributionRow, StoredUsageLeaderboardSummary,
-    StoredUsagePerformancePercentilesRow, StoredUsageProviderPerformance,
-    StoredUsageProviderPerformanceProviderRow, StoredUsageProviderPerformanceSummary,
-    StoredUsageProviderPerformanceTimelineRow, StoredUsageSettledCostSummary,
-    StoredUsageTimeSeriesBucket, StoredUsageUserTotals, UsageAuditAggregationGroupBy,
-    UsageAuditAggregationQuery, UsageAuditKeywordSearchQuery, UsageAuditSummaryQuery,
-    UsageBodyCaptureState, UsageBodyField, UsageBreakdownGroupBy, UsageBreakdownSummaryQuery,
-    UsageCacheAffinityHitSummaryQuery, UsageCacheAffinityIntervalGroupBy,
-    UsageCacheAffinityIntervalQuery, UsageCacheHitSummaryQuery, UsageCostSavingsSummaryQuery,
-    UsageDashboardDailyBreakdownQuery, UsageDashboardProviderCountsQuery,
-    UsageDashboardSummaryQuery, UsageErrorDistributionQuery, UsageLeaderboardGroupBy,
+    StoredUsageDashboardSummary, StoredUsageErrorDistributionRow, StoredUsageHealthTimelineRow,
+    StoredUsageLeaderboardSummary, StoredUsagePerformancePercentilesRow,
+    StoredUsageProviderPerformance, StoredUsageProviderPerformanceProviderRow,
+    StoredUsageProviderPerformanceSummary, StoredUsageProviderPerformanceTimelineRow,
+    StoredUsageSettledCostSummary, StoredUsageTimeSeriesBucket, StoredUsageUserTotals,
+    UsageAuditAggregationGroupBy, UsageAuditAggregationQuery, UsageAuditKeywordSearchQuery,
+    UsageAuditSummaryQuery, UsageBodyCaptureState, UsageBodyField, UsageBreakdownGroupBy,
+    UsageBreakdownSummaryQuery, UsageCacheAffinityHitSummaryQuery,
+    UsageCacheAffinityIntervalGroupBy, UsageCacheAffinityIntervalQuery, UsageCacheHitSummaryQuery,
+    UsageCostSavingsSummaryQuery, UsageDashboardDailyBreakdownQuery,
+    UsageDashboardProviderCountsQuery, UsageDashboardSummaryQuery, UsageErrorDistributionQuery,
+    UsageHealthTimelineGroupBy, UsageHealthTimelineQuery, UsageLeaderboardGroupBy,
     UsageLeaderboardQuery, UsageMonitoringErrorCountQuery, UsageMonitoringErrorListQuery,
     UsagePerformancePercentilesQuery, UsageProviderPerformanceQuery, UsageSettledCostSummaryQuery,
     UsageTimeSeriesGranularity, UsageTimeSeriesQuery, BILLING_MULTIPLIER_SNAPSHOT_METADATA_KEY,
@@ -2011,6 +2012,114 @@ impl UsageReadRepository for InMemoryUsageReadRepository {
                 .then_with(|| left.group_key.cmp(&right.group_key))
         });
         Ok(items)
+    }
+
+    async fn aggregate_usage_health_timeline(
+        &self,
+        query: &UsageHealthTimelineQuery,
+    ) -> Result<Vec<StoredUsageHealthTimelineRow>, DataLayerError> {
+        if query.segments == 0 || query.created_from_unix_secs >= query.created_until_unix_secs {
+            return Ok(Vec::new());
+        }
+        if query.group_values.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // 与 PostgreSQL 实现保持同一分桶口径：等宽分段 + 夹取边界。
+        let segments = u64::from(query.segments);
+        let width_secs =
+            (query.created_until_unix_secs - query.created_from_unix_secs) as f64 / segments as f64;
+        let mut grouped = BTreeMap::<(String, u32), StoredUsageHealthTimelineRow>::new();
+        for item in self
+            .by_request_id
+            .read()
+            .expect("usage repository lock")
+            .values()
+        {
+            if item.created_at_unix_ms < query.created_from_unix_secs
+                || item.created_at_unix_ms >= query.created_until_unix_secs
+                || matches!(item.status.as_str(), "pending" | "streaming")
+                || matches!(item.provider_name.as_str(), "unknown" | "pending")
+            {
+                continue;
+            }
+            if item
+                .status_code
+                .is_some_and(|status_code| query.exclude_status_codes.contains(&status_code))
+            {
+                continue;
+            }
+            if let Some(provider_name) = query.provider_name.as_deref() {
+                if item.provider_name != provider_name {
+                    continue;
+                }
+            }
+            if let Some(model) = query.model.as_deref() {
+                if item.model != model {
+                    continue;
+                }
+            }
+            if let Some(api_format) = query.api_format.as_deref() {
+                if item.api_format.as_deref() != Some(api_format) {
+                    continue;
+                }
+            }
+            let group_key = match query.group_by {
+                UsageHealthTimelineGroupBy::Model => item.model.clone(),
+                UsageHealthTimelineGroupBy::Provider => item.provider_name.clone(),
+                UsageHealthTimelineGroupBy::ApiFormat => {
+                    item.api_format.clone().unwrap_or_default()
+                }
+            };
+            if group_key.is_empty() {
+                continue;
+            }
+            if !query.group_values.iter().any(|value| value == &group_key) {
+                continue;
+            }
+            let offset_secs = item
+                .created_at_unix_ms
+                .saturating_sub(query.created_from_unix_secs);
+            let mut segment_idx = if width_secs <= 0.0 {
+                0
+            } else {
+                (offset_secs as f64 / width_secs).floor() as u64
+            };
+            if segment_idx >= segments {
+                segment_idx = segments - 1;
+            }
+
+            let is_success = item.status != "failed"
+                && item.status_code.is_none_or(|status| status < 400)
+                && item.error_message.is_none();
+            let bucket = grouped
+                .entry((group_key, segment_idx as u32))
+                .or_insert_with(|| StoredUsageHealthTimelineRow {
+                    segment_idx: segment_idx as u32,
+                    ..StoredUsageHealthTimelineRow::default()
+                });
+            bucket.request_count = bucket.request_count.saturating_add(1);
+            if is_success {
+                bucket.success_count = bucket.success_count.saturating_add(1);
+            }
+            if let Some(response_time_ms) = item.response_time_ms {
+                bucket.response_time_sum_ms += response_time_ms as f64;
+                bucket.response_time_samples = bucket.response_time_samples.saturating_add(1);
+            }
+            if let Some(first_byte_time_ms) = item.first_byte_time_ms {
+                bucket.first_byte_sum_ms += first_byte_time_ms as f64;
+                bucket.first_byte_samples = bucket.first_byte_samples.saturating_add(1);
+            }
+            bucket.output_tokens = bucket.output_tokens.saturating_add(item.output_tokens);
+        }
+
+        Ok(grouped
+            .into_iter()
+            .map(|((group_key, _), mut row)| {
+                row.group_key = group_key;
+                row
+            })
+            .collect())
     }
 
     async fn count_monitoring_usage_errors(

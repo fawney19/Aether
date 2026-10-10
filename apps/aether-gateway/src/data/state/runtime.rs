@@ -1990,6 +1990,21 @@ impl GatewayDataState {
         }
     }
 
+    /// 健康监控时间线条：数据库侧全窗口分桶聚合。
+    /// 仓储不可用时返回空结果，调用方降级为"无请求"时间线而不是报错。
+    pub(crate) async fn aggregate_usage_health_timeline(
+        &self,
+        query: &aether_data_contracts::repository::usage::UsageHealthTimelineQuery,
+    ) -> Result<
+        Vec<aether_data_contracts::repository::usage::StoredUsageHealthTimelineRow>,
+        DataLayerError,
+    > {
+        match &self.usage_reader {
+            Some(repository) => repository.aggregate_usage_health_timeline(query).await,
+            None => Ok(Vec::new()),
+        }
+    }
+
     pub(crate) async fn count_monitoring_usage_errors(
         &self,
         query: &aether_data_contracts::repository::usage::UsageMonitoringErrorCountQuery,

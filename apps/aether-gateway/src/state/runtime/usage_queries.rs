@@ -250,6 +250,17 @@ impl AppState {
             .map_err(|err| GatewayError::Internal(err.to_string()))
     }
 
+    /// 健康监控时间线条：必须走数据库侧全窗口分桶聚合，不能用被 LIMIT 截断的事件样本。
+    pub(crate) async fn aggregate_usage_health_timeline(
+        &self,
+        query: &usage::UsageHealthTimelineQuery,
+    ) -> Result<Vec<usage::StoredUsageHealthTimelineRow>, GatewayError> {
+        self.data
+            .aggregate_usage_health_timeline(query)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
     pub(crate) async fn count_monitoring_usage_errors(
         &self,
         query: &usage::UsageMonitoringErrorCountQuery,

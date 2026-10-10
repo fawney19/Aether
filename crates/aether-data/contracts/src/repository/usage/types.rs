@@ -1597,6 +1597,55 @@ pub struct StoredUsageBreakdownSummaryRow {
     pub overall_response_time_samples: u64,
 }
 
+/// 健康监控时间线条（History 状态条）的分组维度。
+///
+/// 与 `UsageBreakdownGroupBy` 分开，是因为时间线条只服务于健康监控卡片，
+/// 且必须与模型/提供商卡片头部的全窗口统计口径保持一致。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageHealthTimelineGroupBy {
+    #[default]
+    Model,
+    Provider,
+    ApiFormat,
+}
+
+/// 按时间分桶聚合用量健康数据。
+///
+/// 关键点：这里必须在数据库侧完成分桶，不能改成"取最近 N 条事件再在内存里分桶"，
+/// 否则高流量模型的时间线条会因为样本被截断而丢失历史时段（表现为大量"无请求"灰条）。
+/// 过滤条件与 `UsageBreakdownSummaryQuery` 对齐：卡片头部的请求数来自该聚合，
+/// 两者必须同源才能对账。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct UsageHealthTimelineQuery {
+    pub created_from_unix_secs: u64,
+    pub created_until_unix_secs: u64,
+    pub group_by: UsageHealthTimelineGroupBy,
+    /// 需要统计的分组键（模型名、提供商名或 API 格式）。空列表表示不匹配任何记录。
+    pub group_values: Vec<String>,
+    /// 可选的范围过滤，用于"某提供商下的模型""某模型下的提供商"这类下钻视图。
+    pub provider_name: Option<String>,
+    pub model: Option<String>,
+    pub api_format: Option<String>,
+    pub segments: u32,
+    pub exclude_status_codes: Vec<u16>,
+}
+
+/// 单个 (分组键, 时间分段) 桶的聚合结果。
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+pub struct StoredUsageHealthTimelineRow {
+    pub group_key: String,
+    pub segment_idx: u32,
+    pub request_count: u64,
+    pub success_count: u64,
+    /// 全部请求（不区分成功失败）的耗时之和与样本数。
+    pub response_time_sum_ms: f64,
+    pub response_time_samples: u64,
+    pub first_byte_sum_ms: f64,
+    pub first_byte_samples: u64,
+    pub output_tokens: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct UsageMonitoringErrorCountQuery {
     pub created_from_unix_secs: u64,
@@ -2221,6 +2270,18 @@ pub trait UsageReadRepository: Send + Sync {
         &self,
         query: &UsageBreakdownSummaryQuery,
     ) -> Result<Vec<StoredUsageBreakdownSummaryRow>, crate::DataLayerError>;
+
+    /// 按时间分段聚合健康监控时间线条。
+    ///
+    /// 默认实现返回"仓储不可用"，调用方需容忍降级为空时间线（全部显示为无请求）。
+    async fn aggregate_usage_health_timeline(
+        &self,
+        _query: &UsageHealthTimelineQuery,
+    ) -> Result<Vec<StoredUsageHealthTimelineRow>, crate::DataLayerError> {
+        Err(crate::DataLayerError::UnexpectedValue(
+            "usage health timeline repository unavailable".into(),
+        ))
+    }
 
     async fn count_monitoring_usage_errors(
         &self,
