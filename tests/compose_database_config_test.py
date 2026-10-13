@@ -44,7 +44,7 @@ with tempfile.TemporaryDirectory(prefix="aether-compose-databases-") as director
         result = compose_config(files)
         assert result.returncode == 0, result.stderr
         config = json.loads(result.stdout)
-        assert set(config["services"]) == {"app", "postgres", "redis"}
+        assert set(config["services"]) == {"app", "postgres", "redis", "updater"}
         assert set(config["volumes"]) == {"postgres_data"}
         app = config["services"]["app"]
         assert app["user"] == "0:0"
@@ -58,6 +58,13 @@ with tempfile.TemporaryDirectory(prefix="aether-compose-databases-") as director
         assert app_env["DATABASE_URL"] == "postgresql://postgres:fixture-postgres@postgres:5432/aether"
         assert app_env["REDIS_URL"] == "redis://:fixture-redis@redis:6379/0"
         assert app_env["AETHER_LOG_DESTINATION"] == "stdout"
+        updater = config["services"]["updater"]
+        assert updater["image"] == "ghcr.io/fawney19/aether-updater:latest"
+        assert updater["restart"] == "unless-stopped"
+        assert any(
+            volume["target"] == "/var/run/docker.sock" for volume in updater.get("volumes", [])
+        )
+        assert updater["environment"]["AETHER_UPDATER_TOKEN"] == app_env["AETHER_UPDATER_TOKEN"]
         for key in ("DB_PASSWORD", "REDIS_PASSWORD"):
             result = compose_config(files, overrides={key: ""})
             assert result.returncode != 0, f"empty {key} was accepted"

@@ -156,6 +156,9 @@
             :scheduled-tasks="scheduledTasks"
           />
 
+          <!-- 系统更新 -->
+          <SystemUpdateSection id="section-update" />
+
           <!-- 系统版本信息 -->
           <SystemInfoSection
             id="section-sysinfo"
@@ -266,6 +269,7 @@ import BasicConfigSection from './system-settings/BasicConfigSection.vue'
 import RequestLogSection from './system-settings/RequestLogSection.vue'
 import CleanupPolicySection from './system-settings/CleanupPolicySection.vue'
 import ScheduledTasksSection from './system-settings/ScheduledTasksSection.vue'
+import SystemUpdateSection from './system-settings/SystemUpdateSection.vue'
 import SystemInfoSection from './system-settings/SystemInfoSection.vue'
 
 // Dialog components
@@ -284,6 +288,7 @@ const tocItems = [
   { id: 'section-request-log', label: '请求记录' },
   { id: 'section-cleanup', label: '记录清理策略' },
   { id: 'section-scheduled', label: '定时任务' },
+  { id: 'section-update', label: '系统更新' },
   { id: 'section-sysinfo', label: '系统信息' },
 ]
 
