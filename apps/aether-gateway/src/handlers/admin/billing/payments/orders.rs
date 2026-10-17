@@ -250,18 +250,17 @@ async fn build_admin_payment_credit_order_response(
         .await?
     {
         crate::AdminWalletMutationOutcome::Applied((order, credited)) => {
-            if credited {
-                if let Err(err) = state
-                    .app()
-                    .apply_referral_rewards_for_payment_order_id(&order.id)
-                    .await
-                {
-                    warn!(
-                        error = ?err,
-                        order_id = %order.id,
-                        "failed to apply referral rewards for admin-credited payment order"
-                    );
-                }
+            // 支付事务已持久化奖励义务，重复人工确认也恢复原快照的奖励。
+            if let Err(err) = state
+                .app()
+                .apply_referral_rewards_for_payment_order_id(&order.id)
+                .await
+            {
+                warn!(
+                    error = ?err,
+                    order_id = %order.id,
+                    "failed to apply referral rewards for admin-credited payment order"
+                );
             }
             Ok(attach_admin_audit_response(
                 Json(json!({

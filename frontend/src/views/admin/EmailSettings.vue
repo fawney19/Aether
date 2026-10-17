@@ -640,7 +640,7 @@ async function saveEmailVerificationConfig() {
     )
     success('配置已保存')
   } catch (err) {
-    error('保存配置失败')
+    error(parseApiError(err, '保存配置失败'))
     log.error('保存邮箱验证配置失败:', err)
   } finally {
     emailVerificationSaveLoading.value = false

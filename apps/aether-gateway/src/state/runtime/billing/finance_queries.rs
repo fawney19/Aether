@@ -34,6 +34,26 @@ impl AppState {
         Ok((page.items, page.total))
     }
 
+    pub(crate) async fn find_admin_wallet_transaction(
+        &self,
+        wallet_id: &str,
+        transaction_id: &str,
+    ) -> Result<Option<StoredAdminWalletTransaction>, GatewayError> {
+        #[cfg(test)]
+        if self.admin_wallet_transaction_store.is_some() {
+            return Ok(self
+                .list_admin_wallet_transactions(wallet_id, usize::MAX, 0)
+                .await?
+                .0
+                .into_iter()
+                .find(|tx| tx.id == transaction_id));
+        }
+        self.data
+            .find_admin_wallet_transaction(wallet_id, transaction_id)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
     pub(crate) async fn list_admin_wallet_ledger(
         &self,
         category: Option<&str>,

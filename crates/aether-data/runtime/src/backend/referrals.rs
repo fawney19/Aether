@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use sqlx::Row;
 
 use super::DataBackends;
+pub use aether_data_contracts::repository::referrals::ReferralRewardConfig;
+use aether_data_contracts::repository::referrals::REFERRAL_SNAPSHOT_KEY;
 
 #[derive(Debug, Clone, Copy)]
 pub struct ReferralDataState<'a> {
@@ -17,6 +19,42 @@ impl<'a> ReferralDataState<'a> {
 }
 
 const REFERRAL_RECONCILIATION_LIMIT: usize = 200;
+
+// Successful refunds exclude processing reservations; the fallback supports
+// historical refunds that only updated the order aggregate.
+const REFERRAL_REFUND_CONTEXT_SQL: &str = r#"
+SELECT CAST(po.amount_usd AS DOUBLE PRECISION) AS amount_usd,
+       CAST(
+         CASE
+           WHEN COALESCE((
+             SELECT SUM(rr.amount_usd)
+             FROM refund_requests rr
+             WHERE rr.payment_order_id = po.id
+               AND rr.status = 'succeeded'
+           ), 0.0) >=
+             COALESCE(po.refunded_amount_usd, 0.0) - COALESCE((
+               SELECT SUM(rr.amount_usd)
+               FROM refund_requests rr
+               WHERE rr.payment_order_id = po.id
+                 AND rr.status = 'processing'
+             ), 0.0)
+           THEN COALESCE((
+             SELECT SUM(rr.amount_usd)
+             FROM refund_requests rr
+             WHERE rr.payment_order_id = po.id
+               AND rr.status = 'succeeded'
+           ), 0.0)
+           ELSE COALESCE(po.refunded_amount_usd, 0.0) - COALESCE((
+             SELECT SUM(rr.amount_usd)
+             FROM refund_requests rr
+             WHERE rr.payment_order_id = po.id
+               AND rr.status = 'processing'
+           ), 0.0)
+         END AS DOUBLE PRECISION
+       ) AS refunded_amount_usd
+FROM payment_orders po
+WHERE po.id = $1
+"#;
 
 // The list tests intentionally build one page larger than the historical
 // in-memory fetch cap. Keep the fixture cap test-only now that production
@@ -52,12 +90,17 @@ pub struct ReferralRewardRecord {
     pub referral_id: String,
     pub inviter_user_id: String,
     pub invitee_user_id: String,
+    pub inviter_username: Option<String>,
+    pub invitee_username: Option<String>,
+    pub source_order_no: Option<String>,
+    pub inviter_wallet_id: Option<String>,
     pub reward_type: String,
     pub source_order_id: Option<String>,
     pub trigger_point: String,
     pub amount_usd: f64,
     pub status: String,
     pub wallet_transaction_id: Option<String>,
+    #[serde(skip_serializing)]
     pub idempotency_key: String,
     pub reversed_amount_usd: f64,
     pub pending_reversal_amount_usd: f64,
@@ -105,19 +148,16 @@ pub struct ReferralRelationshipListQuery {
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ReferralRewardListQuery {
     pub order_id: Option<String>,
+    pub order_no: Option<String>,
+    pub inviter: Option<String>,
+    pub invitee: Option<String>,
+    pub referral_id: Option<String>,
+    pub trigger_point: Option<String>,
+    pub pending_reversal: Option<bool>,
     pub reward_type: Option<String>,
     pub status: Option<String>,
     pub limit: usize,
     pub offset: usize,
-}
-
-#[derive(Debug, Clone)]
-pub struct ReferralRewardConfig {
-    pub percent_enabled: bool,
-    pub percent_rate: f64,
-    pub headcount_enabled: bool,
-    pub headcount_amount_usd: f64,
-    pub headcount_trigger: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,16 +173,6 @@ enum ReferralApplyingRecovery {
     Applied,
     Failed,
     Unchanged,
-}
-
-#[derive(Debug, Clone)]
-struct ReferralPaymentOrderContext {
-    id: String,
-    user_id: String,
-    amount_usd: f64,
-    payment_method: String,
-    status: String,
-    order_kind: String,
 }
 
 #[derive(Debug, Clone)]
@@ -204,6 +234,22 @@ macro_rules! reward_from_row {
             referral_id: row_string!($row, "referral_id"),
             inviter_user_id: row_string!($row, "inviter_user_id"),
             invitee_user_id: row_string!($row, "invitee_user_id"),
+            inviter_username: $row
+                .try_get::<Option<String>, _>("inviter_username")
+                .ok()
+                .flatten(),
+            invitee_username: $row
+                .try_get::<Option<String>, _>("invitee_username")
+                .ok()
+                .flatten(),
+            source_order_no: $row
+                .try_get::<Option<String>, _>("source_order_no")
+                .ok()
+                .flatten(),
+            inviter_wallet_id: $row
+                .try_get::<Option<String>, _>("inviter_wallet_id")
+                .ok()
+                .flatten(),
             reward_type: row_string!($row, "reward_type"),
             source_order_id: row_optional_string!($row, "source_order_id"),
             trigger_point: row_string!($row, "trigger_point"),
@@ -220,6 +266,13 @@ macro_rules! reward_from_row {
         })
     }};
 }
+
+mod admin;
+pub use admin::{ReferralAdminOverviewStats, ReferralRewardDetail};
+mod preview;
+mod registration;
+mod settings;
+pub use preview::{ReferralRefundPreview, ReferralReversalSummary};
 
 fn row_unix_secs<R>(row: &R, column: &str) -> Result<u64, DataLayerError>
 where
@@ -315,10 +368,12 @@ fn referral_void_allowed(status: &str) -> bool {
     matches!(status, "pending" | "failed")
 }
 
+#[cfg(test)]
 fn referral_percent_rate_valid(percent_rate: f64) -> bool {
     percent_rate.is_finite() && percent_rate > 0.0 && percent_rate <= 100.0
 }
 
+#[cfg(test)]
 fn referral_payment_method_excluded(payment_method: &str) -> bool {
     matches!(
         payment_method.trim().to_ascii_lowercase().as_str(),
@@ -540,7 +595,36 @@ fn referral_reversal_target(
     {
         return 0.0;
     }
-    reward_amount_usd * (refunded_amount_usd / order_amount_usd).clamp(0.0, 1.0)
+    // Full refunds preserve the exact stored principal; multiplying a large
+    // value by the decimal scale and back can otherwise lose several units.
+    if refunded_amount_usd >= order_amount_usd {
+        return reward_amount_usd;
+    }
+    // Decimal strings preserve the persisted monetary scale. Rounding a binary
+    // float such as 3e-8 * 50% would miss PostgreSQL NUMERIC's half-up boundary.
+    // All values are finite and positive above, so parsing cannot fail.
+    let reward = reward_amount_usd
+        .to_string()
+        .parse::<sqlx::types::BigDecimal>()
+        .expect("finite reward decimal");
+    let refunded = refunded_amount_usd
+        .to_string()
+        .parse::<sqlx::types::BigDecimal>()
+        .expect("finite refunded decimal");
+    let order = order_amount_usd
+        .to_string()
+        .parse::<sqlx::types::BigDecimal>()
+        .expect("finite order decimal");
+    let half_unit = "0.000000005"
+        .parse::<sqlx::types::BigDecimal>()
+        .expect("constant decimal");
+    // Nonnegative NUMERIC ROUND(...,8) is half-up: add half a unit then
+    // truncate, independent of BigDecimal's configurable default rounding.
+    ((reward * refunded / order + half_unit).with_scale(8))
+        .to_string()
+        .parse::<f64>()
+        .expect("bounded referral target")
+        .min(reward_amount_usd)
 }
 
 impl ReferralDataState<'_> {
@@ -609,7 +693,10 @@ WHERE id = $1
         // "total"/"paid" rather than "filtered").  Compute them with an
         // aggregate query instead of deriving them from the bounded list
         // page, so pagination and filters cannot change the headline stats.
-        let (items, total) = self.list_referral_relationships_raw(&query).await?;
+        let (mut items, total) = self.list_referral_relationships_raw(&query).await?;
+        for relationship in &mut items {
+            relationship.source = None;
+        }
         let stats = self.referral_admin_stats_global(None).await?;
         Ok(Some((items, total, stats)))
     }
@@ -733,137 +820,51 @@ WHERE ($1::TEXT IS NULL OR inviter_user_id = $1)
     pub async fn apply_registration_referral_reward(
         &self,
         invitee_user_id: &str,
-        amount_usd: f64,
-        trigger_point: &str,
+        _amount_usd: f64,
+        _trigger_point: &str,
     ) -> Result<Vec<ReferralRewardRecord>, DataLayerError> {
-        if !amount_usd.is_finite() || amount_usd <= 0.0 {
-            return Ok(Vec::new());
-        }
-        let Some(relationship) = self
-            .find_referral_relationship_by_invitee(invitee_user_id)
-            .await?
-        else {
-            return Ok(Vec::new());
-        };
-        let idempotency_key = format!("referral:{}:headcount:{trigger_point}", relationship.id);
-        self.insert_referral_reward(
-            &relationship,
-            "headcount",
-            None,
-            trigger_point,
-            amount_usd,
-            &idempotency_key,
-        )
-        .await?;
-        self.credit_pending_referral_rewards(&[idempotency_key], None, None)
+        self.settle_registration_referral_rewards(invitee_user_id)
             .await
     }
 
     pub async fn apply_paid_order_referral_rewards(
         &self,
         order_id: &str,
-        config: ReferralRewardConfig,
+        _config: ReferralRewardConfig,
     ) -> Result<Vec<ReferralRewardRecord>, DataLayerError> {
-        if self.backends.is_none() {
-            return Ok(Vec::new());
-        }
-        if !config.percent_enabled && !config.headcount_enabled {
-            return Ok(Vec::new());
-        }
-        let Some(context) = self.find_referral_payment_order_context(order_id).await? else {
-            return Ok(Vec::new());
-        };
-        if context.status != "credited"
-            || !context.amount_usd.is_finite()
-            || context.amount_usd <= 0.0
-        {
-            return Ok(Vec::new());
-        }
-        if !matches!(
-            context.order_kind.as_str(),
-            "wallet_recharge" | "plan_purchase"
-        ) {
-            return Ok(Vec::new());
-        }
-        if referral_payment_method_excluded(&context.payment_method) {
-            return Ok(Vec::new());
-        }
-        let Some(relationship) = self
-            .find_referral_relationship_by_invitee(&context.user_id)
-            .await?
-        else {
-            return Ok(Vec::new());
-        };
-        let newly_marked_first_paid = self
-            .mark_referral_first_paid_order(&relationship.id, &context.id)
-            .await?;
-        // A replay of the winning order must repair a crash between marking
-        // first-paid and inserting its idempotent reward row.
-        let owns_first_paid_order = newly_marked_first_paid
-            || relationship.first_paid_order_id.as_deref() == Some(context.id.as_str());
+        self.settle_paid_order_referral_rewards(order_id).await
+    }
 
-        let mut idempotency_keys = Vec::new();
-        if config.percent_enabled && referral_percent_rate_valid(config.percent_rate) {
-            let amount_usd = (context.amount_usd * config.percent_rate / 100.0).max(0.0);
-            if amount_usd.is_finite() && amount_usd > 0.0 {
-                let idempotency_key =
-                    format!("referral:{}:percent:{}", relationship.id, context.id);
-                self.insert_referral_reward(
-                    &relationship,
-                    "percent",
-                    Some(&context.id),
-                    "paid_order",
-                    amount_usd,
-                    &idempotency_key,
-                )
+    /// Consume only obligations committed by the payment credit transaction.
+    /// Legacy orders without a durable obligation are never rewarded on replay.
+    pub async fn settle_paid_order_referral_rewards(
+        &self,
+        order_id: &str,
+    ) -> Result<Vec<ReferralRewardRecord>, DataLayerError> {
+        #[cfg(feature = "postgres")]
+        if let Some(backend) = self.backends.and_then(DataBackends::postgres) {
+            let keys = sqlx::query_scalar::<_, String>("SELECT idempotency_key FROM referral_rewards WHERE source_order_id=$1 AND status IN ('pending','failed') AND amount_usd>0 ORDER BY created_at,id")
+                .bind(order_id).fetch_all(&backend.pool_clone()).await.map_err(DataLayerError::postgres)?;
+            let mut rewards = self
+                .credit_pending_referral_rewards(&keys, None, None)
                 .await?;
-                idempotency_keys.push(idempotency_key);
-            }
-        }
-        if config.headcount_enabled
-            && config.headcount_amount_usd.is_finite()
-            && config.headcount_amount_usd > 0.0
-            && config.headcount_trigger == "first_paid_order"
-            && owns_first_paid_order
-        {
-            let idempotency_key =
-                format!("referral:{}:headcount:first_paid_order", relationship.id);
-            self.insert_referral_reward(
-                &relationship,
-                "headcount",
-                Some(&context.id),
-                "first_paid_order",
-                config.headcount_amount_usd,
-                &idempotency_key,
-            )
-            .await?;
-            idempotency_keys.push(idempotency_key);
-        }
-
-        if idempotency_keys.is_empty() {
-            return Ok(Vec::new());
-        }
-        let mut rewards = self
-            .credit_pending_referral_rewards(&idempotency_keys, None, None)
-            .await?;
-
-        // Payment credit and referral application use separate transactions.
-        // Whichever side wins a race with a refund must converge on the same
-        // cumulative reversal state.
-        if self
-            .find_referral_payment_order_refund_context(&context.id)
-            .await?
-            .is_some_and(|refund| refund.refunded_amount_usd > 0.0)
-        {
-            self.reverse_referral_rewards_for_order(&context.id, context.amount_usd)
-                .await?;
-            for reward in &mut rewards {
-                if let Some(updated) = self.find_referral_reward(&reward.id).await? {
-                    *reward = updated;
+            if let Some(refund) = self
+                .find_referral_payment_order_refund_context(order_id)
+                .await?
+            {
+                if referral_refund_context_valid(&refund) {
+                    self.reverse_referral_rewards_for_order(order_id, refund.refunded_amount_usd)
+                        .await?;
+                    for reward in &mut rewards {
+                        if let Some(updated) = self.find_referral_reward(&reward.id).await? {
+                            *reward = updated;
+                        }
+                    }
                 }
             }
+            return Ok(rewards);
         }
-        Ok(rewards)
+        Ok(Vec::new())
     }
 
     pub async fn retry_referral_reward(
@@ -934,8 +935,14 @@ WHERE ($1::TEXT IS NULL OR inviter_user_id = $1)
                 "仅待发或失败返利可以作废".to_string(),
             ));
         }
-        self.update_referral_reward_status(reward_id, "voided", operator_id, note)
-            .await?;
+        if !self
+            .update_referral_reward_status(reward_id, "voided", operator_id, note)
+            .await?
+        {
+            return Err(DataLayerError::InvalidInput(
+                "返利状态已变化，请刷新后重试".to_string(),
+            ));
+        }
         self.find_referral_reward(reward_id).await
     }
 
@@ -1021,7 +1028,11 @@ WHERE ($1::TEXT IS NULL OR inviter_user_id = $1)
                 .credit_pending_referral_rewards(std::slice::from_ref(&idempotency_key), None, None)
                 .await;
             match result {
-                Ok(updated) if updated.iter().any(|item| item.status == "applied") => {
+                Ok(updated)
+                    if updated
+                        .iter()
+                        .any(|item| matches!(item.status.as_str(), "applied" | "reversed")) =>
+                {
                     summary.reward_applied += 1;
                 }
                 Ok(_) => summary.deferred += 1,
@@ -1379,107 +1390,11 @@ LIMIT 1
         Ok(None)
     }
 
-    async fn find_referral_relationship_by_invitee(
-        &self,
-        invitee_user_id: &str,
-    ) -> Result<Option<ReferralRelationshipRecord>, DataLayerError> {
-        let Some(backends) = self.backends.as_ref() else {
-            return Ok(None);
-        };
-        #[cfg(feature = "postgres")]
-        if let Some(backend) = backends.postgres() {
-            let row = sqlx::query(
-                r#"
-SELECT
-  r.id, r.inviter_user_id, inviter.username AS inviter_username,
-  r.invitee_user_id, invitee.username AS invitee_username,
-  r.invite_code_snapshot, r.first_paid_order_id,
-  EXTRACT(EPOCH FROM r.first_paid_at)::BIGINT AS first_paid_at_unix_secs,
-  r.source_json::TEXT AS source_json,
-  EXTRACT(EPOCH FROM r.created_at)::BIGINT AS created_at_unix_secs
-FROM user_referrals r
-JOIN users inviter ON inviter.id = r.inviter_user_id
-  AND inviter.is_active IS TRUE AND inviter.is_deleted IS FALSE
-JOIN users invitee ON invitee.id = r.invitee_user_id
-  AND invitee.is_active IS TRUE AND invitee.is_deleted IS FALSE
-WHERE r.invitee_user_id = $1
-LIMIT 1
-"#,
-            )
-            .bind(invitee_user_id)
-            .fetch_optional(&backend.pool_clone())
-            .await
-            .map_err(DataLayerError::postgres)?;
-            return row.map(|row| relationship_from_row!(&row)).transpose();
-        }
-        Ok(None)
-    }
-
     async fn list_referral_rewards_raw(
         &self,
         query: &ReferralRewardListQuery,
     ) -> Result<(Vec<ReferralRewardRecord>, u64), DataLayerError> {
-        let Some(backends) = self.backends.as_ref() else {
-            return Ok((Vec::new(), 0));
-        };
-        let order_pattern = referral_like_pattern(query.order_id.as_deref());
-        let reward_type_pattern = referral_like_pattern(query.reward_type.as_deref());
-        let status_pattern = referral_like_pattern(query.status.as_deref());
-        let (limit, offset) = referral_page_bounds(query.limit, query.offset);
-        #[cfg(feature = "postgres")]
-        if let Some(backend) = backends.postgres() {
-            let count = sqlx::query(
-                r#"
-SELECT COUNT(*) AS total
-FROM referral_rewards
-WHERE ($1 = '' OR LOWER(COALESCE(source_order_id, '')) LIKE $1 ESCAPE '!')
-  AND ($2 = '' OR LOWER(reward_type) LIKE $2 ESCAPE '!')
-  AND ($3 = '' OR LOWER(status) LIKE $3 ESCAPE '!')
-"#,
-            )
-            .bind(&order_pattern)
-            .bind(&reward_type_pattern)
-            .bind(&status_pattern)
-            .fetch_one(&backend.pool_clone())
-            .await
-            .map_err(DataLayerError::postgres)?;
-            let total = count
-                .try_get::<i64, _>("total")
-                .map_err(DataLayerError::postgres)?;
-            let rows = sqlx::query(
-                r#"
-SELECT
-  id, referral_id, inviter_user_id, invitee_user_id, reward_type, source_order_id,
-  trigger_point, CAST(amount_usd AS DOUBLE PRECISION) AS amount_usd,
-  status, wallet_transaction_id, idempotency_key,
-  CAST(reversed_amount_usd AS DOUBLE PRECISION) AS reversed_amount_usd,
-  CAST(pending_reversal_amount_usd AS DOUBLE PRECISION) AS pending_reversal_amount_usd,
-  admin_operator_id, admin_note,
-  EXTRACT(EPOCH FROM created_at)::BIGINT AS created_at_unix_secs,
-  EXTRACT(EPOCH FROM updated_at)::BIGINT AS updated_at_unix_secs
-FROM referral_rewards
-WHERE ($1 = '' OR LOWER(COALESCE(source_order_id, '')) LIKE $1 ESCAPE '!')
-  AND ($2 = '' OR LOWER(reward_type) LIKE $2 ESCAPE '!')
-  AND ($3 = '' OR LOWER(status) LIKE $3 ESCAPE '!')
-ORDER BY created_at DESC, id DESC
-LIMIT $4 OFFSET $5
-"#,
-            )
-            .bind(&order_pattern)
-            .bind(&reward_type_pattern)
-            .bind(&status_pattern)
-            .bind(limit)
-            .bind(offset)
-            .fetch_all(&backend.pool_clone())
-            .await
-            .map_err(DataLayerError::postgres)?;
-            let items = rows
-                .iter()
-                .map(|row| reward_from_row!(row))
-                .collect::<Result<Vec<_>, _>>()?;
-            return Ok((items, total.max(0) as u64));
-        }
-        Ok((Vec::new(), 0))
+        admin::list_rewards(self, query).await
     }
 
     async fn list_applying_referral_reward_ids(&self) -> Result<Vec<String>, DataLayerError> {
@@ -1568,7 +1483,7 @@ FROM referral_rewards rw
 JOIN (
   SELECT
     po0.id,
-    CAST(po0.amount_usd AS DOUBLE PRECISION) AS amount_usd,
+    CAST(po0.amount_usd AS NUMERIC) AS amount_usd,
     po0.credited_at,
     po0.paid_at,
     po0.created_at,
@@ -1598,7 +1513,7 @@ JOIN (
           WHERE rr.payment_order_id = po0.id
             AND rr.status = 'processing'
         ), 0.0)
-      END AS DOUBLE PRECISION
+      END AS NUMERIC
     ) AS refunded_amount_usd
   FROM payment_orders po0
 ) po ON po.id = rw.source_order_id
@@ -1609,19 +1524,18 @@ JOIN users inviter ON inviter.id = rw.inviter_user_id
 WHERE rw.status IN ('applied', 'reversed')
   AND po.refunded_amount_usd > 0
   AND (
-    rw.pending_reversal_amount_usd > 0.00000001
+    rw.pending_reversal_amount_usd > 0
     OR (
       po.amount_usd > 0
       AND rw.amount_usd > 0
-      AND rw.reversed_amount_usd + 0.00000001 <
+      AND rw.reversed_amount_usd < ROUND((
         rw.amount_usd * CASE
           WHEN po.refunded_amount_usd >= po.amount_usd THEN 1.0
           ELSE po.refunded_amount_usd / po.amount_usd
-        END
+        END)::numeric, 8)
     )
   )
-ORDER BY COALESCE(po.credited_at, po.paid_at, po.created_at) ASC,
-         rw.created_at ASC, rw.id ASC
+ORDER BY rw.updated_at ASC, rw.created_at ASC, rw.id ASC
 LIMIT $1
 "#,
             )
@@ -1725,7 +1639,7 @@ SELECT
 FROM referral_rewards
 WHERE source_order_id = $1
   AND status IN ('applied', 'reversed')
-ORDER BY created_at ASC
+ORDER BY id ASC
 "#,
             )
             .bind(order_id)
@@ -1737,75 +1651,6 @@ ORDER BY created_at ASC
         Ok(Vec::new())
     }
 
-    async fn insert_referral_reward(
-        &self,
-        relationship: &ReferralRelationshipRecord,
-        reward_type: &str,
-        source_order_id: Option<&str>,
-        trigger_point: &str,
-        amount_usd: f64,
-        idempotency_key: &str,
-    ) -> Result<bool, DataLayerError> {
-        let Some(backends) = self.backends.as_ref() else {
-            return Ok(false);
-        };
-        let reward_id = uuid::Uuid::new_v4().to_string();
-        #[cfg(feature = "postgres")]
-        if let Some(backend) = backends.postgres() {
-            let affected = sqlx::query(
-                r#"
-INSERT INTO referral_rewards (
-  id, referral_id, inviter_user_id, invitee_user_id, reward_type, source_order_id,
-  trigger_point, amount_usd, status, idempotency_key, created_at, updated_at
-)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', $9, NOW(), NOW())
-ON CONFLICT (idempotency_key) DO NOTHING
-"#,
-            )
-            .bind(&reward_id)
-            .bind(&relationship.id)
-            .bind(&relationship.inviter_user_id)
-            .bind(&relationship.invitee_user_id)
-            .bind(reward_type)
-            .bind(source_order_id)
-            .bind(trigger_point)
-            .bind(amount_usd)
-            .bind(idempotency_key)
-            .execute(&backend.pool_clone())
-            .await
-            .map_err(DataLayerError::postgres)?
-            .rows_affected();
-            return Ok(affected > 0);
-        }
-        Ok(false)
-    }
-
-    async fn find_referral_payment_order_context(
-        &self,
-        order_id: &str,
-    ) -> Result<Option<ReferralPaymentOrderContext>, DataLayerError> {
-        let Some(backends) = self.backends.as_ref() else {
-            return Ok(None);
-        };
-        #[cfg(feature = "postgres")]
-        if let Some(backend) = backends.postgres() {
-            let row = sqlx::query(
-                r#"
-SELECT id, user_id, CAST(amount_usd AS DOUBLE PRECISION) AS amount_usd,
-       payment_method, status, order_kind
-FROM payment_orders
-WHERE id = $1
-"#,
-            )
-            .bind(order_id)
-            .fetch_optional(&backend.pool_clone())
-            .await
-            .map_err(DataLayerError::postgres)?;
-            return row.map(payment_order_context_from_row).transpose();
-        }
-        Ok(None)
-    }
-
     async fn find_referral_payment_order_refund_context(
         &self,
         order_id: &str,
@@ -1815,78 +1660,14 @@ WHERE id = $1
         };
         #[cfg(feature = "postgres")]
         if let Some(backend) = backends.postgres() {
-            let row = sqlx::query(
-                r#"
-SELECT CAST(po.amount_usd AS DOUBLE PRECISION) AS amount_usd,
-       CAST(
-         CASE
-           WHEN COALESCE((
-             SELECT SUM(rr.amount_usd)
-             FROM refund_requests rr
-             WHERE rr.payment_order_id = po.id
-               AND rr.status = 'succeeded'
-           ), 0.0) >=
-             COALESCE(po.refunded_amount_usd, 0.0) - COALESCE((
-               SELECT SUM(rr.amount_usd)
-               FROM refund_requests rr
-               WHERE rr.payment_order_id = po.id
-                 AND rr.status = 'processing'
-             ), 0.0)
-           THEN COALESCE((
-             SELECT SUM(rr.amount_usd)
-             FROM refund_requests rr
-             WHERE rr.payment_order_id = po.id
-               AND rr.status = 'succeeded'
-           ), 0.0)
-           ELSE COALESCE(po.refunded_amount_usd, 0.0) - COALESCE((
-             SELECT SUM(rr.amount_usd)
-             FROM refund_requests rr
-             WHERE rr.payment_order_id = po.id
-               AND rr.status = 'processing'
-           ), 0.0)
-         END AS DOUBLE PRECISION
-       ) AS refunded_amount_usd
-FROM payment_orders po
-WHERE po.id = $1
-"#,
-            )
-            .bind(order_id)
-            .fetch_optional(&backend.pool_clone())
-            .await
-            .map_err(DataLayerError::postgres)?;
+            let row = sqlx::query(REFERRAL_REFUND_CONTEXT_SQL)
+                .bind(order_id)
+                .fetch_optional(&backend.pool_clone())
+                .await
+                .map_err(DataLayerError::postgres)?;
             return row.map(payment_order_refund_context_from_row).transpose();
         }
         Ok(None)
-    }
-
-    async fn mark_referral_first_paid_order(
-        &self,
-        referral_id: &str,
-        order_id: &str,
-    ) -> Result<bool, DataLayerError> {
-        let Some(backends) = self.backends.as_ref() else {
-            return Ok(false);
-        };
-        #[cfg(feature = "postgres")]
-        if let Some(backend) = backends.postgres() {
-            let affected = sqlx::query(
-                r#"
-UPDATE user_referrals
-SET first_paid_order_id = $2,
-    first_paid_at = NOW(),
-    updated_at = NOW()
-WHERE id = $1 AND first_paid_order_id IS NULL
-"#,
-            )
-            .bind(referral_id)
-            .bind(order_id)
-            .execute(&backend.pool_clone())
-            .await
-            .map_err(DataLayerError::postgres)?
-            .rows_affected();
-            return Ok(affected > 0);
-        }
-        Ok(false)
     }
 
     async fn update_referral_reward_status(
@@ -2151,18 +1932,29 @@ SET status = 'applying',
     admin_note = COALESCE($3, admin_note),
     updated_at = NOW()
 WHERE id = $1 AND status IN ('pending', 'failed')
+RETURNING source_order_id, CAST(amount_usd AS DOUBLE PRECISION) AS amount_usd,
+          CAST(reversed_amount_usd AS DOUBLE PRECISION) AS reversed_amount_usd,
+          CAST(pending_reversal_amount_usd AS DOUBLE PRECISION) AS pending_reversal_amount_usd
 "#,
             )
             .bind(&target.id)
             .bind(operator_id)
             .bind(note)
-            .execute(&mut *tx)
+            .fetch_optional(&mut *tx)
             .await
-            .map_err(DataLayerError::postgres)?
-            .rows_affected();
-            if claimed == 0 {
+            .map_err(DataLayerError::postgres)?;
+            let Some(claimed) = claimed else {
                 tx.commit().await.map_err(DataLayerError::postgres)?;
                 return Ok(());
+            };
+            let reward_amount = row_f64!(claimed, "amount_usd");
+            if !referral_amounts_match(reward_amount, target.amount_usd)
+                || row_f64!(claimed, "reversed_amount_usd") != 0.0
+                || row_f64!(claimed, "pending_reversal_amount_usd") != 0.0
+            {
+                return Err(DataLayerError::InvalidInput(
+                    "pending referral reward state is invalid".into(),
+                ));
             }
             let wallet = sqlx::query(
                 r#"
@@ -2211,10 +2003,34 @@ WHERE id = $1
                     "inviter wallet balance is invalid".to_string(),
                 ));
             }
+            // Keep reward -> inviter wallet -> source order aligned with reversal.
+            // Read already successful refunds before exposing any new gift balance.
+            // A processing refund is reconciled normally once it succeeds later.
+            let refund_context =
+                if let Some(source_order_id) = row_optional_string!(claimed, "source_order_id") {
+                    let row = sqlx::query(&format!("{REFERRAL_REFUND_CONTEXT_SQL} FOR UPDATE"))
+                        .bind(source_order_id)
+                        .fetch_optional(&mut *tx)
+                        .await
+                        .map_err(DataLayerError::postgres)?;
+                    Some(
+                        row.map(payment_order_refund_context_from_row)
+                            .transpose()?
+                            .ok_or_else(|| {
+                                DataLayerError::InvalidInput(
+                                    "referral payment source is missing".into(),
+                                )
+                            })?,
+                    )
+                } else {
+                    None
+                };
+            let reverse_at_credit =
+                referral_pending_credit_reversal(reward_amount, refund_context.as_ref())?;
             let total_before = balance + gift_before;
-            let gift_after = gift_before + target.amount_usd;
+            let gift_after = gift_before + reward_amount;
             let total_after = balance + gift_after;
-            let total_adjusted_after = total_adjusted_before + target.amount_usd;
+            let total_adjusted_after = total_adjusted_before + reward_amount;
             if !gift_after.is_finite()
                 || !total_before.is_finite()
                 || !total_after.is_finite()
@@ -2224,7 +2040,15 @@ WHERE id = $1
                     "inviter wallet balance overflowed".to_string(),
                 ));
             }
-            let tx_id = uuid::Uuid::new_v4().to_string();
+            // Subtract the reward components first: a fully refunded large
+            // reward must leave the inviter's existing small balance unchanged.
+            let net_gift_after =
+                referral_net_credit_balance(gift_before, reward_amount, reverse_at_credit);
+            let net_adjusted_after = referral_net_credit_balance(
+                total_adjusted_before,
+                reward_amount,
+                reverse_at_credit,
+            );
             let description = note
                 .map(ToOwned::to_owned)
                 .unwrap_or_else(|| reward_description(&target));
@@ -2238,42 +2062,44 @@ WHERE id = $1
 "#,
             )
             .bind(&target.wallet_id)
-            .bind(gift_after)
-            .bind(total_adjusted_after)
+            .bind(net_gift_after)
+            .bind(net_adjusted_after)
             .execute(&mut *tx)
             .await
             .map_err(DataLayerError::postgres)?;
-            sqlx::query(
-                r#"
-INSERT INTO wallet_transactions (
-  id, wallet_id, category, reason_code, amount,
-  balance_before, balance_after,
-  recharge_balance_before, recharge_balance_after,
-  gift_balance_before, gift_balance_after,
-  link_type, link_id, operator_id, description, created_at
-)
-VALUES ($1, $2, 'adjust', 'referral_reward', $3, $4, $5, $6, $6, $7, $8,
-        'referral_reward', $9, $10, $11, NOW())
-"#,
+            let tx_id = insert_referral_gift_ledger(
+                &mut tx,
+                &target.wallet_id,
+                &target.id,
+                "referral_reward",
+                reward_amount,
+                balance,
+                gift_before,
+                gift_after,
+                operator_id,
+                &description,
             )
-            .bind(&tx_id)
-            .bind(&target.wallet_id)
-            .bind(target.amount_usd)
-            .bind(total_before)
-            .bind(total_after)
-            .bind(balance)
-            .bind(gift_before)
-            .bind(gift_after)
-            .bind(&target.id)
-            .bind(operator_id)
-            .bind(&description)
-            .execute(&mut *tx)
-            .await
-            .map_err(DataLayerError::postgres)?;
+            .await?;
+            if reverse_at_credit > 0.0 {
+                insert_referral_gift_ledger(
+                    &mut tx,
+                    &target.wallet_id,
+                    &target.id,
+                    "referral_reward_reversal",
+                    -reverse_at_credit,
+                    balance,
+                    gift_after,
+                    net_gift_after,
+                    operator_id,
+                    "邀请返利退款冲回",
+                )
+                .await?;
+            }
             sqlx::query(
                 r#"
 UPDATE referral_rewards
-SET status = 'applied',
+SET status = CASE WHEN $5 >= amount_usd THEN 'reversed' ELSE 'applied' END,
+    reversed_amount_usd = $5, pending_reversal_amount_usd = 0,
     wallet_transaction_id = $2,
     admin_operator_id = COALESCE($3, admin_operator_id),
     admin_note = COALESCE($4, admin_note),
@@ -2285,6 +2111,7 @@ WHERE id = $1
             .bind(&tx_id)
             .bind(operator_id)
             .bind(note)
+            .bind(reverse_at_credit)
             .execute(&mut *tx)
             .await
             .map_err(DataLayerError::postgres)?;
@@ -2364,46 +2191,11 @@ FOR UPDATE
             .fetch_optional(&mut *tx)
             .await
             .map_err(DataLayerError::postgres)?;
-            let order_row = sqlx::query(
-                r#"
-SELECT CAST(po.amount_usd AS DOUBLE PRECISION) AS amount_usd,
-       CAST(
-         CASE
-           WHEN COALESCE((
-             SELECT SUM(rr.amount_usd)
-             FROM refund_requests rr
-             WHERE rr.payment_order_id = po.id
-               AND rr.status = 'succeeded'
-           ), 0.0) >=
-             COALESCE(po.refunded_amount_usd, 0.0) - COALESCE((
-               SELECT SUM(rr.amount_usd)
-               FROM refund_requests rr
-               WHERE rr.payment_order_id = po.id
-                 AND rr.status = 'processing'
-             ), 0.0)
-           THEN COALESCE((
-             SELECT SUM(rr.amount_usd)
-             FROM refund_requests rr
-             WHERE rr.payment_order_id = po.id
-               AND rr.status = 'succeeded'
-           ), 0.0)
-           ELSE COALESCE(po.refunded_amount_usd, 0.0) - COALESCE((
-             SELECT SUM(rr.amount_usd)
-             FROM refund_requests rr
-             WHERE rr.payment_order_id = po.id
-               AND rr.status = 'processing'
-           ), 0.0)
-         END AS DOUBLE PRECISION
-       ) AS refunded_amount_usd
-FROM payment_orders po
-WHERE po.id = $1
-FOR UPDATE
-"#,
-            )
-            .bind(&source_order_id)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(DataLayerError::postgres)?;
+            let order_row = sqlx::query(&format!("{REFERRAL_REFUND_CONTEXT_SQL} FOR UPDATE"))
+                .bind(&source_order_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(DataLayerError::postgres)?;
             let Some(order_row) = order_row else {
                 tx.commit().await.map_err(DataLayerError::postgres)?;
                 return Ok(());
@@ -2503,7 +2295,6 @@ WHERE id = $1
                     "inviter wallet balance overflowed".to_string(),
                 ));
             }
-            let tx_id = uuid::Uuid::new_v4().to_string();
             if actual_reverse > 0.0 {
                 sqlx::query(
                     r#"
@@ -2520,31 +2311,19 @@ WHERE id = $1
                 .execute(&mut *tx)
                 .await
                 .map_err(DataLayerError::postgres)?;
-                sqlx::query(
-                    r#"
-INSERT INTO wallet_transactions (
-  id, wallet_id, category, reason_code, amount,
-  balance_before, balance_after,
-  recharge_balance_before, recharge_balance_after,
-  gift_balance_before, gift_balance_after,
-  link_type, link_id, description, created_at
-)
-VALUES ($1, $2, 'adjust', 'referral_reward_reversal', $3, $4, $5, $6, $6, $7, $8,
-        'referral_reward', $9, '邀请返利退款冲回', NOW())
-"#,
+                insert_referral_gift_ledger(
+                    &mut tx,
+                    &wallet_id,
+                    &reward.id,
+                    "referral_reward_reversal",
+                    -actual_reverse,
+                    balance,
+                    gift_before,
+                    gift_after,
+                    None,
+                    "邀请返利退款冲回",
                 )
-                .bind(&tx_id)
-                .bind(&wallet_id)
-                .bind(-actual_reverse)
-                .bind(total_before)
-                .bind(total_after)
-                .bind(balance)
-                .bind(gift_before)
-                .bind(gift_after)
-                .bind(&reward.id)
-                .execute(&mut *tx)
-                .await
-                .map_err(DataLayerError::postgres)?;
+                .await?;
             }
             sqlx::query(
                 r#"
@@ -2565,8 +2344,8 @@ WHERE id = $1
                 r#"
 UPDATE referral_rewards
 SET status = CASE
-      WHEN pending_reversal_amount_usd > 0.00000001 AND status = 'reversed' THEN 'applied'
-      WHEN pending_reversal_amount_usd <= 0.00000001
+      WHEN pending_reversal_amount_usd > 0 AND status = 'reversed' THEN 'applied'
+      WHEN pending_reversal_amount_usd = 0
         AND reversed_amount_usd >= amount_usd
         AND status IN ('applied', 'reversed') THEN 'reversed'
       ELSE status
@@ -2586,27 +2365,122 @@ WHERE id = $1
     }
 }
 
-fn payment_order_context_from_row<R>(row: R) -> Result<ReferralPaymentOrderContext, DataLayerError>
-where
-    R: Row,
-    for<'c> &'c str: sqlx::ColumnIndex<R>,
-    for<'r> String: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
-    for<'r> Option<String>: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
-    for<'r> f64: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
-{
-    let Some(user_id) = row_optional_string!(row, "user_id") else {
+/// An unissued reward funds its own already-due reversal. Both ledgers are
+/// committed together, so only the net gift becomes available for consumption.
+fn referral_net_credit_balance(before: f64, reward: f64, reverse: f64) -> f64 {
+    before + (reward - reverse)
+}
+
+fn referral_pending_credit_reversal(
+    amount: f64,
+    context: Option<&ReferralPaymentOrderRefundContext>,
+) -> Result<f64, DataLayerError> {
+    if !amount.is_finite() || amount <= 0.0 {
         return Err(DataLayerError::InvalidInput(
-            "payment order has no user_id".to_string(),
+            "referral reward amount is invalid".into(),
         ));
+    }
+    let Some(context) = context else {
+        return Ok(0.0);
     };
-    Ok(ReferralPaymentOrderContext {
-        id: row_string!(row, "id"),
-        user_id,
-        amount_usd: row_f64!(row, "amount_usd"),
-        payment_method: row_string!(row, "payment_method"),
-        status: row_string!(row, "status"),
-        order_kind: row_string!(row, "order_kind"),
-    })
+    if !payment_order_refund_amounts_are_consistent(
+        context.amount_usd,
+        context.refunded_amount_usd,
+        (context.amount_usd - context.refunded_amount_usd).max(0.0),
+    ) {
+        return Err(DataLayerError::InvalidInput(
+            "referral refund context is invalid".into(),
+        ));
+    }
+    Ok(referral_reversal_target(
+        amount,
+        context.amount_usd,
+        context.refunded_amount_usd,
+    ))
+}
+
+fn referral_signed_gift_fact_valid(
+    amount: f64,
+    recharge: f64,
+    gift_before: f64,
+    gift_after: f64,
+) -> bool {
+    let before = recharge + gift_before;
+    let after = recharge + gift_after;
+    // A reversal must satisfy the same complete gift-only snapshot invariant
+    // as a credit with its before/after values exchanged.
+    if amount > 0.0 {
+        referral_credit_transaction_fact_valid(
+            amount,
+            amount,
+            before,
+            after,
+            recharge,
+            recharge,
+            gift_before,
+            gift_after,
+        )
+    } else {
+        referral_credit_transaction_fact_valid(
+            -amount,
+            -amount,
+            after,
+            before,
+            recharge,
+            recharge,
+            gift_after,
+            gift_before,
+        )
+    }
+}
+
+#[cfg(feature = "postgres")]
+#[allow(clippy::too_many_arguments)]
+async fn insert_referral_gift_ledger(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    wallet_id: &str,
+    reward_id: &str,
+    reason: &str,
+    amount: f64,
+    recharge: f64,
+    gift_before: f64,
+    gift_after: f64,
+    operator_id: Option<&str>,
+    description: &str,
+) -> Result<String, DataLayerError> {
+    let before = recharge + gift_before;
+    let after = recharge + gift_after;
+    let valid = referral_signed_gift_fact_valid(amount, recharge, gift_before, gift_after);
+    if !valid {
+        return Err(DataLayerError::InvalidInput(
+            "referral wallet ledger snapshot is invalid".into(),
+        ));
+    }
+    let id = uuid::Uuid::new_v4().to_string();
+    sqlx::query(
+        r#"
+INSERT INTO wallet_transactions (id, wallet_id, category, reason_code, amount,
+ balance_before, balance_after, recharge_balance_before, recharge_balance_after,
+ gift_balance_before, gift_balance_after, link_type, link_id, operator_id, description, created_at)
+VALUES ($1,$2,'adjust',$3,$4,$5,$6,$7,$7,$8,$9,'referral_reward',$10,$11,$12,NOW())
+"#,
+    )
+    .bind(&id)
+    .bind(wallet_id)
+    .bind(reason)
+    .bind(amount)
+    .bind(before)
+    .bind(after)
+    .bind(recharge)
+    .bind(gift_before)
+    .bind(gift_after)
+    .bind(reward_id)
+    .bind(operator_id)
+    .bind(description)
+    .execute(&mut **tx)
+    .await
+    .map_err(DataLayerError::postgres)?;
+    Ok(id)
 }
 
 fn payment_order_refund_context_from_row<R>(
@@ -2641,6 +2515,62 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pending_referral_credit_nets_known_refunds_with_valid_signed_ledgers() {
+        for (refund, expected) in [(0.0, 0.0), (40.0, 4.0), (100.0, 10.0)] {
+            let context = ReferralPaymentOrderRefundContext {
+                amount_usd: 100.0,
+                refunded_amount_usd: refund,
+            };
+            let reverse = referral_pending_credit_reversal(10.0, Some(&context)).unwrap();
+            assert_eq!(reverse, expected);
+            let gross_gift = 1.0 + 10.0;
+            let net_gift = referral_net_credit_balance(1.0, 10.0, reverse);
+            assert!(referral_signed_gift_fact_valid(10.0, 2.0, 1.0, gross_gift));
+            if reverse > 0.0 {
+                assert!(referral_signed_gift_fact_valid(
+                    -reverse, 2.0, gross_gift, net_gift
+                ));
+            }
+            assert_eq!(
+                referral_reversal_due_bounded(expected, 10.0, reverse, 0.0),
+                0.0
+            );
+        }
+        assert!(!referral_signed_gift_fact_valid(-4.0, 2.0, 11.0, 8.0));
+        assert!(referral_pending_credit_reversal(
+            10.0,
+            Some(&ReferralPaymentOrderRefundContext {
+                amount_usd: 100.0,
+                refunded_amount_usd: 101.0
+            })
+        )
+        .is_err());
+        assert_eq!(referral_pending_credit_reversal(3.0, None).unwrap(), 0.0);
+    }
+
+    #[test]
+    fn pending_referral_credit_preserves_small_balance_for_large_full_refund() {
+        let amount = 999_999_999_999.0;
+        let reverse = referral_pending_credit_reversal(
+            amount,
+            Some(&ReferralPaymentOrderRefundContext {
+                amount_usd: amount,
+                refunded_amount_usd: amount,
+            }),
+        )
+        .unwrap();
+        assert_eq!(referral_net_credit_balance(0.1, amount, reverse), 0.1);
+        assert_eq!(referral_reversal_target(0.00000002, 3.0, 1.0), 0.00000001);
+        assert_eq!(referral_reversal_target(0.00000001, 3.0, 1.0), 0.0);
+        assert_eq!(referral_reversal_target(0.00000003, 1.0, 0.5), 0.00000002);
+        assert_eq!(referral_reversal_target(0.00000001, 1.0, 0.5), 0.00000001);
+        assert_eq!(
+            referral_reversal_target(0.00000003, 1.0, 0.49999999),
+            0.00000001
+        );
+    }
 
     #[test]
     fn referral_retry_only_allows_failed_rewards() {

@@ -76,6 +76,8 @@ export function walletTransactionReasonLabel(reasonCode: string | null | undefin
     gift_expire_reclaim: '赠款回收',
     adjust_admin: '人工调账',
     adjust_system: '系统调账',
+    referral_reward: '邀请返利发放',
+    referral_reward_reversal: '邀请返利冲回',
     refund_out: '退款扣减',
     refund_revert: '退款回补',
   }
@@ -90,6 +92,8 @@ export function walletTransactionReasonLabel(reasonCode: string | null | undefin
       gift_expire_reclaim: 'Grant reclaim',
       adjust_admin: 'Manual adjustment',
       adjust_system: 'System adjustment',
+      referral_reward: 'Referral reward',
+      referral_reward_reversal: 'Referral reward reversal',
       refund_out: 'Refund deduction',
       refund_revert: 'Refund reversal',
     }
@@ -168,6 +172,7 @@ export function walletLinkTypeLabel(type: string | null | undefined): string {
   const labels: Record<string, string> = {
     payment_order: '充值订单',
     refund_request: '退款申请',
+    referral_reward: '邀请返利记录',
     admin_action: '后台操作',
     system_task: '系统任务',
     campaign: '活动批次',
@@ -178,6 +183,7 @@ export function walletLinkTypeLabel(type: string | null | undefined): string {
     const englishLabels: Record<string, string> = {
       payment_order: 'Top-up order',
       refund_request: 'Refund request',
+      referral_reward: 'Referral reward record',
       admin_action: 'Admin action',
       system_task: 'System task',
       campaign: 'Campaign batch',

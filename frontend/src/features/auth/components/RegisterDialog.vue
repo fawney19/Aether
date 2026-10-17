@@ -8,7 +8,7 @@
       <div class="flex flex-col items-center text-center">
         <div class="mb-4 rounded-3xl border border-primary/30 dark:border-[#cc785c]/30 bg-primary/5 dark:bg-transparent p-4 shadow-inner shadow-white/40 dark:shadow-[#cc785c]/10">
           <img
-            src="/aether_adaptive.svg"
+            :src="logoPath"
             alt="Logo"
             class="h-16 w-16"
           >
@@ -214,11 +214,31 @@
           </p>
         </div>
 
-        <div
-          v-if="inviteCode"
-          class="rounded-lg border border-primary/20 bg-primary/5 px-3 py-2 text-xs text-muted-foreground"
-        >
-          {{ inviteCodeText }}
+        <div class="space-y-2">
+          <Label for="reg-invite-code">
+            {{ registerUi.inviteCodeLabel }}
+            <span class="text-muted-foreground text-xs">{{ registerUi.optional }}</span>
+          </Label>
+          <Input
+            id="reg-invite-code"
+            :model-value="inviteCode"
+            type="text"
+            :placeholder="registerUi.inviteCodePlaceholder"
+            :disabled="isLoading"
+            :aria-invalid="!!inviteCodeError"
+            :aria-describedby="inviteCodeError ? 'reg-invite-code-error' : undefined"
+            disable-autofill
+            @update:model-value="updateInviteCode"
+            @blur="!isLoading && validateInviteCode()"
+          />
+          <p
+            v-if="inviteCodeError"
+            id="reg-invite-code-error"
+            class="text-xs text-destructive"
+            role="alert"
+          >
+            {{ inviteCodeError }}
+          </p>
         </div>
 
         <div
@@ -311,7 +331,8 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, onUnmounted, nextTick } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
+import axios from 'axios'
 import { RouterLink } from 'vue-router'
 import { marked } from 'marked'
 import { authApi, type RegisterRequest, type RegistrationPrivacyPolicySettings } from '@/api/auth'
@@ -349,6 +370,7 @@ const props = withDefaults(defineProps<Props>(), {
 
 const emit = defineEmits<Emits>()
 
+const logoPath = '/aether_adaptive.svg'
 const INVITE_CODE_STORAGE_KEY = 'aether_invite_code'
 
 interface Props {
@@ -384,7 +406,8 @@ const registerUi = computed(() => ({
   confirmPassword: t('auth.register.confirmPassword'),
   confirmPasswordPlaceholder: t('auth.register.confirmPasswordPlaceholder'),
   passwordMismatch: t('auth.register.passwordMismatch'),
-  inviteCode: (code: string) => t('auth.register.inviteCode', { code }),
+  inviteCodeLabel: t('auth.register.inviteCodeLabel'),
+  inviteCodePlaceholder: t('auth.register.inviteCodePlaceholder'),
   privacyPrefix: t('auth.register.privacyPrefix'),
   privacyTitle: t('site.privacy.title'),
   openInNewWindow: t('auth.register.openInNewWindow'),
@@ -395,7 +418,6 @@ const registerUi = computed(() => ({
   cancel: t('common.cancel'),
 }))
 
-const inviteCodeText = computed(() => inviteCode.value ? registerUi.value.inviteCode(inviteCode.value) : '')
 const privacyVersionText = computed(() => t('site.privacy.currentVersion', { version: privacyPolicyVersion.value }))
 
 // Form nonce for password fields (prevent autofill)
@@ -530,7 +552,9 @@ const handleTurnstileError = (message: string) => {
   showError(message, t('auth.register.turnstile'))
 }
 
-const inviteCode = ref<string | null>(null)
+const inviteCode = ref('')
+const inviteCodeError = ref('')
+let inviteValidationSequence = 0
 const privacyAccepted = ref(false)
 const privacyDialogOpen = ref(false)
 const privacyPolicyEnabled = computed(() => !!props.privacyPolicy?.enabled)
@@ -545,15 +569,64 @@ const renderedPrivacyPolicy = computed(() => {
   return sanitizeMarkdown(rawHtml)
 })
 
-function loadInviteCode(): string | null {
-  if (typeof window === 'undefined') return null
+function loadInviteCode(): string {
+  inviteValidationSequence++
+  if (typeof window === 'undefined') return ''
   const fromQuery = new URLSearchParams(window.location.search).get('invite')
-  const normalized = (fromQuery || localStorage.getItem(INVITE_CODE_STORAGE_KEY) || '')
+  let cached = ''
+  try { cached = localStorage.getItem(INVITE_CODE_STORAGE_KEY) || '' } catch { /* 浏览器可能禁用本地存储。 */ }
+  const normalized = (fromQuery || cached)
     .trim()
     .toUpperCase()
-  if (!normalized) return null
-  localStorage.setItem(INVITE_CODE_STORAGE_KEY, normalized)
+  if (!normalized) return ''
+  try { localStorage.setItem(INVITE_CODE_STORAGE_KEY, normalized) } catch { /* 邀请码仍可从本次页面使用。 */ }
   return normalized
+}
+
+function updateInviteCode(value: string | number) {
+  if (isLoading.value) return
+  inviteValidationSequence++
+  inviteCode.value = String(value).trim().toUpperCase()
+  inviteCodeError.value = ''
+  try {
+    if (inviteCode.value) localStorage.setItem(INVITE_CODE_STORAGE_KEY, inviteCode.value)
+    else localStorage.removeItem(INVITE_CODE_STORAGE_KEY)
+  } catch { /* 浏览器禁用存储时仍使用用户当前填写的值。 */ }
+  // 用户编辑后以表单值为准，避免重新打开时被原邀请链接覆盖。
+  const url = new URL(window.location.href)
+  if (url.searchParams.has('invite')) {
+    url.searchParams.delete('invite')
+    window.history.replaceState(window.history.state, '', url)
+  }
+}
+
+function cleanupInviteCodeAfterRegistration() {
+  inviteValidationSequence++
+  inviteCode.value = ''
+  inviteCodeError.value = ''
+  try { localStorage.removeItem(INVITE_CODE_STORAGE_KEY) } catch { /* 缓存清理失败不能把已完成注册显示成失败。 */ }
+  // 注册成功后清理邀请来源，避免后续注册继续使用已消费的邀请上下文。
+  const url = new URL(window.location.href)
+  url.searchParams.delete('invite')
+  window.history.replaceState(window.history.state, '', url)
+}
+
+async function validateInviteCode(): Promise<boolean> {
+  const sequence = ++inviteValidationSequence
+  const code = inviteCode.value
+  if (!code) {
+    inviteCodeError.value = ''
+    return true
+  }
+  try {
+    const result = await authApi.validateInviteCode(code)
+    if (sequence !== inviteValidationSequence || inviteCode.value !== code) return false
+    inviteCodeError.value = result.valid ? '' : (result.reason || t('auth.register.invalidInviteCode'))
+    return result.valid
+  } catch {
+    if (sequence === inviteValidationSequence && inviteCode.value === code) inviteCodeError.value = t('auth.register.inviteCodeCheckFailed')
+    return false
+  }
 }
 
 // Send code cooldown timer
@@ -759,6 +832,8 @@ const resetForm = () => {
   codeSentAt.value = null
   cooldownSeconds.value = 0
   inviteCode.value = loadInviteCode()
+  inviteCodeError.value = ''
+  void validateInviteCode()
   privacyAccepted.value = false
   privacyDialogOpen.value = false
 
@@ -903,6 +978,7 @@ const handleSubmit = async () => {
   loadingText.value = t('auth.register.submitting')
 
   try {
+    if (!await validateInviteCode()) return
     // 构建请求数据：邮箱可选
     const registerData: RegisterRequest = {
       username: formData.value.username,
@@ -928,18 +1004,29 @@ const handleSubmit = async () => {
 
     const response = await authApi.register(registerData)
 
+    cleanupInviteCodeAfterRegistration()
     success(response.message || t('auth.register.successMessage'), t('auth.register.successTitle'))
 
     emit('success')
     isOpen.value = false
   } catch (error: unknown) {
     resetTurnstile()
+    if (axios.isAxiosError(error) && error.response?.data?.code === 'INVITE_INVALID') {
+      inviteCodeError.value = parseApiError(error, t('auth.register.invalidInviteCode'))
+    }
     showError(parseApiError(error, t('auth.register.submitRetry')), t('auth.register.submitFailed'))
   } finally {
     isLoading.value = false
     resetTurnstile()
   }
 }
+
+onMounted(() => {
+  if (props.open) {
+    inviteCode.value = loadInviteCode()
+    void validateInviteCode()
+  }
+})
 
 const handleCancel = () => {
   isOpen.value = false

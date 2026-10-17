@@ -19,8 +19,9 @@ pub(crate) use self::catalog_helpers::{
 };
 pub(crate) use self::system_modules_helpers::{
     build_admin_keys_grouped_by_format_payload, build_public_auth_modules_status_payload,
-    capability_detail_by_name, enabled_key_capability_short_names, ldap_module_config_is_valid,
-    serialize_public_capability, supported_capability_names, PUBLIC_CAPABILITY_DEFINITIONS,
+    build_public_user_modules_status_payload, capability_detail_by_name,
+    enabled_key_capability_short_names, ldap_module_config_is_valid, serialize_public_capability,
+    supported_capability_names, PUBLIC_CAPABILITY_DEFINITIONS,
 };
 
 #[cfg(test)]

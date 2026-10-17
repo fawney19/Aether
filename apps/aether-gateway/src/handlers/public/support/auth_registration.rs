@@ -13,6 +13,7 @@ use super::{
     GatewayError, Regex, Response, AUTH_REGISTER_RATE_LIMIT, AUTH_SEND_VERIFICATION_RATE_LIMIT,
     AUTH_VERIFICATION_STATUS_RATE_LIMIT, AUTH_VERIFY_EMAIL_RATE_LIMIT,
 };
+use axum::response::IntoResponse;
 use serde::Deserialize;
 use std::net::IpAddr;
 
@@ -624,6 +625,55 @@ pub(super) async fn handle_auth_register(
         }
     }
 
+    let invite_code = payload
+        .invite_code
+        .as_deref()
+        .map(str::trim)
+        .filter(|code| !code.is_empty());
+    let referral_config = match state.referral_reward_config().await {
+        Ok(config) => config,
+        Err(error) => {
+            return build_auth_internal_error_response(
+                "auth_registration_referral_config_failed",
+                &error,
+                AUTH_REGISTRATION_UNAVAILABLE_DETAIL,
+            )
+        }
+    };
+    if referral_config.is_some() && invite_code.is_some() {
+        if let Err(error) = state.validate_referral_invite_code(invite_code).await {
+            return match error {
+                GatewayError::Client { status, message } => (
+                    status,
+                    axum::Json(json!({"detail":message,"code":"INVITE_INVALID"})),
+                )
+                    .into_response(),
+                error => build_auth_internal_error_response(
+                    "auth_registration_invite_validation_failed",
+                    &error,
+                    AUTH_REGISTRATION_UNAVAILABLE_DETAIL,
+                ),
+            };
+        }
+    }
+    let atomic_registration = state.has_referral_data_backend();
+    let default_group_id = if atomic_registration {
+        match state.effective_default_user_group_id().await {
+            Ok(group_id) => group_id,
+            Err(error) => {
+                return build_auth_internal_error_response(
+                    "auth_registration_default_group_lookup_failed",
+                    &error,
+                    AUTH_REGISTRATION_UNAVAILABLE_DETAIL,
+                )
+            }
+        }
+    } else {
+        None
+    };
+    let referral_source = json!({ "channel": "registration", "ip": client_ip.to_string(),
+        "user_agent": headers.get(http::header::USER_AGENT).and_then(|value| value.to_str().ok()) });
+
     let password_hash = match bcrypt::hash(&payload.password, bcrypt::DEFAULT_COST) {
         Ok(value) => value,
         Err(_) => {
@@ -676,18 +726,49 @@ pub(super) async fn handle_auth_register(
             }
         }
     }
-    let Some((user, wallet, wallet_created)) = (match state
-        .register_local_auth_user_with_wallet_outcome(
-            email.clone(),
-            require_verification && email.is_some(),
-            username.clone(),
-            password_hash,
-            initial_gift,
-            false,
-        )
-        .await
-    {
+    let registration = if atomic_registration {
+        state
+            .register_local_auth_user_with_referral(
+                email.clone(),
+                require_verification && email.is_some(),
+                username.clone(),
+                password_hash,
+                initial_gift,
+                invite_code,
+                Some(referral_source),
+                referral_config.clone(),
+                privacy_policy
+                    .enabled
+                    .then_some(privacy_policy.version.as_str()),
+                default_group_id.as_deref(),
+            )
+            .await
+    } else {
+        state
+            .register_local_auth_user_with_wallet_outcome(
+                email.clone(),
+                require_verification && email.is_some(),
+                username.clone(),
+                password_hash,
+                initial_gift,
+                false,
+            )
+            .await
+    };
+    let Some((user, wallet, wallet_created)) = (match registration {
         Ok(value) => value,
+        Err(GatewayError::Client { status, message }) => {
+            return if matches!(message.as_str(), "邀请码无效" | "不能使用自己的邀请码注册")
+            {
+                (
+                    status,
+                    axum::Json(json!({"detail":message,"code":"INVITE_INVALID"})),
+                )
+                    .into_response()
+            } else {
+                build_auth_error_response(status, message, false)
+            };
+        }
         Err(err) => {
             return build_auth_internal_error_response(
                 "auth_registration_create_user_failed",
@@ -703,89 +784,60 @@ pub(super) async fn handle_auth_register(
         );
     };
     let owned_wallet_id = wallet_created.then(|| wallet.id.clone());
-    if let Err(err) = state
-        .assign_default_group_to_self_registered_user(&user.id)
-        .await
-    {
-        let _ = state
-            .rollback_provisional_auth_user_with_wallet(&user.id, owned_wallet_id.as_deref())
-            .await;
-        return build_auth_internal_error_response(
-            "auth_registration_default_group_assignment_failed",
-            &err,
-            AUTH_REGISTRATION_UNAVAILABLE_DETAIL,
-        );
-    }
-    if privacy_policy.enabled {
-        match state
-            .record_user_privacy_policy_acceptance(&user.id, &privacy_policy.version)
-            .await
-        {
-            Ok(true) => {}
-            Ok(false) => {
-                let _ = state
-                    .rollback_provisional_auth_user_with_wallet(
-                        &user.id,
-                        owned_wallet_id.as_deref(),
-                    )
-                    .await;
-                return build_auth_error_response(
-                    http::StatusCode::SERVICE_UNAVAILABLE,
-                    AUTH_REGISTRATION_STORAGE_UNAVAILABLE_DETAIL,
-                    false,
-                );
-            }
-            Err(err) => {
-                let _ = state
-                    .rollback_provisional_auth_user_with_wallet(
-                        &user.id,
-                        owned_wallet_id.as_deref(),
-                    )
-                    .await;
-                return build_auth_internal_error_response(
-                    "auth_registration_privacy_policy_record_failed",
-                    &err,
-                    AUTH_REGISTRATION_UNAVAILABLE_DETAIL,
-                );
-            }
-        }
-    }
-    let invite_code = payload
-        .invite_code
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    if invite_code.is_some() {
-        let source = json!({
-            "channel": "registration",
-            "ip": client_ip.to_string(),
-            "user_agent": headers
-                .get(http::header::USER_AGENT)
-                .and_then(|value| value.to_str().ok()),
-        });
+    if !atomic_registration {
         if let Err(err) = state
-            .bind_referral_invite_after_registration(
-                &user.id,
-                user.email_verified,
-                invite_code,
-                Some(source),
-            )
+            .assign_default_group_to_self_registered_user(&user.id)
             .await
         {
             let _ = state
                 .rollback_provisional_auth_user_with_wallet(&user.id, owned_wallet_id.as_deref())
                 .await;
-            let (status, detail) = match err {
-                GatewayError::Client { status, message } => (status, message),
-                other => {
+            return build_auth_internal_error_response(
+                "auth_registration_default_group_assignment_failed",
+                &err,
+                AUTH_REGISTRATION_UNAVAILABLE_DETAIL,
+            );
+        }
+        if privacy_policy.enabled {
+            match state
+                .record_user_privacy_policy_acceptance(&user.id, &privacy_policy.version)
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) => {
+                    let _ = state
+                        .rollback_provisional_auth_user_with_wallet(
+                            &user.id,
+                            owned_wallet_id.as_deref(),
+                        )
+                        .await;
+                    return build_auth_error_response(
+                        http::StatusCode::SERVICE_UNAVAILABLE,
+                        AUTH_REGISTRATION_STORAGE_UNAVAILABLE_DETAIL,
+                        false,
+                    );
+                }
+                Err(err) => {
+                    let _ = state
+                        .rollback_provisional_auth_user_with_wallet(
+                            &user.id,
+                            owned_wallet_id.as_deref(),
+                        )
+                        .await;
                     return build_auth_internal_error_response(
-                        "auth_registration_referral_binding_failed",
-                        &other,
+                        "auth_registration_privacy_policy_record_failed",
+                        &err,
                         AUTH_REGISTRATION_UNAVAILABLE_DETAIL,
                     );
                 }
-            };
-            return build_auth_error_response(status, detail, false);
+            }
+        }
+    }
+    // 账户、邀请关系和奖励义务已同事务提交；入账失败只能重试，不能删除账户。
+    if atomic_registration && invite_code.is_some() {
+        if let Err(error) = state.settle_registration_referral_reward(&user.id).await {
+            tracing::warn!(event_name = "registration_referral_settlement_deferred", user_id = %user.id,
+                error = %crate::error::redact_error_debug(&error), "registration referral reward will be recovered by maintenance");
         }
     }
 

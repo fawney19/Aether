@@ -500,6 +500,7 @@ import { useLocalStorage } from '@vueuse/core'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import { useModuleStore } from '@/stores/modules'
+import { useNavigationModules } from '@/layouts/main-layout/modules'
 import { useSiteInfo } from '@/composables/useSiteInfo'
 import { useToast } from '@/composables/useToast'
 import { isDemoMode } from '@/config/demo'
@@ -542,6 +543,7 @@ const router = useRouter()
 const route = useRoute()
 const authStore = useAuthStore()
 const moduleStore = useModuleStore()
+useNavigationModules(() => authStore.canAccessAdmin)
 const announcementStore = useAnnouncementStore()
 const { siteName, siteSubtitle } = useSiteInfo()
 const { success, error: showError } = useToast()
@@ -1197,12 +1199,6 @@ onMounted(() => {
   syncAuthNotice()
   applyCachedVersionStatus()
 
-  // 管理员预加载模块状态（路由守卫会按需加载，这里提前加载以避免菜单闪烁）
-  if (authStore.canAccessAdmin && !moduleStore.loaded && !moduleStore.loading) {
-    void moduleStore.fetchModules().catch(() => {
-      // 路由守卫会在需要模块状态时按需处理失败场景。
-    })
-  }
   announcementPollTimer = window.setInterval(() => {
     if (!document.hidden) void announcementStore.refreshStatus()
   }, 60_000)
@@ -1264,7 +1260,7 @@ const navigation = computed(() => {
   return buildNavigation({
     canAccessAdmin: authStore.canAccessAdmin,
     modules: moduleStore.modules,
-    isModuleActive: moduleStore.isActive,
+    isModuleActive: authStore.canAccessAdmin ? moduleStore.isActive : moduleStore.isUserActive,
     t,
   })
 })

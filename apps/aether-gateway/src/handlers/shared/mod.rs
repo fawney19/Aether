@@ -6,11 +6,14 @@ mod email_templates;
 mod external_models;
 pub(crate) mod health_monitor;
 mod identity_oauth_provider_secret;
+mod module_status;
 mod multipart;
 mod normalize;
 mod payloads;
 mod payment_currency;
 mod payment_direct;
+#[cfg(test)]
+pub(crate) use payment_direct::set_refund_failure_stub_for_tests;
 mod payment_gateway_config;
 mod payment_gateway_secret;
 mod payment_order_stripe_secret;
@@ -53,6 +56,9 @@ pub(crate) use self::external_models::OFFICIAL_EXTERNAL_MODEL_PROVIDERS;
 pub(crate) use self::identity_oauth_provider_secret::{
     decrypt_or_migrate_identity_oauth_provider_client_secret,
     identity_oauth_provider_secret_binding_matches, seal_identity_oauth_provider_client_secret,
+};
+pub(crate) use self::module_status::{
+    module_enabled_config_key, read_module_enabled, REFERRAL_ENABLED_CONFIG_KEY,
 };
 pub(crate) use self::multipart::{
     find_multipart_boundary, find_multipart_boundary_after_crlf, parse_multipart_boundary,

@@ -32,6 +32,8 @@ pub(in super::super) struct AdminWalletRefundFailRequest {
 #[derive(Debug, serde::Deserialize)]
 pub(in super::super) struct AdminWalletRefundCompleteRequest {
     #[serde(default)]
+    pub(in super::super) referral_shortfall_confirmation: Option<String>,
+    #[serde(default)]
     pub(in super::super) gateway_refund_id: Option<String>,
     #[serde(default)]
     pub(in super::super) gateway_refund: bool,

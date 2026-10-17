@@ -1716,3 +1716,234 @@ async fn gateway_rejects_admin_api_key_wallet_process_refund_locally_with_truste
     gateway_handle.abort();
     upstream_handle.abort();
 }
+
+#[tokio::test]
+async fn referral_refund_complete_rejects_unapproved_before_gateway_lookup() {
+    let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    crate::handlers::shared::set_refund_failure_stub_for_tests(
+        "rf-refund-1",
+        Some(counter.clone()),
+    );
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway")
+            .with_auth_wallets_for_tests([sample_wallet_snapshot(
+                "wallet-123",
+                Some("user-1"),
+                None,
+                "finite",
+            )])
+            .with_admin_wallet_refunds_for_tests([sample_refund_record(
+                "refund-1",
+                "wallet-123",
+                Some("user-1"),
+                Some("missing-order"),
+                4.0,
+                "pending_approval",
+                None,
+                None,
+                None,
+            )]),
+    );
+    let (url, handle) = start_server(gateway).await;
+    let response = reqwest::Client::new()
+        .post(format!(
+            "{url}/api/admin/wallets/wallet-123/refunds/refund-1/complete"
+        ))
+        .header(GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({"gateway_refund":true}))
+        .send()
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = response.json().await.expect("json");
+    assert_eq!(body["detail"], "只有 processing 状态的退款可以标记完成");
+    assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 0);
+    crate::handlers::shared::set_refund_failure_stub_for_tests("rf-refund-1", None);
+    handle.abort();
+}
+
+#[tokio::test]
+async fn referral_refund_preview_reports_no_order_as_not_applicable() {
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway")
+            .with_auth_wallets_for_tests([sample_wallet_snapshot(
+                "wallet-123",
+                Some("user-1"),
+                None,
+                "finite",
+            )])
+            .with_admin_wallet_refunds_for_tests([sample_refund_record(
+                "refund-1",
+                "wallet-123",
+                Some("user-1"),
+                None,
+                4.0,
+                "pending_approval",
+                None,
+                None,
+                None,
+            )]),
+    );
+    let (url, handle) = start_server(gateway).await;
+    let response = reqwest::Client::new()
+        .get(format!(
+            "{url}/api/admin/wallets/wallet-123/refunds/refund-1/referral-preview"
+        ))
+        .header(GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .send()
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value = response.json().await.expect("json");
+    assert_eq!(body["applicable"], false);
+    assert_eq!(body["stage"], "process");
+    assert_eq!(body["rewards"], json!([]));
+    assert_eq!(body["confirmation_token"], serde_json::Value::Null);
+    handle.abort();
+}
+
+#[tokio::test]
+async fn referral_refund_approved_gateway_failure_stays_processing_and_retries() {
+    let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    crate::handlers::shared::set_refund_failure_stub_for_tests(
+        "rf-refund-retry",
+        Some(counter.clone()),
+    );
+    let mut order =
+        sample_payment_order_record("po-retry", "wallet-retry", Some("user-1"), 10.0, 4.0, 6.0);
+    order.payment_method = "manual".to_string();
+    let state = AppState::new()
+        .expect("gateway")
+        .with_auth_wallets_for_tests([sample_wallet_snapshot(
+            "wallet-retry",
+            Some("user-1"),
+            None,
+            "finite",
+        )])
+        .with_admin_wallet_refunds_for_tests([sample_refund_record(
+            "refund-retry",
+            "wallet-retry",
+            Some("user-1"),
+            Some("po-retry"),
+            4.0,
+            "processing",
+            Some("admin-user-123"),
+            Some("admin-user-123"),
+            Some(1_710_000_500),
+        )])
+        .with_admin_wallet_payment_orders_for_tests([order]);
+    let (url, handle) = start_server(build_router_with_state(state.clone())).await;
+    let client = reqwest::Client::new();
+    for expected_calls in 1..=2 {
+        let response = client
+            .post(format!(
+                "{url}/api/admin/wallets/wallet-retry/refunds/refund-retry/complete"
+            ))
+            .header(GATEWAY_HEADER, "rust-phase3b")
+            .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+            .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+            .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+            .json(&json!({"gateway_refund":true}))
+            .send()
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let payload: serde_json::Value = response.json().await.expect("json");
+        assert_eq!(payload["detail"], "支付网关退款请求失败");
+        assert_eq!(
+            counter.load(std::sync::atomic::Ordering::SeqCst),
+            expected_calls
+        );
+        let refund = state
+            .find_wallet_refund("wallet-retry", "refund-retry")
+            .await
+            .expect("lookup")
+            .expect("refund");
+        assert_eq!(refund.status, "processing");
+    }
+    let failure = state
+        .admin_fail_wallet_refund(
+            "wallet-retry",
+            "refund-retry",
+            "取消",
+            Some("admin-user-123"),
+        )
+        .await
+        .expect("failure result");
+    assert!(matches!(
+        failure,
+        crate::AdminWalletMutationOutcome::Invalid(_)
+    ));
+    crate::handlers::shared::set_refund_failure_stub_for_tests("rf-refund-retry", None);
+    handle.abort();
+}
+
+#[tokio::test]
+async fn admin_referral_wallet_links_return_scoped_records_and_public_proof() {
+    let mut refund = sample_refund_record(
+        "refund-linked",
+        "wallet-linked",
+        Some("user-1"),
+        Some("order-1"),
+        4.0,
+        "succeeded",
+        None,
+        None,
+        None,
+    );
+    refund.payout_proof = Some(
+        json!({"channel":"manual","manual_note":"manual-proof-note","gateway_refund":{"payload":{"secret":"gateway-secret"}}}),
+    );
+    let app = AppState::new()
+        .unwrap()
+        .with_auth_wallets_for_tests([
+            sample_wallet_snapshot("wallet-linked", Some("user-1"), None, "finite"),
+            sample_wallet_snapshot("wallet-other", Some("user-2"), None, "finite"),
+        ])
+        .with_admin_wallet_refunds_for_tests([refund])
+        .with_admin_wallet_transactions_for_tests([sample_transaction_record(
+            "tx-linked",
+            "wallet-linked",
+            None,
+        )]);
+    let (url, handle) = start_server(build_router_with_state(app)).await;
+    for (suffix, key) in [
+        ("refunds/refund-linked", "refund"),
+        ("transactions/tx-linked", "transaction"),
+    ] {
+        let request = |wallet: &str| {
+            reqwest::Client::new()
+                .get(format!("{url}/api/admin/wallets/{wallet}/{suffix}"))
+                .header(GATEWAY_HEADER, "rust-phase3b")
+                .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-1")
+                .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+                .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-1")
+        };
+        let response = request("wallet-linked").send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(body[key]["wallet_id"], "wallet-linked");
+        assert_eq!(body[key]["owner_type"], "user");
+        assert!(body[key]["created_at"].is_string());
+        if key == "refund" {
+            assert_eq!(
+                body[key]["payout_proof"]["manual_note"],
+                "manual-proof-note"
+            );
+        }
+        assert!(!body.to_string().contains("gateway-secret"));
+        assert_eq!(
+            request("wallet-other").send().await.unwrap().status(),
+            StatusCode::NOT_FOUND
+        );
+    }
+    handle.abort();
+}

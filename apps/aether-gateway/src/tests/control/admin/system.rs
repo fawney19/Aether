@@ -41,6 +41,107 @@ use crate::handlers::admin::SystemExportMode;
 
 static SYSTEM_UPDATE_TEST_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+#[tokio::test]
+async fn referral_settings_validate_email_dependency_for_batch_single_and_module_writes() {
+    let state = AppState::new().expect("state").with_data_state_for_tests(
+        GatewayDataState::disabled().with_system_config_values_for_tests(vec![
+            ("referral_enabled".to_string(), json!(false)),
+            ("referral_reward_mode".to_string(), json!("headcount")),
+            (
+                "referral_headcount_trigger".to_string(),
+                json!("email_verified"),
+            ),
+            ("require_email_verification".to_string(), json!(false)),
+        ]),
+    );
+    let (gateway_url, handle) = start_server(build_router_with_state(state.clone())).await;
+    let client = reqwest::Client::new();
+    let put = |path: &'static str, body: serde_json::Value| {
+        let client = client.clone();
+        let url = format!("{gateway_url}{path}");
+        async move {
+            client
+                .put(url)
+                .header(GATEWAY_HEADER, "rust-phase3b")
+                .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+                .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+                .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+                .json(&body)
+                .send()
+                .await
+                .expect("request")
+        }
+    };
+    let response = put(
+        "/api/admin/system/configs/referral_enabled",
+        json!({"value":true}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        state
+            .read_system_config_json_value("referral_enabled")
+            .await
+            .expect("read"),
+        Some(json!(false))
+    );
+
+    let response = put(
+        "/api/admin/system/referral-settings",
+        json!({"referral_enabled":true,"require_email_verification":true}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        state
+            .read_system_config_json_value("referral_enabled")
+            .await
+            .expect("read"),
+        Some(json!(true))
+    );
+    let response = put(
+        "/api/admin/system/configs/require_email_verification",
+        json!({"value":false}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        state
+            .read_system_config_json_value("require_email_verification")
+            .await
+            .expect("read"),
+        Some(json!(true))
+    );
+
+    let response = put(
+        "/api/admin/system/referral-settings",
+        json!({"referral_enabled":false,"require_email_verification":false}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = put(
+        "/api/admin/modules/status/referral/enabled",
+        json!({"enabled":true}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = response.json().await.expect("response json");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("注册邮箱验证")),
+        "{body}"
+    );
+    assert_eq!(
+        state
+            .read_system_config_json_value("referral_enabled")
+            .await
+            .expect("read"),
+        Some(json!(false))
+    );
+    handle.abort();
+}
+
 fn sha256_hex(value: &str) -> String {
     format!("{:x}", Sha256::digest(value.as_bytes()))
 }

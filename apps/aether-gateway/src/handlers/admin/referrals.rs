@@ -27,6 +27,28 @@ pub(crate) async fn maybe_build_local_admin_referrals_response(
         return Ok(None);
     }
     let response = match decision.route_kind.as_deref() {
+        Some("referrals_overview") => {
+            match request.state().app().referral_admin_overview().await? {
+                Some(value) => Json(value).into_response(),
+                None => build_admin_referrals_unavailable_response(),
+            }
+        }
+        Some("referral_reward_detail") => {
+            if !request.state().app().has_referral_data_backend() {
+                build_admin_referrals_unavailable_response()
+            } else if let Some(id) = reward_id_from_path(request_context.path(), "") {
+                match request.state().app().referral_reward_detail(&id).await? {
+                    Some(detail) => Json(detail).into_response(),
+                    None => (
+                        http::StatusCode::NOT_FOUND,
+                        Json(json!({"detail":"Referral reward not found"})),
+                    )
+                        .into_response(),
+                }
+            } else {
+                admin_referrals_bad_request("Reward ID invalid")
+            }
+        }
         Some("list_referrals") => {
             build_admin_referrals_list_response(&request.state(), &request_context).await?
         }
@@ -182,10 +204,20 @@ async fn build_admin_referral_rewards_list_response(
         Ok(value) => value,
         Err(detail) => return Ok(admin_referrals_bad_request(detail)),
     };
+    let pending_reversal = match parse_optional_bool(query, "pending_reversal") {
+        Ok(value) => value,
+        Err(detail) => return Ok(admin_referrals_bad_request(detail)),
+    };
     let Some((items, total, stats)) = state
         .app()
         .list_admin_referral_rewards(ReferralRewardListQuery {
             order_id: query_param_value(query, "order_id"),
+            order_no: query_param_value(query, "order_no"),
+            inviter: query_param_value(query, "inviter"),
+            invitee: query_param_value(query, "invitee"),
+            referral_id: query_param_value(query, "referral_id"),
+            trigger_point: query_param_value(query, "trigger_point"),
+            pending_reversal,
             reward_type: query_param_value(query, "reward_type"),
             status: query_param_value(query, "status"),
             limit,

@@ -32,13 +32,16 @@ export interface ReferralRewardRecord {
   referral_id: string
   inviter_user_id: string
   invitee_user_id: string
+  inviter_username?: string | null
+  invitee_username?: string | null
+  inviter_wallet_id?: string | null
   reward_type: string
   source_order_id?: string | null
+  source_order_no?: string | null
   trigger_point: string
   amount_usd: number
   status: string
   wallet_transaction_id?: string | null
-  idempotency_key: string
   reversed_amount_usd: number
   pending_reversal_amount_usd: number
   admin_operator_id?: string | null
@@ -66,10 +69,58 @@ export interface ReferralRelationshipQuery {
 
 export interface ReferralRewardQuery {
   order_id?: string
+  order_no?: string
+  inviter?: string
+  invitee?: string
+  referral_id?: string
+  trigger_point?: string
+  pending_reversal?: boolean
   reward_type?: string
   status?: string
   limit?: number
   offset?: number
+}
+
+export interface AdminReferralOverview {
+  stats: ReferralSummary & {
+    cumulative_reward_usd: number
+    failed_reward_count: number
+    pending_reversal_reward_usd: number
+    pending_reversal_reward_count: number
+  }
+  rules: {
+    available: boolean
+    enabled: boolean
+    reward_mode: string
+    recharge_percent: number
+    headcount_amount_usd: number
+    headcount_trigger: string
+  }
+}
+
+export interface ReferralRuleSnapshot {
+  percent_enabled: boolean
+  percent_rate: number
+  headcount_enabled: boolean
+  headcount_amount_usd: number
+  headcount_trigger: string
+}
+
+export interface ReferralRewardDetail {
+  reward: ReferralRewardRecord
+  relationship: ReferralRelationshipRecord | null
+  rule_snapshot: ReferralRuleSnapshot | null
+  source_order: {
+    id: string
+    order_no: string
+    wallet_id: string
+    order_kind: string
+    amount_usd: number
+    refunded_amount_usd: number
+    status: string
+  } | null
+  ledger_entries: Array<{ id: string; reason_code: string; amount_usd: number; created_at_unix_secs: number }>
+  refunds: Array<{ id: string; refund_no: string; status: string; refund_mode: string; wallet_id: string; refund_amount_usd: number; created_at_unix_secs: number }>
 }
 
 function cleanParams<T extends Record<string, unknown>>(params: T): Partial<T> {
@@ -79,6 +130,15 @@ function cleanParams<T extends Record<string, unknown>>(params: T): Partial<T> {
 }
 
 export const referralApi = {
+  async getAdminOverview(): Promise<AdminReferralOverview> {
+    const response = await apiClient.get<AdminReferralOverview>('/api/admin/referrals/overview')
+    return response.data
+  },
+
+  async getReferralRewardDetail(id: string): Promise<ReferralRewardDetail> {
+    const response = await apiClient.get<ReferralRewardDetail>(`/api/admin/referral-rewards/${encodeURIComponent(id)}`)
+    return response.data
+  },
   async getMyReferral(): Promise<ReferralDashboardResponse> {
     const response = await apiClient.get<ReferralDashboardResponse>('/api/users/me/referral')
     return response.data

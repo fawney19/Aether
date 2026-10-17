@@ -1,439 +1,325 @@
 <template>
   <div class="space-y-6 pb-8">
-    <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+    <div class="grid grid-cols-[1fr_auto] items-center gap-x-6 gap-y-3 xl:grid-cols-[minmax(8rem,1fr)_auto_minmax(12rem,1fr)]">
       <div>
-        <h1 class="text-2xl font-semibold text-foreground">
+        <h1 class="text-2xl font-semibold">
           邀请返利
         </h1>
-        <p class="mt-1 text-sm text-muted-foreground">
-          查看邀请关系、返利记录和失败返利处理状态
-        </p>
       </div>
-      <Button
-        variant="outline"
-        :disabled="loading"
-        @click="loadAll"
-      >
-        <RefreshCw
-          class="mr-2 h-4 w-4"
-          :class="{ 'animate-spin': loading }"
-        />
-        刷新
-      </Button>
-    </div>
-
-    <div class="grid grid-cols-1 gap-4 md:grid-cols-5">
-      <Card
-        v-for="item in statCards"
-        :key="item.label"
-        class="p-4"
-      >
-        <p class="text-xs text-muted-foreground">
-          {{ item.label }}
-        </p>
-        <p class="mt-2 text-xl font-semibold">
-          {{ item.value }}
-        </p>
-      </Card>
-    </div>
-
-    <Card class="overflow-hidden">
-      <div class="border-b border-border px-5 py-4">
-        <h2 class="text-base font-semibold">
-          邀请关系
-        </h2>
-      </div>
-      <div class="grid grid-cols-1 gap-3 border-b border-border/70 p-4 md:grid-cols-5">
-        <Input
-          v-model="relationshipFilters.inviter"
-          placeholder="邀请人"
-        />
-        <Input
-          v-model="relationshipFilters.invitee"
-          placeholder="被邀请人"
-        />
-        <Input
-          v-model="relationshipFilters.invite_code"
-          placeholder="邀请码"
-        />
-        <Select v-model="firstPaidFilter">
-          <SelectTrigger>
-            <SelectValue placeholder="首付状态" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="all">
-              全部
-            </SelectItem>
-            <SelectItem value="true">
-              已首付
-            </SelectItem>
-            <SelectItem value="false">
-              未首付
-            </SelectItem>
-          </SelectContent>
-        </Select>
-        <Button
-          type="button"
-          @click="loadRelationships"
+      <ReferralOverview
+        summary
+        class="col-span-2 row-start-2 xl:col-span-1 xl:row-start-auto"
+        :overview="overview"
+        :loading="overviewLoading"
+        :error="overviewError"
+      />
+      <div class="col-start-2 row-start-1 flex flex-wrap justify-end gap-2 xl:col-start-3">
+        <RouterLink
+          to="/admin/system"
+          class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
         >
-          查询
+          <Settings2 class="h-4 w-4" />规则设置
+        </RouterLink><Button
+          variant="outline"
+          :disabled="refreshing"
+          @click="refresh"
+        >
+          <RefreshCw
+            class="mr-2 h-4 w-4"
+            :class="{ 'animate-spin': refreshing }"
+          />刷新
         </Button>
       </div>
-
-      <div class="overflow-x-auto">
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>邀请人</TableHead>
-              <TableHead>被邀请人</TableHead>
-              <TableHead>邀请码</TableHead>
-              <TableHead>绑定时间</TableHead>
-              <TableHead>首付状态</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            <TableRow
-              v-for="item in relationships"
-              :key="item.id"
-            >
-              <TableCell>{{ item.inviter_username || item.inviter_user_id }}</TableCell>
-              <TableCell>{{ item.invitee_username || item.invitee_user_id }}</TableCell>
-              <TableCell class="font-mono text-xs">
-                {{ item.invite_code_snapshot }}
-              </TableCell>
-              <TableCell>{{ formatUnix(item.created_at_unix_secs) }}</TableCell>
-              <TableCell>
-                <Badge :variant="item.first_paid_order_id ? 'success' : 'secondary'">
-                  {{ item.first_paid_order_id ? '已首付' : '未首付' }}
-                </Badge>
-              </TableCell>
-            </TableRow>
-            <TableRow v-if="relationships.length === 0">
-              <TableCell
-                colspan="5"
-                class="py-8 text-center text-sm text-muted-foreground"
-              >
-                暂无邀请关系
-              </TableCell>
-            </TableRow>
-          </TableBody>
-        </Table>
-      </div>
-    </Card>
-
-    <Card class="overflow-hidden">
-      <div class="border-b border-border px-5 py-4">
-        <h2 class="text-base font-semibold">
-          返利记录
-        </h2>
-      </div>
-      <div class="grid grid-cols-1 gap-3 border-b border-border/70 p-4 md:grid-cols-5">
-        <Input
-          v-model="rewardFilters.order_id"
-          placeholder="订单号"
+    </div>
+    <ReferralOverview
+      :overview="overview"
+      :loading="overviewLoading"
+      :error="overviewError"
+      @reload="loadOverview"
+    />
+    <nav
+      class="flex gap-5 overflow-x-auto border-b border-border"
+      aria-label="返利管理分类"
+    >
+      <button
+        v-for="item in tabs"
+        :key="item.value"
+        type="button"
+        class="relative inline-flex shrink-0 items-center gap-2 border-b-2 px-1 pb-3 text-sm font-medium transition-colors"
+        :class="tab === item.value ? 'border-primary text-primary' : 'border-transparent text-muted-foreground hover:text-foreground'"
+        :aria-pressed="tab === item.value"
+        @click="tab = item.value"
+      >
+        <component
+          :is="item.icon"
+          class="h-4 w-4"
         />
-        <Select v-model="rewardFilters.reward_type">
-          <SelectTrigger>
-            <SelectValue placeholder="返利类型" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="all">
-              全部类型
-            </SelectItem>
-            <SelectItem value="percent">
-              比例返利
-            </SelectItem>
-            <SelectItem value="headcount">
-              人头返利
-            </SelectItem>
-          </SelectContent>
-        </Select>
-        <Select v-model="rewardFilters.status">
-          <SelectTrigger>
-            <SelectValue placeholder="状态" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="all">
-              全部状态
-            </SelectItem>
-            <SelectItem value="pending">
-              待发
-            </SelectItem>
-            <SelectItem value="failed">
-              失败
-            </SelectItem>
-            <SelectItem value="applied">
-              已发
-            </SelectItem>
-            <SelectItem value="voided">
-              已作废
-            </SelectItem>
-            <SelectItem value="reversed">
-              已冲回
-            </SelectItem>
-          </SelectContent>
-        </Select>
-        <Button
+        {{ item.label }}
+      </button>
+    </nav>
+    <div
+      v-if="tab === 'pending'"
+      class="space-y-4"
+    >
+      <div
+        class="grid gap-3 sm:grid-cols-2"
+        aria-label="待处理队列"
+      >
+        <button
+          v-for="queue in queues"
+          :key="queue.value"
           type="button"
-          class="md:col-start-5"
-          @click="loadRewards"
+          :aria-label="`${queue.label}队列`"
+          :aria-pressed="queueTab === queue.value"
+          class="flex min-w-0 items-center gap-3 rounded-xl border p-4 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          :class="queueTab === queue.value ? 'border-primary/50 bg-primary/5' : 'border-border bg-card hover:bg-muted/30'"
+          @click="selectQueue(queue.value)"
         >
-          查询
-        </Button>
+          <span
+            class="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg"
+            :class="queueTab === queue.value ? 'bg-primary/10 text-primary' : 'bg-muted text-muted-foreground'"
+          >
+            <component
+              :is="queue.icon"
+              class="h-5 w-5"
+            />
+          </span>
+          <span class="min-w-0 flex-1">
+            <span class="block text-sm font-semibold">{{ queue.label }} <span
+              class="ml-2 inline-flex rounded-md bg-background/70 px-1.5 py-0.5 text-xs font-medium tabular-nums"
+              :class="queueTab === queue.value ? 'text-primary' : 'text-muted-foreground'"
+            >{{ queue.count }}</span></span>
+          </span>
+          <ChevronRight
+            class="h-4 w-4 shrink-0"
+            :class="queueTab === queue.value ? 'text-primary' : 'text-muted-foreground'"
+          />
+        </button>
       </div>
-
-      <div class="overflow-x-auto">
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>类型</TableHead>
-              <TableHead>来源订单</TableHead>
-              <TableHead>金额</TableHead>
-              <TableHead>状态</TableHead>
-              <TableHead>冲回</TableHead>
-              <TableHead>创建时间</TableHead>
-              <TableHead class="text-right">
-                操作
-              </TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            <TableRow
-              v-for="item in rewards"
-              :key="item.id"
-            >
-              <TableCell>{{ getRewardTypeLabel(item.reward_type) }}</TableCell>
-              <TableCell class="font-mono text-xs">
-                {{ item.source_order_id || '-' }}
-              </TableCell>
-              <TableCell>{{ formatUsd(item.amount_usd) }}</TableCell>
-              <TableCell>
-                <Badge :variant="getRewardStatusVariant(item.status)">
-                  {{ getRewardStatusLabel(item.status) }}
-                </Badge>
-              </TableCell>
-              <TableCell>
-                {{ formatUsd(item.reversed_amount_usd) }}
-                <span
-                  v-if="item.pending_reversal_amount_usd > 0"
-                  class="text-xs text-amber-600 dark:text-amber-400"
-                >
-                  / 待冲回 {{ formatUsd(item.pending_reversal_amount_usd) }}
-                </span>
-              </TableCell>
-              <TableCell>{{ formatUnix(item.created_at_unix_secs) }}</TableCell>
-              <TableCell class="text-right">
-                <div class="flex justify-end gap-2">
-                  <Button
-                    v-if="item.status === 'failed'"
-                    variant="outline"
-                    size="sm"
-                    :disabled="mutatingRewardId === item.id"
-                    @click="retryReward(item)"
-                  >
-                    补发
-                  </Button>
-                  <Button
-                    v-if="item.status === 'failed' || item.status === 'pending'"
-                    variant="ghost"
-                    size="sm"
-                    :disabled="mutatingRewardId === item.id"
-                    @click="voidReward(item)"
-                  >
-                    作废
-                  </Button>
-                </div>
-              </TableCell>
-            </TableRow>
-            <TableRow v-if="rewards.length === 0">
-              <TableCell
-                colspan="7"
-                class="py-8 text-center text-sm text-muted-foreground"
-              >
-                暂无返利记录
-              </TableCell>
-            </TableRow>
-          </TableBody>
-        </Table>
-      </div>
-    </Card>
+      <ReferralRewardList
+        v-show="queueTab === 'failed'"
+        title="发放失败"
+        kind="failed"
+        v-bind="listProps(failed)"
+        :mutating="mutating"
+        @page="failed.state.page = $event"
+        @size="failed.state.pageSize = $event"
+        @reload="failed.load"
+        @detail="openDetail"
+        @operate="openOperation"
+      >
+        <template #filters>
+          <ReferralRewardFilters
+            v-model:filters="failedFilters"
+            :loading="failed.state.loading"
+            @query="queryFailed"
+            @reset="resetFailed"
+          />
+        </template>
+      </ReferralRewardList>
+      <ReferralRewardList
+        v-show="queueTab === 'debt'"
+        title="待冲回款项"
+        kind="debt"
+        v-bind="listProps(debt)"
+        :mutating="mutating"
+        @page="debt.state.page = $event"
+        @size="debt.state.pageSize = $event"
+        @reload="debt.load"
+        @detail="openDetail"
+        @operate="openOperation"
+      >
+        <template #filters>
+          <ReferralRewardFilters
+            v-model:filters="debtFilters"
+            :loading="debt.state.loading"
+            @query="queryDebt"
+            @reset="resetDebt"
+          />
+        </template>
+      </ReferralRewardList>
+    </div>
+    <ReferralRewardList
+      v-if="tab === 'rewards'"
+      title="返利记录"
+      kind="rewards"
+      v-bind="listProps(rewards)"
+      :mutating="mutating"
+      @page="rewards.state.page = $event"
+      @size="rewards.state.pageSize = $event"
+      @reload="rewards.load"
+      @detail="openDetail"
+      @operate="openOperation"
+    >
+      <template #filters>
+        <ReferralRewardFilters
+          v-model:filters="rewardFilters"
+          full
+          :loading="rewards.state.loading"
+          @query="queryRewards"
+          @reset="resetRewards"
+        />
+      </template>
+    </ReferralRewardList>
+    <ReferralRelationshipList
+      v-if="tab === 'relationships'"
+      v-model:filters="relationshipFilters"
+      v-bind="listProps(relationships)"
+      @page="relationships.state.page = $event"
+      @size="relationships.state.pageSize = $event"
+      @reload="relationships.load"
+      @query="queryRelationships"
+      @reset="resetRelationships"
+      @rewards="showRelationshipRewards"
+      @copy="copy"
+    />
+    <ReferralDetailDrawer
+      :id="detailId"
+      :detail="detail"
+      :loading="detailLoading"
+      :error="detailError"
+      :mutating="mutating"
+      @close="closeDetail"
+      @reload="loadDetail"
+      @copy="copy"
+      @operate="openOperation"
+    />
+    <ReferralOperationDialog
+      :operation="operation"
+      :detail="operationDetail"
+      :loading="operationLoading"
+      :error="operationError"
+      :busy="!!mutating"
+      @close="closeOperation"
+      @confirm="confirmOperation"
+    />
   </div>
 </template>
 
 <script setup lang="ts">
-import { getI18nLocale } from '@/i18n'
-import { computed, onMounted, ref } from 'vue'
-import { RefreshCw } from 'lucide-vue-next'
-import {
-  referralApi,
-  type ReferralRelationshipRecord,
-  type ReferralRewardRecord,
-  type ReferralSummary
-} from '@/api/referrals'
-import {
-  Badge,
-  Button,
-  Card,
-  Input,
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow
-} from '@/components/ui'
+import { computed, onMounted, onScopeDispose, ref, watch } from 'vue'
+import { RouterLink } from 'vue-router'
+import { RefreshCw, Settings2, CircleAlert, History, Users, RotateCcw, ChevronRight } from 'lucide-vue-next'
+import { Button } from '@/components/ui'
+import { referralApi, type AdminReferralOverview, type ReferralRewardDetail, type ReferralRewardQuery, type ReferralRewardRecord } from '@/api/referrals'
 import { useToast } from '@/composables/useToast'
-
-const relationships = ref<ReferralRelationshipRecord[]>([])
-const rewards = ref<ReferralRewardRecord[]>([])
-const stats = ref<ReferralSummary>({
-  total_invites: 0,
-  effective_invites: 0,
-  paid_reward_usd: 0,
-  pending_reward_usd: 0,
-  reversed_reward_usd: 0
-})
-const loading = ref(false)
-const mutatingRewardId = ref<string | null>(null)
-const relationshipFilters = ref({
-  inviter: '',
-  invitee: '',
-  invite_code: ''
-})
-const firstPaidFilter = ref('all')
-const rewardFilters = ref({
-  order_id: '',
-  reward_type: 'all',
-  status: 'all'
-})
-const { success, error: showError } = useToast()
-
-const statCards = computed(() => [
-  { label: '总邀请', value: stats.value.total_invites },
-  { label: '有效邀请', value: stats.value.effective_invites },
-  { label: '已发返利', value: formatUsd(stats.value.paid_reward_usd) },
-  { label: '待发返利', value: formatUsd(stats.value.pending_reward_usd) },
-  { label: '已冲回返利', value: formatUsd(stats.value.reversed_reward_usd) },
+import ReferralOverview from './referrals/ReferralOverview.vue'
+import ReferralRewardList from './referrals/ReferralRewardList.vue'
+import ReferralRewardFilters, { type RewardFilters } from './referrals/ReferralRewardFilters.vue'
+import ReferralRelationshipList from './referrals/ReferralRelationshipList.vue'
+import ReferralDetailDrawer from './referrals/ReferralDetailDrawer.vue'
+import ReferralOperationDialog, { type RewardOperation } from './referrals/ReferralOperationDialog.vue'
+import { useReferralList } from './referrals/useReferralLists'
+import { usd } from './referrals/presentation'
+const toast = useToast()
+const tab = ref('pending')
+const queueTab = ref<'failed' | 'debt'>('failed')
+let queueSelected = false
+let initialQueuesLoaded = false
+function selectQueue(value: 'failed' | 'debt') { queueSelected = true; queueTab.value = value }
+const overview = ref<AdminReferralOverview | null>(null)
+const overviewLoading = ref(false)
+const overviewError = ref(false)
+let overviewSequence = 0
+const tabs = [{ value: 'pending', label: '待处理', icon: CircleAlert }, { value: 'rewards', label: '返利记录', icon: History }, { value: 'relationships', label: '邀请关系', icon: Users }]
+const queues = computed(() => [
+  { value: 'failed' as const, label: '发放失败', count: overview.value && !overviewError.value ? overview.value.stats.failed_reward_count : '—', icon: CircleAlert },
+  { value: 'debt' as const, label: '待冲回款项', count: overview.value && !overviewError.value ? overview.value.stats.pending_reversal_reward_count : '—', icon: RotateCcw },
 ])
-
-function formatUsd(value: number): string {
-  return `$${Number(value || 0).toFixed(2)}`
+const blankFilters = (): RewardFilters => ({ inviter: '', invitee: '', order_no: '', referral_id: '', reward_type: 'all', status: 'all', trigger_point: 'all', pending_reversal: 'all' })
+const rewardFilters = ref(blankFilters())
+const failedFilters = ref(blankFilters())
+const debtFilters = ref(blankFilters())
+let rewardQuery: ReferralRewardQuery = {}
+let failedQuery: ReferralRewardQuery = {}
+let debtQuery: ReferralRewardQuery = {}
+const rewards = useReferralList((limit, offset) => referralApi.getAdminReferralRewards({ ...rewardQuery, limit, offset }))
+const failed = useReferralList((limit, offset) => referralApi.getAdminReferralRewards({ ...failedQuery, status: 'failed', limit, offset }))
+const debt = useReferralList((limit, offset) => referralApi.getAdminReferralRewards({ ...debtQuery, pending_reversal: true, limit, offset }))
+const blankRelationships = () => ({ inviter: '', invitee: '', invite_code: '', first_paid: 'all' })
+const relationshipFilters = ref(blankRelationships())
+let relationshipQuery = {}
+const relationships = useReferralList((limit, offset) => referralApi.getAdminReferrals({ ...relationshipQuery, limit, offset }))
+function listProps<T>(list: ReturnType<typeof useReferralList<T>>) { return { items: list.state.items, total: list.state.total, page: list.state.page, pageSize: list.state.pageSize, loading: list.state.loading, error: list.state.error } }
+function filterQuery(filters: RewardFilters): ReferralRewardQuery {
+  const clean = (value: string) => value === 'all' || !value.trim() ? undefined : value.trim()
+  return { inviter: clean(filters.inviter), invitee: clean(filters.invitee), order_no: clean(filters.order_no), referral_id: clean(filters.referral_id), reward_type: clean(filters.reward_type), status: clean(filters.status), trigger_point: clean(filters.trigger_point), pending_reversal: filters.pending_reversal === 'all' ? undefined : filters.pending_reversal === 'true' }
 }
-
-function formatUnix(value?: number | null): string {
-  if (!value) return '-'
-  return new Date(value * 1000).toLocaleString(getI18nLocale())
+function queryRewards() { rewardQuery = filterQuery(rewardFilters.value); rewards.query() }
+function queryFailed() { failedQuery = filterQuery(failedFilters.value); failed.query() }
+function queryDebt() { debtQuery = filterQuery(debtFilters.value); debt.query() }
+function resetRewards() { rewardFilters.value = blankFilters(); queryRewards() }
+function resetFailed() { failedFilters.value = blankFilters(); queryFailed() }
+function resetDebt() { debtFilters.value = blankFilters(); queryDebt() }
+function queryRelationships() { const f = relationshipFilters.value; relationshipQuery = { inviter: f.inviter.trim(), invitee: f.invitee.trim(), invite_code: f.invite_code.trim(), first_paid: f.first_paid === 'all' ? undefined : f.first_paid === 'true' }; relationships.query() }
+function resetRelationships() { relationshipFilters.value = blankRelationships(); queryRelationships() }
+function showRelationshipRewards(id: string) { rewardFilters.value = { ...blankFilters(), referral_id: id }; rewardQuery = filterQuery(rewardFilters.value); tab.value = 'rewards'; if (rewards.state.page !== 1) rewards.state.page = 1; else void rewards.load() }
+async function loadOverview() {
+  const request = ++overviewSequence
+  overviewLoading.value = true; overviewError.value = false
+  try { const result = await referralApi.getAdminOverview(); if (request === overviewSequence) overview.value = result }
+  catch { if (request === overviewSequence) overviewError.value = true }
+  finally { if (request === overviewSequence) overviewLoading.value = false }
 }
-
-function getRewardTypeLabel(value: string): string {
-  if (value === 'percent') return '比例返利'
-  if (value === 'headcount') return '人头返利'
-  return value
-}
-
-function getRewardStatusLabel(value: string): string {
-  switch (value) {
-    case 'applied':
-      return '已发'
-    case 'pending':
-      return '待发'
-    case 'failed':
-      return '失败'
-    case 'voided':
-      return '已作废'
-    case 'reversed':
-      return '已冲回'
-    default:
-      return value
+const refreshing = ref(false)
+async function refresh() {
+  refreshing.value = true
+  await Promise.all([loadOverview(), failed.load(), debt.load(), ...(rewards.state.loaded || tab.value === 'rewards' ? [rewards.load()] : []), ...(relationships.state.loaded || tab.value === 'relationships' ? [relationships.load()] : [])])
+  if (!initialQueuesLoaded) {
+    initialQueuesLoaded = true
+    // 首次无失败记录时呈现有款项的队列；用户已选择后不再跳转。
+    if (!queueSelected && failed.state.loaded && !failed.state.error && failed.state.total === 0 && debt.state.loaded && !debt.state.error && debt.state.total > 0) queueTab.value = 'debt'
   }
+  refreshing.value = false
 }
-
-function getRewardStatusVariant(value: string): 'default' | 'secondary' | 'destructive' | 'outline' | 'success' | 'warning' | 'dark' {
-  switch (value) {
-    case 'applied':
-      return 'success'
-    case 'failed':
-      return 'destructive'
-    case 'pending':
-      return 'warning'
-    case 'voided':
-      return 'secondary'
-    default:
-      return 'outline'
-  }
+watch(tab, value => { if (value === 'rewards' && !rewards.state.loaded && !rewards.state.loading) void rewards.load(); if (value === 'relationships' && !relationships.state.loaded && !relationships.state.loading) void relationships.load() })
+const detailId = ref<string | null>(null)
+const detail = ref<ReferralRewardDetail | null>(null)
+const detailLoading = ref(false)
+const detailError = ref(false)
+let detailSequence = 0
+function openDetail(id: string) { detailId.value = id; detail.value = null; void loadDetail() }
+function closeDetail() { detailSequence++; detailId.value = null; detail.value = null; detailLoading.value = false }
+async function loadDetail() {
+  const id = detailId.value
+  if (!id) return
+  const request = ++detailSequence
+  detailLoading.value = true; detailError.value = false
+  try { const result = await referralApi.getReferralRewardDetail(id); if (request === detailSequence && detailId.value === id) detail.value = result }
+  catch { if (request === detailSequence) detailError.value = true }
+  finally { if (request === detailSequence) detailLoading.value = false }
 }
-
-async function loadRelationships() {
-  const firstPaid =
-    firstPaidFilter.value === 'true' ? true : firstPaidFilter.value === 'false' ? false : null
-  const response = await referralApi.getAdminReferrals({
-    ...relationshipFilters.value,
-    first_paid: firstPaid,
-    limit: 100,
-    offset: 0
-  })
-  relationships.value = response.items
-  stats.value = response.stats
+const operation = ref<RewardOperation | null>(null)
+const operationDetail = ref<ReferralRewardDetail | null>(null)
+const operationLoading = ref(false)
+const operationError = ref(false)
+const mutating = ref<string | null>(null)
+let operationSequence = 0
+async function openOperation(action: 'retry' | 'void', reward: ReferralRewardRecord) {
+  if (mutating.value) return
+  const request = ++operationSequence
+  operation.value = { action, reward: { ...reward } }; operationDetail.value = null; operationLoading.value = true; operationError.value = false
+  try { const result = await referralApi.getReferralRewardDetail(reward.id); if (request === operationSequence) operationDetail.value = result }
+  catch { if (request === operationSequence) operationError.value = true }
+  finally { if (request === operationSequence) operationLoading.value = false }
 }
-
-async function loadRewards() {
-  const response = await referralApi.getAdminReferralRewards({
-    order_id: rewardFilters.value.order_id,
-    reward_type: rewardFilters.value.reward_type === 'all' ? undefined : rewardFilters.value.reward_type,
-    status: rewardFilters.value.status === 'all' ? undefined : rewardFilters.value.status,
-    limit: 100,
-    offset: 0
-  })
-  rewards.value = response.items
-}
-
-async function loadAll() {
-  loading.value = true
+function closeOperation() { if (mutating.value) return; operationSequence++; operation.value = null; operationDetail.value = null }
+async function confirmOperation(note: string) {
+  const target = operation.value
+  if (!target || mutating.value || operationLoading.value || operationError.value || !operationDetail.value || operationDetail.value.reward.id !== target.reward.id || (target.action === 'void' && !note.trim())) return
+  const { action, reward: { id } } = target
+  mutating.value = id
   try {
-    await Promise.all([loadRelationships(), loadRewards()])
-  } catch {
-    showError('加载邀请返利数据失败')
-  } finally {
-    loading.value = false
-  }
+    const { reward } = action === 'retry' ? await referralApi.retryReferralReward(id, note || undefined) : await referralApi.voidReferralReward(id, note)
+    if (action === 'void') { if (reward.status === 'voided') toast.success('返利已作废'); else toast.error('返利状态已变化，未作废，请核对最新记录') }
+    else if (reward.status === 'applied') toast.success(`返利已发放${reward.reversed_amount_usd > 0 ? `，累计冲回 ${usd(reward.reversed_amount_usd)}` : ''}`)
+    else if (reward.status === 'reversed') toast.info('返利已全部冲回，没有新增可用赠款')
+    else if (reward.status === 'failed') toast.error('重试后仍发放失败，请核对记录')
+    else toast.info(`重试已受理，当前${reward.status === 'applying' ? '处理中' : reward.status === 'pending' ? '待发' : reward.status}`)
+  } catch { toast.error(action === 'void' ? '作废失败，记录可能已发放，请核对最新状态' : '重试失败，请核对最新状态') }
+  finally { mutating.value = null; closeOperation(); await refresh(); if (detailId.value === id) await loadDetail() }
 }
-
-async function retryReward(item: ReferralRewardRecord) {
-  mutatingRewardId.value = item.id
-  try {
-    const response = await referralApi.retryReferralReward(item.id, '管理员后台补发')
-    replaceReward(response.reward)
-    success('返利已补发')
-  } catch {
-    showError('补发失败')
-  } finally {
-    mutatingRewardId.value = null
-  }
-}
-
-async function voidReward(item: ReferralRewardRecord) {
-  mutatingRewardId.value = item.id
-  try {
-    const response = await referralApi.voidReferralReward(item.id, '管理员后台作废')
-    replaceReward(response.reward)
-    success('返利已作废')
-  } catch {
-    showError('作废失败')
-  } finally {
-    mutatingRewardId.value = null
-  }
-}
-
-function replaceReward(updated: ReferralRewardRecord) {
-  rewards.value = rewards.value.map(item => item.id === updated.id ? updated : item)
-}
-
-onMounted(() => {
-  void loadAll()
-})
+async function copy(value: string) { try { await navigator.clipboard.writeText(value); toast.success('已复制') } catch { toast.error('复制失败，请手动复制') } }
+onMounted(() => { void refresh() })
+onScopeDispose(() => { overviewSequence++; detailSequence++; operationSequence++ })
 </script>

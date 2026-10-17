@@ -108,6 +108,82 @@ fn build_empty_admin_system_data_state() -> GatewayDataState {
     )
 }
 
+#[tokio::test]
+async fn referral_system_import_applies_valid_rule_groups_independent_of_item_order() {
+    let data = build_empty_admin_system_data_state().with_system_config_values_for_tests(vec![
+        ("referral_enabled".to_string(), json!(true)),
+        (
+            "referral_reward_mode".to_string(),
+            json!("recharge_percent"),
+        ),
+        (
+            "referral_headcount_trigger".to_string(),
+            json!("email_verified"),
+        ),
+        ("require_email_verification".to_string(), json!(false)),
+    ]);
+    let state = AppState::new()
+        .expect("state")
+        .with_data_state_for_tests(data);
+    let (gateway_url, handle) = start_server(build_router_with_state(state.clone())).await;
+    let client = reqwest::Client::new();
+    let import = |configs: Value| {
+        let client = client.clone();
+        let url = format!("{gateway_url}/api/admin/system/config/import");
+        async move {
+            client.post(url)
+                .header(GATEWAY_HEADER, "rust-phase3b")
+                .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+                .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+                .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+                .json(&json!({"version":"2.2","merge_mode":"overwrite","global_models":[],"providers":[],"oauth_providers":[],"system_configs":configs}))
+                .send().await.expect("import request")
+        }
+    };
+    let response = import(json!([
+        {"key":"referral_reward_mode","value":"headcount"},
+        {"key":"require_email_verification","value":true}
+    ]))
+    .await;
+    let status = response.status();
+    let body: Value = response.json().await.expect("json");
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["stats"]["system_configs"]["updated"], json!(2));
+    assert_eq!(
+        state
+            .read_system_config_json_value("referral_reward_mode")
+            .await
+            .expect("read"),
+        Some(json!("headcount"))
+    );
+
+    let response = import(json!([
+        {"key":"require_email_verification","value":false},
+        {"key":"referral_enabled","value":false}
+    ]))
+    .await;
+    let status = response.status();
+    let body: Value = response.json().await.expect("json");
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        state
+            .read_system_config_json_value("require_email_verification")
+            .await
+            .expect("read"),
+        Some(json!(false))
+    );
+    let response = import(json!([{ "key":"referral_enabled","value":true }])).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        state
+            .read_system_config_json_value("referral_enabled")
+            .await
+            .expect("read"),
+        Some(json!(false))
+    );
+    handle.abort();
+}
+
 fn sample_system_import_payload() -> Value {
     json!({
         "version": "2.2",

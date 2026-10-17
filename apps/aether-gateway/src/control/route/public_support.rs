@@ -242,13 +242,15 @@ pub(super) fn classify_public_support_route(
                 | "/api/auth/verify-email"
                 | "/api/auth/verification-status"
         ))
-        || (method == http::Method::GET && normalized_path == "/api/auth/me")
+        || (method == http::Method::GET
+            && matches!(normalized_path, "/api/auth/me" | "/api/auth/invite-code"))
     {
         let route_kind = match normalized_path {
             "/api/auth/login" => "login",
             "/api/auth/refresh" => "refresh",
             "/api/auth/register" => "register",
             "/api/auth/me" => "me",
+            "/api/auth/invite-code" => "invite_code",
             "/api/auth/logout" => "logout",
             "/api/auth/send-verification-code" => "send_verification_code",
             "/api/auth/verify-email" => "verify_email",
@@ -885,11 +887,20 @@ pub(super) fn classify_public_support_route(
             "public:capabilities",
             false,
         ))
-    } else if method == http::Method::GET && normalized_path == "/api/modules/auth-status" {
+    } else if method == http::Method::GET
+        && matches!(
+            normalized_path,
+            "/api/modules/auth-status" | "/api/modules/user-status"
+        )
+    {
         Some(classified(
             "public_support",
             "modules",
-            "auth_status",
+            if normalized_path == "/api/modules/user-status" {
+                "user_status"
+            } else {
+                "auth_status"
+            },
             "public:modules",
             false,
         ))

@@ -347,7 +347,10 @@
               <SelectItem value="registration">
                 注册成功
               </SelectItem>
-              <SelectItem value="email_verified">
+              <SelectItem
+                value="email_verified"
+                :disabled="requireEmailVerification !== true"
+              >
                 邮箱验证完成
               </SelectItem>
               <SelectItem value="first_paid_order">
@@ -355,6 +358,16 @@
               </SelectItem>
             </SelectContent>
           </Select>
+          <p class="mt-2 text-xs text-muted-foreground">
+            邮箱验证返利需要先在“邮件设置”中启用注册邮箱验证，不会自动开启。
+          </p>
+          <p
+            v-if="referralHeadcountTrigger === 'email_verified' && requireEmailVerification !== true"
+            class="mt-1 text-xs text-destructive"
+            role="alert"
+          >
+            {{ verificationLookupFailed ? '暂时无法核实邮箱验证配置，请刷新后重试。' : requireEmailVerification === null ? '正在核实邮箱验证配置；请稍后重试。' : '注册邮箱验证未启用，请调整触发时机或先启用邮箱验证。' }}
+          </p>
         </div>
       </div>
 
@@ -444,6 +457,8 @@
 </template>
 
 <script setup lang="ts">
+import { onMounted, ref } from 'vue'
+import { authApi } from '@/api/auth'
 import Button from '@/components/ui/button.vue'
 import Input from '@/components/ui/input.vue'
 import Label from '@/components/ui/label.vue'
@@ -504,4 +519,16 @@ defineEmits<{
   'update:autoDeleteExpiredKeys': [value: boolean]
   'update:enableFormatConversion': [value: boolean]
 }>()
+const requireEmailVerification = ref<boolean | null>(null)
+const verificationLookupFailed = ref(false)
+onMounted(async () => {
+  try {
+    const settings = await authApi.getRegistrationSettings()
+    requireEmailVerification.value = settings.require_email_verification
+  } catch {
+    verificationLookupFailed.value = true
+    // 无法核实时保持未知，避免把依赖配置误报为已开启。
+  }
+})
+
 </script>

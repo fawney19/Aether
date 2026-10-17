@@ -86,7 +86,34 @@ export interface RefundFailRequest {
   reason: string
 }
 
-export interface RefundCompleteRequest {
+export interface ReferralRefundPreview {
+  refund_id: string
+  applicable: boolean
+  stage: 'process' | 'complete'
+  rewards: Array<{
+    inviter_user_id: string
+    inviter_username: string | null
+    expected_reversal_usd: number
+    available_gift_usd: number
+    deductible_usd: number
+    shortfall_usd: number
+  }>
+  total_expected_reversal_usd: number
+  total_deductible_usd: number
+  total_shortfall_usd: number
+  confirmation_token: string | null
+}
+
+export interface ReferralRefundConfirmation {
+  referral_shortfall_confirmation?: string
+}
+
+export interface ReferralRefundReversal {
+  reversed_amount_usd: number
+  pending_reversal_amount_usd: number
+}
+
+export interface RefundCompleteRequest extends ReferralRefundConfirmation {
   gateway_refund_id?: string
   payout_reference?: string
   payout_proof?: Record<string, unknown>
@@ -154,8 +181,22 @@ export const adminWalletApi = {
     )
   },
 
-  async getWalletDetail(walletId: string): Promise<AdminWalletDetailResponse> {
-    const response = await apiClient.get<AdminWalletDetailResponse>(`/api/admin/wallets/${walletId}`)
+  async getWalletDetail(walletId: string, signal?: AbortSignal): Promise<AdminWalletDetailResponse> {
+    const response = await apiClient.get<AdminWalletDetailResponse>(`/api/admin/wallets/${walletId}`, { signal })
+    return response.data
+  },
+
+  async getRefundDetail(walletId: string, refundId: string, signal?: AbortSignal): Promise<{ refund: AdminGlobalRefund }> {
+    const response = await apiClient.get<{ refund: AdminGlobalRefund }>(
+      `/api/admin/wallets/${walletId}/refunds/${refundId}`, { signal },
+    )
+    return response.data
+  },
+
+  async getTransactionDetail(walletId: string, transactionId: string, signal?: AbortSignal): Promise<{ transaction: AdminLedgerTransaction }> {
+    const response = await apiClient.get<{ transaction: AdminLedgerTransaction }>(
+      `/api/admin/wallets/${walletId}/transactions/${transactionId}`, { signal },
+    )
     return response.data
   },
 
@@ -243,7 +284,14 @@ export const adminWalletApi = {
     return response.data
   },
 
-  async processRefund(walletId: string, refundId: string): Promise<{
+  async getReferralRefundPreview(walletId: string, refundId: string, stage: 'process' | 'complete', signal?: AbortSignal): Promise<ReferralRefundPreview> {
+    const response = await apiClient.get<ReferralRefundPreview>(
+      `/api/admin/wallets/${walletId}/refunds/${refundId}/referral-preview`, { params: { stage }, ...(signal ? { signal } : {}) }
+    )
+    return response.data
+  },
+
+  async processRefund(walletId: string, refundId: string, payload: ReferralRefundConfirmation = {}): Promise<{
     wallet: AdminWallet
     refund: RefundRequest
     transaction: WalletTransaction
@@ -254,7 +302,7 @@ export const adminWalletApi = {
     transaction: WalletTransaction
   }>(
       `/api/admin/wallets/${walletId}/refunds/${refundId}/process`,
-      {}
+      payload
     )
     return response.data
   },
@@ -279,8 +327,8 @@ export const adminWalletApi = {
     walletId: string,
     refundId: string,
     payload: RefundCompleteRequest
-  ): Promise<{ refund: RefundRequest }> {
-    const response = await apiClient.post<{ refund: RefundRequest }>(
+  ): Promise<{ refund: RefundRequest; referral_reversal?: ReferralRefundReversal }> {
+    const response = await apiClient.post<{ refund: RefundRequest; referral_reversal?: ReferralRefundReversal }>(
       `/api/admin/wallets/${walletId}/refunds/${refundId}/complete`,
       payload
     )

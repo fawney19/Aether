@@ -3,6 +3,7 @@ import type { LocationQuery, RouteLocationNormalizedLoaded } from 'vue-router'
 
 import { buildBreadcrumbs, buildNavigation } from '@/layouts/main-layout/navigation'
 import type { MessageKey } from '@/i18n'
+import type { ModuleStatus } from '@/api/modules'
 
 const translate = (key: MessageKey) => `tx:${key}`
 
@@ -21,6 +22,27 @@ function route(path: string, name?: string, meta: Record<string, unknown> = {}, 
 }
 
 describe('main layout navigation builder', () => {
+  it.each([true, false])('keeps one admin referral history entry with active=%s while user entry follows the switch', active => {
+    const referral: ModuleStatus = {
+      name: 'referral', available: active, enabled: active, active,
+      config_validated: true, config_error: null, display_name: '邀请返利',
+      description: '', category: 'integration', health: 'healthy',
+      admin_route: '/admin/referrals', admin_menu_group: 'management',
+      admin_menu_icon: 'Gift', admin_menu_order: 70,
+    }
+    const options = { modules: { referral }, isModuleActive: () => active, t: translate }
+    const admin = buildNavigation({ ...options, canAccessAdmin: true }).flatMap(group => group.items)
+    expect(admin.filter(item => item.href === '/admin/referrals')).toHaveLength(1)
+    const user = buildNavigation({ ...options, canAccessAdmin: false }).flatMap(group => group.items)
+    expect(user.some(item => item.href === '/dashboard/referral')).toBe(active)
+    expect(user.some(item => item.href === '/admin/referrals')).toBe(false)
+  })
+
+  it('keeps administrator referral history reachable when module status has not loaded', () => {
+    const items = buildNavigation({ canAccessAdmin: true, modules: {}, isModuleActive: () => false, t: translate }).flatMap(group => group.items)
+    expect(items.filter(item => item.href === '/admin/referrals')).toHaveLength(1)
+  })
+
   it('builds user navigation from translation keys and active modules', () => {
     const navigation = buildNavigation({
       canAccessAdmin: false,

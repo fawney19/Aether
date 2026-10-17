@@ -3509,6 +3509,7 @@ impl<'a> AdminAppState<'a> {
             oauth_provider_types.insert(provider_type);
         }
 
+        let mut referral_settings = serde_json::Map::new();
         for imported_config_item in imported_system_configs {
             let config = imported_config_item.value;
             let normalized_key = normalize_imported_system_config_key(&config.key);
@@ -3534,6 +3535,9 @@ impl<'a> AdminAppState<'a> {
             }))
             .map_err(|err| GatewayError::Internal(err.to_string()))?;
             let update = routed!(parse_admin_system_config_update(&config.key, &request_body));
+            if crate::AppState::is_referral_settings_key(&normalized_key) {
+                referral_settings.insert(update.normalized_key.clone(), update.value.clone());
+            }
             if is_sensitive_admin_system_config_key(&update.normalized_key)
                 && update.value.as_str().is_some_and(|raw| !raw.is_empty())
             {
@@ -3553,6 +3557,11 @@ impl<'a> AdminAppState<'a> {
             existing_system_config_keys.insert(normalized_key);
         }
 
+        if !referral_settings.is_empty() {
+            self.app()
+                .validate_referral_settings_overlay(&referral_settings)
+                .await?;
+        }
         Ok(Ok(()))
     }
 
@@ -6707,6 +6716,8 @@ impl<'a> AdminAppState<'a> {
             }
         }
 
+        let mut referral_settings = serde_json::Map::new();
+        let mut referral_config_changes = Vec::new();
         for imported_config_item in imported_system_configs {
             let (_, system_config) = imported_config_item.into_parts();
             let ImportedSystemConfig {
@@ -6743,6 +6754,13 @@ impl<'a> AdminAppState<'a> {
                 }))
                 .map_err(|err| GatewayError::Internal(err.to_string()))?,
             );
+            if crate::AppState::is_referral_settings_key(&normalized_key) {
+                let update = routed!(parse_admin_system_config_update(&key, &request_bytes));
+                referral_settings.insert(update.normalized_key, update.value);
+                referral_config_changes.push((normalized_key.clone(), exists));
+                existing_system_config_keys.insert(normalized_key);
+                continue;
+            }
             let update_result =
                 apply_admin_system_config_update(self, &key, &request_bytes).await?;
             match update_result {
@@ -6758,6 +6776,24 @@ impl<'a> AdminAppState<'a> {
                     }
                 }
                 Err((status, payload)) => return Ok(Err((status, payload))),
+            }
+        }
+
+        // A valid imported rule group must not depend on JSON field ordering.
+        // The same transaction and dependency check also apply during checkpoint restoration.
+        if !referral_settings.is_empty() {
+            self.app()
+                .update_referral_settings(referral_settings)
+                .await?;
+            for (key, exists) in referral_config_changes {
+                if exists {
+                    stats.system_configs.updated += 1;
+                } else {
+                    stats.system_configs.created += 1;
+                    if let Some(journal) = mutation_journal.as_deref_mut() {
+                        journal.system_config_keys.insert(key);
+                    }
+                }
             }
         }
 

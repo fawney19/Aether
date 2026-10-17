@@ -2,6 +2,7 @@ use crate::data::state::{
     ReferralRelationshipListQuery, ReferralRelationshipRecord, ReferralRewardConfig,
     ReferralRewardListQuery, ReferralRewardRecord, ReferralUserDashboard,
 };
+use crate::handlers::shared::{system_config_bool, REFERRAL_ENABLED_CONFIG_KEY};
 use crate::{AppState, GatewayError};
 use axum::http::StatusCode;
 use tracing::warn;
@@ -17,6 +18,11 @@ fn safe_referral_invalid_input_detail(detail: &str) -> &'static str {
         "不能使用自己的邀请码注册" => "不能使用自己的邀请码注册",
         "仅失败返利可以补发" => "仅失败返利可以补发",
         "返利金额无效，无法补发" => "返利金额无效，无法补发",
+        "仅待发或失败返利可以作废" => "仅待发或失败返利可以作废",
+        "返利状态已变化，请刷新后重试" => "返利状态已变化，请刷新后重试",
+        "邮箱验证返利必须启用注册邮箱验证" | "邮箱验证返利必须同时启用注册邮箱验证" => {
+            "邮箱验证返利必须同时启用注册邮箱验证"
+        }
         _ => REFERRAL_INVALID_INPUT_FALLBACK,
     }
 }
@@ -33,28 +39,15 @@ fn referral_data_error(err: aether_data::DataLayerError) -> GatewayError {
                 );
             }
             GatewayError::Client {
-                status: StatusCode::BAD_REQUEST,
+                status: if safe_detail == "返利状态已变化，请刷新后重试" {
+                    StatusCode::CONFLICT
+                } else {
+                    StatusCode::BAD_REQUEST
+                },
                 message: safe_detail.to_string(),
             }
         }
         other => GatewayError::Internal(other.to_string()),
-    }
-}
-
-fn config_bool(value: Option<&serde_json::Value>, default: bool) -> bool {
-    match value {
-        Some(serde_json::Value::Bool(value)) => *value,
-        Some(serde_json::Value::String(value)) => {
-            match value.trim().to_ascii_lowercase().as_str() {
-                "true" | "1" | "yes" | "on" => true,
-                "false" | "0" | "no" | "off" => false,
-                _ => default,
-            }
-        }
-        Some(serde_json::Value::Number(value)) => {
-            value.as_i64().map(|value| value != 0).unwrap_or(default)
-        }
-        _ => default,
     }
 }
 
@@ -69,24 +62,131 @@ fn config_string(value: Option<&serde_json::Value>) -> Option<String> {
     }
 }
 
-fn config_f64(value: Option<&serde_json::Value>, default: f64) -> f64 {
-    match value {
-        Some(serde_json::Value::Number(value)) => value.as_f64().unwrap_or(default),
-        Some(serde_json::Value::String(value)) => value.trim().parse::<f64>().unwrap_or(default),
-        _ => default,
-    }
-}
-
-fn config_percent(value: Option<&serde_json::Value>) -> f64 {
-    let value = config_f64(value, 0.0);
-    if value.is_finite() && value > 0.0 && value <= 100.0 {
-        value
-    } else {
-        0.0
-    }
-}
-
 impl AppState {
+    pub(crate) fn is_referral_settings_key(key: &str) -> bool {
+        matches!(
+            key,
+            "referral_enabled"
+                | "referral_reward_mode"
+                | "referral_recharge_percent"
+                | "referral_headcount_amount_usd"
+                | "referral_headcount_trigger"
+                | "require_email_verification"
+        )
+    }
+
+    pub(crate) async fn register_local_auth_user_with_referral(
+        &self,
+        email: Option<String>,
+        email_verified: bool,
+        username: String,
+        password_hash: String,
+        initial_gift_usd: f64,
+        invite_code: Option<&str>,
+        source: Option<serde_json::Value>,
+        config: Option<ReferralRewardConfig>,
+        privacy_version: Option<&str>,
+        default_group_id: Option<&str>,
+    ) -> Result<
+        Option<(
+            aether_data::repository::users::StoredUserAuthRecord,
+            aether_data::repository::wallet::StoredWalletSnapshot,
+            bool,
+        )>,
+        GatewayError,
+    > {
+        self.data
+            .register_local_auth_user_with_referral(
+                email,
+                email_verified,
+                username,
+                password_hash,
+                initial_gift_usd,
+                false,
+                invite_code,
+                source,
+                config,
+                privacy_version,
+                default_group_id,
+            )
+            .await
+            .map_err(referral_data_error)
+    }
+
+    pub(crate) async fn settle_registration_referral_reward(
+        &self,
+        user_id: &str,
+    ) -> Result<(), GatewayError> {
+        self.data
+            .settle_registration_referral_rewards(user_id)
+            .await
+            .map_err(|error| GatewayError::Internal(error.to_string()))?;
+        Ok(())
+    }
+    pub(crate) async fn validate_referral_invite_code(
+        &self,
+        code: Option<&str>,
+    ) -> Result<(), GatewayError> {
+        self.data
+            .validate_referral_invite_code(code)
+            .await
+            .map_err(referral_data_error)
+    }
+
+    pub(crate) async fn validate_referral_settings_overlay(
+        &self,
+        values: &serde_json::Map<String, serde_json::Value>,
+    ) -> Result<(), GatewayError> {
+        let read = |key: &'static str| async {
+            if let Some(value) = values.get(key) {
+                Ok::<_, GatewayError>(Some(value.clone()))
+            } else {
+                self.read_system_config_json_value_strong(key).await
+            }
+        };
+        let mode = read("referral_reward_mode").await?;
+        let enabled = read("referral_enabled").await?;
+        let trigger = read("referral_headcount_trigger").await?;
+        let require = read("require_email_verification").await?;
+        if system_config_bool(enabled.as_ref(), false)
+            && matches!(
+                config_string(mode.as_ref()).as_deref(),
+                Some("headcount" | "both")
+            )
+            && config_string(trigger.as_ref()).as_deref() == Some("email_verified")
+            && !system_config_bool(require.as_ref(), false)
+        {
+            return Err(GatewayError::Client {
+                status: StatusCode::BAD_REQUEST,
+                message: "邮箱验证返利必须同时启用注册邮箱验证".to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn update_referral_settings(
+        &self,
+        values: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<(), GatewayError> {
+        #[cfg(test)]
+        if !self.has_referral_data_backend() {
+            self.validate_referral_settings_overlay(&values).await?;
+            for (key, value) in values {
+                self.upsert_system_config_json_value(&key, &value, None)
+                    .await?;
+            }
+            return Ok(());
+        }
+        self.data
+            .update_referral_settings(values.clone())
+            .await
+            .map_err(referral_data_error)?;
+        for (key, value) in values {
+            self.remember_system_config_write(&key, Some(value));
+        }
+        Ok(())
+    }
+
     pub(crate) fn has_referral_data_backend(&self) -> bool {
         self.data.has_referral_data_backend()
     }
@@ -105,68 +205,19 @@ impl AppState {
     pub(crate) async fn referral_reward_config(
         &self,
     ) -> Result<Option<ReferralRewardConfig>, GatewayError> {
-        let enabled = self
-            .read_system_config_json_value("referral_enabled")
-            .await?;
-        if !config_bool(enabled.as_ref(), false) {
-            return Ok(None);
+        let mut values = serde_json::Map::new();
+        for key in [
+            REFERRAL_ENABLED_CONFIG_KEY,
+            "referral_reward_mode",
+            "referral_recharge_percent",
+            "referral_headcount_amount_usd",
+            "referral_headcount_trigger",
+        ] {
+            if let Some(value) = self.read_system_config_json_value(key).await? {
+                values.insert(key.to_string(), value);
+            }
         }
-        let mode = self
-            .read_system_config_json_value("referral_reward_mode")
-            .await?;
-        let mode = config_string(mode.as_ref()).unwrap_or_else(|| "percent".to_string());
-        let percent = self
-            .read_system_config_json_value("referral_recharge_percent")
-            .await?;
-        let headcount_amount = self
-            .read_system_config_json_value("referral_headcount_amount_usd")
-            .await?;
-        let headcount_trigger = self
-            .read_system_config_json_value("referral_headcount_trigger")
-            .await?;
-        let headcount_trigger =
-            config_string(headcount_trigger.as_ref()).unwrap_or_else(|| "registration".to_string());
-        Ok(Some(ReferralRewardConfig {
-            percent_enabled: matches!(mode.as_str(), "percent" | "both"),
-            percent_rate: config_percent(percent.as_ref()),
-            headcount_enabled: matches!(mode.as_str(), "headcount" | "both"),
-            headcount_amount_usd: config_f64(headcount_amount.as_ref(), 0.0),
-            headcount_trigger,
-        }))
-    }
-
-    pub(crate) async fn bind_referral_invite_after_registration(
-        &self,
-        user_id: &str,
-        email_verified: bool,
-        invite_code: Option<&str>,
-        source: Option<serde_json::Value>,
-    ) -> Result<(), GatewayError> {
-        let Some(config) = self.referral_reward_config().await? else {
-            return Ok(());
-        };
-        let relationship = self
-            .data
-            .bind_referral_invite_code(user_id, invite_code, source)
-            .await
-            .map_err(referral_data_error)?;
-        let trigger_matches = config.headcount_trigger == "registration"
-            || (config.headcount_trigger == "email_verified" && email_verified);
-        if relationship.is_some()
-            && config.headcount_enabled
-            && trigger_matches
-            && config.headcount_amount_usd > 0.0
-        {
-            self.data
-                .apply_registration_referral_reward(
-                    user_id,
-                    config.headcount_amount_usd,
-                    &config.headcount_trigger,
-                )
-                .await
-                .map_err(|err| GatewayError::Internal(err.to_string()))?;
-        }
-        Ok(())
+        Ok(aether_data_contracts::repository::referrals::parse_referral_reward_config(&values))
     }
 
     pub(crate) async fn referral_dashboard(
@@ -213,6 +264,51 @@ impl AppState {
             .map_err(|err| GatewayError::Internal(err.to_string()))
     }
 
+    pub(crate) async fn referral_admin_overview(
+        &self,
+    ) -> Result<Option<serde_json::Value>, GatewayError> {
+        let Some(stats) = self
+            .data
+            .referral_admin_overview_stats()
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))?
+        else {
+            return Ok(None);
+        };
+        let mut values = serde_json::Map::new();
+        for key in [
+            "referral_enabled",
+            "referral_reward_mode",
+            "referral_recharge_percent",
+            "referral_headcount_amount_usd",
+            "referral_headcount_trigger",
+        ] {
+            if let Some(value) = self.read_system_config_json_value(key).await? {
+                values.insert(key.to_owned(), value);
+            }
+        }
+        use aether_data_contracts::repository::referrals::{
+            referral_config_bool, referral_config_number, referral_config_string,
+        };
+        Ok(Some(serde_json::json!({"stats": stats,"rules":{
+            "available":crate::handlers::shared::module_available_from_env("REFERRAL_AVAILABLE",true),
+            "enabled":referral_config_bool(values.get("referral_enabled"),false),
+            "reward_mode":referral_config_string(values.get("referral_reward_mode")).unwrap_or_else(||"percent".into()),
+            "recharge_percent":referral_config_number(values.get("referral_recharge_percent")),
+            "headcount_amount_usd":referral_config_number(values.get("referral_headcount_amount_usd")),
+            "headcount_trigger":referral_config_string(values.get("referral_headcount_trigger")).unwrap_or_else(||"registration".into())
+        }})))
+    }
+    pub(crate) async fn referral_reward_detail(
+        &self,
+        reward_id: &str,
+    ) -> Result<Option<crate::data::state::ReferralRewardDetail>, GatewayError> {
+        self.data
+            .referral_reward_detail(reward_id)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
     pub(crate) async fn retry_referral_reward(
         &self,
         reward_id: &str,
@@ -241,11 +337,8 @@ impl AppState {
         &self,
         order: &aether_data::repository::wallet::StoredAdminPaymentOrder,
     ) -> Result<Vec<ReferralRewardRecord>, GatewayError> {
-        let Some(config) = self.referral_reward_config().await? else {
-            return Ok(Vec::new());
-        };
         self.data
-            .apply_paid_order_referral_rewards(&order.id, config)
+            .settle_paid_order_referral_rewards(&order.id)
             .await
             .map_err(|err| GatewayError::Internal(err.to_string()))
     }
@@ -254,11 +347,8 @@ impl AppState {
         &self,
         order_id: &str,
     ) -> Result<Vec<ReferralRewardRecord>, GatewayError> {
-        let Some(config) = self.referral_reward_config().await? else {
-            return Ok(Vec::new());
-        };
         self.data
-            .apply_paid_order_referral_rewards(order_id, config)
+            .settle_paid_order_referral_rewards(order_id)
             .await
             .map_err(|err| GatewayError::Internal(err.to_string()))
     }
@@ -277,9 +367,8 @@ impl AppState {
     pub(crate) async fn reconcile_referral_rewards_once(
         &self,
     ) -> Result<crate::data::state::ReferralReconciliationSummary, GatewayError> {
-        let config = self.referral_reward_config().await?;
         self.data
-            .reconcile_referral_rewards_once(config)
+            .reconcile_referral_rewards_once(None)
             .await
             .map_err(|err| GatewayError::Internal(err.to_string()))
     }
@@ -308,6 +397,20 @@ mod tests {
                 assert_eq!(message, REFERRAL_INVALID_INPUT_FALLBACK);
                 assert!(!message.contains("reward-secret"));
                 assert!(!message.contains("referral_rewards"));
+            }
+            other => panic!("expected client error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn referral_void_race_is_a_safe_conflict() {
+        let error = referral_data_error(aether_data::DataLayerError::InvalidInput(
+            "返利状态已变化，请刷新后重试".to_string(),
+        ));
+        match error {
+            crate::GatewayError::Client { status, message } => {
+                assert_eq!(status, axum::http::StatusCode::CONFLICT);
+                assert_eq!(message, "返利状态已变化，请刷新后重试");
             }
             other => panic!("expected client error, got {other:?}"),
         }

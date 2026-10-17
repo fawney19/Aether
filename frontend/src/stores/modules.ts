@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
-import { modulesApi, type ModuleStatus } from '@/api/modules'
+import { modulesApi, type ModuleStatus, type UserModuleStatus } from '@/api/modules'
 import { log } from '@/utils/logger'
 import { parseApiError } from '@/utils/errorParser'
 
@@ -10,6 +10,37 @@ export const useModuleStore = defineStore('modules', () => {
   const loading = ref(false)
   const error = ref<string | null>(null)
   let fetchModulesPromise: Promise<Record<string, ModuleStatus>> | null = null
+  const userModules = ref<Record<string, UserModuleStatus>>({})
+  const userLoaded = ref(false)
+  const userLoading = ref(false)
+  let fetchUserModulesPromise: Promise<Record<string, UserModuleStatus>> | null = null
+
+  async function fetchUserModules() {
+    if (fetchUserModulesPromise) return fetchUserModulesPromise
+    userLoading.value = true
+    fetchUserModulesPromise = (async () => {
+      try {
+        const nextModules = await modulesApi.getUserStatus()
+        userModules.value = nextModules
+        userLoaded.value = true
+        return nextModules
+      } catch (err) {
+        // 刷新失败时清除旧状态，避免继续显示已经关闭的功能入口。
+        userModules.value = {}
+        userLoaded.value = false
+        log.error('Failed to fetch user modules status', err)
+        throw err
+      } finally {
+        userLoading.value = false
+        fetchUserModulesPromise = null
+      }
+    })()
+    return fetchUserModulesPromise
+  }
+
+  function isUserActive(moduleName: string): boolean {
+    return userModules.value[moduleName]?.active ?? false
+  }
 
   /**
    * 获取所有模块状态
@@ -106,6 +137,11 @@ export const useModuleStore = defineStore('modules', () => {
   })
 
   return {
+    userModules,
+    userLoaded,
+    userLoading,
+    fetchUserModules,
+    isUserActive,
     modules,
     loaded,
     loading,

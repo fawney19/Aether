@@ -1002,6 +1002,19 @@ export const adminApi = {
   },
 
   // 更新系统配置
+  async updateReferralSettings(payload: {
+    referral_enabled?: boolean
+    referral_reward_mode?: string
+    referral_recharge_percent?: number
+    referral_headcount_amount_usd?: number
+    referral_headcount_trigger?: string
+    require_email_verification?: boolean
+  }): Promise<void> {
+    await apiClient.put('/api/admin/system/referral-settings', payload)
+    cache.delete(ALL_SYSTEM_CONFIGS_CACHE_KEY)
+    for (const key of Object.keys(payload)) cache.delete(buildCacheKey('admin:system:config', { key }))
+  },
+
   async updateSystemConfig(
     key: string,
     value: unknown,

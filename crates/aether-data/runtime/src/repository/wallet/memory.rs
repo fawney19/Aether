@@ -943,6 +943,20 @@ impl WalletReadRepository for InMemoryWalletRepository {
         Ok(StoredAdminWalletRefundRequestPage { items, total })
     }
 
+    async fn find_admin_wallet_transaction(
+        &self,
+        wallet_id: &str,
+        transaction_id: &str,
+    ) -> Result<Option<StoredAdminWalletTransaction>, DataLayerError> {
+        Ok(self
+            .wallet_transactions_by_id
+            .read()
+            .expect("wallet repo lock")
+            .get(transaction_id)
+            .filter(|tx| tx.wallet_id == wallet_id)
+            .cloned())
+    }
+
     async fn list_admin_wallet_transactions(
         &self,
         wallet_id: &str,

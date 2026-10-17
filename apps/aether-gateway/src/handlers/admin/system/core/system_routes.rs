@@ -3,8 +3,9 @@ use crate::handlers::admin::request::{AdminAppState, AdminRequestContext, System
 use crate::handlers::admin::shared::attach_admin_audit_response;
 use crate::handlers::admin::shared::build_proxy_error_response;
 use crate::handlers::admin::system::shared::configs::{
-    apply_admin_system_config_update, build_admin_system_config_detail_payload,
-    build_admin_system_configs_payload, delete_admin_system_config,
+    apply_admin_referral_settings_update, apply_admin_system_config_update,
+    build_admin_system_config_detail_payload, build_admin_system_configs_payload,
+    delete_admin_system_config,
 };
 use crate::handlers::admin::system::shared::paths::{
     admin_system_config_key_from_path, admin_system_email_template_preview_type_from_path,
@@ -524,6 +525,32 @@ pub(super) async fn maybe_build_local_admin_core_system_response(
             object_type,
             object_id,
         )));
+    }
+
+    if decision.route_kind.as_deref() == Some("referral_settings_set")
+        && request_method == http::Method::PUT
+    {
+        let Some(body) = request_body else {
+            return Ok(Some(
+                (
+                    http::StatusCode::BAD_REQUEST,
+                    Json(json!({"detail":"请求体不能为空"})),
+                )
+                    .into_response(),
+            ));
+        };
+        return Ok(Some(
+            match apply_admin_referral_settings_update(state, body).await? {
+                Ok(payload) => attach_admin_audit_response(
+                    Json(payload).into_response(),
+                    "admin_referral_settings_updated",
+                    "update_referral_settings",
+                    "system_settings",
+                    "referral",
+                ),
+                Err((status, payload)) => (status, Json(payload)).into_response(),
+            },
+        ));
     }
 
     if decision.route_kind.as_deref() == Some("settings_set")

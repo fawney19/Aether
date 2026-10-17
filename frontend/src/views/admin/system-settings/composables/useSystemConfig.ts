@@ -1,6 +1,7 @@
 import { ref, computed } from 'vue'
 import { useToast } from '@/composables/useToast'
 import { adminApi } from '@/api/admin'
+import { parseApiError } from '@/utils/errorParser'
 import { log } from '@/utils/logger'
 import { useSiteInfo } from '@/composables/useSiteInfo'
 
@@ -412,31 +413,6 @@ export function useSystemConfig() {
           description: 'Cloudflare Turnstile 允许的 hostname 列表',
         },
         {
-          key: 'referral_enabled',
-          value: systemConfig.value.referral_enabled,
-          description: '邀请返利开关',
-        },
-        {
-          key: 'referral_reward_mode',
-          value: systemConfig.value.referral_reward_mode,
-          description: '邀请返利方式',
-        },
-        {
-          key: 'referral_recharge_percent',
-          value: systemConfig.value.referral_recharge_percent,
-          description: '邀请充值比例返利百分比',
-        },
-        {
-          key: 'referral_headcount_amount_usd',
-          value: systemConfig.value.referral_headcount_amount_usd,
-          description: '邀请人头返利金额（美元）',
-        },
-        {
-          key: 'referral_headcount_trigger',
-          value: systemConfig.value.referral_headcount_trigger,
-          description: '邀请人头返利触发时机',
-        },
-        {
           key: 'registration_privacy_policy_enabled',
           value: systemConfig.value.registration_privacy_policy_enabled,
           description: '注册隐私政策确认开关',
@@ -476,6 +452,14 @@ export function useSystemConfig() {
         })
       }
 
+      // 相关规则一次保存，避免并行单项写入产生中间态或错误覆盖邮箱配置。
+      await adminApi.updateReferralSettings({
+        referral_enabled: systemConfig.value.referral_enabled,
+        referral_reward_mode: systemConfig.value.referral_reward_mode,
+        referral_recharge_percent: systemConfig.value.referral_recharge_percent,
+        referral_headcount_amount_usd: systemConfig.value.referral_headcount_amount_usd,
+        referral_headcount_trigger: systemConfig.value.referral_headcount_trigger,
+      })
       await Promise.all(
         configItems.map((item) =>
           adminApi.updateSystemConfig(item.key, item.value, item.description)
@@ -519,7 +503,7 @@ export function useSystemConfig() {
       }
       success('基础配置已保存')
     } catch (err) {
-      error('保存配置失败')
+      error(parseApiError(err, '保存配置失败'))
       log.error('保存基础配置失败:', err)
     } finally {
       basicConfigLoading.value = false

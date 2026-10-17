@@ -1,13 +1,11 @@
 use crate::backup::config::S3BackupConfig;
 use crate::bark_push::bark_push_configured;
 use crate::handlers::admin::request::AdminAppState;
-use crate::handlers::shared::{module_available_from_env, system_config_bool};
-use crate::important_notification::{
-    important_notification_configured, IMPORTANT_NOTIFICATION_ENABLED_KEY,
-    LEGACY_NOTIFICATION_EMAIL_ENABLED_KEY,
+use crate::handlers::shared::{
+    module_available_from_env, module_enabled_config_key, read_module_enabled,
 };
+use crate::important_notification::important_notification_configured;
 use crate::server_chan_push::server_chan_push_configured;
-use crate::system_features::ENABLE_MODEL_DIRECTIVES_CONFIG_KEY;
 use crate::GatewayError;
 use aether_admin::system as admin_system_kernel;
 use serde_json::json;
@@ -231,15 +229,7 @@ pub(crate) fn admin_module_name_from_enabled_path(request_path: &str) -> Option<
 }
 
 pub(crate) fn admin_module_enabled_config_key(module: &AdminModuleDefinition) -> String {
-    if module.name == "model_directives" {
-        ENABLE_MODEL_DIRECTIVES_CONFIG_KEY.to_string()
-    } else if module.name == "important_notification" {
-        IMPORTANT_NOTIFICATION_ENABLED_KEY.to_string()
-    } else if module.name == "s3_backup" {
-        crate::backup::S3_BACKUP_ENABLED_KEY.to_string()
-    } else {
-        format!("module.{}.enabled", module.name)
-    }
+    module_enabled_config_key(module.name)
 }
 
 fn admin_module_available(module: &AdminModuleDefinition) -> bool {
@@ -358,21 +348,7 @@ pub(crate) async fn build_admin_module_status_payload(
     runtime: &AdminModuleRuntimeState,
 ) -> Result<serde_json::Value, GatewayError> {
     let available = admin_module_available(module);
-    let enabled = if available {
-        let enabled_value = state
-            .read_system_config_json_value(&admin_module_enabled_config_key(module))
-            .await?;
-        let enabled_value = if module.name == "important_notification" && enabled_value.is_none() {
-            state
-                .read_system_config_json_value(LEGACY_NOTIFICATION_EMAIL_ENABLED_KEY)
-                .await?
-        } else {
-            enabled_value
-        };
-        system_config_bool(enabled_value.as_ref(), false)
-    } else {
-        false
-    };
+    let enabled = read_module_enabled(state.app(), module.name, available).await?;
     let (config_validated, config_error) = if available {
         build_admin_module_validation_result(module, runtime)
     } else {
