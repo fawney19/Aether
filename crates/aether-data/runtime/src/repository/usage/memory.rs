@@ -2840,6 +2840,9 @@ impl UsageReadRepository for InMemoryUsageReadRepository {
                 {
                     continue;
                 }
+                if !request.matches_model(&item.model, item.target_model.as_deref()) {
+                    continue;
+                }
 
                 summary.request_count = summary.request_count.saturating_add(1);
                 if item.usage_available() {
