@@ -228,6 +228,33 @@ fn extract_system_text(system: Option<&Value>) -> (String, Option<Value>) {
     }
 }
 
+fn cache_control_uses_one_hour(value: &Value) -> bool {
+    value
+        .get("cache_control")
+        .and_then(|cache_control| cache_control.get("ttl"))
+        .and_then(Value::as_str)
+        .is_some_and(|ttl| ttl.trim().eq_ignore_ascii_case("1h"))
+}
+
+fn cache_control_scope_uses_one_hour(scope: Option<&Value>) -> bool {
+    let Some(items) = scope.and_then(Value::as_array) else {
+        return false;
+    };
+    items.iter().any(|item| {
+        cache_control_uses_one_hour(item)
+            || item
+                .get("content")
+                .and_then(Value::as_array)
+                .is_some_and(|blocks| blocks.iter().any(cache_control_uses_one_hour))
+    })
+}
+
+fn client_uses_one_hour_cache_control(body: &Map<String, Value>) -> bool {
+    ["tools", "system", "messages"]
+        .iter()
+        .any(|field| cache_control_scope_uses_one_hour(body.get(*field)))
+}
+
 fn rewrite_system_and_migrate_instructions(
     body: &mut Map<String, Value>,
     cli_version: &str,
@@ -235,6 +262,11 @@ fn rewrite_system_and_migrate_instructions(
     identity_only: bool,
 ) {
     let (original_text, original_cache_control) = extract_system_text(body.get("system"));
+    let injected_cache_control = if client_uses_one_hour_cache_control(body) {
+        json!({"type": "ephemeral", "ttl": "1h"})
+    } else {
+        json!({"type": "ephemeral", "ttl": "5m"})
+    };
 
     let mut system = vec![
         json!({"type": "text", "text": billing_header_text(first_user_text, cli_version)}),
@@ -244,7 +276,7 @@ fn rewrite_system_and_migrate_instructions(
         system.push(json!({
             "type": "text",
             "text": CLAUDE_CODE_SYSTEM_PROMPT_EXPANSION,
-            "cache_control": {"type": "ephemeral", "ttl": "5m"},
+            "cache_control": injected_cache_control,
         }));
     }
     body.insert("system".to_string(), Value::Array(system));
@@ -499,6 +531,59 @@ mod tests {
         );
         assert_eq!(messages[1]["role"], "assistant");
         assert_eq!(messages[2]["content"], "hello world, please help");
+    }
+
+    #[test]
+    fn injected_cache_ttl_follows_client_one_hour_markers_from_any_scope() {
+        let one_hour = json!({"type": "ephemeral", "ttl": "1h"});
+        let cases = [
+            (
+                "system",
+                json!({
+                    "system": [{
+                        "type": "text",
+                        "text": "client system",
+                        "cache_control": one_hour.clone(),
+                    }],
+                    "messages": [{"role": "user", "content": "hi"}],
+                }),
+            ),
+            (
+                "messages",
+                json!({
+                    "system": "client system",
+                    "messages": [{
+                        "role": "user",
+                        "content": [{
+                            "type": "text",
+                            "text": "hi",
+                            "cache_control": one_hour.clone(),
+                        }],
+                    }],
+                }),
+            ),
+            (
+                "tools",
+                json!({
+                    "system": "client system",
+                    "tools": [{
+                        "name": "read",
+                        "input_schema": {"type": "object"},
+                        "cache_control": one_hour.clone(),
+                    }],
+                    "messages": [{"role": "user", "content": "hi"}],
+                }),
+            ),
+        ];
+
+        for (scope, mut body) in cases {
+            body["model"] = json!("claude-sonnet-5-5");
+            assert!(apply_claude_code_body_mimicry(&mut body, CONTEXT));
+            assert_eq!(
+                body["system"][2]["cache_control"]["ttl"], "1h",
+                "injected system cache TTL must follow the {scope} marker"
+            );
+        }
     }
 
     #[test]
