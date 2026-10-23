@@ -122,7 +122,7 @@ pub fn convert_request_pure_with_context(
     let pure_ctx = ctx.without_runtime_request_edits();
     let source = parse_format(source_format)?;
     let target = parse_format(target_format)?;
-    let normalized_body = normalize_openai_responses_to_chat_body(source, target, body)?;
+    let normalized_body = normalize_openai_responses_additional_tools(source, target, body)?;
     let request = parse_request(source_format, &normalized_body, &pure_ctx)?;
     validate_openai_responses_target_contract(target_format, &normalized_body)?;
     validate_request_conversion(
@@ -161,7 +161,7 @@ pub fn convert_request(
         None
     };
     let body = expanded_body.as_ref().unwrap_or(body);
-    let normalized_body = normalize_openai_responses_to_chat_body(source, target, body)?;
+    let normalized_body = normalize_openai_responses_additional_tools(source, target, body)?;
     validate_openai_responses_target_contract(target_format, &normalized_body)?;
     let mut request = parse_request(source_format, &normalized_body, ctx)?;
     validate_runtime_request_conversion(
@@ -181,7 +181,7 @@ pub fn convert_request(
     emit_request_inner(target_format, &request, ctx)
 }
 
-fn normalize_openai_responses_to_chat_body(
+fn normalize_openai_responses_additional_tools(
     source: FormatId,
     target: FormatId,
     body: &Value,
@@ -189,8 +189,10 @@ fn normalize_openai_responses_to_chat_body(
     if !matches!(
         source,
         FormatId::OpenAiResponses | FormatId::OpenAiResponsesCompact
-    ) || target != FormatId::OpenAiChat
-    {
+    ) || !matches!(
+        target,
+        FormatId::OpenAiChat | FormatId::GeminiGenerateContent
+    ) {
         return Ok(body.clone());
     }
 
@@ -5436,6 +5438,66 @@ mod tests {
             assert_eq!(converted["tools"][2]["function"]["name"], "existing");
             assert_eq!(converted["messages"][0]["role"], "user");
             assert_eq!(converted["messages"].as_array().map(Vec::len), Some(1));
+        }
+    }
+
+    #[test]
+    fn openai_responses_additional_tools_prefix_maps_to_gemini_tools() {
+        let body = json!({
+            "model": "gemini-3.7-flash",
+            "input": [
+                {
+                    "type": "additional_tools",
+                    "role": "developer",
+                    "tools": [{
+                        "type": "function",
+                        "name": "lookup",
+                        "description": "Look up a value",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"query": {"type": "string"}},
+                            "required": ["query"]
+                        }
+                    }]
+                },
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hello"}]}
+            ],
+            "tools": [{"type": "web_search"}]
+        });
+
+        for converted in [
+            convert_request_pure("openai:responses", "gemini:generate_content", &body)
+                .expect("pure conversion should map additional tools")
+                .value,
+            convert_request(
+                "openai:responses",
+                "gemini:generate_content",
+                &body,
+                &FormatContext::default(),
+            )
+            .expect("runtime conversion should map additional tools"),
+        ] {
+            let tools = converted["tools"]
+                .as_array()
+                .expect("Gemini tools should be present");
+            let declarations = tools
+                .iter()
+                .filter_map(|tool| tool.get("functionDeclarations"))
+                .filter_map(Value::as_array)
+                .flatten()
+                .collect::<Vec<_>>();
+            assert_eq!(declarations.len(), 1, "{tools:?}");
+            assert_eq!(declarations[0]["name"], "lookup");
+            assert!(
+                tools.iter().any(|tool| tool.get("googleSearch").is_some()),
+                "built-in search should survive the Gemini conversion: {tools:?}"
+            );
+            assert_eq!(
+                converted["toolConfig"]["includeServerSideToolInvocations"],
+                true
+            );
+            assert_eq!(converted["contents"].as_array().map(Vec::len), Some(1));
+            assert_eq!(converted["contents"][0]["parts"][0]["text"], "hello");
         }
     }
 
