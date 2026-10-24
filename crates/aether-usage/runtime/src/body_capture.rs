@@ -328,21 +328,22 @@ fn apply_usage_body_capture_limit(
         .compact_base64_images
         .then(|| json_serialized_len(&value))
         .flatten();
-    let (compacted_opaque_count, compacted_base64_count) = if policy.compact_base64_images {
-        (
-            compact_opaque_payloads(&mut value),
-            compact_base64_payloads(&mut value),
-        )
-    } else {
-        (0, 0)
-    };
+    let (has_compacted_opaque_payload, has_compacted_base64_payload) =
+        if policy.compact_base64_images {
+            (
+                compact_opaque_payloads(&mut value),
+                compact_base64_payloads(&mut value),
+            )
+        } else {
+            (false, false)
+        };
     let mut limited = limit_usage_body_capture_value(value, policy.max_body_bytes);
-    if compacted_base64_count > 0 || compacted_opaque_count > 0 {
+    if has_compacted_base64_payload || has_compacted_opaque_payload {
         limited.source_bytes = original_source_bytes.or(limited.source_bytes);
         limited.truncated = true;
         if limited.reason.is_none() {
             limited.reason = Some(
-                match (compacted_base64_count > 0, compacted_opaque_count > 0) {
+                match (has_compacted_base64_payload, has_compacted_opaque_payload) {
                     (true, true) => "base64_and_opaque_payloads_compacted",
                     (true, false) => "base64_payload_compacted",
                     (false, true) => "opaque_payload_compacted",
@@ -369,23 +370,26 @@ fn apply_usage_body_capture_limit(
     );
 }
 
-fn compact_base64_payloads(value: &mut Value) -> usize {
+fn compact_base64_payloads(value: &mut Value) -> bool {
     compact_base64_payloads_with_context(value, None)
 }
 
-fn compact_base64_payloads_with_context(value: &mut Value, parent_key: Option<&str>) -> usize {
+fn compact_base64_payloads_with_context(value: &mut Value, parent_key: Option<&str>) -> bool {
     match value {
         Value::String(text) => {
-            if let Some((compacted, count)) = compact_base64_data_urls_in_string(text) {
+            if let Some(compacted) = compact_base64_data_urls_in_string(text) {
                 *text = compacted;
-                return count;
+                return true;
             }
-            0
+            false
         }
-        Value::Array(items) => items
-            .iter_mut()
-            .map(|item| compact_base64_payloads_with_context(item, parent_key))
-            .sum(),
+        Value::Array(items) => {
+            let mut compacted = false;
+            for item in items {
+                compacted |= compact_base64_payloads_with_context(item, parent_key);
+            }
+            compacted
+        }
         Value::Object(object) => {
             let is_image_generation_call = object
                 .get("type")
@@ -401,7 +405,7 @@ fn compact_base64_payloads_with_context(value: &mut Value, parent_key: Option<&s
             let is_base64_container = is_base64_source
                 || has_mime_type
                 || parent_key.is_some_and(is_base64_container_key);
-            let mut compacted = 0usize;
+            let mut compacted = false;
             for (key, child) in object.iter_mut() {
                 let is_base64_field = is_base64_payload_key(key)
                     || (key.eq_ignore_ascii_case("result") && is_image_generation_call)
@@ -413,17 +417,16 @@ fn compact_base64_payloads_with_context(value: &mut Value, parent_key: Option<&s
                                 "<base64 payload omitted; original size: {}>",
                                 format_payload_size(original_bytes)
                             ));
-                            compacted = compacted.saturating_add(1);
+                            compacted = true;
                             continue;
                         }
                     }
                 }
-                compacted = compacted
-                    .saturating_add(compact_base64_payloads_with_context(child, Some(key)));
+                compacted |= compact_base64_payloads_with_context(child, Some(key));
             }
             compacted
         }
-        Value::Null | Value::Bool(_) | Value::Number(_) => 0,
+        Value::Null | Value::Bool(_) | Value::Number(_) => false,
     }
 }
 
@@ -449,11 +452,17 @@ fn is_base64_container_key(key: &str) -> bool {
     .any(|candidate| key.eq_ignore_ascii_case(candidate))
 }
 
-fn compact_opaque_payloads(value: &mut Value) -> usize {
+fn compact_opaque_payloads(value: &mut Value) -> bool {
     match value {
-        Value::Array(items) => items.iter_mut().map(compact_opaque_payloads).sum(),
+        Value::Array(items) => {
+            let mut compacted = false;
+            for item in items {
+                compacted |= compact_opaque_payloads(item);
+            }
+            compacted
+        }
         Value::Object(object) => {
-            let mut compacted = 0usize;
+            let mut compacted = false;
             for (key, child) in object.iter_mut() {
                 if key.eq_ignore_ascii_case("encrypted_content") {
                     if let Some(payload) = child.as_str() {
@@ -463,7 +472,7 @@ fn compact_opaque_payloads(value: &mut Value) -> usize {
                                 "<encrypted content omitted; original size: {}>",
                                 format_payload_size(original_bytes)
                             ));
-                            compacted = compacted.saturating_add(1);
+                            compacted = true;
                             continue;
                         }
                     }
@@ -474,23 +483,23 @@ fn compact_opaque_payloads(value: &mut Value) -> usize {
                                 "<raw body bytes omitted; original size: {}>",
                                 format_payload_size(original_bytes)
                             ));
-                            compacted = compacted.saturating_add(1);
+                            compacted = true;
                             continue;
                         }
                     }
                 }
-                compacted = compacted.saturating_add(compact_opaque_payloads(child));
+                compacted |= compact_opaque_payloads(child);
             }
             compacted
         }
-        Value::String(_) | Value::Null | Value::Bool(_) | Value::Number(_) => 0,
+        Value::String(_) | Value::Null | Value::Bool(_) | Value::Number(_) => false,
     }
 }
 
-fn compact_base64_data_urls_in_string(value: &str) -> Option<(String, usize)> {
+fn compact_base64_data_urls_in_string(value: &str) -> Option<String> {
     let mut cursor = 0usize;
     let mut compacted = String::new();
-    let mut replacement_count = 0usize;
+    let mut replaced = false;
 
     while let Some(start) = find_ascii_case_insensitive(value, BASE64_DATA_URL_PREFIX, cursor) {
         let metadata_start = start + BASE64_DATA_URL_PREFIX.len();
@@ -531,14 +540,14 @@ fn compact_base64_data_urls_in_string(value: &str) -> Option<(String, usize)> {
             format_payload_size(original_bytes)
         ));
         cursor = payload_end;
-        replacement_count = replacement_count.saturating_add(1);
+        replaced = true;
     }
 
-    if replacement_count == 0 {
+    if !replaced {
         return None;
     }
     compacted.push_str(&value[cursor..]);
-    Some((compacted, replacement_count))
+    Some(compacted)
 }
 
 fn find_ascii_case_insensitive(value: &str, needle: &str, from: usize) -> Option<usize> {
@@ -1367,9 +1376,9 @@ mod tests {
             "status": "ok"
         });
 
-        let compacted_count = compact_base64_payloads(&mut body);
+        let compacted = compact_base64_payloads(&mut body);
 
-        assert_eq!(compacted_count, 4);
+        assert!(compacted);
         assert_eq!(
             body["messages"][0]["content"][0]["image_url"],
             "<base64 payload omitted; original size: 5 B>"
@@ -1422,9 +1431,9 @@ mod tests {
             "other": "data:image/png;broken;base64,aGVsbG8="
         });
 
-        let compacted_count = compact_base64_payloads(&mut body);
+        let compacted = compact_base64_payloads(&mut body);
 
-        assert_eq!(compacted_count, 11);
+        assert!(compacted);
         assert_eq!(
             body["input"],
             "prefix <base64 payload omitted; original size: 4.00 KiB> suffix"
