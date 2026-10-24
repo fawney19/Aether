@@ -40,7 +40,7 @@ use super::{
     usage_cleanup_window_with_override, wallet_daily_usage_aggregation_target, AppState,
     DbMaintenanceRunSummary, FailedPendingUsageRow, GatewayDataState, ManualUsageCleanupMode,
     ProxyNodeMetricsCleanupSettings, ProxyUpgradeRolloutProbeConfig, StalePendingUsageRow,
-    UsageCleanupSettings, USAGE_CLEANUP_HOUR, USAGE_CLEANUP_MINUTE,
+    UsageCleanupSettings, DB_MAINTENANCE_TABLES, USAGE_CLEANUP_HOUR, USAGE_CLEANUP_MINUTE,
     WALLET_DAILY_USAGE_AGGREGATION_HOUR, WALLET_DAILY_USAGE_AGGREGATION_MINUTE,
 };
 
@@ -1346,17 +1346,16 @@ async fn db_maintenance_continues_across_table_failures() {
     assert_eq!(
         summary,
         DbMaintenanceRunSummary {
-            attempted: 3,
-            succeeded: 2,
+            attempted: DB_MAINTENANCE_TABLES.len(),
+            succeeded: DB_MAINTENANCE_TABLES.len() - 1,
         }
     );
     assert_eq!(
         *seen_tables.lock().expect("seen tables lock"),
-        vec![
-            "usage".to_string(),
-            "request_candidates".to_string(),
-            "audit_logs".to_string(),
-        ]
+        DB_MAINTENANCE_TABLES
+            .iter()
+            .map(|t| t.to_string())
+            .collect::<Vec<_>>()
     );
 }
 
