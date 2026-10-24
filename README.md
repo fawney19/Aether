@@ -54,6 +54,14 @@ chmod 600 .env
 docker compose pull && docker compose up -d
 ```
 
+### 一键更新
+
+Docker Compose 部署后，可在管理后台右上角“版本信息”或 `/admin/system` 的“系统更新”区域执行 Web 自动更新。Compose 会启动一个内网 `aether-updater` sidecar，它只执行部署目录里的固定 `update.sh`，并通过 `AETHER_UPDATER_TOKEN` 与 app 鉴权。生产环境请在 `.env` 中把 `AETHER_UPDATER_TOKEN` 改成随机长字符串；如果不是从部署目录交互式执行 compose，请设置 `AETHER_DEPLOY_DIR` 为部署目录绝对路径。
+
+也可以在部署目录直接执行 `./update.sh`，它会拉取最新 `app` 镜像并重建 `app` 容器，数据卷和 `./logs` 不会被删除；Single Node 部署可显式指定 `./update.sh --mode single-node`。
+
+多节点部署不要从单个后台节点执行更新，应使用镜像滚动更新或外部编排。systemd / launchd / 二进制部署使用后台自更新（下载 GitHub Release 包、强制校验 `SHA256SUMS` 后原子切换版本）；源码或本地构建版本不会启用后台在线更新。`AETHER_UPDATE_PROXY_URL`、`AETHER_UPDATE_GITHUB_TOKEN` 等更新相关变量见 `.env.example`。
+
 ### 一键安装（PostgreSQL + Redis）
 
 ```bash

@@ -54,6 +54,21 @@ pub(crate) fn build_direct_update_http_client(
         .map_err(|err| format!("创建{label}客户端失败: {err}"))
 }
 
+/// 内网更新服务（如 Docker updater sidecar）专用：显式放行指定主机的私网解析结果。
+pub(crate) fn build_internal_update_http_client(
+    timeout: Duration,
+    label: &str,
+    private_allowed_host: &str,
+) -> Result<reqwest::Client, String> {
+    base_update_http_client_builder(timeout)
+        .no_proxy()
+        .dns_resolver(Arc::new(SafeUpdateDnsResolver::new(Some(
+            private_allowed_host.to_string(),
+        ))))
+        .build()
+        .map_err(|err| format!("创建{label}客户端失败: {err}"))
+}
+
 pub(crate) fn has_explicit_update_proxy_env() -> bool {
     read_nonempty_env_value(EXPLICIT_UPDATE_PROXY_ENV_KEYS).is_some()
 }
