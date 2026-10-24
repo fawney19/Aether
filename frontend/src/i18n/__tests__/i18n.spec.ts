@@ -113,7 +113,7 @@ describe('i18n infrastructure', () => {
 
   it('translates common legacy phrases without adding new message entry points', () => {
     expect(translateLegacyText('请求记录清理策略', 'en-US')).toBe('Request log cleanup policy')
-    expect(translateLegacyText('精简 Base64 图片', 'en-US')).toBe('Compact Base64 images')
+    expect(translateLegacyText('压缩审计快照中的 Base64', 'en-US')).toBe('Compact Base64 payloads in audit snapshots')
     expect(translateLegacyText('Body 大小上限（KB）', 'en-US')).toBe('Body size limit (KB)')
     expect(translateLegacyText('最大转移次数', 'en-US')).toBe('Max transfers')
     expect(translateLegacyText('最大转移超时', 'en-US')).toBe('Max transfer timeout')

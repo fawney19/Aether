@@ -200,7 +200,7 @@ describe('useSystemConfig', () => {
     expect(updateSystemConfigMock).toHaveBeenCalledWith(
       'request_record_compact_base64_images',
       true,
-      '请求记录 Base64 图片精简开关'
+      '请求记录图片及大型审计载荷精简开关'
     )
     expect(updateSystemConfigMock).toHaveBeenCalledWith(
       'request_record_max_body_size_kb',
