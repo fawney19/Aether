@@ -1,4 +1,5 @@
 use super::responses::build_admin_providers_data_unavailable_response;
+use crate::handlers::admin::provider::ops::providers::actions::query_quota::sync_custom_quota_display_after_write;
 use crate::handlers::admin::provider::shared::paths::{
     admin_provider_id_for_manage_path, is_admin_providers_root,
 };
@@ -105,6 +106,9 @@ pub(crate) async fn maybe_build_local_admin_provider_writes_response(
         {
             reconcile_admin_fixed_provider_template_endpoints(state, &created_provider).await?;
         }
+        // A created custom provider with a script fetches its first quota
+        // snapshot right away instead of waiting for a manual action run.
+        sync_custom_quota_display_after_write(state, None, &created_provider);
         return Ok(Some(attach_admin_audit_response(
             Json(json!({
                 "id": created_provider.id,
@@ -191,6 +195,13 @@ pub(crate) async fn maybe_build_local_admin_provider_writes_response(
             )
             .await?;
         }
+        // Script edits must reach the quota display immediately: the cached
+        // payload is invalidated and the query re-runs in the background.
+        sync_custom_quota_display_after_write(
+            state,
+            existing_provider.config.as_ref(),
+            &updated_record,
+        );
         return Ok(Some(
             match state
                 .build_admin_provider_summary_payload(&provider_id)

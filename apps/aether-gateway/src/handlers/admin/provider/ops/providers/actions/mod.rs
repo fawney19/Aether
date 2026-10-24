@@ -1,5 +1,6 @@
 mod checkin;
 mod query_balance;
+pub(crate) mod query_quota;
 mod responses;
 mod support;
 
@@ -23,6 +24,7 @@ pub(super) fn admin_provider_ops_is_valid_action_type(action_type: &str) -> bool
     matches!(
         action_type,
         "query_balance"
+            | "query_quota"
             | "checkin"
             | "claim_quota"
             | "refresh_token"
@@ -36,13 +38,25 @@ pub(crate) async fn admin_provider_ops_local_action_response(
     state: &AdminAppState<'_>,
     provider_id: &str,
     provider: Option<&StoredProviderCatalogProvider>,
-    _endpoints: &[StoredProviderCatalogEndpoint],
+    endpoints: &[StoredProviderCatalogEndpoint],
     action_type: &str,
     request_config: Option<&serde_json::Map<String, serde_json::Value>>,
 ) -> serde_json::Value {
     let Some(provider) = provider else {
         return responses::admin_provider_ops_action_not_configured(action_type, "未配置操作设置");
     };
+    // Custom-provider quota query is stored on the provider's own `config.quota_query`
+    // block and is independent of the Provider Ops config.
+    if action_type == "query_quota" {
+        return query_quota::admin_provider_ops_run_query_quota_action(
+            state,
+            provider_id,
+            provider,
+            endpoints,
+            request_config,
+        )
+        .await;
+    }
     let credential_snapshot = match admin_provider_ops_credential_snapshot(state, provider).await {
         Ok(snapshot) => snapshot,
         Err(_) => {

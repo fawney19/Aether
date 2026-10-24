@@ -20,6 +20,7 @@ chrono.workspace = true
 chrono-tz.workspace = true
 http.workspace = true
 reqwest.workspace = true
+rhai.workspace = true
 regex.workspace = true
 semver.workspace = true
 serde.workspace = true

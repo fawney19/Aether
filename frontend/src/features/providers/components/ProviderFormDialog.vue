@@ -312,6 +312,17 @@
           </div>
         </div>
       </div>
+
+      <!-- 额度查询（仅自定义类型） -->
+      <div
+        v-if="form.provider_type === 'custom'"
+        data-testid="provider-quota-query-section"
+      >
+        <ProviderQuotaQuerySection
+          v-model="form.quota_query"
+          :provider-id="provider?.id"
+        />
+      </div>
     </form>
 
     <template #footer>
@@ -349,6 +360,7 @@ import {
 } from '@/components/ui'
 import { Server, SquarePen } from 'lucide-vue-next'
 import HelpHint from '@/components/common/HelpHint.vue'
+import ProviderQuotaQuerySection from './ProviderQuotaQuerySection.vue'
 import { useToast } from '@/composables/useToast'
 import { useFormDialog } from '@/composables/useFormDialog'
 import { useI18n } from '@/i18n'
@@ -358,6 +370,7 @@ import {
   updateProvider,
   type ProviderType,
   type ProviderWithEndpointsSummary,
+  type QuotaQueryConfig,
 } from '@/api/endpoints'
 import { parseApiError } from '@/utils/errorParser'
 import { parseNumberInput } from '@/utils/form'
@@ -424,6 +437,8 @@ const form = ref({
   kiro_simulated_cache_enabled: false,
   // Responses WebSocket 配置
   responses_websocket_enabled: false,
+  // 额度查询（仅自定义类型）
+  quota_query: null as QuotaQueryConfig | null,
 })
 
 // 重置表单
@@ -452,6 +467,8 @@ function resetForm() {
     kiro_simulated_cache_enabled: false,
     // Responses WebSocket 配置
     responses_websocket_enabled: false,
+    // 额度查询（仅自定义类型）
+    quota_query: null,
   }
 }
 
@@ -484,6 +501,8 @@ function loadProviderData() {
     kiro_simulated_cache_enabled: props.provider.kiro_simulated_cache_enabled ?? false,
     // Responses WebSocket 配置
     responses_websocket_enabled: props.provider.responses_websocket_enabled ?? false,
+    // 额度查询（仅自定义类型）
+    quota_query: props.provider.quota_query ?? null,
   }
 }
 
@@ -532,6 +551,9 @@ const handleSubmit = async () => {
       pool_advanced: form.value.pool_mode_enabled
         ? (currentPoolAdvanced ?? {})
         : null,
+      ...(form.value.provider_type === 'custom'
+        ? { quota_query: form.value.quota_query }
+        : {}),
       ...(form.value.provider_type === 'codex'
         ? {
             codex_fingerprint_convergence_enabled: form.value.codex_fingerprint_convergence_enabled,

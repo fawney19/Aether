@@ -7,6 +7,7 @@ use crate::handlers::admin::provider::shared::support::{
 use crate::handlers::admin::provider::write::normalize::normalize_chat_pii_redaction_config;
 use crate::handlers::admin::provider::write::normalize::normalize_pool_advanced_config;
 use crate::handlers::admin::provider::write::normalize::normalize_provider_type_input;
+use crate::handlers::admin::provider::write::normalize::normalize_quota_query_config;
 use crate::handlers::admin::provider::write::normalize::set_responses_websocket_enabled;
 use crate::handlers::admin::provider::write::normalize::validate_responses_websocket_config;
 use crate::handlers::admin::request::AdminAppState;
@@ -38,6 +39,7 @@ pub(crate) async fn build_admin_create_provider_record(
 
     let provider_type =
         normalize_provider_type_input(payload.provider_type.as_deref().unwrap_or("custom"))?;
+    let provider_id = Uuid::new_v4().to_string();
     let billing_type = normalize_provider_billing_type(
         payload.billing_type.as_deref().unwrap_or("pay_as_you_go"),
     )?;
@@ -167,6 +169,13 @@ pub(crate) async fn build_admin_create_provider_record(
     if let Some(value) = normalize_json_object(payload.failover_rules, "failover_rules")? {
         config_map.insert("failover_rules".to_string(), value);
     }
+    let quota_query_provided = payload.quota_query.is_some();
+    if quota_query_provided && provider_type != "custom" {
+        return Err("quota_query 仅适用于 provider_type=custom".to_string());
+    }
+    if let Some(value) = normalize_quota_query_config(payload.quota_query)? {
+        config_map.insert("quota_query".to_string(), value);
+    }
     if let Some(value) =
         normalize_json_object(payload.claude_code_advanced, "claude_code_advanced")?
     {
@@ -196,7 +205,7 @@ pub(crate) async fn build_admin_create_provider_record(
         .unwrap_or(0);
 
     let record = StoredProviderCatalogProvider::new(
-        Uuid::new_v4().to_string(),
+        provider_id,
         name.to_string(),
         website,
         provider_type.clone(),

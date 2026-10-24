@@ -58,6 +58,30 @@ export interface ProviderAccountSubscription {
   monthly_limit_usd: number | null
   expires_at: string | null
 }
+
+/** 自定义额度查询单个周期（5h / week / month），由 extractor 的 periods 返回 */
+export interface ProviderCustomQuotaPeriod {
+  key: string
+  used: number | null
+  limit: number | null
+  reset_at: string | null
+}
+
+/** 自定义额度查询（Rhai extractor）返回的展示字段，全部可选 */
+export interface ProviderCustomQuota {
+  /** 结果生成时间（epoch 秒） */
+  updated_at?: number | null
+  is_valid: boolean | null
+  invalid_message: string | null
+  remaining: number | null
+  unit: string | null
+  plan_name: string | null
+  total: number | null
+  used: number | null
+  extra: string | null
+  periods?: ProviderCustomQuotaPeriod[] | null
+}
+
 export interface ProviderAccount {
   provider_id: string
   provider_name: string
@@ -74,6 +98,7 @@ export interface ProviderAccount {
     plan_name: string | null
     subscriptions: ProviderAccountSubscription[]
   } | null
+  custom_quota: ProviderCustomQuota | null
 }
 export interface ProviderAccounts { observed_at: string; items: ProviderAccount[] }
 export type ProviderExpensesQuery = OverviewRange & { limit?: number; offset?: number }

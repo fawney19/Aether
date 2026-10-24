@@ -197,6 +197,20 @@ export interface ResponsesWebSocketProviderConfig {
   enabled: boolean
 }
 
+/**
+ * 自定义类型提供商的「额度查询方式」配置（Rhai 脚本）。
+ * 仅 provider_type === 'custom' 时可用；不存储任何密钥，
+ * 脚本中通过 {{apiKey}} 占位符引用扩展操作凭据。
+ */
+export interface QuotaQueryConfig {
+  /**
+   * Rhai 脚本：#{ request: #{ url, method, headers }, extractor: |response| #{ ... } }
+   * extractor 返回字段（均可选）：isValid / invalidMessage / remaining / unit /
+   * planName / total / used / extra / periods（5h/week/月 用量窗口数组）
+   */
+  script?: string
+}
+
 export interface ProviderConfig {
   chat_pii_redaction?: ChatPiiRedactionProviderConfig
   codex?: CodexProviderConfig
@@ -204,6 +218,7 @@ export interface ProviderConfig {
   pool_advanced?: PoolAdvancedConfig
   failover_rules?: FailoverRulesConfig
   claude_code_advanced?: ClaudeCodeAdvancedConfig
+  quota_query?: QuotaQueryConfig
   [key: string]: unknown
 }
 
@@ -339,11 +354,15 @@ export interface CodexUpstreamMetadata {
   credential_generation?: string
   updated_at?: number  // 更新时间（Unix 时间戳）
   plan_type?: string  // 套餐类型
+  primary_code?: string  // 主限额窗口 code（monthly / weekly），自定义提供商可能两者并存
   primary_used_percent?: number  // 周限额窗口使用百分比
   primary_reset_seconds?: number  // 周限额重置剩余秒数
   primary_reset_after_seconds?: number  // 周限额重置剩余秒数（兼容字段）
   primary_reset_at?: number  // 周限额重置时间（Unix 时间戳）
   primary_window_minutes?: number  // 周限额窗口大小（分钟）
+  weekly_used_percent?: number  // 周限额窗口使用百分比（monthly 为主限额时，weekly 单独渲染）
+  weekly_reset_seconds?: number  // 周限额重置剩余秒数
+  weekly_reset_at?: number  // 周限额重置时间（Unix 时间戳）
   secondary_used_percent?: number  // 5H限额窗口使用百分比
   secondary_reset_seconds?: number  // 5H限额重置剩余秒数
   secondary_reset_after_seconds?: number  // 5H限额重置剩余秒数（兼容字段）
@@ -957,6 +976,9 @@ export interface ProviderWithEndpointsSummary {
   chat_pii_redaction?: ChatPiiRedactionProviderConfig | null
   pool_advanced?: PoolAdvancedConfig | null
   failover_rules?: FailoverRulesConfig | null
+  quota_query?: QuotaQueryConfig | null
+  /** 自定义额度查询最近一次成功结果（来自 query_quota 缓存） */
+  custom_quota?: import('@/api/providerFinance').ProviderCustomQuota | null
   ops_configured: boolean  // 是否配置了扩展操作（余额监控等）
   ops_architecture_id?: string  // 扩展操作使用的架构 ID（如 cubence, anyrouter）
   codex_fingerprint_convergence_enabled?: boolean

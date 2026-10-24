@@ -7,6 +7,7 @@ use crate::handlers::admin::provider::shared::support::{
 use crate::handlers::admin::provider::write::normalize::normalize_chat_pii_redaction_config;
 use crate::handlers::admin::provider::write::normalize::normalize_pool_advanced_config;
 use crate::handlers::admin::provider::write::normalize::normalize_provider_type_input;
+use crate::handlers::admin::provider::write::normalize::normalize_quota_query_config;
 use crate::handlers::admin::provider::write::normalize::set_responses_websocket_enabled;
 use crate::handlers::admin::provider::write::normalize::validate_responses_websocket_config;
 use crate::handlers::admin::request::AdminAppState;
@@ -356,6 +357,24 @@ pub(crate) async fn build_admin_update_provider_record(
             );
             config_map.insert("failover_rules".to_string(), value);
         }
+    }
+
+    if fields.contains("quota_query") {
+        if fields.is_null("quota_query") {
+            if target_provider_type != "custom" {
+                return Err("quota_query 仅适用于 provider_type=custom".to_string());
+            }
+            config_map.remove("quota_query");
+        } else {
+            if target_provider_type != "custom" {
+                return Err("quota_query 仅适用于 provider_type=custom".to_string());
+            }
+            let value = normalize_quota_query_config(payload.quota_query)?
+                .ok_or_else(|| "quota_query 必须是 JSON 对象".to_string())?;
+            config_map.insert("quota_query".to_string(), value);
+        }
+    } else if target_provider_type != "custom" {
+        config_map.remove("quota_query");
     }
 
     if config_map.contains_key("chat_pii_redaction") {

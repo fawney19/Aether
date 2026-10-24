@@ -185,58 +185,13 @@
                         :loading="refreshingQuota"
                         :updated-text="getCodexQuotaDisplay(key)?.updated_at ? formatCodexUpdatedAt(getCodexQuotaDisplay(key)?.updated_at || 0) : null"
                       />
-                      <!-- 普通 Codex 限额并排显示：Team/Plus/Enterprise 账号 2列, Free 账号 1列 -->
-                      <div
-                        class="grid gap-3"
-                        :class="isCodexTeamPlan(key) ? 'grid-cols-2' : 'grid-cols-1'"
-                      >
-                        <!-- 主限额 -->
-                        <ProviderQuotaProgressRow
-                          v-if="getCodexQuotaDisplay(key)?.primary_used_percent !== undefined"
-                          :label="legacyT(getCodexPrimaryQuotaLabel(key))"
-                          :used-percent="getCodexQuotaDisplay(key)?.primary_used_percent || 0"
-                          :remaining-percent="toCodexRemainingPercent(getCodexQuotaDisplay(key)?.primary_used_percent)"
-                          :meter-class="getQuotaRemainingClass(getCodexQuotaDisplay(key)?.primary_used_percent || 0)"
-                          :bar-class="getQuotaRemainingBarColor(getCodexQuotaDisplay(key)?.primary_used_percent || 0)"
-                          :reset-text="(getCodexQuotaDisplay(key)?.primary_reset_at || getCodexQuotaDisplay(key)?.primary_reset_seconds) && shouldStartCodexResetCountdown(getCodexQuotaDisplay(key)?.primary_used_percent || 0)
-                            ? getResetCountdownText(
-                              getCodexQuotaDisplay(key)?.primary_reset_at,
-                              getCodexQuotaDisplay(key)?.primary_reset_seconds,
-                              getCodexQuotaDisplay(key)?.updated_at,
-                              getCodexQuotaDisplay(key)?.primary_used_percent
-                            )
-                            : null"
-                          :footer-class="getResetCountdownClass(
-                            getCodexQuotaDisplay(key)?.primary_reset_at,
-                            getCodexQuotaDisplay(key)?.primary_reset_seconds,
-                            getCodexQuotaDisplay(key)?.updated_at,
-                            getCodexQuotaDisplay(key)?.primary_used_percent
-                          )"
-                        />
-                        <!-- 5H限额（仅 Team/Plus/Enterprise 显示） -->
-                        <ProviderQuotaProgressRow
-                          v-if="isCodexTeamPlan(key) && getCodexQuotaDisplay(key)?.secondary_used_percent !== undefined"
-                          :label="legacyT('5H限额')"
-                          :used-percent="getCodexQuotaDisplay(key)?.secondary_used_percent || 0"
-                          :remaining-percent="toCodexRemainingPercent(getCodexQuotaDisplay(key)?.secondary_used_percent)"
-                          :meter-class="getQuotaRemainingClass(getCodexQuotaDisplay(key)?.secondary_used_percent || 0)"
-                          :bar-class="getQuotaRemainingBarColor(getCodexQuotaDisplay(key)?.secondary_used_percent || 0)"
-                          :reset-text="shouldStartCodexResetCountdown(getCodexQuotaDisplay(key)?.secondary_used_percent || 0)
-                            ? getCodexQuotaResetText(
-                              getCodexQuotaDisplay(key)?.secondary_reset_at,
-                              getCodexQuotaDisplay(key)?.secondary_reset_seconds,
-                              getCodexQuotaDisplay(key)?.updated_at,
-                              getCodexQuotaDisplay(key)?.secondary_used_percent
-                            )
-                            : null"
-                          :footer-class="getResetCountdownClass(
-                            getCodexQuotaDisplay(key)?.secondary_reset_at,
-                            getCodexQuotaDisplay(key)?.secondary_reset_seconds,
-                            getCodexQuotaDisplay(key)?.updated_at,
-                            getCodexQuotaDisplay(key)?.secondary_used_percent
-                          )"
-                        />
-                      </div>
+                      <!-- 普通 Codex 限额并排显示：与额度查询测试面板共用同一渲染组件 -->
+                      <CodexQuotaUsageGrid
+                        :display="getCodexQuotaDisplay(key)"
+                        :primary-label="legacyT(getCodexPrimaryQuotaLabel(key))"
+                        :show-secondary="isCodexTeamPlan(key) || provider.provider_type === 'custom'"
+                        :tick="countdownTick"
+                      />
                       <!-- Spark 限额独立一行展示，避免与普通 Codex 周/5H 混淆 -->
                       <div
                         v-if="hasCodexSparkQuotaDisplayData(key)"
@@ -893,6 +848,7 @@
                       : legacyT('请先添加端点，然后再添加密钥') }}
                   </p>
                 </div>
+
               </Card>
 
               <!-- 模型查看 -->
@@ -1101,6 +1057,7 @@ import ProviderKeyIdentityBlock from '@/features/providers/components/ProviderKe
 import ProviderMonthlyQuotaCard from '@/features/providers/components/ProviderMonthlyQuotaCard.vue'
 import ProviderQuotaProgressRow from '@/features/providers/components/ProviderQuotaProgressRow.vue'
 import ProviderQuotaSectionHeader from '@/features/providers/components/ProviderQuotaSectionHeader.vue'
+import CodexQuotaUsageGrid from '@/features/providers/components/CodexQuotaUsageGrid.vue'
 import { useProxyNodesStore } from '@/stores/proxy-nodes'
 import { resolveAntigravityQuotaGroupLabel } from '@/features/providers/utils/antigravityQuota'
 import { refreshQuotaInBackground } from '@/features/providers/utils/refreshQuotaInBackground'
@@ -1138,8 +1095,9 @@ import { isOAuthAccountProviderType, isKeyManagedProviderType } from '../utils/p
 import { getOAuthOrgBadge } from '@/utils/oauthIdentity'
 import { getOAuthRefreshFeedback } from '@/utils/oauthRefreshFeedback'
 import {
-  getCodexPrimaryQuotaWindow,
+  getCodexQuotaDisplayFromSnapshot,
   getCodexQuotaWindowLimitLabel,
+  getCustomQuotaPrimaryLimitLabel,
 } from '@/utils/codexQuotaWindow'
 import { formatCompactNumber } from '@/utils/format'
 import {
@@ -1186,6 +1144,7 @@ interface Props {
 }
 
 const props = defineProps<Props>()
+
 const emit = defineEmits<{
   (e: 'update:open', value: boolean): void
   (e: 'edit', provider: ProviderWithEndpointsSummary): void
@@ -1991,7 +1950,7 @@ function quotaSnapshotHasDisplayData(quota: QuotaStatusSnapshot | null | undefin
 
 function getQuotaSnapshotForProvider(
   key: EndpointAPIKey,
-  providerType: 'codex' | 'kiro' | 'windsurf' | 'antigravity' | 'chatgpt_web' | 'gemini_cli' | 'claude_code' | 'grok' | 'xai',
+  providerType: 'codex' | 'kiro' | 'windsurf' | 'antigravity' | 'chatgpt_web' | 'gemini_cli' | 'claude_code' | 'grok' | 'xai' | 'custom',
 ): QuotaStatusSnapshot | null {
   const quota = key.status_snapshot?.quota
   if (!quota) return null
@@ -2131,74 +2090,27 @@ function getCodexQuotaDisplayFromMetadata(metadata: CodexUpstreamMetadata | null
   return Object.keys(display).length > 0 ? display : null
 }
 
-function getCodexQuotaDisplayFromSnapshot(quota: QuotaStatusSnapshot | null | undefined): CodexUpstreamMetadata | null {
-  if (!quota) return null
-
-  const display: CodexUpstreamMetadata = {}
-  const updatedAt = getQuotaSnapshotUpdatedAt(quota)
-  if (updatedAt !== undefined) display.updated_at = updatedAt
-  if (quota.plan_type) display.plan_type = quota.plan_type
-
-  const primaryWindow = getCodexPrimaryQuotaWindow(quota.windows)
-  const primaryUsedPercent = getQuotaWindowUsedPercent(primaryWindow)
-  if (primaryUsedPercent !== undefined) display.primary_used_percent = primaryUsedPercent
-  const primaryResetAt = getQuotaWindowResetAt(primaryWindow)
-  if (primaryResetAt !== undefined) display.primary_reset_at = primaryResetAt
-  const primaryResetSeconds = getQuotaWindowResetSeconds(primaryWindow)
-  if (primaryResetSeconds !== undefined) display.primary_reset_seconds = primaryResetSeconds
-  if (typeof primaryWindow?.window_minutes === 'number') {
-    display.primary_window_minutes = primaryWindow.window_minutes
-  }
-
-  const secondaryWindow = getQuotaWindow(quota, '5h')
-  const secondaryUsedPercent = getQuotaWindowUsedPercent(secondaryWindow)
-  if (secondaryUsedPercent !== undefined) display.secondary_used_percent = secondaryUsedPercent
-  const secondaryResetAt = getQuotaWindowResetAt(secondaryWindow)
-  if (secondaryResetAt !== undefined) display.secondary_reset_at = secondaryResetAt
-  const secondaryResetSeconds = getQuotaWindowResetSeconds(secondaryWindow)
-  if (secondaryResetSeconds !== undefined) display.secondary_reset_seconds = secondaryResetSeconds
-  if (typeof secondaryWindow?.window_minutes === 'number') {
-    display.secondary_window_minutes = secondaryWindow.window_minutes
-  }
-
-  const sparkPrimaryWindow = getQuotaWindow(quota, 'spark_5h')
-  const sparkPrimaryUsedPercent = getQuotaWindowUsedPercent(sparkPrimaryWindow)
-  if (sparkPrimaryUsedPercent !== undefined) display.spark_primary_used_percent = sparkPrimaryUsedPercent
-  const sparkPrimaryResetAt = getQuotaWindowResetAt(sparkPrimaryWindow)
-  if (sparkPrimaryResetAt !== undefined) display.spark_primary_reset_at = sparkPrimaryResetAt
-  const sparkPrimaryResetSeconds = getQuotaWindowResetSeconds(sparkPrimaryWindow)
-  if (sparkPrimaryResetSeconds !== undefined) display.spark_primary_reset_seconds = sparkPrimaryResetSeconds
-  if (typeof sparkPrimaryWindow?.window_minutes === 'number') {
-    display.spark_primary_window_minutes = sparkPrimaryWindow.window_minutes
-  }
-
-  const sparkSecondaryWindow = getQuotaWindow(quota, 'spark_weekly')
-  const sparkSecondaryUsedPercent = getQuotaWindowUsedPercent(sparkSecondaryWindow)
-  if (sparkSecondaryUsedPercent !== undefined) display.spark_secondary_used_percent = sparkSecondaryUsedPercent
-  const sparkSecondaryResetAt = getQuotaWindowResetAt(sparkSecondaryWindow)
-  if (sparkSecondaryResetAt !== undefined) display.spark_secondary_reset_at = sparkSecondaryResetAt
-  const sparkSecondaryResetSeconds = getQuotaWindowResetSeconds(sparkSecondaryWindow)
-  if (sparkSecondaryResetSeconds !== undefined) display.spark_secondary_reset_seconds = sparkSecondaryResetSeconds
-  if (typeof sparkSecondaryWindow?.window_minutes === 'number') {
-    display.spark_secondary_window_minutes = sparkSecondaryWindow.window_minutes
-  }
-  if (quota.reset_credits) display.reset_credits = quota.reset_credits
-
-  return Object.keys(display).length > 0 ? display : null
-}
-
 function codexDisplayHasResetCredits(display: CodexUpstreamMetadata | null | undefined): boolean {
   const count = display?.reset_credits?.available_count
   return typeof count === 'number' && Number.isFinite(count)
 }
 
 function getCodexQuotaDisplay(key: EndpointAPIKey): CodexUpstreamMetadata | null {
-  const snapshotDisplay = getCodexQuotaDisplayFromSnapshot(getQuotaSnapshotForProvider(key, 'codex'))
+  // Custom providers persist quota-query windows into the same shared
+  // status_snapshot store, so they render through the identical codex block.
+  const snapshotType = provider.value?.provider_type === 'custom' ? 'custom' : 'codex'
+  const snapshotDisplay = getCodexQuotaDisplayFromSnapshot(getQuotaSnapshotForProvider(key, snapshotType))
   const metadataDisplay = getCodexQuotaDisplayFromMetadata(key.upstream_metadata?.codex)
   return mergeCodexQuotaDisplays(snapshotDisplay, metadataDisplay)
 }
 
 function getCodexPrimaryQuotaLabel(key: EndpointAPIKey): string {
+  // Custom providers may map their primary window to any shared code (monthly
+  // included), so the label follows the real window; codex is always weekly.
+  if (provider.value?.provider_type === 'custom') {
+    const label = getCustomQuotaPrimaryLimitLabel(getQuotaSnapshotForProvider(key, 'custom')?.windows)
+    if (label) return label
+  }
   return getCodexQuotaWindowLimitLabel({
     code: 'weekly',
     label: '周',

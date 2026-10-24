@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  buildCustomQuotaSnapshotFromExtractorData,
   getCodexPrimaryQuotaWindow,
+  getCodexQuotaDisplayFromSnapshot,
   getCodexQuotaWindowLimitLabel,
   getCodexQuotaWindowPresentation,
 } from '../codexQuotaWindow'
@@ -135,5 +137,51 @@ describe('getCodexQuotaWindowPresentation', () => {
   it('keeps legacy labels when old snapshots have no window duration', () => {
     expect(getCodexQuotaWindowPresentation({ code: '5h' })?.label).toBe('5H')
     expect(getCodexQuotaWindowPresentation({ code: 'weekly' })?.label).toBe('周')
+  })
+})
+
+describe('getCodexQuotaDisplayFromSnapshot', () => {
+  function extractorData(periods: { key: string, used: number, limit: number, reset_at: string | null }[]) {
+    return {
+      updated_at: null,
+      is_valid: true,
+      invalid_message: null,
+      remaining: null,
+      unit: '%',
+      plan_name: null,
+      total: null,
+      used: null,
+      extra: null,
+      periods,
+    }
+  }
+
+  it('projects the weekly window separately when monthly and weekly coexist', () => {
+    // Kimi-style custom provider: 5h / week / month all at once.
+    const snapshot = buildCustomQuotaSnapshotFromExtractorData(extractorData([
+      { key: '5h', used: 0, limit: 1, reset_at: '2026-10-30T00:00:00Z' },
+      { key: 'week', used: 0.3, limit: 1, reset_at: '2026-10-29T00:00:00Z' },
+      { key: 'month', used: 0.95, limit: 1, reset_at: '2026-11-01T00:00:00Z' },
+    ]))
+    expect(snapshot).not.toBeNull()
+    const display = getCodexQuotaDisplayFromSnapshot(snapshot)!
+    // Primary slot takes the monthly window…
+    expect(display.primary_code).toBe('monthly')
+    expect(display.primary_used_percent).toBe(95)
+    // …while the weekly window gets its own fields instead of being dropped.
+    expect(display.weekly_used_percent).toBe(30)
+    expect(display.secondary_used_percent).toBe(0)
+  })
+
+  it('does not duplicate the weekly row when weekly is the primary window', () => {
+    const snapshot = buildCustomQuotaSnapshotFromExtractorData(extractorData([
+      { key: '5h', used: 0, limit: 1, reset_at: null },
+      { key: 'week', used: 0.3, limit: 1, reset_at: null },
+    ]))
+    const display = getCodexQuotaDisplayFromSnapshot(snapshot)!
+    expect(display.primary_code).toBe('weekly')
+    expect(display.primary_used_percent).toBe(30)
+    expect(display.weekly_used_percent).toBe(30)
+    // The grid hides the separate weekly row via primary_code === 'weekly'.
   })
 })

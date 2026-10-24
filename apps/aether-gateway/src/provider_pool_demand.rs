@@ -258,12 +258,13 @@ fn build_in_flight_token(request_id: &str, candidate_id: Option<&str>, key_id: &
         .unwrap_or("-");
     let key_id = key_id.trim();
     format!(
-        "{}:{}:{}:{}",
+        "{}:{}:{}:{}:{}",
         current_unix_ms(),
         request_id,
         candidate_id,
         if key_id.is_empty() { "-" } else { key_id },
-    ) + &format!(":{}", Uuid::new_v4())
+        Uuid::new_v4(),
+    )
 }
 
 fn token_expiry_score(now_ms: u64) -> f64 {
