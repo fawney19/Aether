@@ -328,15 +328,13 @@ fn apply_usage_body_capture_limit(
         .compact_base64_images
         .then(|| json_serialized_len(&value))
         .flatten();
-    let compacted_opaque_count = if policy.compact_base64_images {
-        compact_opaque_payloads(&mut value)
+    let (compacted_opaque_count, compacted_base64_count) = if policy.compact_base64_images {
+        (
+            compact_opaque_payloads(&mut value),
+            compact_base64_payloads(&mut value),
+        )
     } else {
-        0
-    };
-    let compacted_base64_count = if policy.compact_base64_images {
-        compact_base64_payloads(&mut value)
-    } else {
-        0
+        (0, 0)
     };
     let mut limited = limit_usage_body_capture_value(value, policy.max_body_bytes);
     if compacted_base64_count > 0 || compacted_opaque_count > 0 {
