@@ -10,7 +10,7 @@ use crate::event::UsageEvent;
 use crate::runtime::{UsageBodyCapturePolicy, UsageRequestRecordLevel};
 
 const TRUNCATED_BODY_STRING_SUFFIX: &str = "...[truncated]";
-const BASE64_IMAGE_DATA_URL_PREFIX: &str = "data:image/";
+const BASE64_DATA_URL_PREFIX: &str = "data:";
 const BASE64_DATA_URL_MARKER: &str = ";base64,";
 
 #[derive(Debug)]
@@ -328,17 +328,29 @@ fn apply_usage_body_capture_limit(
         .compact_base64_images
         .then(|| json_serialized_len(&value))
         .flatten();
-    let compacted_image_count = if policy.compact_base64_images {
-        compact_base64_image_data_urls(&mut value)
+    let compacted_opaque_count = if policy.compact_base64_images {
+        compact_opaque_payloads(&mut value)
+    } else {
+        0
+    };
+    let compacted_base64_count = if policy.compact_base64_images {
+        compact_base64_payloads(&mut value)
     } else {
         0
     };
     let mut limited = limit_usage_body_capture_value(value, policy.max_body_bytes);
-    if compacted_image_count > 0 {
+    if compacted_base64_count > 0 || compacted_opaque_count > 0 {
         limited.source_bytes = original_source_bytes.or(limited.source_bytes);
         limited.truncated = true;
         if limited.reason.is_none() {
-            limited.reason = Some("base64_image_data_url_compacted");
+            limited.reason = Some(
+                match (compacted_base64_count > 0, compacted_opaque_count > 0) {
+                    (true, true) => "base64_and_opaque_payloads_compacted",
+                    (true, false) => "base64_payload_compacted",
+                    (false, true) => "opaque_payload_compacted",
+                    (false, false) => unreachable!(),
+                },
+            );
         }
     }
     let next_state = if limited.truncated {
@@ -359,44 +371,139 @@ fn apply_usage_body_capture_limit(
     );
 }
 
-fn compact_base64_image_data_urls(value: &mut Value) -> usize {
+fn compact_base64_payloads(value: &mut Value) -> usize {
+    compact_base64_payloads_with_context(value, None)
+}
+
+fn compact_base64_payloads_with_context(value: &mut Value, parent_key: Option<&str>) -> usize {
     match value {
         Value::String(text) => {
-            if let Some((compacted, count)) = compact_base64_image_data_urls_in_string(text) {
+            if let Some((compacted, count)) = compact_base64_data_urls_in_string(text) {
                 *text = compacted;
-                count
-            } else {
-                0
+                return count;
             }
+            0
         }
-        Value::Array(items) => items.iter_mut().map(compact_base64_image_data_urls).sum(),
-        Value::Object(object) => object
-            .values_mut()
-            .map(compact_base64_image_data_urls)
+        Value::Array(items) => items
+            .iter_mut()
+            .map(|item| compact_base64_payloads_with_context(item, parent_key))
             .sum(),
+        Value::Object(object) => {
+            let is_image_generation_call = object
+                .get("type")
+                .and_then(Value::as_str)
+                .is_some_and(|value| value.eq_ignore_ascii_case("image_generation_call"));
+            let is_base64_source = object
+                .get("type")
+                .and_then(Value::as_str)
+                .is_some_and(|value| value.eq_ignore_ascii_case("base64"));
+            let has_mime_type = ["media_type", "mime_type", "mimeType"]
+                .iter()
+                .any(|key| object.get(*key).and_then(Value::as_str).is_some());
+            let is_base64_container = is_base64_source
+                || has_mime_type
+                || parent_key.is_some_and(is_base64_container_key);
+            let mut compacted = 0usize;
+            for (key, child) in object.iter_mut() {
+                let is_base64_field = is_base64_payload_key(key)
+                    || (key.eq_ignore_ascii_case("result") && is_image_generation_call)
+                    || (key.eq_ignore_ascii_case("data") && is_base64_container);
+                if is_base64_field {
+                    if let Some(payload) = child.as_str() {
+                        if let Some(original_bytes) = valid_base64_payload_decoded_len(payload) {
+                            *child = Value::String(format!(
+                                "<base64 payload omitted; original size: {}>",
+                                format_payload_size(original_bytes)
+                            ));
+                            compacted = compacted.saturating_add(1);
+                            continue;
+                        }
+                    }
+                }
+                compacted = compacted
+                    .saturating_add(compact_base64_payloads_with_context(child, Some(key)));
+            }
+            compacted
+        }
         Value::Null | Value::Bool(_) | Value::Number(_) => 0,
     }
 }
 
-fn compact_base64_image_data_urls_in_string(value: &str) -> Option<(String, usize)> {
+fn is_base64_payload_key(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    key == "b64"
+        || key == "b64_json"
+        || key == "file_data"
+        || key == "filedata"
+        || key.ends_with("_b64")
+        || key.ends_with("_base64")
+}
+
+fn is_base64_container_key(key: &str) -> bool {
+    [
+        "audio",
+        "input_audio",
+        "input_file",
+        "inline_data",
+        "inlinedata",
+    ]
+    .iter()
+    .any(|candidate| key.eq_ignore_ascii_case(candidate))
+}
+
+fn compact_opaque_payloads(value: &mut Value) -> usize {
+    match value {
+        Value::Array(items) => items.iter_mut().map(compact_opaque_payloads).sum(),
+        Value::Object(object) => {
+            let mut compacted = 0usize;
+            for (key, child) in object.iter_mut() {
+                if key.eq_ignore_ascii_case("encrypted_content") {
+                    if let Some(payload) = child.as_str() {
+                        let original_bytes = payload.len() as u64;
+                        if !payload.is_empty() {
+                            *child = Value::String(format!(
+                                "<encrypted content omitted; original size: {}>",
+                                format_payload_size(original_bytes)
+                            ));
+                            compacted = compacted.saturating_add(1);
+                            continue;
+                        }
+                    }
+                } else if key.eq_ignore_ascii_case("body_bytes_b64") {
+                    if let Some(payload) = child.as_str() {
+                        if let Some(original_bytes) = valid_base64_payload_decoded_len(payload) {
+                            *child = Value::String(format!(
+                                "<raw body bytes omitted; original size: {}>",
+                                format_payload_size(original_bytes)
+                            ));
+                            compacted = compacted.saturating_add(1);
+                            continue;
+                        }
+                    }
+                }
+                compacted = compacted.saturating_add(compact_opaque_payloads(child));
+            }
+            compacted
+        }
+        Value::String(_) | Value::Null | Value::Bool(_) | Value::Number(_) => 0,
+    }
+}
+
+fn compact_base64_data_urls_in_string(value: &str) -> Option<(String, usize)> {
     let mut cursor = 0usize;
     let mut compacted = String::new();
     let mut replacement_count = 0usize;
 
-    while let Some(relative_start) = value[cursor..].find(BASE64_IMAGE_DATA_URL_PREFIX) {
-        let start = cursor + relative_start;
-        let metadata_start = start + BASE64_IMAGE_DATA_URL_PREFIX.len();
-        let Some(relative_marker) = value[metadata_start..].find(BASE64_DATA_URL_MARKER) else {
-            break;
+    while let Some(start) = find_ascii_case_insensitive(value, BASE64_DATA_URL_PREFIX, cursor) {
+        let metadata_start = start + BASE64_DATA_URL_PREFIX.len();
+        let Some(marker) =
+            find_ascii_case_insensitive(value, BASE64_DATA_URL_MARKER, metadata_start)
+        else {
+            cursor = metadata_start;
+            continue;
         };
-        let marker = metadata_start + relative_marker;
-        let media_subtype = &value[metadata_start..marker];
-        if media_subtype.is_empty()
-            || media_subtype.len() > 127
-            || !media_subtype
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'+' | b'-'))
-        {
+        let media_type = &value[metadata_start..marker];
+        if !valid_base64_data_url_metadata(media_type) {
             cursor = metadata_start;
             continue;
         }
@@ -406,7 +513,7 @@ fn compact_base64_image_data_urls_in_string(value: &str) -> Option<(String, usiz
             .iter()
             .take_while(|byte| {
                 let byte = **byte;
-                byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/' | b'=')
+                byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/' | b'-' | b'_' | b'=')
             })
             .count();
         if payload_len == 0 {
@@ -415,15 +522,15 @@ fn compact_base64_image_data_urls_in_string(value: &str) -> Option<(String, usiz
         }
         let payload_end = payload_start + payload_len;
         let payload = &value[payload_start..payload_end];
-        let Some(original_bytes) = decoded_base64_len_hint(payload) else {
+        let Some(original_bytes) = valid_base64_payload_decoded_len(payload) else {
             cursor = payload_end;
             continue;
         };
 
         compacted.push_str(&value[cursor..start]);
         compacted.push_str(&format!(
-            "<base64 image omitted; original size: {}>",
-            format_base64_image_size(original_bytes)
+            "<base64 payload omitted; original size: {}>",
+            format_payload_size(original_bytes)
         ));
         cursor = payload_end;
         replacement_count = replacement_count.saturating_add(1);
@@ -436,7 +543,91 @@ fn compact_base64_image_data_urls_in_string(value: &str) -> Option<(String, usiz
     Some((compacted, replacement_count))
 }
 
-fn format_base64_image_size(bytes: u64) -> String {
+fn find_ascii_case_insensitive(value: &str, needle: &str, from: usize) -> Option<usize> {
+    let value = value.as_bytes();
+    let needle = needle.as_bytes();
+    if needle.is_empty() || from > value.len() || needle.len() > value.len().saturating_sub(from) {
+        return None;
+    }
+
+    (from..=value.len() - needle.len()).find(|start| {
+        value[*start..*start + needle.len()]
+            .iter()
+            .zip(needle)
+            .all(|(left, right)| left.eq_ignore_ascii_case(right))
+    })
+}
+
+fn valid_base64_data_url_metadata(value: &str) -> bool {
+    let mut parts = value.split(';');
+    let Some(media_type) = parts.next() else {
+        return false;
+    };
+    if !media_type.is_empty() {
+        let Some((media_type, media_subtype)) = media_type.split_once('/') else {
+            return false;
+        };
+        if !valid_mime_token(media_type) || !valid_mime_token(media_subtype) {
+            return false;
+        }
+    }
+
+    parts.all(|parameter| {
+        let Some((name, value)) = parameter.split_once('=') else {
+            return false;
+        };
+        valid_mime_token(name)
+            && !value.is_empty()
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_graphic() && byte != b',')
+    })
+}
+
+fn valid_mime_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(
+                    byte,
+                    b'!' | b'#'
+                        ..=b'\'' | b'*' | b'+' | b'-' | b'.' | b'^' | b'_' | b'`' | b'|' | b'~'
+                )
+        })
+}
+
+fn valid_base64_payload_decoded_len(value: &str) -> Option<u64> {
+    if value.is_empty() {
+        return None;
+    }
+    let bytes = value.as_bytes();
+    let padding = bytes.iter().rev().take_while(|byte| **byte == b'=').count();
+    if padding > 2 || bytes.len() % 4 == 1 || (padding > 0 && !bytes.len().is_multiple_of(4)) {
+        return None;
+    }
+    let symbols = bytes.len().saturating_sub(padding);
+    if bytes[..symbols]
+        .iter()
+        .any(|byte| !byte.is_ascii_alphanumeric() && !matches!(*byte, b'+' | b'/' | b'-' | b'_'))
+        || bytes[symbols..].iter().any(|byte| *byte != b'=')
+    {
+        return None;
+    }
+    if (padding == 1 && symbols % 4 != 3) || (padding == 2 && symbols % 4 != 2) {
+        return None;
+    }
+
+    let decoded = (symbols / 4)
+        .saturating_mul(3)
+        .saturating_add(match symbols % 4 {
+            2 => 1,
+            3 => 2,
+            _ => 0,
+        });
+    u64::try_from(decoded).ok()
+}
+
+fn format_payload_size(bytes: u64) -> String {
     const KIB: u64 = 1024;
     const MIB: u64 = KIB * 1024;
     const GIB: u64 = MIB * 1024;
@@ -868,8 +1059,8 @@ fn usage_value_kind(value: &Value) -> &'static str {
 mod tests {
     use super::{
         apply_usage_body_capture_policy_to_event, apply_usage_body_capture_policy_to_record,
-        build_plan_body_capture_metadata, compact_base64_image_data_urls,
-        sync_usage_body_ref_metadata, trim_owned_non_empty_string, truncate_usage_body_string,
+        build_plan_body_capture_metadata, compact_base64_payloads, sync_usage_body_ref_metadata,
+        trim_owned_non_empty_string, truncate_usage_body_string,
         upsert_body_capture_metadata_value_entry,
     };
     use aether_data_contracts::repository::usage::UsageBodyCaptureState;
@@ -1157,7 +1348,7 @@ mod tests {
     }
 
     #[test]
-    fn compact_base64_images_replaces_nested_data_urls_with_size_placeholders() {
+    fn compact_base64_payloads_replaces_nested_data_urls_with_size_placeholders() {
         let mut body = json!({
             "messages": [{
                 "role": "user",
@@ -1173,26 +1364,235 @@ mod tests {
                 ]
             }],
             "remote_image": "https://example.com/image.png",
-            "other_data_url": "data:text/plain;base64,aGVsbG8="
+            "other_data_url": "data:text/plain;base64,aGVsbG8=",
+            "plain_base64": "aGVsbG8=",
+            "status": "ok"
         });
 
-        let compacted_count = compact_base64_image_data_urls(&mut body);
+        let compacted_count = compact_base64_payloads(&mut body);
 
-        assert_eq!(compacted_count, 2);
+        assert_eq!(compacted_count, 4);
         assert_eq!(
             body["messages"][0]["content"][0]["image_url"],
-            "<base64 image omitted; original size: 5 B>"
+            "<base64 payload omitted; original size: 5 B>"
         );
         assert_eq!(
             body["messages"][0]["content"][1]["text"],
-            "preview: <base64 image omitted; original size: 5 B> end"
+            "preview: <base64 payload omitted; original size: 5 B> end"
         );
         assert_eq!(body["remote_image"], "https://example.com/image.png");
-        assert_eq!(body["other_data_url"], "data:text/plain;base64,aGVsbG8=");
+        assert_eq!(
+            body["other_data_url"],
+            "<base64 payload omitted; original size: 5 B>"
+        );
+        assert_eq!(
+            body["plain_base64"],
+            "<base64 payload omitted; original size: 5 B>"
+        );
+        assert_eq!(body["status"], "ok");
     }
 
     #[test]
-    fn body_capture_policy_compacts_images_before_enforcing_the_size_limit() {
+    fn compact_base64_payloads_cover_multiple_api_formats_and_mime_types() {
+        let encoded_image = base64::engine::general_purpose::STANDARD.encode(vec![7u8; 4096]);
+        let mut body = json!({
+            "input": format!("prefix DATA:IMAGE/PNG;charset=utf-8;BASE64,{encoded_image} suffix"),
+            "data": [{"b64_json": encoded_image}],
+            "stream_event": {
+                "type": "response.image_generation_call.partial_image",
+                "partial_image_b64": encoded_image
+            },
+            "gemini_camel_case": {
+                "inlineData": {"mimeType": "image/png", "data": encoded_image}
+            },
+            "gemini_snake_case": {
+                "inline_data": {"mime_type": "image/webp", "data": encoded_image}
+            },
+            "claude": {
+                "source": {"type": "base64", "media_type": "image/jpeg", "data": encoded_image}
+            },
+            "document": {
+                "source": {"type": "base64", "media_type": "application/pdf", "data": encoded_image}
+            },
+            "document_data_url": format!("data:application/pdf;name=scan.pdf;base64,{encoded_image}"),
+            "output": [{
+                "type": "image_generation_call",
+                "result": encoded_image
+            }],
+            "file_data": encoded_image,
+            "audio": {"input_audio": {"data": encoded_image}},
+            "other": "data:image/png;broken;base64,aGVsbG8="
+        });
+
+        let compacted_count = compact_base64_payloads(&mut body);
+
+        assert_eq!(compacted_count, 11);
+        assert_eq!(
+            body["input"],
+            "prefix <base64 payload omitted; original size: 4.00 KiB> suffix"
+        );
+        assert_eq!(
+            body["data"][0]["b64_json"],
+            "<base64 payload omitted; original size: 4.00 KiB>"
+        );
+        assert_eq!(
+            body["stream_event"]["partial_image_b64"],
+            "<base64 payload omitted; original size: 4.00 KiB>"
+        );
+        assert_eq!(
+            body["gemini_camel_case"]["inlineData"]["data"],
+            "<base64 payload omitted; original size: 4.00 KiB>"
+        );
+        assert_eq!(
+            body["gemini_snake_case"]["inline_data"]["data"],
+            "<base64 payload omitted; original size: 4.00 KiB>"
+        );
+        assert_eq!(
+            body["claude"]["source"]["data"],
+            "<base64 payload omitted; original size: 4.00 KiB>"
+        );
+        assert_eq!(
+            body["document"]["source"]["data"],
+            "<base64 payload omitted; original size: 4.00 KiB>"
+        );
+        assert_eq!(
+            body["document_data_url"],
+            "<base64 payload omitted; original size: 4.00 KiB>"
+        );
+        assert_eq!(
+            body["output"][0]["result"],
+            "<base64 payload omitted; original size: 4.00 KiB>"
+        );
+        assert_eq!(
+            body["file_data"],
+            "<base64 payload omitted; original size: 4.00 KiB>"
+        );
+        assert_eq!(
+            body["audio"]["input_audio"]["data"],
+            "<base64 payload omitted; original size: 4.00 KiB>"
+        );
+        assert_eq!(body["other"], "data:image/png;broken;base64,aGVsbG8=");
+    }
+
+    #[test]
+    fn base64_compaction_also_replaces_opaque_audit_fields_at_any_size() {
+        let encoded_body = base64::engine::general_purpose::STANDARD.encode([1u8, 2, 3]);
+        let encrypted_content = "state".to_string();
+        let mut event = UsageEvent::new(
+            UsageEventType::Completed,
+            "req-compact-opaque",
+            UsageEventData {
+                provider_name: "OpenAI".to_string(),
+                model: "gpt-5".to_string(),
+                request_body: Some(json!({
+                    "prompt": "keep this human-readable text",
+                    "body_bytes_b64": encoded_body,
+                    "input": [{"type": "reasoning", "encrypted_content": encrypted_content.clone()}]
+                })),
+                provider_request_body: Some(json!({
+                    "output": [{"type": "reasoning", "encrypted_content": encrypted_content.clone()}]
+                })),
+                response_body: Some(json!({
+                    "output": [{"type": "reasoning", "encrypted_content": encrypted_content.clone()}]
+                })),
+                client_response_body: Some(json!({
+                    "output": [{"type": "reasoning", "encrypted_content": encrypted_content}]
+                })),
+                ..UsageEventData::default()
+            },
+        );
+
+        apply_usage_body_capture_policy_to_event(
+            UsageBodyCapturePolicy {
+                record_level: UsageRequestRecordLevel::Full,
+                compact_base64_images: true,
+                ..UsageBodyCapturePolicy::default()
+            },
+            &mut event,
+        );
+
+        let body = event
+            .data
+            .request_body
+            .as_ref()
+            .expect("request body should remain");
+        assert_eq!(body["prompt"], "keep this human-readable text");
+        assert_eq!(
+            body["body_bytes_b64"],
+            "<raw body bytes omitted; original size: 3 B>"
+        );
+        assert_eq!(
+            body["input"][0]["encrypted_content"],
+            "<encrypted content omitted; original size: 5 B>"
+        );
+        for (field, body) in [
+            (
+                "provider_request",
+                event.data.provider_request_body.as_ref(),
+            ),
+            ("response", event.data.response_body.as_ref()),
+            ("client_response", event.data.client_response_body.as_ref()),
+        ] {
+            assert_eq!(
+                body.expect("audit body should remain")["output"][0]["encrypted_content"],
+                "<encrypted content omitted; original size: 5 B>",
+                "{field} body should have its opaque audit payload compacted"
+            );
+        }
+        assert_eq!(
+            event.data.request_body_state,
+            Some(UsageBodyCaptureState::Truncated)
+        );
+        let capture = &event.data.request_metadata.as_ref().unwrap()["body_capture"];
+        for field in ["request", "provider_request", "response", "client_response"] {
+            assert_eq!(capture[field]["reason"], "opaque_payload_compacted");
+            assert_eq!(capture[field]["state"], "truncated");
+            assert!(capture[field]["source_bytes"].as_u64().is_some());
+            assert!(capture[field]["stored_bytes"].as_u64().is_some());
+        }
+    }
+
+    #[test]
+    fn opaque_payload_fields_are_preserved_when_compaction_is_disabled() {
+        let encoded_body = base64::engine::general_purpose::STANDARD.encode(vec![1u8; 4096]);
+        let event = UsageEvent::new(
+            UsageEventType::Completed,
+            "req-keep-opaque",
+            UsageEventData {
+                provider_name: "OpenAI".to_string(),
+                model: "gpt-5".to_string(),
+                request_body: Some(json!({
+                    "body_bytes_b64": encoded_body,
+                    "encrypted_content": "x".repeat(8192)
+                })),
+                ..UsageEventData::default()
+            },
+        );
+        let mut event = event;
+
+        apply_usage_body_capture_policy_to_event(
+            UsageBodyCapturePolicy {
+                record_level: UsageRequestRecordLevel::Full,
+                ..UsageBodyCapturePolicy::default()
+            },
+            &mut event,
+        );
+
+        let body = event
+            .data
+            .request_body
+            .as_ref()
+            .expect("request body should remain");
+        assert_eq!(body["body_bytes_b64"], encoded_body);
+        assert_eq!(body["encrypted_content"], "x".repeat(8192));
+        assert_eq!(
+            event.data.request_body_state,
+            Some(UsageBodyCaptureState::Inline)
+        );
+    }
+
+    #[test]
+    fn body_capture_policy_compacts_base64_before_enforcing_the_size_limit() {
         let encoded_image = base64::engine::general_purpose::STANDARD.encode(vec![0u8; 1536]);
         let mut event = UsageEvent::new(
             UsageEventType::Completed,
@@ -1226,7 +1626,7 @@ mod tests {
         );
         assert_eq!(
             event.data.request_body.as_ref().unwrap()["input"][0]["image_url"],
-            "<base64 image omitted; original size: 1.50 KiB>"
+            "<base64 payload omitted; original size: 1.50 KiB>"
         );
         assert_eq!(
             event.data.response_body_state,
@@ -1234,7 +1634,7 @@ mod tests {
         );
         let request_capture =
             &event.data.request_metadata.as_ref().unwrap()["body_capture"]["request"];
-        assert_eq!(request_capture["reason"], "base64_image_data_url_compacted");
+        assert_eq!(request_capture["reason"], "base64_payload_compacted");
         assert!(
             request_capture["source_bytes"].as_u64().unwrap()
                 > request_capture["stored_bytes"].as_u64().unwrap()
