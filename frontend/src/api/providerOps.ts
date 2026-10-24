@@ -18,6 +18,7 @@ export type ConnectorAuthType = 'api_key' | 'session_login' | 'oauth' | 'cookie'
 /** 操作类型 */
 export type ProviderActionType =
   | 'query_balance'
+  | 'query_quota'
   | 'checkin'
   | 'claim_quota'
   | 'refresh_token'
@@ -302,6 +303,20 @@ export async function getBalance(
 export async function refreshBalance(providerId: string): Promise<ActionResultResponse> {
   const response = await client.post<ActionResultResponse>(
     `${BASE_URL}/providers/${providerId}/balance`
+  )
+  return response.data
+}
+
+/**
+ * 自定义额度查询（同步等待结果，仅 custom 类型）
+ */
+export async function queryQuota(
+  providerId: string,
+  request?: ExecuteActionRequest
+): Promise<ActionResultResponse> {
+  const response = await client.post<ActionResultResponse>(
+    `${BASE_URL}/providers/${providerId}/actions/query_quota`,
+    request || {}
   )
   return response.data
 }

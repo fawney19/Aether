@@ -8,6 +8,7 @@ import type {
   ProviderType,
   ProviderWithEndpointsSummary,
   ProxyConfig,
+  QuotaQueryConfig,
 } from './types'
 import {
   normalizeChatPiiRedactionProviderConfig as normalizeChatPiiRedactionProvider,
@@ -137,6 +138,7 @@ export async function updateProvider(
     codex_fingerprint_convergence_enabled: boolean
     pool_advanced: PoolAdvancedConfig | null
     failover_rules: FailoverRulesConfig | null
+    quota_query: QuotaQueryConfig | null
     config: ProviderConfig | null
   }>,
   requestOptions?: ProviderRequestOptions,
@@ -183,6 +185,7 @@ export async function createProvider(
     codex_fingerprint_convergence_enabled?: boolean
     pool_advanced?: PoolAdvancedConfig | null
     failover_rules?: FailoverRulesConfig | null
+    quota_query?: QuotaQueryConfig | null
     config?: ProviderConfig | null
   }
 ): Promise<{ id: string; name: string; message?: string }> {

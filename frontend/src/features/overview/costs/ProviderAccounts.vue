@@ -102,6 +102,67 @@
             </p>
           </div>
         </div>
+        <div
+          v-if="account.custom_quota"
+          class="space-y-1.5 border-t pt-3 text-xs"
+        >
+          <div class="flex flex-wrap items-center justify-between gap-2">
+            <p class="font-medium">
+              {{ t('自定义额度查询', 'Custom quota query') }}
+              <span v-if="account.custom_quota.plan_name"> · {{ account.custom_quota.plan_name }}</span>
+            </p>
+            <span
+              v-if="account.custom_quota.is_valid === false"
+              class="text-destructive"
+            >{{ account.custom_quota.invalid_message || t('套餐已失效', 'Plan invalid') }}</span>
+          </div>
+          <div class="flex flex-wrap gap-x-4 gap-y-1 text-muted-foreground">
+            <span class="tabular-nums">
+              {{ t('已用', 'Used') }} {{ amount(account.custom_quota.used, account.custom_quota.unit ?? undefined) }}
+              /
+              {{ t('总额', 'Total') }} {{ amount(account.custom_quota.total, account.custom_quota.unit ?? undefined) }}
+            </span>
+            <span class="tabular-nums">
+              {{ t('剩余', 'Remaining') }} {{ amount(account.custom_quota.remaining, account.custom_quota.unit ?? undefined) }}
+            </span>
+          </div>
+          <div
+            v-for="period in account.custom_quota.periods ?? []"
+            :key="period.key"
+            class="space-y-1"
+          >
+            <div class="flex flex-wrap justify-between gap-2">
+              <span class="font-medium">{{ periodLabel(period.key) }}</span>
+              <span class="tabular-nums text-muted-foreground">
+                {{ amount(period.used, account.custom_quota.unit ?? undefined) }} / {{ amount(period.limit, account.custom_quota.unit ?? undefined) }}
+                <template v-if="period.reset_at"> · {{ t('重置', 'Reset') }} {{ resetDisplay(period.reset_at) }}</template>
+              </span>
+            </div>
+            <div class="h-1.5 overflow-hidden rounded-full bg-muted">
+              <div
+                class="h-full rounded-full"
+                :class="periodPercent(period) >= 90 ? 'bg-amber-500' : 'bg-primary/65'"
+                :style="{ width: `${periodPercent(period)}%` }"
+              />
+            </div>
+          </div>
+          <div
+            v-if="hasTotalWindow(account.custom_quota)"
+            class="h-1.5 overflow-hidden rounded-full bg-muted"
+          >
+            <div
+              class="h-full rounded-full"
+              :class="customQuotaPercent(account.custom_quota) >= 90 ? 'bg-amber-500' : 'bg-primary/65'"
+              :style="{ width: `${customQuotaPercent(account.custom_quota)}%` }"
+            />
+          </div>
+          <p
+            v-if="account.custom_quota.extra"
+            class="text-muted-foreground"
+          >
+            {{ account.custom_quota.extra }}
+          </p>
+        </div>
       </Card>
     </div>
     <Card
@@ -116,7 +177,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { Card } from '@/components/ui'
-import type { ProviderAccount, ProviderAccountSubscription } from '@/api/providerFinance'
+import type { ProviderAccount, ProviderAccountSubscription, ProviderCustomQuota, ProviderCustomQuotaPeriod } from '@/api/providerFinance'
 import { money, timestamp } from '../format'
 import { useOverviewI18n } from '../i18n'
 const props = defineProps<{ accounts: ProviderAccount[]; timezone: string; observedAt?: string }>()
@@ -145,5 +206,24 @@ function planUsage(plan: ProviderAccountSubscription) {
     [t('周额度', 'Weekly'), plan.weekly_used_usd, plan.weekly_limit_usd],
     [t('月额度', 'Monthly'), plan.monthly_used_usd, plan.monthly_limit_usd],
   ].filter(([, , limit]) => limit != null).map(([label, used, limit]) => `${label} ${amount(used)} / ${amount(limit)}`).join(' · ') || t('暂无额度明细', 'Quota details unavailable')
+}
+function customQuotaPercent(quota: ProviderCustomQuota) {
+  const used = Number(quota.used)
+  const total = Number(quota.total)
+  return Number.isFinite(used) && Number.isFinite(total) && total > 0 ? Math.min(100, Math.max(0, (used / total) * 100)) : 0
+}
+function hasTotalWindow(quota: ProviderCustomQuota) {
+  return quota.used != null && quota.total != null && Number(quota.total) > 0
+}
+function periodLabel(key: string) {
+  return key === '5h' ? t('5 小时', '5 hours') : key === 'week' ? t('周', 'Weekly') : key === 'month' ? t('月', 'Monthly') : key
+}
+function periodPercent(period: ProviderCustomQuotaPeriod) {
+  const used = Number(period.used)
+  const limit = Number(period.limit)
+  return Number.isFinite(used) && Number.isFinite(limit) && limit > 0 ? Math.min(100, Math.max(0, (used / limit) * 100)) : 0
+}
+function resetDisplay(raw: string) {
+  return /^\d{4}-\d{2}-\d{2}T/.test(raw) ? timestamp(raw, props.timezone) : raw
 }
 </script>

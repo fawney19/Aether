@@ -1697,6 +1697,7 @@ watch(showAdaptiveHotPoolMetricsButton, (enabled) => {
 
 const showAccountQuotaColumn = computed(() => {
   return selectedProviderType.value === 'codex'
+    || selectedProviderType.value === 'custom'
     || selectedProviderType.value === 'claude_code'
     || selectedProviderType.value === 'gemini_cli'
     || selectedProviderType.value === 'kiro'
@@ -3777,7 +3778,9 @@ function buildQuotaProgressItemsFromSnapshot(key: PoolKeyDetail): QuotaProgressI
 
   const providerType = getQuotaSnapshotProviderType(key)
 
-  if (providerType === 'codex') {
+  // Custom providers persist quota-query windows with the shared window
+  // vocabulary, so they render through the identical codex branch.
+  if (providerType === 'codex' || providerType === 'custom') {
     const quotaResetAtSeconds = getQuotaSnapshotResetAtSeconds(quota)
     const quotaResetSeconds = getQuotaSnapshotResetSeconds(quota)
     return (quota.windows ?? [])

@@ -1,5 +1,6 @@
 //! Current provider finance snapshots. This endpoint never calls upstream services.
 use super::build_admin_billing_data_unavailable_response;
+use crate::handlers::admin::provider::ops::providers::ADMIN_PROVIDER_OPS_QUOTA_CACHE_PREFIX;
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::GatewayError;
 use axum::{
@@ -86,6 +87,59 @@ fn balance(value: &Value) -> Option<Value> {
         "subscriptions": subscriptions,
     }))
 }
+pub(crate) fn custom_quota(value: &Value) -> Option<Value> {
+    if value.get("action_type").and_then(Value::as_str) != Some("query_quota") {
+        return None;
+    }
+    if value.get("status").and_then(Value::as_str) != Some("success") {
+        return None;
+    }
+    let data = value.get("data")?;
+    let periods = data
+        .get("periods")
+        .and_then(Value::as_array)
+        .and_then(|items| {
+            let projected = items
+                .iter()
+                .take(8)
+                .filter_map(|period| {
+                    let key = text(period.get("key"))?;
+                    Some(json!({
+                        "key": key,
+                        "used": finite(period.get("used")),
+                        "limit": finite(period.get("limit")),
+                        "reset_at": period.get("reset_at").and_then(|value| {
+                            timestamp(Some(value))
+                                .or_else(|| value.as_str().map(|raw| raw.trim().to_owned()))
+                        }),
+                    }))
+                })
+                .collect::<Vec<_>>();
+            (!projected.is_empty()).then_some(projected)
+        });
+    let updated_at = value
+        .get("executed_at")
+        .and_then(Value::as_str)
+        .and_then(|raw| chrono::DateTime::parse_from_rfc3339(raw).ok())
+        .map(|date| date.timestamp());
+    let projected = json!({
+        "updated_at": updated_at,
+        "is_valid": data.get("is_valid").and_then(Value::as_bool),
+        "invalid_message": text(data.get("invalid_message")),
+        "remaining": finite(data.get("remaining")),
+        "unit": text(data.get("unit")),
+        "plan_name": text(data.get("plan_name")),
+        "total": finite(data.get("total")),
+        "used": finite(data.get("used")),
+        "extra": text(data.get("extra")),
+        "periods": periods,
+    });
+    let has_any = projected
+        .as_object()
+        .map(|fields| fields.values().any(|value| !value.is_null()))
+        .unwrap_or(false);
+    has_any.then_some(projected)
+}
 pub(super) async fn response(
     state: &AdminAppState<'_>,
     context: &AdminRequestContext<'_>,
@@ -101,10 +155,13 @@ pub(super) async fn response(
     }
     let mut providers = state.list_provider_catalog_providers(false).await?;
     providers.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.id.cmp(&b.id)));
-    let keys = providers
-        .iter()
-        .map(|p| format!("provider_ops:balance:{}", p.id))
-        .collect::<Vec<_>>();
+    let mut keys = Vec::with_capacity(providers.len() * 2);
+    for p in &providers {
+        keys.push(format!("provider_ops:balance:{}", p.id));
+    }
+    for p in &providers {
+        keys.push(format!("{ADMIN_PROVIDER_OPS_QUOTA_CACHE_PREFIX}{}", p.id));
+    }
     let (cached, unavailable) = if keys.is_empty() {
         (Vec::new(), false)
     } else {
@@ -113,6 +170,7 @@ pub(super) async fn response(
             Err(_) => (vec![None; keys.len()], true),
         }
     };
+    let (balance_cached, quota_cached) = cached.split_at(providers.len());
     let items = providers.iter().enumerate().map(|(index, p)| {
         let limit = p.monthly_quota_usd.filter(|v| v.is_finite() && *v >= 0.0);
         let used = p.monthly_used_usd.filter(|v| v.is_finite() && *v >= 0.0);
@@ -125,11 +183,14 @@ pub(super) async fn response(
                 "expires_at": p.quota_expires_at_unix_secs.and_then(|v| timestamp(Some(&json!(v)))),
             })
         } else { Value::Null };
-        let balance = cached.get(index).and_then(|v| v.as_deref())
+        let balance = balance_cached.get(index).and_then(|v| v.as_deref())
             .and_then(|v| serde_json::from_str::<Value>(v).ok()).and_then(|v| balance(&v));
+        let custom_quota = quota_cached.get(index).and_then(|v| v.as_deref())
+            .and_then(|v| serde_json::from_str::<Value>(v).ok()).and_then(|v| custom_quota(&v));
         json!({
             "provider_id": p.id, "provider_name": p.name, "is_active": p.is_active,
             "billing_type": p.billing_type, "quota": quota, "balance": balance,
+            "custom_quota": custom_quota,
         })
     }).collect::<Vec<_>>();
     Ok(Some((

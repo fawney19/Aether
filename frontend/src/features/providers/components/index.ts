@@ -4,6 +4,7 @@ export { default as ProviderKeyIdentityBlock } from './ProviderKeyIdentityBlock.
 export { default as ProviderMonthlyQuotaCard } from './ProviderMonthlyQuotaCard.vue'
 export { default as ProviderQuotaProgressRow } from './ProviderQuotaProgressRow.vue'
 export { default as ProviderQuotaSectionHeader } from './ProviderQuotaSectionHeader.vue'
+export { default as CodexQuotaUsageGrid } from './CodexQuotaUsageGrid.vue'
 export { default as ProviderBatchActionDialog } from './ProviderBatchActionDialog.vue'
 export { default as EndpointFormDialog } from './EndpointFormDialog.vue'
 export { default as KeyFormDialog } from './KeyFormDialog.vue'

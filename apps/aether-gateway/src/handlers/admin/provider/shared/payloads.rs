@@ -236,6 +236,8 @@ pub(crate) struct AdminProviderCreateRequest {
     #[serde(default)]
     pub(crate) failover_rules: Option<serde_json::Value>,
     #[serde(default)]
+    pub(crate) quota_query: Option<serde_json::Value>,
+    #[serde(default)]
     pub(crate) config: Option<serde_json::Value>,
 }
 
@@ -298,6 +300,8 @@ pub(crate) struct AdminProviderUpdateRequest {
     pub(crate) claude_code_advanced: Option<serde_json::Value>,
     #[serde(default)]
     pub(crate) failover_rules: Option<serde_json::Value>,
+    #[serde(default)]
+    pub(crate) quota_query: Option<serde_json::Value>,
     #[serde(default)]
     pub(crate) enable_format_conversion: Option<bool>,
     #[serde(default)]

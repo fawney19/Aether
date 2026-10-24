@@ -298,13 +298,55 @@ fn normalize_json_like_object(
     }
 }
 
+const QUOTA_QUERY_MAX_JSON_BYTES: usize = 64 * 1024;
+
+/// Normalize and validate the custom-provider quota query config.
+///
+/// Shape:
+/// ```json
+/// { "script": "#{ request: #{ url: \"https://api.example.com/user/balance\" }, extractor: |response| #{ ... } }" }
+/// ```
+///
+/// The script is a Rhai snippet evaluated in a sandboxed engine (see
+/// `aether_admin::provider::ops::quota_script`); validation here compiles it
+/// and checks the `request` / `extractor` shape. `{{apiKey}}` / `{{api_key}}`
+/// placeholders in the request are resolved from the provider's Provider Ops
+/// credentials (falling back to the first usable pool key) at execution time;
+/// no secret is stored on the quota config itself. Returns `Ok(None)` for
+/// absent/null so callers drop it.
+pub(crate) fn normalize_quota_query_config(
+    value: Option<serde_json::Value>,
+) -> Result<Option<serde_json::Value>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let Some(object) = value.as_object() else {
+        return Err("quota_query 必须是 JSON 对象".to_string());
+    };
+    if value.to_string().len() > QUOTA_QUERY_MAX_JSON_BYTES {
+        return Err("quota_query 内容过大".to_string());
+    }
+    let script = object
+        .get("script")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "quota_query.script 不能为空".to_string())?;
+    aether_admin::provider::ops::quota_script::validate_quota_script(script)
+        .map_err(|message| format!("quota_query 脚本无效: {message}"))?;
+    Ok(Some(serde_json::json!({ "script": script })))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         normalize_allow_auth_channel_mismatch_formats, normalize_api_format_json_object_keys,
         normalize_api_format_list, normalize_auth_type, normalize_auth_type_by_format,
         normalize_chat_pii_redaction_config, normalize_pool_advanced_config,
-        normalize_provider_type_input, normalize_rate_multipliers,
+        normalize_provider_type_input, normalize_quota_query_config, normalize_rate_multipliers,
         reconcile_allow_auth_channel_mismatch_formats, remove_responses_websocket_enabled,
         set_responses_websocket_enabled, validate_responses_websocket_config,
         validate_vertex_api_formats,
@@ -554,5 +596,47 @@ mod tests {
             ],
         )
         .is_ok());
+    }
+
+    #[test]
+    fn quota_query_validates_rhai_script() {
+        let script = "#{ request: #{ url: \"https://api.example.com/user/balance\", method: \"GET\", headers: #{ \"Authorization\": \"Bearer {{apiKey}}\" } }, extractor: |response| #{ remaining: response.balance, unit: \"USD\" } }";
+        let normalized = normalize_quota_query_config(Some(json!({ "script": script })))
+            .expect("valid config")
+            .expect("some config");
+        assert_eq!(normalized, json!({ "script": script }));
+    }
+
+    #[test]
+    fn quota_query_rejects_invalid_scripts() {
+        assert!(normalize_quota_query_config(Some(json!("not-an-object"))).is_err());
+        assert!(normalize_quota_query_config(Some(json!({}))).is_err());
+        assert!(normalize_quota_query_config(Some(json!({ "script": " " }))).is_err());
+
+        // Rhai syntax error.
+        let error = normalize_quota_query_config(Some(json!({ "script": "#{ request: " })))
+            .expect_err("syntax error should fail");
+        assert!(
+            error.contains("quota_query 脚本无效"),
+            "unexpected error: {error}"
+        );
+
+        // Missing extractor / request.url.
+        assert!(normalize_quota_query_config(Some(json!({
+            "script": "#{ request: #{ url: \"https://api.example.com/quota\" } }"
+        })))
+        .is_err());
+        assert!(normalize_quota_query_config(Some(json!({
+            "script": "#{ extractor: |r| #{ remaining: 1 } }"
+        })))
+        .is_err());
+    }
+
+    #[test]
+    fn quota_query_null_returns_none() {
+        assert!(normalize_quota_query_config(None).expect("ok").is_none());
+        assert!(normalize_quota_query_config(Some(json!(null)))
+            .expect("ok")
+            .is_none());
     }
 }

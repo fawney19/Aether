@@ -38,6 +38,7 @@ pub(crate) fn build_admin_provider_summary_value(
     provider: &StoredProviderCatalogProvider,
     endpoints: &[StoredProviderCatalogEndpoint],
     keys: &[StoredProviderCatalogKey],
+    custom_quota: Option<&serde_json::Value>,
     quota_snapshot: Option<&aether_data_contracts::repository::quota::StoredProviderQuotaSnapshot>,
     model_stats: Option<
         &aether_data_contracts::repository::global_models::StoredProviderModelStats,
@@ -198,6 +199,8 @@ pub(crate) fn build_admin_provider_summary_value(
         "claude_code_advanced": admin_secret_safe_json(config.and_then(|cfg| cfg.get("claude_code_advanced"))),
         "pool_advanced": admin_secret_safe_json(config.and_then(|cfg| cfg.get("pool_advanced"))),
         "failover_rules": admin_secret_safe_json(config.and_then(|cfg| cfg.get("failover_rules"))),
+        "quota_query": admin_secret_safe_json(config.and_then(|cfg| cfg.get("quota_query"))),
+        "custom_quota": custom_quota.cloned().unwrap_or(serde_json::Value::Null),
         "chat_pii_redaction": admin_secret_safe_json(config.and_then(|cfg| cfg.get("chat_pii_redaction"))),
         "total_endpoints": total_endpoints,
         "active_endpoints": active_endpoints,

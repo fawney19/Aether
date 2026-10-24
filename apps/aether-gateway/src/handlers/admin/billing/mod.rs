@@ -16,7 +16,7 @@ mod collectors;
 mod payments;
 mod plans;
 mod presets;
-mod provider_accounts;
+pub(in crate::handlers::admin) mod provider_accounts;
 mod provider_expenses;
 mod routes;
 mod rules;

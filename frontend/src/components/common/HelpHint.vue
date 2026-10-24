@@ -1,15 +1,23 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import { CircleHelp } from 'lucide-vue-next'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
+import { cn } from '@/lib/utils'
 
 const props = defineProps<{
   label: string
   text: string
   portal?: boolean
+  /** Extra classes for the tooltip bubble, e.g. a wider max-width for long
+   * help texts. */
+  contentClass?: string
 }>()
 
 const open = ref(false)
+
+const bubbleClass = computed(() =>
+  cn('max-w-xs whitespace-pre-line text-xs leading-5', props.contentClass),
+)
 </script>
 
 <template>
@@ -28,7 +36,7 @@ const open = ref(false)
       </TooltipTrigger>
       <TooltipContent
         side="right"
-        class="max-w-xs whitespace-pre-line text-xs leading-5"
+        :class="bubbleClass"
       >
         {{ props.text }}
       </TooltipContent>

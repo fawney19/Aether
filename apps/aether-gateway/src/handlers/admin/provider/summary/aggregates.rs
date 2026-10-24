@@ -1,4 +1,5 @@
 use super::value::build_admin_provider_summary_value;
+use crate::handlers::admin::provider::ops::providers::ADMIN_PROVIDER_OPS_QUOTA_CACHE_PREFIX;
 use crate::handlers::admin::request::AdminAppState;
 use crate::GatewayError;
 use aether_data_contracts::repository::provider_catalog::{
@@ -44,6 +45,7 @@ pub(crate) async fn build_admin_provider_summary_payload(
     let endpoints = endpoints_result?;
     let keys = keys_result?;
     let quota_snapshot = quota_snapshot_result.ok().flatten();
+    let custom_quota = read_custom_quota_cache(state, provider_id).await;
     let model_stats = model_stats_result
         .ok()
         .unwrap_or_default()
@@ -66,6 +68,7 @@ pub(crate) async fn build_admin_provider_summary_payload(
         &provider,
         &endpoints,
         &keys,
+        custom_quota.as_ref(),
         quota_snapshot.as_ref(),
         model_stats.as_ref(),
         active_global_model_ids,
@@ -239,6 +242,7 @@ pub(crate) async fn build_admin_providers_summary_payload(
         .as_secs();
     let mut items = Vec::with_capacity(providers.len());
     for provider in providers {
+        let custom_quota = read_custom_quota_cache(state, &provider.id).await;
         let active_global_model_ids = active_global_model_ids_by_provider
             .get(&provider.id)
             .cloned()
@@ -255,6 +259,7 @@ pub(crate) async fn build_admin_providers_summary_payload(
                 .get(&provider.id)
                 .map(Vec::as_slice)
                 .unwrap_or(&[]),
+            custom_quota.as_ref(),
             None,
             model_stats_by_provider.get(&provider.id),
             active_global_model_ids,
@@ -268,4 +273,23 @@ pub(crate) async fn build_admin_providers_summary_payload(
         "page_size": page_size,
         "items": items,
     }))
+}
+
+/// Read the cached custom quota query result (written by the `query_quota`
+/// action) so provider summaries can surface it alongside the built-in
+/// per-key quota displays.
+async fn read_custom_quota_cache(
+    state: &crate::AppState,
+    provider_id: &str,
+) -> Option<serde_json::Value> {
+    let raw = state
+        .runtime_state()
+        .kv_get(&format!(
+            "{ADMIN_PROVIDER_OPS_QUOTA_CACHE_PREFIX}{provider_id}"
+        ))
+        .await
+        .ok()
+        .flatten()?;
+    let payload = serde_json::from_str::<serde_json::Value>(&raw).ok()?;
+    crate::handlers::admin::billing::provider_accounts::custom_quota(&payload)
 }
