@@ -12,6 +12,7 @@ use crate::runtime::{UsageBodyCapturePolicy, UsageRequestRecordLevel};
 const TRUNCATED_BODY_STRING_SUFFIX: &str = "...[truncated]";
 const BASE64_DATA_URL_PREFIX: &str = "data:";
 const BASE64_DATA_URL_MARKER: &str = ";base64,";
+const MIN_AUDIT_PAYLOAD_BYTES: u64 = 4 * 1024;
 
 #[derive(Debug)]
 struct LimitedUsageBodyCapture {
@@ -413,7 +414,9 @@ fn compact_base64_payloads_with_context(value: &mut Value, parent_key: Option<&s
                         None
                     }
                 });
-                if let Some((payload_kind, original_bytes)) = replacement {
+                if let Some((payload_kind, original_bytes)) = replacement
+                    .filter(|(_, original_bytes)| *original_bytes >= MIN_AUDIT_PAYLOAD_BYTES)
+                {
                     let payload_media_type = if payload_kind == "base64 payload" {
                         media_type.as_deref()
                     } else {
@@ -460,6 +463,7 @@ fn is_base64_container_key(key: &str) -> bool {
 
 fn compact_base64_data_urls_in_string(value: &str) -> Option<(String, usize)> {
     let mut cursor = 0usize;
+    let mut copied_until = 0usize;
     let mut compacted = String::new();
     let mut replacement_count = 0usize;
 
@@ -495,21 +499,26 @@ fn compact_base64_data_urls_in_string(value: &str) -> Option<(String, usize)> {
             cursor = payload_end;
             continue;
         };
+        if original_bytes < MIN_AUDIT_PAYLOAD_BYTES {
+            cursor = payload_end;
+            continue;
+        }
 
-        compacted.push_str(&value[cursor..start]);
+        compacted.push_str(&value[copied_until..start]);
         compacted.push_str(&format_omitted_payload(
             "base64 payload",
             metadata.split(';').next(),
             original_bytes,
         ));
         cursor = payload_end;
+        copied_until = payload_end;
         replacement_count = replacement_count.saturating_add(1);
     }
 
     if replacement_count == 0 {
         return None;
     }
-    compacted.push_str(&value[cursor..]);
+    compacted.push_str(&value[copied_until..]);
     Some((compacted, replacement_count))
 }
 
@@ -1333,24 +1342,25 @@ mod tests {
 
     #[test]
     fn compact_base64_payloads_replaces_nested_data_urls_with_size_placeholders() {
+        let encoded_payload = base64::engine::general_purpose::STANDARD.encode(vec![7u8; 4096]);
         let mut body = json!({
             "messages": [{
                 "role": "user",
                 "content": [
                     {
                         "type": "input_image",
-                        "image_url": "data:image/png;base64,aGVsbG8="
+                        "image_url": format!("data:image/png;base64,{encoded_payload}")
                     },
                     {
                         "type": "input_text",
-                        "text": "preview: data:image/jpeg;base64,d29ybGQ= and data:text/plain;charset=utf-8;base64,aGVsbG8= end"
+                        "text": format!("preview: data:image/jpeg;base64,{encoded_payload} and data:text/plain;charset=utf-8;base64,{encoded_payload} end")
                     }
                 ]
             }],
             "remote_image": "https://example.com/image.png",
-            "other_data_url": "data:text/plain;base64,aGVsbG8=",
-            "untyped_data_url": "data:;base64,aGVsbG8=",
-            "plain_base64": "aGVsbG8=",
+            "other_data_url": format!("data:text/plain;base64,{encoded_payload}"),
+            "untyped_data_url": format!("data:;base64,{encoded_payload}"),
+            "plain_base64": encoded_payload,
             "status": "ok"
         });
 
@@ -1359,24 +1369,24 @@ mod tests {
         assert_eq!(compacted_count, 6);
         assert_eq!(
             body["messages"][0]["content"][0]["image_url"],
-            "<base64 payload omitted; media type: image/png; original size: 5 B>"
+            "<base64 payload omitted; media type: image/png; original size: 4.00 KiB>"
         );
         assert_eq!(
             body["messages"][0]["content"][1]["text"],
-            "preview: <base64 payload omitted; media type: image/jpeg; original size: 5 B> and <base64 payload omitted; media type: text/plain; original size: 5 B> end"
+            "preview: <base64 payload omitted; media type: image/jpeg; original size: 4.00 KiB> and <base64 payload omitted; media type: text/plain; original size: 4.00 KiB> end"
         );
         assert_eq!(body["remote_image"], "https://example.com/image.png");
         assert_eq!(
             body["other_data_url"],
-            "<base64 payload omitted; media type: text/plain; original size: 5 B>"
+            "<base64 payload omitted; media type: text/plain; original size: 4.00 KiB>"
         );
         assert_eq!(
             body["untyped_data_url"],
-            "<base64 payload omitted; original size: 5 B>"
+            "<base64 payload omitted; original size: 4.00 KiB>"
         );
         assert_eq!(
             body["plain_base64"],
-            "<base64 payload omitted; original size: 5 B>"
+            "<base64 payload omitted; original size: 4.00 KiB>"
         );
         assert_eq!(body["status"], "ok");
     }
@@ -1410,7 +1420,7 @@ mod tests {
             }],
             "file_data": encoded_image,
             "audio": {"input_audio": {"data": encoded_image}},
-            "audit": {"encrypted_content": "state", "body_bytes_b64": "AQID"},
+            "audit": {"encrypted_content": "x".repeat(4096), "body_bytes_b64": encoded_image},
             "other": "data:image/png;broken;base64,aGVsbG8="
         });
 
@@ -1463,19 +1473,144 @@ mod tests {
         );
         assert_eq!(
             body["audit"]["encrypted_content"],
-            "<encrypted content omitted; original size: 5 B>"
+            "<encrypted content omitted; original size: 4.00 KiB>"
         );
         assert_eq!(
             body["audit"]["body_bytes_b64"],
-            "<raw body bytes omitted; original size: 3 B>"
+            "<raw body bytes omitted; original size: 4.00 KiB>"
         );
         assert_eq!(body["other"], "data:image/png;broken;base64,aGVsbG8=");
     }
 
     #[test]
-    fn base64_compaction_also_replaces_encoded_audit_fields_at_any_size() {
-        let encoded_body = base64::engine::general_purpose::STANDARD.encode([1u8, 2, 3]);
-        let encrypted_content = "state".to_string();
+    fn base64_compaction_respects_the_payload_size_threshold() {
+        for original_bytes in [5usize, 4095, 4096, 4097] {
+            let encoded =
+                base64::engine::general_purpose::STANDARD.encode(vec![7u8; original_bytes]);
+            let encrypted_content =
+                "é".repeat(original_bytes / 2) + &"x".repeat(original_bytes % 2);
+            let original = json!({
+                "b64_json": encoded,
+                "body_bytes_b64": encoded,
+                "encrypted_content": encrypted_content,
+                "source": {"type": "base64", "media_type": "text/plain", "data": encoded},
+                "data_url": format!("data:text/plain;base64,{encoded}")
+            });
+            let mut body = original.clone();
+
+            let compacted_count = compact_base64_payloads(&mut body);
+
+            if original_bytes < 4096 {
+                assert_eq!(compacted_count, 0, "{original_bytes} B should remain");
+                assert_eq!(body, original, "{original_bytes} B should remain unchanged");
+                continue;
+            }
+
+            assert_eq!(compacted_count, 5, "{original_bytes} B should be compacted");
+            assert_eq!(
+                body["b64_json"],
+                "<base64 payload omitted; original size: 4.00 KiB>"
+            );
+            assert_eq!(
+                body["body_bytes_b64"],
+                "<raw body bytes omitted; original size: 4.00 KiB>"
+            );
+            assert_eq!(
+                body["encrypted_content"],
+                "<encrypted content omitted; original size: 4.00 KiB>"
+            );
+            for value in [&body["source"]["data"], &body["data_url"]] {
+                assert_eq!(
+                    value,
+                    "<base64 payload omitted; media type: text/plain; original size: 4.00 KiB>"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn base64_compaction_preserves_small_data_urls_and_surrounding_text() {
+        let encoded = base64::engine::general_purpose::STANDARD.encode(vec![7u8; 4096]);
+        let small = "data:text/plain;base64,aGVsbG8=";
+        let invalid = "data:image/png;broken;base64,aGVsbG8=";
+        let large = format!("data:image/png;base64,{encoded}");
+        let placeholder =
+            "<base64 payload omitted; media type: image/png; original size: 4.00 KiB>";
+        let mut body = json!({
+            "text": format!("prefix {small} {invalid} before {large} between {small} then {large} after {small} end")
+        });
+
+        assert_eq!(compact_base64_payloads(&mut body), 2);
+        assert_eq!(
+            body["text"],
+            format!("prefix {small} {invalid} before {placeholder} between {small} then {placeholder} after {small} end")
+        );
+    }
+
+    #[test]
+    fn small_audit_payloads_remain_inline_with_compaction_enabled() {
+        let body = json!({
+            "b64_json": "aGVsbG8=",
+            "body_bytes_b64": "aGVsbG8=",
+            "encrypted_content": "state",
+            "source": {"type": "base64", "media_type": "text/plain", "data": "aGVsbG8="},
+            "data_url": "data:text/plain;base64,aGVsbG8="
+        });
+        let mut event = UsageEvent::new(
+            UsageEventType::Completed,
+            "req-keep-small-payloads",
+            UsageEventData {
+                request_body: Some(body.clone()),
+                provider_request_body: Some(body.clone()),
+                response_body: Some(body.clone()),
+                client_response_body: Some(body.clone()),
+                ..UsageEventData::default()
+            },
+        );
+
+        apply_usage_body_capture_policy_to_event(
+            UsageBodyCapturePolicy {
+                record_level: UsageRequestRecordLevel::Full,
+                compact_base64_images: true,
+                ..UsageBodyCapturePolicy::default()
+            },
+            &mut event,
+        );
+
+        let capture = &event.data.request_metadata.as_ref().unwrap()["body_capture"];
+        for (field, stored_body, state) in [
+            (
+                "request",
+                &event.data.request_body,
+                event.data.request_body_state,
+            ),
+            (
+                "provider_request",
+                &event.data.provider_request_body,
+                event.data.provider_request_body_state,
+            ),
+            (
+                "response",
+                &event.data.response_body,
+                event.data.response_body_state,
+            ),
+            (
+                "client_response",
+                &event.data.client_response_body,
+                event.data.client_response_body_state,
+            ),
+        ] {
+            assert_eq!(stored_body.as_ref(), Some(&body));
+            assert_eq!(state, Some(UsageBodyCaptureState::Inline));
+            assert_eq!(capture[field]["state"], "inline");
+            assert!(capture[field].get("reason").is_none());
+        }
+    }
+
+    #[test]
+    fn base64_compaction_also_replaces_large_encoded_audit_fields() {
+        let encoded_body = base64::engine::general_purpose::STANDARD.encode(vec![1u8; 4096]);
+        let encrypted_content = "x".repeat(4096);
         let mut event = UsageEvent::new(
             UsageEventType::Completed,
             "req-compact-encoded",
@@ -1517,11 +1652,11 @@ mod tests {
         assert_eq!(body["prompt"], "keep this human-readable text");
         assert_eq!(
             body["body_bytes_b64"],
-            "<raw body bytes omitted; original size: 3 B>"
+            "<raw body bytes omitted; original size: 4.00 KiB>"
         );
         assert_eq!(
             body["input"][0]["encrypted_content"],
-            "<encrypted content omitted; original size: 5 B>"
+            "<encrypted content omitted; original size: 4.00 KiB>"
         );
         for (field, body) in [
             (
@@ -1533,7 +1668,7 @@ mod tests {
         ] {
             assert_eq!(
                 body.expect("audit body should remain")["output"][0]["encrypted_content"],
-                "<encrypted content omitted; original size: 5 B>",
+                "<encrypted content omitted; original size: 4.00 KiB>",
                 "{field} body should have its encoded audit payload compacted"
             );
         }
@@ -1591,7 +1726,7 @@ mod tests {
 
     #[test]
     fn body_capture_policy_compacts_base64_before_enforcing_the_size_limit() {
-        let encoded_image = base64::engine::general_purpose::STANDARD.encode(vec![0u8; 1536]);
+        let encoded_image = base64::engine::general_purpose::STANDARD.encode(vec![0u8; 4096]);
         let mut event = UsageEvent::new(
             UsageEventType::Completed,
             "req-compact-images",
@@ -1624,7 +1759,7 @@ mod tests {
         );
         assert_eq!(
             event.data.request_body.as_ref().unwrap()["input"][0]["image_url"],
-            "<base64 payload omitted; media type: image/png; original size: 1.50 KiB>"
+            "<base64 payload omitted; media type: image/png; original size: 4.00 KiB>"
         );
         assert_eq!(
             event.data.response_body_state,
