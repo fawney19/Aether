@@ -385,11 +385,12 @@ fn compact_base64_payloads_with_context(value: &mut Value, parent_key: Option<&s
                 .get("type")
                 .and_then(Value::as_str)
                 .is_some_and(|value| value.eq_ignore_ascii_case("base64"));
-            let has_mime_type = ["media_type", "mime_type", "mimeType"]
+            let media_type = ["media_type", "mime_type", "mimeType"]
                 .iter()
-                .any(|key| object.get(*key).and_then(Value::as_str).is_some());
+                .find_map(|key| object.get(*key).and_then(Value::as_str))
+                .map(str::to_owned);
             let is_base64_container = is_base64_source
-                || has_mime_type
+                || media_type.is_some()
                 || parent_key.is_some_and(is_base64_container_key);
             let mut compacted = 0usize;
             for (key, child) in object.iter_mut() {
@@ -413,9 +414,15 @@ fn compact_base64_payloads_with_context(value: &mut Value, parent_key: Option<&s
                     }
                 });
                 if let Some((payload_kind, original_bytes)) = replacement {
-                    *child = Value::String(format!(
-                        "<{payload_kind} omitted; original size: {}>",
-                        format_payload_size(original_bytes)
+                    let payload_media_type = if payload_kind == "base64 payload" {
+                        media_type.as_deref()
+                    } else {
+                        None
+                    };
+                    *child = Value::String(format_omitted_payload(
+                        payload_kind,
+                        payload_media_type,
+                        original_bytes,
                     ));
                     compacted = compacted.saturating_add(1);
                     continue;
@@ -464,8 +471,8 @@ fn compact_base64_data_urls_in_string(value: &str) -> Option<(String, usize)> {
             cursor = metadata_start;
             continue;
         };
-        let media_type = &value[metadata_start..marker];
-        if !valid_base64_data_url_metadata(media_type) {
+        let metadata = &value[metadata_start..marker];
+        if !valid_base64_data_url_metadata(metadata) {
             cursor = metadata_start;
             continue;
         }
@@ -490,9 +497,10 @@ fn compact_base64_data_urls_in_string(value: &str) -> Option<(String, usize)> {
         };
 
         compacted.push_str(&value[cursor..start]);
-        compacted.push_str(&format!(
-            "<base64 payload omitted; original size: {}>",
-            format_payload_size(original_bytes)
+        compacted.push_str(&format_omitted_payload(
+            "base64 payload",
+            metadata.split(';').next(),
+            original_bytes,
         ));
         cursor = payload_end;
         replacement_count = replacement_count.saturating_add(1);
@@ -503,6 +511,20 @@ fn compact_base64_data_urls_in_string(value: &str) -> Option<(String, usize)> {
     }
     compacted.push_str(&value[cursor..]);
     Some((compacted, replacement_count))
+}
+
+fn format_omitted_payload(
+    payload_kind: &str,
+    media_type: Option<&str>,
+    original_bytes: u64,
+) -> String {
+    let original_size = format_payload_size(original_bytes);
+    match media_type.filter(|media_type| !media_type.is_empty()) {
+        Some(media_type) => format!(
+            "<{payload_kind} omitted; media type: {media_type}; original size: {original_size}>"
+        ),
+        None => format!("<{payload_kind} omitted; original size: {original_size}>"),
+    }
 }
 
 fn find_ascii_case_insensitive(value: &str, needle: &str, from: usize) -> Option<usize> {
@@ -1321,30 +1343,35 @@ mod tests {
                     },
                     {
                         "type": "input_text",
-                        "text": "preview: data:image/jpeg;base64,d29ybGQ= end"
+                        "text": "preview: data:image/jpeg;base64,d29ybGQ= and data:text/plain;charset=utf-8;base64,aGVsbG8= end"
                     }
                 ]
             }],
             "remote_image": "https://example.com/image.png",
             "other_data_url": "data:text/plain;base64,aGVsbG8=",
+            "untyped_data_url": "data:;base64,aGVsbG8=",
             "plain_base64": "aGVsbG8=",
             "status": "ok"
         });
 
         let compacted_count = compact_base64_payloads(&mut body);
 
-        assert_eq!(compacted_count, 4);
+        assert_eq!(compacted_count, 6);
         assert_eq!(
             body["messages"][0]["content"][0]["image_url"],
-            "<base64 payload omitted; original size: 5 B>"
+            "<base64 payload omitted; media type: image/png; original size: 5 B>"
         );
         assert_eq!(
             body["messages"][0]["content"][1]["text"],
-            "preview: <base64 payload omitted; original size: 5 B> end"
+            "preview: <base64 payload omitted; media type: image/jpeg; original size: 5 B> and <base64 payload omitted; media type: text/plain; original size: 5 B> end"
         );
         assert_eq!(body["remote_image"], "https://example.com/image.png");
         assert_eq!(
             body["other_data_url"],
+            "<base64 payload omitted; media type: text/plain; original size: 5 B>"
+        );
+        assert_eq!(
+            body["untyped_data_url"],
             "<base64 payload omitted; original size: 5 B>"
         );
         assert_eq!(
@@ -1392,7 +1419,7 @@ mod tests {
         assert_eq!(compacted_count, 13);
         assert_eq!(
             body["input"],
-            "prefix <base64 payload omitted; original size: 4.00 KiB> suffix"
+            "prefix <base64 payload omitted; media type: IMAGE/PNG; original size: 4.00 KiB> suffix"
         );
         assert_eq!(
             body["data"][0]["b64_json"],
@@ -1404,23 +1431,23 @@ mod tests {
         );
         assert_eq!(
             body["gemini_camel_case"]["inlineData"]["data"],
-            "<base64 payload omitted; original size: 4.00 KiB>"
+            "<base64 payload omitted; media type: image/png; original size: 4.00 KiB>"
         );
         assert_eq!(
             body["gemini_snake_case"]["inline_data"]["data"],
-            "<base64 payload omitted; original size: 4.00 KiB>"
+            "<base64 payload omitted; media type: image/webp; original size: 4.00 KiB>"
         );
         assert_eq!(
             body["claude"]["source"]["data"],
-            "<base64 payload omitted; original size: 4.00 KiB>"
+            "<base64 payload omitted; media type: image/jpeg; original size: 4.00 KiB>"
         );
         assert_eq!(
             body["document"]["source"]["data"],
-            "<base64 payload omitted; original size: 4.00 KiB>"
+            "<base64 payload omitted; media type: application/pdf; original size: 4.00 KiB>"
         );
         assert_eq!(
             body["document_data_url"],
-            "<base64 payload omitted; original size: 4.00 KiB>"
+            "<base64 payload omitted; media type: application/pdf; original size: 4.00 KiB>"
         );
         assert_eq!(
             body["output"][0]["result"],
@@ -1597,7 +1624,7 @@ mod tests {
         );
         assert_eq!(
             event.data.request_body.as_ref().unwrap()["input"][0]["image_url"],
-            "<base64 payload omitted; original size: 1.50 KiB>"
+            "<base64 payload omitted; media type: image/png; original size: 1.50 KiB>"
         );
         assert_eq!(
             event.data.response_body_state,
