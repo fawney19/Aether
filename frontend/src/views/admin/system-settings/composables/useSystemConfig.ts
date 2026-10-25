@@ -567,7 +567,7 @@ export function useSystemConfig() {
         {
           key: 'request_record_compact_base64_images',
           value: systemConfig.value.request_record_compact_base64_images,
-          description: '请求记录 Base64 图片精简开关',
+          description: '请求记录图片及大型审计载荷精简开关',
         },
         {
           key: 'request_record_max_body_size_kb',

@@ -78,10 +78,10 @@
             for="compact-base64-images"
             class="text-sm font-medium cursor-pointer"
           >
-            精简 Base64 图片
+            压缩 Base64
           </Label>
           <p class="mt-1 text-xs text-muted-foreground">
-            将 data:image/...;base64 图片替换为包含原始大小的占位符
+            将较大的 Base64 内容替换为保留类型和大小的占位符，仅影响审计记录，不影响请求转发。
           </p>
         </div>
       </div>
