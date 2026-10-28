@@ -664,6 +664,7 @@ export function useUsageData(options: UseUsageDataOptions) {
         image_progress: statusProgressed
           ? (record.image_progress ?? existing.image_progress)
           : existing.image_progress,
+        is_queued: statusProgressed ? record.is_queued === true : existing.is_queued,
         is_stream: upstreamIsStream,
         is_websocket: mergeBooleanTrueWins(existing.is_websocket, record.is_websocket),
         websocket_transport: record.websocket_transport || existing.websocket_transport,

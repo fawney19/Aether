@@ -12,6 +12,10 @@ use crate::GatewayError;
 
 #[async_trait]
 pub(crate) trait SchedulerRuntimeState {
+    fn provider_concurrency_queue_enabled(&self) -> bool {
+        false
+    }
+
     async fn read_provider_quota_snapshot(
         &self,
         provider_id: &str,

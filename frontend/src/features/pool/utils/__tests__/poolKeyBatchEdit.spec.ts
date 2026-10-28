@@ -17,6 +17,8 @@ function state(overrides: Partial<PoolKeyBatchEditState> = {}): PoolKeyBatchEdit
     rpmLimit: '',
     applyConcurrentLimit: false,
     concurrentLimit: '',
+    applyConcurrencyQueue: false,
+    concurrencyQueueEnabled: true,
     applyCacheTtl: false,
     cacheTtlMinutes: '5',
     applyProbeInterval: false,
@@ -36,6 +38,28 @@ function state(overrides: Partial<PoolKeyBatchEditState> = {}): PoolKeyBatchEdit
 }
 
 describe('buildPoolKeyBatchUpdatePatch', () => {
+  it.each([true, false])('emits the explicitly selected queue boolean %s independently', (enabled) => {
+    const result = buildPoolKeyBatchUpdatePatch(state({
+      applyConcurrencyQueue: true,
+      concurrencyQueueEnabled: enabled,
+    }))
+
+    expect(result.error).toBeNull()
+    expect(JSON.parse(JSON.stringify(result.patch))).toEqual({
+      concurrency_queue_enabled: enabled,
+    })
+  })
+
+  it('does not change the queue setting when only the concurrency limit is selected', () => {
+    const result = buildPoolKeyBatchUpdatePatch(state({
+      applyConcurrentLimit: true,
+      concurrentLimit: '6',
+      concurrencyQueueEnabled: false,
+    }))
+
+    expect(result.patch).toEqual({ concurrent_limit: 6 })
+  })
+
   it('only emits fields explicitly enabled by the operator', () => {
     const result = buildPoolKeyBatchUpdatePatch(state({
       applyApiFormats: true,

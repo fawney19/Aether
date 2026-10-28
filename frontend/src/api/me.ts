@@ -381,6 +381,7 @@ export const meApi = {
     requests: Array<{
       id: string
       status: 'pending' | 'streaming' | 'completed' | 'failed' | 'cancelled'
+      is_queued?: boolean
       input_tokens: number
       effective_input_tokens?: number | null
       output_tokens: number
@@ -433,6 +434,7 @@ export const meApi = {
     requests: Array<{
       id: string
       status: 'pending' | 'streaming' | 'completed' | 'failed' | 'cancelled'
+      is_queued?: boolean
       input_tokens: number
       effective_input_tokens?: number | null
       output_tokens: number

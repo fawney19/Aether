@@ -365,7 +365,7 @@ import { parseProviderKeyBatchImport } from '@/features/providers/utils/provider
 type WizardStep = 1 | 2 | 3
 type AuthType = 'api_key' | 'bearer'
 type ImportSettings = Required<Pick<PoolKeySettingsPatch,
-  'internal_priority' | 'rpm_limit' | 'concurrent_limit' | 'cache_ttl_minutes'
+  'internal_priority' | 'rpm_limit' | 'concurrent_limit' | 'concurrency_queue_enabled' | 'cache_ttl_minutes'
   | 'max_probe_interval_minutes' | 'is_active' | 'note' | 'proxy_node_id'
 >>
 
@@ -479,7 +479,7 @@ const settingsSummaryItems = computed(() => {
   const rpm = settings.rpm_limit == null ? 'RPM 自适应' : `RPM ${settings.rpm_limit}`
   const concurrent = settings.concurrent_limit == null || settings.concurrent_limit === 0
     ? '不限并发'
-    : `并发 ${settings.concurrent_limit}`
+    : `并发 ${settings.concurrent_limit} · ${settings.concurrency_queue_enabled ? '满时排队' : '满时不等待'}`
   const proxy = settings.proxy_node_id ? '独立代理' : '沿用 Provider 代理'
   return [authType.value === 'bearer' ? 'Bearer' : 'API Key', rpm, concurrent, proxy]
 })
@@ -512,6 +512,7 @@ function createDefaultSettings(): ImportSettings {
     internal_priority: 50,
     rpm_limit: null,
     concurrent_limit: null,
+    concurrency_queue_enabled: true,
     cache_ttl_minutes: 5,
     max_probe_interval_minutes: 32,
     is_active: true,
@@ -532,6 +533,7 @@ function buildSettingsPayload(
     internal_priority: source.internal_priority,
     rpm_limit: source.rpm_limit,
     concurrent_limit: source.concurrent_limit,
+    concurrency_queue_enabled: source.concurrency_queue_enabled,
     cache_ttl_minutes: source.cache_ttl_minutes,
     max_probe_interval_minutes: source.max_probe_interval_minutes,
     is_active: source.is_active,

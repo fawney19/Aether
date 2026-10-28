@@ -66,6 +66,7 @@ mod orchestration;
 mod plan_usage_policy;
 mod privacy;
 mod process_metrics;
+mod provider_concurrency_queue;
 mod provider_key_auth;
 mod provider_pool_demand;
 pub(crate) use aether_provider_transport as provider_transport;

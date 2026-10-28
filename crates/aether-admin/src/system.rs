@@ -481,6 +481,8 @@ pub struct AdminSystemConfigProviderKey {
     pub allow_auth_channel_mismatch_formats: Option<Vec<String>>,
     #[serde(default)]
     pub rpm_limit: Option<u32>,
+    #[serde(default = "default_true")]
+    pub concurrency_queue_enabled: bool,
     #[serde(default)]
     pub allowed_models: Option<Vec<String>>,
     #[serde(default)]

@@ -11,6 +11,8 @@ export interface PoolKeyBatchEditState {
   rpmLimit: string
   applyConcurrentLimit: boolean
   concurrentLimit: string
+  applyConcurrencyQueue: boolean
+  concurrencyQueueEnabled: boolean
   applyCacheTtl: boolean
   cacheTtlMinutes: string
   applyProbeInterval: boolean
@@ -99,6 +101,11 @@ export function buildPoolKeyBatchUpdatePatch(
     if (parsed.error) return { patch: null, fieldLabels, error: parsed.error }
     patch.concurrent_limit = parsed.value
     fieldLabels.push('并发请求上限')
+  }
+
+  if (state.applyConcurrencyQueue) {
+    patch.concurrency_queue_enabled = state.concurrencyQueueEnabled
+    fieldLabels.push('并发满时排队')
   }
 
   if (state.applyCacheTtl) {

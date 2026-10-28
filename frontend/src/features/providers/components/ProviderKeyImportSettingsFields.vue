@@ -59,7 +59,7 @@
           @update:model-value="updateSetting('rpm_limit', parseNullableNumberInput($event, { min: 1, max: 10000 }))"
         />
       </div>
-      <div class="space-y-1.5">
+      <div class="space-y-1.5 sm:col-span-2">
         <Label class="text-xs">并发请求上限</Label>
         <Input
           :model-value="settings.concurrent_limit ?? ''"
@@ -68,6 +68,10 @@
           class="h-10"
           placeholder="不限制"
           @update:model-value="updateSetting('concurrent_limit', parseNullableNumberInput($event, { min: 0 }))"
+        />
+        <ConcurrencyQueueSetting
+          :model-value="settings.concurrency_queue_enabled"
+          @update:model-value="updateSetting('concurrency_queue_enabled', $event)"
         />
       </div>
       <div class="space-y-1.5">
@@ -148,10 +152,11 @@ import type { PoolKeySettingsPatch } from '@/api/endpoints/pool'
 import { formatApiFormat } from '@/api/endpoints/types/api-format'
 import { parseNullableNumberInput, parseNumberInput } from '@/utils/form'
 import ProxyNodeSelect from './ProxyNodeSelect.vue'
+import ConcurrencyQueueSetting from './ConcurrencyQueueSetting.vue'
 
 type AuthType = 'api_key' | 'bearer'
 type ImportSettings = Required<Pick<PoolKeySettingsPatch,
-  'internal_priority' | 'rpm_limit' | 'concurrent_limit' | 'cache_ttl_minutes'
+  'internal_priority' | 'rpm_limit' | 'concurrent_limit' | 'concurrency_queue_enabled' | 'cache_ttl_minutes'
   | 'max_probe_interval_minutes' | 'is_active' | 'note' | 'proxy_node_id'
 >>
 

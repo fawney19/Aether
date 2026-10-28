@@ -523,6 +523,20 @@ describe('useUsageData', () => {
     })
   })
 
+  it('refreshes queue membership even when the pending lifecycle timestamp is unchanged', async () => {
+    const { loadRecords, currentRecords } = useUsageData({ isAdminPage: ref(true) })
+    async function refresh(isQueued: boolean) {
+      getAllUsageRecordsMock.mockResolvedValueOnce({
+        records: [buildUsageRecord({ status: 'pending', is_queued: isQueued, updated_at: '2026-05-01T00:00:02Z' })],
+        total: 1, limit: 20, offset: 0,
+      })
+      await loadRecords({ page: 1, pageSize: 20 })
+    }
+    await refresh(true)
+    await refresh(false)
+    expect(currentRecords.value[0]?.is_queued).toBe(false)
+  })
+
   it('preserves billing snapshots across sparse refreshes but accepts newer zero or unavailable amounts', async () => {
     const { loadRecords, currentRecords } = useUsageData({ isAdminPage: ref(true) })
     async function refresh(overrides: Partial<UsageRecord>) {

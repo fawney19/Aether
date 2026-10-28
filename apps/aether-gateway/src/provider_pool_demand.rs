@@ -16,6 +16,12 @@ use uuid::Uuid;
 
 use crate::{AppState, GatewayError};
 
+mod admission;
+pub(crate) use admission::{
+    acquire_provider_pool_execution_guard, acquire_provider_pool_execution_guard_unobserved,
+    prepare_provider_execution_admission,
+};
+
 const PROVIDER_POOL_IN_FLIGHT_TOKENS_PREFIX: &str = "ap:provider_pool:in_flight";
 const PROVIDER_KEY_CONCURRENCY_GATE: &str = "provider_key";
 const PROVIDER_POOL_DEMAND_SNAPSHOT_PREFIX: &str = "ap:provider_pool:demand";
@@ -49,13 +55,18 @@ pub(crate) struct ProviderPoolDemandSnapshot {
 pub(crate) struct ProviderPoolInFlightGuard {
     kind: ProviderPoolInFlightGuardKind,
     provider_key_permit: Option<RuntimeSemaphorePermit>,
+    concurrency_permits: Vec<RuntimeSemaphorePermit>,
     observed_activity: Option<crate::execution_activity::ExecutionActivityGuard>,
     released: bool,
 }
 
 pub(crate) enum ProviderPoolInFlightAdmission {
     Acquired(Option<ProviderPoolInFlightGuard>),
-    Saturated { limit: usize },
+    Rejected {
+        reason: &'static str,
+        status: u16,
+        message: String,
+    },
 }
 
 enum ProviderPoolInFlightGuardKind {
@@ -82,6 +93,7 @@ impl ProviderPoolInFlightGuard {
         let mut guard = guard.unwrap_or(Self {
             kind: ProviderPoolInFlightGuardKind::Disabled,
             provider_key_permit: None,
+            concurrency_permits: Vec::new(),
             observed_activity: None,
             released: false,
         });
@@ -136,6 +148,11 @@ impl ProviderPoolInFlightGuard {
             }
         }
         if self.released {
+            for permit in self.concurrency_permits.drain(..) {
+                if let Err(error) = permit.release().await {
+                    debug!(error = ?error, "gateway provider concurrency permit release failed");
+                }
+            }
             if let Some(provider_key_permit) = self.provider_key_permit.take() {
                 if let Err(err) = provider_key_permit.release().await {
                     debug!(
@@ -376,6 +393,7 @@ pub(crate) async fn acquire_provider_pool_in_flight_guard_with_key_limit(
             provider_key_permit.map(|provider_key_permit| ProviderPoolInFlightGuard {
                 kind: ProviderPoolInFlightGuardKind::Disabled,
                 provider_key_permit: Some(provider_key_permit),
+                concurrency_permits: Vec::new(),
                 observed_activity: None,
                 released: false,
             }),
@@ -388,6 +406,7 @@ pub(crate) async fn acquire_provider_pool_in_flight_guard_with_key_limit(
                 provider_key_permit.map(|provider_key_permit| ProviderPoolInFlightGuard {
                     kind: ProviderPoolInFlightGuardKind::Disabled,
                     provider_key_permit: Some(provider_key_permit),
+                    concurrency_permits: Vec::new(),
                     observed_activity: None,
                     released: false,
                 }),
@@ -401,6 +420,7 @@ pub(crate) async fn acquire_provider_pool_in_flight_guard_with_key_limit(
                     counter,
                 },
                 provider_key_permit,
+                concurrency_permits: Vec::new(),
                 observed_activity: None,
                 released: false,
             }));
@@ -413,6 +433,7 @@ pub(crate) async fn acquire_provider_pool_in_flight_guard_with_key_limit(
                     counter,
                 },
                 provider_key_permit,
+                concurrency_permits: Vec::new(),
                 observed_activity: None,
                 released: false,
             }));
@@ -439,6 +460,7 @@ pub(crate) async fn acquire_provider_pool_in_flight_guard_with_key_limit(
                 provider_key_permit.map(|provider_key_permit| ProviderPoolInFlightGuard {
                     kind: ProviderPoolInFlightGuardKind::Disabled,
                     provider_key_permit: Some(provider_key_permit),
+                    concurrency_permits: Vec::new(),
                     observed_activity: None,
                     released: false,
                 }),
@@ -454,6 +476,7 @@ pub(crate) async fn acquire_provider_pool_in_flight_guard_with_key_limit(
                 provider_key_permit.map(|provider_key_permit| ProviderPoolInFlightGuard {
                     kind: ProviderPoolInFlightGuardKind::Disabled,
                     provider_key_permit: Some(provider_key_permit),
+                    concurrency_permits: Vec::new(),
                     observed_activity: None,
                     released: false,
                 }),
@@ -478,33 +501,10 @@ pub(crate) async fn acquire_provider_pool_in_flight_guard_with_key_limit(
             renew_handle: Some(renew_handle),
         },
         provider_key_permit,
+        concurrency_permits: Vec::new(),
         observed_activity: None,
         released: false,
     }))
-}
-
-pub(crate) async fn acquire_provider_pool_execution_guard(
-    state: &AppState,
-    plan: &ExecutionPlan,
-    report_context: Option<&serde_json::Value>,
-) -> Result<ProviderPoolInFlightAdmission, GatewayError> {
-    let admission = acquire_provider_pool_execution_guard_unobserved(state, plan).await?;
-    let ProviderPoolInFlightAdmission::Acquired(guard) = admission else {
-        return Ok(admission);
-    };
-    let requested_model = report_context
-        .and_then(|context| context.get("model"))
-        .and_then(serde_json::Value::as_str);
-    let observation_id = execution_observation_request_id(&plan.request_id, report_context);
-    let activity = state.execution_activity.begin(
-        observation_id.as_ref(),
-        &plan.provider_id,
-        plan.provider_name.as_deref(),
-        requested_model,
-    );
-    Ok(ProviderPoolInFlightAdmission::Acquired(Some(
-        ProviderPoolInFlightGuard::observe_execution(guard, activity),
-    )))
 }
 
 fn execution_observation_request_id<'a>(
@@ -520,38 +520,6 @@ fn execution_observation_request_id<'a>(
         .filter(|value| !value.is_empty())
         .map(|value| std::borrow::Cow::Owned(format!("ws:{value}")))
         .unwrap_or(std::borrow::Cow::Borrowed(request_id))
-}
-
-/// Long-lived audio/live sockets use the same capacity permits, but are not
-/// individual requests and must not contribute to per-request RPM/concurrency.
-pub(crate) async fn acquire_provider_pool_execution_guard_unobserved(
-    state: &AppState,
-    plan: &ExecutionPlan,
-) -> Result<ProviderPoolInFlightAdmission, GatewayError> {
-    let concurrent_limit = state
-        .read_provider_catalog_keys_by_ids(std::slice::from_ref(&plan.key_id))
-        .await?
-        .into_iter()
-        .find(|key| key.id == plan.key_id)
-        .and_then(|key| key.concurrent_limit)
-        .filter(|limit| *limit > 0)
-        .and_then(|limit| usize::try_from(limit).ok());
-    match acquire_provider_pool_in_flight_guard_with_key_limit(
-        state.runtime_state.clone(),
-        &plan.provider_id,
-        &plan.request_id,
-        plan.candidate_id.as_deref(),
-        &plan.key_id,
-        concurrent_limit,
-    )
-    .await
-    {
-        Ok(guard) => Ok(ProviderPoolInFlightAdmission::Acquired(guard)),
-        Err(RuntimeSemaphoreError::Saturated { limit, .. }) => {
-            Ok(ProviderPoolInFlightAdmission::Saturated { limit })
-        }
-        Err(error) => Err(GatewayError::Internal(error.to_string())),
-    }
 }
 
 pub(crate) async fn provider_pool_live_in_flight_count(

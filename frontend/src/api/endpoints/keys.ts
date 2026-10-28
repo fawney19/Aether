@@ -205,6 +205,7 @@ export async function addProviderKey(
     internal_priority?: number
     rpm_limit?: number | null  // RPM 限制（留空=自适应模式）
     concurrent_limit?: number | null  // 并发请求上限（留空或 0=不限制）
+    concurrency_queue_enabled?: boolean
     cache_ttl_minutes?: number
     max_probe_interval_minutes?: number
     allowed_models?: AllowedModels
@@ -237,6 +238,7 @@ export async function updateProviderKey(
     global_priority_by_format: Record<string, number> | null  // 按 API 格式的全局优先级
     rpm_limit: number | null  // RPM 限制（留空=自适应模式）
     concurrent_limit: number | null  // 并发请求上限（留空或 0=不限制）
+    concurrency_queue_enabled: boolean
     cache_ttl_minutes: number
     max_probe_interval_minutes: number
     allowed_models: AllowedModels

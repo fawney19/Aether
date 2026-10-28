@@ -121,6 +121,15 @@
               </BatchFieldToggle>
 
               <BatchFieldToggle
+                v-model="form.applyConcurrencyQueue"
+                label="修改并发排队设置"
+              >
+                <fieldset :disabled="!form.applyConcurrencyQueue">
+                  <ConcurrencyQueueSetting v-model="form.concurrencyQueueEnabled" />
+                </fieldset>
+              </BatchFieldToggle>
+
+              <BatchFieldToggle
                 v-model="form.applyCacheTtl"
                 label="缓存 TTL"
               >
@@ -414,6 +423,7 @@ import { useConfirm } from '@/composables/useConfirm'
 import { useToast } from '@/composables/useToast'
 import { parseApiError } from '@/utils/errorParser'
 import { useUpstreamModelsCache } from '@/features/providers/composables/useUpstreamModelsCache'
+import ConcurrencyQueueSetting from '@/features/providers/components/ConcurrencyQueueSetting.vue'
 import BatchFieldToggle from './PoolKeyBatchFieldToggle.vue'
 import {
   buildPoolKeyBatchUpdatePatch,
@@ -462,6 +472,8 @@ function createInitialForm(): PoolKeyBatchEditState {
     rpmLimit: '',
     applyConcurrentLimit: false,
     concurrentLimit: '',
+    applyConcurrencyQueue: false,
+    concurrencyQueueEnabled: true,
     applyCacheTtl: false,
     cacheTtlMinutes: '5',
     applyProbeInterval: false,

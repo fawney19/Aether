@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { createApp, defineComponent, h, nextTick, type App } from 'vue'
+import { createApp, defineComponent, h, nextTick, reactive, type App } from 'vue'
 import UsageRecordsTable from '../UsageRecordsTable.vue'
 import type { UsageRecord } from '../../types'
 
@@ -189,6 +189,19 @@ afterEach(() => {
 })
 
 describe('UsageRecordsTable', () => {
+  it('replaces ordinary waiting with queued in desktop and mobile rows until admission', async () => {
+    const record = reactive(buildRecord({ status: 'pending', first_byte_time_ms: null, is_queued: true }))
+    const root = mountUsageRecordsTable([record])
+    expect([...root.querySelectorAll('[data-usage-queue-status]')].map(node => node.textContent?.trim()))
+      .toEqual(['排队中', '排队中'])
+
+    record.is_queued = false
+    await nextTick()
+
+    expect(root.querySelector('[data-usage-queue-status]')).toBeNull()
+    expect(root.textContent).toContain('等待中')
+  })
+
   it.each([
     [{ routing_group_name: '生产策略', routing_group_id: 'group-1' }, '生产策略'],
     [{ routing_group_name: ' ', routing_group_id: 'group-history' }, 'group-history'],

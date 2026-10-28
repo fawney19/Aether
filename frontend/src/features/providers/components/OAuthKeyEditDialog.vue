@@ -36,7 +36,7 @@
       </div>
 
       <!-- 配置项 -->
-      <div class="grid grid-cols-4 gap-3">
+      <div class="grid grid-cols-2 gap-3 sm:grid-cols-4">
         <div>
           <Label
             for="internal_priority"
@@ -73,7 +73,7 @@
             留空自适应
           </p>
         </div>
-        <div>
+        <div class="col-span-2">
           <Label
             for="concurrent_limit"
             class="text-xs"
@@ -90,6 +90,7 @@
           <p class="text-xs text-muted-foreground mt-0.5">
             留空或 0 表示不限制
           </p>
+          <ConcurrencyQueueSetting v-model="form.concurrency_queue_enabled" />
         </div>
         <div>
           <Label
@@ -202,6 +203,7 @@ import { SquarePen } from 'lucide-vue-next'
 import { useToast } from '@/composables/useToast'
 import { useConfirm } from '@/composables/useConfirm'
 import { useFormDialog } from '@/composables/useFormDialog'
+import ConcurrencyQueueSetting from './ConcurrencyQueueSetting.vue'
 import { parseApiError } from '@/utils/errorParser'
 import { parseNumberInput, parseNullableNumberInput } from '@/utils/form'
 import {
@@ -262,6 +264,7 @@ const form = ref({
   internal_priority: 10,
   rpm_limit: undefined as number | null | undefined,
   concurrent_limit: undefined as number | null | undefined,
+  concurrency_queue_enabled: true,
   cache_ttl_minutes: 5,
   max_probe_interval_minutes: 32,
   note: '',
@@ -298,6 +301,7 @@ function resetForm() {
     internal_priority: 10,
     rpm_limit: undefined,
     concurrent_limit: undefined,
+    concurrency_queue_enabled: true,
     cache_ttl_minutes: 5,
     max_probe_interval_minutes: 32,
     note: '',
@@ -316,6 +320,7 @@ function loadKeyData() {
     internal_priority: props.editingKey.internal_priority ?? 10,
     rpm_limit: props.editingKey.rpm_limit ?? undefined,
     concurrent_limit: props.editingKey.concurrent_limit ?? undefined,
+    concurrency_queue_enabled: props.editingKey.concurrency_queue_enabled ?? true,
     cache_ttl_minutes: props.editingKey.cache_ttl_minutes ?? 5,
     max_probe_interval_minutes: props.editingKey.max_probe_interval_minutes ?? 32,
     note: props.editingKey.note || '',
@@ -381,6 +386,7 @@ async function handleSave() {
       internal_priority: form.value.internal_priority,
       rpm_limit: form.value.rpm_limit,
       concurrent_limit: form.value.concurrent_limit,
+      concurrency_queue_enabled: form.value.concurrency_queue_enabled,
       cache_ttl_minutes: form.value.cache_ttl_minutes,
       max_probe_interval_minutes: form.value.max_probe_interval_minutes,
       note: form.value.note,

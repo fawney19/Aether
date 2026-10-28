@@ -109,6 +109,7 @@ const PROVIDER_KEY_CAPACITY_LIMIT_REACHED_DETAIL: &str =
     "所有可用上游账号当前均已达到并发或 RPM 上限，请稍后重试";
 const PROVIDER_KEY_CAPACITY_LIMIT_SKIP_REASONS: &[&str] = &[
     "provider_key_concurrency_limit_reached",
+    "provider_concurrency_limit_reached",
     "key_rpm_exhausted",
 ];
 const LOCAL_EXECUTION_PLANNING_TIMEOUT_DETAIL: &str =
@@ -2819,6 +2820,9 @@ fn diagnostic_is_provider_key_capacity_limited(
     let Some(diagnostic) = diagnostic else {
         return false;
     };
+    if diagnostic.execution_admitted {
+        return false;
+    }
     PROVIDER_KEY_CAPACITY_LIMIT_SKIP_REASONS.contains(&diagnostic.reason.as_str())
         || (diagnostic.candidate_count.is_some_and(|candidate_count| {
             candidate_count > 0
@@ -3632,6 +3636,13 @@ mod tests {
         )));
         assert!(!diagnostic_is_provider_key_capacity_limited(Some(
             &mixed_failure
+        )));
+        let admitted_failure = LocalExecutionRuntimeMissDiagnostic {
+            execution_admitted: true,
+            ..capacity_limited.clone()
+        };
+        assert!(!diagnostic_is_provider_key_capacity_limited(Some(
+            &admitted_failure
         )));
         assert_eq!(
             local_execution_runtime_miss_status(true),

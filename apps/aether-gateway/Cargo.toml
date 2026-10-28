@@ -103,6 +103,7 @@ tikv-jemallocator = { version = "0.6", optional = true }
 tikv-jemalloc-sys = { version = "0.6", optional = true }
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 aether-testkit = { workspace = true, features = ["postgres"] }
 aether-test-support.workspace = true
 aws-lc-rs.workspace = true

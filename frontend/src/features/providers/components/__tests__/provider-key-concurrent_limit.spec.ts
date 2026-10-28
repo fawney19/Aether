@@ -309,6 +309,74 @@ afterEach(() => {
 })
 
 describe('provider key concurrent_limit form behavior', () => {
+  it('creates a key with queueing explicitly disabled', async () => {
+    const root = mountDialog(KeyFormDialog, {
+      open: true,
+      endpoint: null,
+      editingKey: null,
+      providerId: 'provider-1',
+      providerType: 'custom',
+      availableApiFormats: ['openai:chat'],
+    })
+    await settle()
+    const name = root.querySelector<HTMLInputElement>('input[name^="key-name-field-"]')
+    const toggle = root.querySelector<HTMLInputElement>('input[aria-describedby]')
+    if (!name || !toggle) throw new Error('Expected key name and queue setting')
+    updateInput(name, 'Queue opt-out')
+    toggle.click()
+
+    await submit(root)
+
+    expect(endpointMocks.addProviderKey).toHaveBeenCalledWith('provider-1',
+      expect.objectContaining({ concurrency_queue_enabled: false }))
+  })
+
+  describe.each([
+    { name: 'normal key', component: KeyFormDialog, authType: 'api_key' },
+    { name: 'OAuth key', component: OAuthKeyEditDialog, authType: 'oauth' },
+  ] as const)('$name concurrency queue setting', ({ component, authType }) => {
+    it.each([true, false])('preserves an existing %s setting on save', async (enabled) => {
+      const root = mountDialog(component, {
+        open: true,
+        endpoint: null,
+        providerId: 'provider-1',
+        providerType: 'custom',
+        availableApiFormats: ['openai:chat'],
+        editingKey: createProviderKey({
+          auth_type: authType,
+          concurrent_limit: 1,
+          concurrency_queue_enabled: enabled,
+        }),
+      })
+      await settle()
+      const toggle = root.querySelector<HTMLInputElement>('input[aria-describedby]')
+      expect(toggle?.checked).toBe(enabled)
+
+      await submit(root)
+
+      expect(lastUpdatePayload().concurrency_queue_enabled).toBe(enabled)
+    })
+
+    it('defaults older keys to queueing and saves toggling it off', async () => {
+      const root = mountDialog(component, {
+        open: true,
+        endpoint: null,
+        providerId: 'provider-1',
+        providerType: 'custom',
+        availableApiFormats: ['openai:chat'],
+        editingKey: createProviderKey({ auth_type: authType, concurrent_limit: 1 }),
+      })
+      await settle()
+      const toggle = root.querySelector<HTMLInputElement>('input[aria-describedby]')
+      expect(toggle?.checked).toBe(true)
+
+      toggle?.click()
+      await submit(root)
+
+      expect(lastUpdatePayload().concurrency_queue_enabled).toBe(false)
+    })
+  })
+
   it('lets Vertex AI keys switch to Service Account JSON and submit auth_config', async () => {
     const root = mountDialog(KeyFormDialog, {
       open: true,

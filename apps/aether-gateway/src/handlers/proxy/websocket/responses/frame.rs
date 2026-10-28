@@ -249,6 +249,14 @@ fn responses_incomplete_default_status(event: &Value) -> u16 {
 
 fn terminal_for_event(event: &Value) -> Option<ResponsesWebSocketFrameTerminal> {
     match event_type_of(event).unwrap_or_default() {
+        "response.completed" | "response.done"
+            if event.pointer("/response/status").and_then(Value::as_str) == Some("cancelled") =>
+        {
+            Some(ResponsesWebSocketFrameTerminal {
+                status_code: 499,
+                cancelled: true,
+            })
+        }
         "response.completed" | "response.done" => Some(ResponsesWebSocketFrameTerminal {
             status_code: websocket_event_status_code(event, 200),
             cancelled: false,
@@ -457,6 +465,21 @@ mod tests {
                 .map(|terminal| (terminal.status_code, terminal.cancelled)),
             Some((499, true))
         );
+
+        for event_type in ["response.done", "response.completed"] {
+            let text = format!(
+                r#"{{"type":"{event_type}","response":{{"id":"resp_cancelled","status":"cancelled"}}}}"#
+            );
+            let cancelled =
+                ParsedResponsesWebSocketFrame::parse(&text).expect("valid cancelled terminal");
+            assert_eq!(
+                cancelled
+                    .terminal()
+                    .map(|terminal| (terminal.status_code, terminal.cancelled)),
+                Some((499, true))
+            );
+            assert_eq!(cancelled.continuation_response_id(), None);
+        }
 
         let error = ParsedResponsesWebSocketFrame::parse(
             r#"{"type":"error","status_code":429,"error":{"type":"usage_limit_reached"}}"#,

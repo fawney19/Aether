@@ -233,7 +233,7 @@ fn lifecycle_status_and_billing(
         UsageEventType::Completed => ("completed", "pending"),
         UsageEventType::Failed => ("failed", "void"),
         UsageEventType::Cancelled
-            if aether_data_contracts::repository::usage::cancelled_request_fee_is_billable(
+            if aether_data_contracts::repository::usage::cancelled_usage_is_billable(
                 request_metadata,
             ) =>
         {
@@ -550,6 +550,46 @@ mod tests {
         assert_eq!(record.status_code, Some(499));
         assert_eq!(record.response_time_ms, Some(200));
         assert_eq!(record.first_byte_time_ms, Some(50));
+    }
+
+    #[test]
+    fn provider_cancelled_usage_keeps_cancelled_status_and_pending_billing() {
+        for (marker, availability, pricing_available, expected_billing) in [
+            (true, true, true, "pending"),
+            (false, true, true, "void"),
+            (true, false, true, "void"),
+            (true, true, false, "void"),
+        ] {
+            let event = UsageEvent::new(
+                UsageEventType::Cancelled,
+                "req-provider-cancelled-usage",
+                UsageEventData {
+                    provider_name: "OpenAI".to_string(),
+                    model: "gpt-5".to_string(),
+                    input_tokens: Some(9),
+                    output_tokens: Some(3),
+                    total_tokens: Some(12),
+                    total_cost_usd: Some(0.02),
+                    actual_total_cost_usd: Some(0.01),
+                    request_metadata: Some(serde_json::json!({
+                        "provider_cancelled_usage": marker,
+                        "usage_available": availability,
+                        "usage_pricing_available": pricing_available,
+                    })),
+                    ..Default::default()
+                },
+            );
+
+            let record = build_upsert_usage_record_from_event(&event).unwrap();
+
+            assert_eq!(record.status, "cancelled");
+            assert_eq!(record.billing_status, expected_billing);
+            assert_eq!(record.total_tokens, availability.then_some(12));
+            assert_eq!(
+                record.request_metadata.unwrap()["provider_cancelled_usage"],
+                marker
+            );
+        }
     }
 
     #[test]

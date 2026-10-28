@@ -4,6 +4,7 @@ export type PoolKeyBatchSettingField =
   | 'internal_priority'
   | 'rpm_limit'
   | 'concurrent_limit'
+  | 'concurrency_queue_enabled'
   | 'cache_ttl_minutes'
   | 'max_probe_interval_minutes'
   | 'is_active'
@@ -16,6 +17,7 @@ export interface PoolKeyBatchSettingsDraft {
   internal_priority: number
   rpm_limit: number | null
   concurrent_limit: number | null
+  concurrency_queue_enabled: boolean
   cache_ttl_minutes: number
   max_probe_interval_minutes: number
   is_active: boolean
@@ -29,6 +31,7 @@ export function createPoolKeyBatchSettingSelection(): PoolKeyBatchSettingSelecti
     internal_priority: false,
     rpm_limit: false,
     concurrent_limit: false,
+    concurrency_queue_enabled: false,
     cache_ttl_minutes: false,
     max_probe_interval_minutes: false,
     is_active: false,
@@ -42,6 +45,7 @@ export function createPoolKeyBatchSettingsDraft(): PoolKeyBatchSettingsDraft {
     internal_priority: 50,
     rpm_limit: null,
     concurrent_limit: null,
+    concurrency_queue_enabled: true,
     cache_ttl_minutes: 5,
     max_probe_interval_minutes: 32,
     is_active: true,
@@ -96,6 +100,9 @@ export function buildPoolKeySettingsPatch(
   if (selection.internal_priority) patch.internal_priority = draft.internal_priority
   if (selection.rpm_limit) patch.rpm_limit = draft.rpm_limit
   if (selection.concurrent_limit) patch.concurrent_limit = draft.concurrent_limit
+  if (selection.concurrency_queue_enabled) {
+    patch.concurrency_queue_enabled = draft.concurrency_queue_enabled
+  }
   if (selection.cache_ttl_minutes) patch.cache_ttl_minutes = draft.cache_ttl_minutes
   if (selection.max_probe_interval_minutes) {
     patch.max_probe_interval_minutes = draft.max_probe_interval_minutes

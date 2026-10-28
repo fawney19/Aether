@@ -1,9 +1,13 @@
 use std::collections::BTreeMap;
 use std::future::Future;
+use std::sync::Mutex;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
+use std::time::Duration;
+use tokio::sync::Notify;
+use tokio::time::Instant;
 
 use aether_usage_runtime::{build_usage_event_data_seed, UsageEvent, UsageEventType};
 use axum::body::Body;
@@ -23,6 +27,24 @@ const TRANSPORT_ERROR_CLIENT_MESSAGE: &str =
 pub(crate) struct StreamCandidateWatchdogProgress {
     terminal_started: AtomicBool,
     abandoned: AtomicBool,
+    queue_clock: Mutex<(Duration, Option<Instant>)>,
+    queue_finished: Notify,
+}
+
+pub(crate) struct StreamCandidateQueueWait(Arc<StreamCandidateWatchdogProgress>);
+
+impl Drop for StreamCandidateQueueWait {
+    fn drop(&mut self) {
+        let mut clock = self
+            .0
+            .queue_clock
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(started) = clock.1.take() {
+            clock.0 = clock.0.saturating_add(started.elapsed());
+        }
+        self.0.queue_finished.notify_one();
+    }
 }
 
 tokio::task_local! {
@@ -30,6 +52,36 @@ tokio::task_local! {
 }
 
 impl StreamCandidateWatchdogProgress {
+    pub(crate) fn begin_queue_wait(self: Arc<Self>) -> StreamCandidateQueueWait {
+        self.queue_clock
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .1 = Some(Instant::now());
+        StreamCandidateQueueWait(self)
+    }
+
+    pub(crate) fn queue_wait_elapsed(&self) -> Duration {
+        let clock = self
+            .queue_clock
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        clock
+            .0
+            .saturating_add(clock.1.map(|started| started.elapsed()).unwrap_or_default())
+    }
+
+    pub(crate) fn queue_waiting(&self) -> bool {
+        self.queue_clock
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .1
+            .is_some()
+    }
+
+    pub(crate) async fn queue_wait_finished(&self) {
+        self.queue_finished.notified().await;
+    }
+
     pub(crate) fn shared() -> Arc<Self> {
         Arc::new(Self::default())
     }

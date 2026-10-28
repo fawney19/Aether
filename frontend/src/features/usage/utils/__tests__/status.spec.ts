@@ -6,6 +6,7 @@ import {
   hasUsageRetry,
   hasUsageSkippedCandidate,
   isUsageRecordFailed,
+  isUsageRecordQueued,
   isUsageRecordSuccessful,
   isUsageWebSocket,
   mapRequestStatusToTimelineStatus,
@@ -31,6 +32,17 @@ function buildUsageRecord(overrides: Partial<UsageRecord> = {}): UsageRecord {
 }
 
 describe('usage status helpers', () => {
+  it.each(['pending', 'streaming'] as const)('shows queue state only while %s is waiting for admission', status => {
+    const record = buildUsageRecord({ status, is_queued: true })
+    expect(isUsageRecordQueued(record)).toBe(true)
+    expect(isUsageRecordQueued({ ...record, is_queued: false })).toBe(false)
+  })
+
+  it.each(['completed', 'failed', 'cancelled'] as const)('does not let a stale queue marker override %s', status => {
+    const record = buildUsageRecord({ status, is_queued: true })
+    expect(isUsageRecordQueued(record)).toBe(false)
+  })
+
   it('treats explicit completed status as authoritative over stale legacy failure fields', () => {
     const record = buildUsageRecord({
       status: 'completed',

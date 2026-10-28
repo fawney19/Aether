@@ -1,8 +1,9 @@
 use aether_data_contracts::repository::billing::StoredBillingModelContext;
 use aether_data_contracts::repository::usage::{
-    extract_provider_cache_ttl_minutes_from_metadata, resolve_provider_cache_ttl_minutes,
-    resolve_provider_service_tier_from_request_capture, CANCELLED_REQUEST_FEE_METADATA_KEY,
-    USAGE_AVAILABLE_METADATA_KEY, USAGE_PRICING_AVAILABLE_METADATA_KEY,
+    extract_provider_cache_ttl_minutes_from_metadata, provider_cancelled_usage_is_billable,
+    resolve_provider_cache_ttl_minutes, resolve_provider_service_tier_from_request_capture,
+    CANCELLED_REQUEST_FEE_METADATA_KEY, USAGE_AVAILABLE_METADATA_KEY,
+    USAGE_PRICING_AVAILABLE_METADATA_KEY,
 };
 use aether_data_contracts::DataLayerError;
 use aether_usage_runtime::{UsageEvent, UsageEventType};
@@ -255,7 +256,7 @@ fn calculate_billing_computation(
             .or(pricing.provider_api_key_cache_ttl_minutes),
     };
 
-    if cancelled {
+    if cancelled && !provider_cancelled_usage_is_billable(event.data.request_metadata.as_ref()) {
         input.input_tokens = 0;
         input.output_tokens = 0;
         input.cache_creation_tokens = 0;
@@ -386,6 +387,7 @@ fn apply_billing_computation(
 ) -> Result<(), DataLayerError> {
     let cancelled = matches!(event.event_type, UsageEventType::Cancelled);
     if cancelled
+        && !provider_cancelled_usage_is_billable(event.data.request_metadata.as_ref())
         && !computation
             .pricing_resolution
             .price_per_request
@@ -396,7 +398,12 @@ fn apply_billing_computation(
     event.data.total_cost_usd = Some(computation.cost_result.cost);
     event.data.actual_total_cost_usd = Some(computation.actual_total_cost);
     merge_billing_snapshot_metadata(&mut event.data.request_metadata, pricing, &computation)?;
-    if cancelled {
+    if cancelled
+        && computation
+            .pricing_resolution
+            .price_per_request
+            .is_some_and(|price| price > 0.0)
+    {
         if let Some(metadata) = event
             .data
             .request_metadata
@@ -647,6 +654,7 @@ mod tests {
                         | "plan_usage_reservation_token"
                         | "plan_usage_reservation_deferred"
                         | "cancelled_request_fee"
+                        | "provider_cancelled_usage"
                         | "dimensions"
                         | "billing_dimensions"
                         | "billing_snapshot"
@@ -1858,6 +1866,34 @@ mod tests {
                 .and_then(Value::as_f64),
             Some(0.082)
         );
+    }
+
+    #[tokio::test]
+    async fn provider_cancelled_usage_bills_reported_tokens_after_wire_projection() {
+        let lookup = wire_billing_lookup(
+            Some(json!({"tiers": [{"up_to": null, "input_price_per_1m": 3.0,
+                "output_price_per_1m": 15.0, "cache_read_price_per_1m": 0.3}]})),
+            None,
+        );
+        let mut event = wire_billing_event("provider-cancelled-reported-usage");
+        event.event_type = UsageEventType::Cancelled;
+        event.data.status_code = Some(499);
+        event.data.input_tokens = Some(1_000);
+        event.data.output_tokens = Some(500);
+        event.data.total_tokens = Some(1_500);
+        event.data.cache_read_input_tokens = Some(0);
+        event.data.request_metadata = Some(json!({"provider_cancelled_usage": true}));
+
+        let queued = assert_wire_billing_equivalent(&lookup, event).await;
+
+        assert!((queued.data.total_cost_usd.unwrap() - 0.0105).abs() < 1e-12);
+        assert!((queued.data.actual_total_cost_usd.unwrap() - 0.0105).abs() < 1e-12);
+        assert_eq!(queued.event_type, UsageEventType::Cancelled);
+        let metadata = queued.data.request_metadata.as_ref().unwrap();
+        assert_eq!(metadata["billing_dimensions"]["input_tokens"], 1_000);
+        assert_eq!(metadata["billing_dimensions"]["output_tokens"], 500);
+        assert_eq!(metadata["provider_cancelled_usage"], true);
+        assert!(metadata.get("cancelled_request_fee").is_none());
     }
 
     #[tokio::test]

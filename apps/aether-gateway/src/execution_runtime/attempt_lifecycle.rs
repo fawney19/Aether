@@ -34,7 +34,9 @@ use std::time::Duration;
 
 use aether_contracts::{ExecutionPlan, ExecutionStreamTerminalSummary, ExecutionTelemetry};
 use aether_data_contracts::repository::candidates::RequestCandidateStatus;
-use aether_data_contracts::repository::usage::UsageBodyCaptureState;
+use aether_data_contracts::repository::usage::{
+    UsageBodyCaptureState, PROVIDER_CANCELLED_USAGE_METADATA_KEY,
+};
 use aether_scheduler_core::SchedulerRequestCandidateStatusUpdate;
 #[cfg(test)]
 use aether_usage_runtime::DEFAULT_USAGE_RESPONSE_BODY_CAPTURE_LIMIT_BYTES;
@@ -258,13 +260,12 @@ pub(crate) const fn classify_attempt_provider_effect(
 
 /// 这一个 attempt 的账单是否作废。
 ///
-/// 只有两种情况作废：供应商自己声明取消，或者供应商根本没给出终态而客户端
-/// 又已经走了。**供应商已经给出终态时，客户端最后一跳投递失败不作废账单**：
+/// 供应商根本没给出终态而客户端又已经走了时作废。
+/// 供应商已经给出终态时，取消或客户端最后一跳投递失败不作废已报告的 usage：
 /// 供应商已经完成推理并消耗了 token，客户端还能用 `previous_response_id`
 /// 续取这条响应，把成本记成 0 等于让上游账单凭空消失。
 pub(crate) const fn attempt_billing_is_void(facts: AttemptTerminalFacts) -> bool {
-    facts.provider.cancelled_by_provider()
-        || (facts.delivery.is_aborted() && !facts.provider.is_terminal())
+    facts.delivery.is_aborted() && !facts.provider.is_terminal()
 }
 
 /// attempt 对外记录的状态码。
@@ -275,6 +276,23 @@ pub(crate) const fn attempt_billing_is_void(facts: AttemptTerminalFacts) -> bool
 /// 所以这些行的取值不变。
 pub(crate) const fn attempt_status_code(facts: AttemptTerminalFacts) -> u16 {
     facts.provider.status_code()
+}
+
+fn authorize_provider_cancelled_usage(
+    metadata: &mut Option<Value>,
+    facts: AttemptTerminalFacts,
+    summary: &ExecutionStreamTerminalSummary,
+) {
+    if let Some(object) = metadata.as_mut().and_then(Value::as_object_mut) {
+        object.remove(PROVIDER_CANCELLED_USAGE_METADATA_KEY);
+    }
+    if facts.provider.cancelled_by_provider()
+        && summary.observed_finish
+        && summary.standardized_usage.is_some()
+    {
+        metadata.get_or_insert_with(|| Value::Object(Default::default()))
+            [PROVIDER_CANCELLED_USAGE_METADATA_KEY] = Value::Bool(true);
+    }
 }
 
 /// 结算判定的输入：两个正交事实 + 记账层对这条 report 的判定 + 终态摘要事实。
@@ -315,16 +333,17 @@ pub(crate) const fn classify_attempt_settlement(
     } = inputs;
 
     let void = attempt_billing_is_void(facts);
+    let cancelled = void || facts.provider.cancelled_by_provider();
     let status_code = attempt_status_code(facts);
-    let failed = !void && report_represents_failure;
-    let missing_terminal = !void && !observed_finish;
-    let projects_provider_failure = !void
+    let failed = !cancelled && report_represents_failure;
+    let missing_terminal = !cancelled && !observed_finish;
+    let projects_provider_failure = !cancelled
         && (status_code >= 400
             || facts.forced_error().is_some()
             || has_parser_error
             || missing_terminal);
 
-    let candidate_status = if void {
+    let candidate_status = if cancelled {
         AttemptCandidateStatus::Cancelled
     } else if failed {
         AttemptCandidateStatus::Failed
@@ -334,7 +353,7 @@ pub(crate) const fn classify_attempt_settlement(
     // 投递失败排在供应商侧分类之前：这条记录之所以特别，正是因为内容没送到
     // 客户端手上。供应商侧的判定仍然通过 candidate_status 和 error_message
     // 保留下来。
-    let candidate_error = if void {
+    let candidate_error = if cancelled {
         AttemptCandidateError::Cancelled
     } else if facts.delivery.is_aborted() {
         AttemptCandidateError::ClientDeliveryFailed
@@ -355,8 +374,12 @@ pub(crate) const fn classify_attempt_settlement(
         },
         candidate_status,
         candidate_error,
-        provider_effect: classify_attempt_provider_effect(void, projects_provider_failure, failed),
-        submit_execution_report: !void,
+        provider_effect: classify_attempt_provider_effect(
+            cancelled,
+            projects_provider_failure,
+            failed,
+        ),
+        submit_execution_report: !cancelled,
     }
 }
 
@@ -627,7 +650,7 @@ impl ExecutionAttemptLifecycle {
     /// 2. candidate terminal —— 调度侧的终态，慢依赖不能让它停在 Streaming。
     /// 3. provider 效果 —— health / adaptive / pool 反馈，次于前两段；超时后
     ///    仍然兜底释放 pool key lease，否则要等 lease TTL 过期才放出这把 key。
-    /// 4. execution report —— 作废账单的分支不提交（与 HTTP 在下游断开后
+    /// 4. execution report —— 取消分支不提交（与 HTTP 在下游断开后
     ///    同样不提交一致）。
     pub(crate) async fn settle(
         mut self,
@@ -682,8 +705,13 @@ impl ExecutionAttemptLifecycle {
                 facts.delivery.is_aborted() && !facts.provider.is_terminal(),
             )
         };
-        let context_seed =
+        let mut context_seed =
             build_terminal_usage_context_seed(&self.plan, analytics_context.as_ref());
+        authorize_provider_cancelled_usage(
+            &mut context_seed.request_metadata,
+            facts,
+            &terminal_summary,
+        );
         let payload_seed = build_stream_terminal_usage_payload_seed(&payload);
         let billing_void = settlement.billing.is_void();
         let usage_runtime = Arc::clone(&state.usage_runtime);
@@ -858,11 +886,14 @@ fn candidate_error_fields(
 
 #[cfg(test)]
 mod tests {
+    use aether_contracts::{ExecutionStreamTerminalSummary, StandardizedUsage};
+    use serde_json::json;
+
     use super::{
-        classify_attempt_provider_effect, classify_attempt_settlement, AttemptBilling,
-        AttemptCandidateError, AttemptCandidateStatus, AttemptClientDelivery,
-        AttemptProviderEffect, AttemptProviderOutcome, AttemptSettlement, AttemptSettlementInputs,
-        AttemptTerminalFacts,
+        authorize_provider_cancelled_usage, classify_attempt_provider_effect,
+        classify_attempt_settlement, AttemptBilling, AttemptCandidateError, AttemptCandidateStatus,
+        AttemptClientDelivery, AttemptProviderEffect, AttemptProviderOutcome, AttemptSettlement,
+        AttemptSettlementInputs, AttemptTerminalFacts,
     };
 
     fn settle(
@@ -899,6 +930,74 @@ mod tests {
             status_code,
             reason,
             stream_timeout: status_code == 504,
+        }
+    }
+
+    #[test]
+    fn provider_cancelled_usage_is_authorized_only_for_observed_provider_cancellation() {
+        for (provider, expected) in [
+            (provider_cancelled(), Some(json!(true))),
+            (terminal(200), None),
+            (aborted(499, "client disconnected"), None),
+        ] {
+            let mut metadata = Some(json!({"provider_cancelled_usage": true}));
+            let summary = ExecutionStreamTerminalSummary {
+                observed_finish: true,
+                standardized_usage: Some(StandardizedUsage {
+                    input_tokens: 9,
+                    output_tokens: 3,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+
+            authorize_provider_cancelled_usage(
+                &mut metadata,
+                AttemptTerminalFacts {
+                    provider,
+                    delivery: AttemptClientDelivery::Complete,
+                },
+                &summary,
+            );
+
+            assert_eq!(
+                metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.get("provider_cancelled_usage")),
+                expected.as_ref()
+            );
+        }
+    }
+
+    #[test]
+    fn provider_cancelled_usage_requires_reported_usage_without_fabricating_zero() {
+        for (observed_finish, usage, expected) in [
+            (true, None, None),
+            (false, Some(StandardizedUsage::default()), None),
+            (true, Some(StandardizedUsage::default()), Some(json!(true))),
+        ] {
+            let mut metadata = Some(json!({"provider_cancelled_usage": true}));
+            let summary = ExecutionStreamTerminalSummary {
+                observed_finish,
+                standardized_usage: usage,
+                ..Default::default()
+            };
+
+            authorize_provider_cancelled_usage(
+                &mut metadata,
+                AttemptTerminalFacts {
+                    provider: provider_cancelled(),
+                    delivery: AttemptClientDelivery::Complete,
+                },
+                &summary,
+            );
+
+            assert_eq!(
+                metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.get("provider_cancelled_usage")),
+                expected.as_ref()
+            );
         }
     }
 
@@ -975,7 +1074,7 @@ mod tests {
 
     /// §1.6 结算表，逐行。
     #[test]
-    fn settlement_table_row_provider_cancelled_is_void_regardless_of_delivery() {
+    fn settlement_table_row_provider_cancelled_is_billed_without_provider_effects() {
         for delivery in [
             AttemptClientDelivery::Complete,
             AttemptClientDelivery::Aborted { reason: "gone" },
@@ -992,7 +1091,7 @@ mod tests {
                     settlement,
                     AttemptSettlement {
                         status_code: 499,
-                        billing: AttemptBilling::Void,
+                        billing: AttemptBilling::Billed,
                         candidate_status: AttemptCandidateStatus::Cancelled,
                         candidate_error: AttemptCandidateError::Cancelled,
                         provider_effect: AttemptProviderEffect::ReleasePoolKeyLease,
@@ -1168,9 +1267,9 @@ mod tests {
         assert!(!settlement.submit_execution_report);
     }
 
-    /// 供应商自己声明取消时，即使内容送到了客户端也不计费。
+    /// 供应商自己声明取消时保留账单，但不改变取消状态。
     #[test]
-    fn a_provider_declared_cancellation_is_void_even_when_delivered() {
+    fn a_provider_declared_cancellation_is_billed_without_becoming_a_failure() {
         let settlement = settle(
             provider_cancelled(),
             AttemptClientDelivery::Complete,
@@ -1178,7 +1277,11 @@ mod tests {
             true,
             false,
         );
-        assert_eq!(settlement.billing, AttemptBilling::Void);
+        assert_eq!(settlement.billing, AttemptBilling::Billed);
+        assert_eq!(
+            settlement.candidate_status,
+            AttemptCandidateStatus::Cancelled
+        );
         assert_eq!(settlement.candidate_error, AttemptCandidateError::Cancelled);
     }
 
@@ -1298,7 +1401,7 @@ mod tests {
                             // 作废账单的分支一律不提交 execution report。
                             assert_eq!(
                                 settlement.submit_execution_report,
-                                !settlement.billing.is_void(),
+                                !settlement.billing.is_void() && !provider.cancelled_by_provider(),
                                 "provider={provider:?} delivery={delivery:?}"
                             );
                         }

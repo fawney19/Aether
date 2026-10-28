@@ -329,6 +329,9 @@ pub(crate) fn build_admin_update_provider_key_record_with_existing_keys(
         updated.concurrent_limit =
             normalize_optional_api_key_concurrent_limit(payload.concurrent_limit)?;
     }
+    if fields.contains("concurrency_queue_enabled") {
+        updated.concurrency_queue_enabled = payload.concurrency_queue_enabled;
+    }
     if fields.contains("allowed_models") {
         updated.allowed_models =
             normalize_string_list(payload.allowed_models).map(|value| json!(value));

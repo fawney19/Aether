@@ -11,6 +11,7 @@ const BATCH_EDITABLE_KEY_FIELDS: &[&str] = &[
     "cache_ttl_minutes",
     "capabilities",
     "concurrent_limit",
+    "concurrency_queue_enabled",
     "global_priority_by_format",
     "internal_priority",
     "is_active",
@@ -73,6 +74,23 @@ mod tests {
 
         assert_eq!(patch.len(), 5);
         assert_eq!(patch["auto_fetch_models"], json!(true));
+    }
+
+    #[test]
+    fn queue_setting_requires_a_boolean() {
+        for enabled in [true, false] {
+            let patch = parse_admin_provider_key_batch_update_patch(json!({
+                "concurrency_queue_enabled": enabled
+            }))
+            .expect("boolean queue setting should parse");
+            assert_eq!(patch["concurrency_queue_enabled"], enabled);
+        }
+        for invalid in [json!(null), json!("false"), json!(0)] {
+            assert!(parse_admin_provider_key_batch_update_patch(json!({
+                "concurrency_queue_enabled": invalid
+            }))
+            .is_err());
+        }
     }
 
     #[test]

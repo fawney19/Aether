@@ -749,6 +749,8 @@ pub struct StoredProviderCatalogKey {
     pub fingerprint: Option<serde_json::Value>,
     pub rpm_limit: Option<u32>,
     pub concurrent_limit: Option<i32>,
+    #[serde(default = "default_concurrency_queue_enabled")]
+    pub concurrency_queue_enabled: bool,
     pub learned_rpm_limit: Option<u32>,
     pub concurrent_429_count: Option<u32>,
     pub rpm_429_count: Option<u32>,
@@ -816,6 +818,10 @@ impl std::fmt::Debug for StoredProviderCatalogKey {
             .field("updated_at_unix_secs", &self.updated_at_unix_secs)
             .finish_non_exhaustive()
     }
+}
+
+fn default_concurrency_queue_enabled() -> bool {
+    true
 }
 
 #[derive(Clone, PartialEq)]
@@ -886,6 +892,7 @@ impl StoredProviderCatalogKey {
             rpm_limit: None,
             concurrent_limit: None,
             learned_rpm_limit: None,
+            concurrency_queue_enabled: true,
             concurrent_429_count: None,
             rpm_429_count: None,
             last_429_at_unix_secs: None,
@@ -1159,6 +1166,24 @@ mod transport_tests {
         .expect("key should build");
 
         assert_eq!(key.concurrent_limit, None);
+        assert!(key.concurrency_queue_enabled);
+    }
+
+    #[test]
+    fn provider_catalog_key_concurrency_queue_legacy_default_and_round_trip() {
+        let mut key = sample_key();
+        key.concurrency_queue_enabled = false;
+        let mut encoded = serde_json::to_value(&key).expect("key should serialize");
+        let decoded: StoredProviderCatalogKey =
+            serde_json::from_value(encoded.clone()).expect("key should deserialize");
+        assert!(!decoded.concurrency_queue_enabled);
+        encoded
+            .as_object_mut()
+            .unwrap()
+            .remove("concurrency_queue_enabled");
+        let legacy: StoredProviderCatalogKey =
+            serde_json::from_value(encoded).expect("legacy key should deserialize");
+        assert!(legacy.concurrency_queue_enabled);
     }
 
     #[test]

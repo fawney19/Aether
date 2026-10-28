@@ -350,89 +350,128 @@ where
             return Ok(AiAttemptExecutionOutcome::Responded(response));
         }
         prewarm_direct_reqwest_candidate_client(plan);
-        let _permit = match acquire_upstream_execution_gate(self.state, self.trace_id).await {
-            Ok(permit) => permit,
-            Err(error) => {
-                release_plan_usage_policy_cost_best_effort(
-                    self.state,
-                    self.decision,
-                    plan,
-                    self.transfer_tracker,
-                    "upstream_admission_error",
-                )
-                .await;
-                return Err(error);
-            }
-        };
-        if let Some(response) = execution_plan_cost_capacity_response(
+        let provider_admission = crate::provider_pool_demand::prepare_provider_execution_admission(
             self.state,
-            self.trace_id,
-            self.decision,
             plan,
             report_context.as_ref(),
-            self.transfer_tracker,
-        )
-        .await?
-        {
-            return Ok(AiAttemptExecutionOutcome::Responded(response));
-        }
-        let report_context = crate::usage::attach_plan_wallet_fallback_context(
-            self.state,
-            report_context,
-            self.transfer_tracker.uses_wallet_fallback(),
-        )
-        .await?;
-        let upstream_execution_gate_held_started_at = std::time::Instant::now();
-        let deferred_report_context = report_context.clone();
-        let execution = execute_execution_runtime_sync_with_retry_scope(
-            self.state,
-            self.parts.uri.path(),
-            plan.clone(),
-            self.trace_id,
-            self.decision,
-            self.plan_kind,
-            attempt.report_kind(),
-            report_context,
         )
         .await;
-        let execution = match execution {
-            Ok(execution) => execution,
+        let provider_admission = match provider_admission {
+            Ok(admission) => admission,
             Err(error) => {
                 release_plan_usage_policy_cost_best_effort(
                     self.state,
                     self.decision,
                     plan,
                     self.transfer_tracker,
-                    "sync_execution_error",
+                    "provider_admission_error",
                 )
                 .await;
                 return Err(error);
             }
         };
-        observe_gateway_stage_ms(
-            "upstream_execution_gate_held",
-            upstream_execution_gate_held_started_at
-                .elapsed()
-                .as_millis() as u64,
-        );
-        let mut execution = execution;
-        match &mut execution {
-            AiAttemptExecutionOutcome::Responded(response) => {
-                attach_redaction_execution_candidate(response, plan.candidate_id.as_deref());
-            }
-            AiAttemptExecutionOutcome::Retry {
-                fallback_response: Some(response),
-                ..
-            } => {
-                attach_redaction_execution_candidate(response, plan.candidate_id.as_deref());
-                attach_deferred_usage_context(response, plan, deferred_report_context.as_ref());
-            }
-            AiAttemptExecutionOutcome::Retry {
-                fallback_response: None,
-                ..
-            } => {}
-        }
-        Ok(execution)
+        let was_queued = provider_admission.was_queued();
+        provider_admission
+            .scope(async {
+                let _permit = match acquire_upstream_execution_gate(self.state, self.trace_id).await
+                {
+                    Ok(permit) => permit,
+                    Err(error) => {
+                        release_plan_usage_policy_cost_best_effort(
+                            self.state,
+                            self.decision,
+                            plan,
+                            self.transfer_tracker,
+                            "upstream_admission_error",
+                        )
+                        .await;
+                        return Err(error);
+                    }
+                };
+                if let Some(mut response) = execution_plan_cost_capacity_response(
+                    self.state,
+                    self.trace_id,
+                    self.decision,
+                    plan,
+                    report_context.as_ref(),
+                    self.transfer_tracker,
+                )
+                .await?
+                {
+                    if was_queued {
+                        attach_deferred_usage_context(&mut response, plan, report_context.as_ref());
+                    }
+                    return Ok(AiAttemptExecutionOutcome::Responded(response));
+                }
+                let report_context = crate::usage::attach_plan_wallet_fallback_context(
+                    self.state,
+                    report_context,
+                    self.transfer_tracker.uses_wallet_fallback(),
+                )
+                .await?;
+                let upstream_execution_gate_held_started_at = std::time::Instant::now();
+                let deferred_report_context = report_context.clone();
+                let execution = execute_execution_runtime_sync_with_retry_scope(
+                    self.state,
+                    self.parts.uri.path(),
+                    plan.clone(),
+                    self.trace_id,
+                    self.decision,
+                    self.plan_kind,
+                    attempt.report_kind(),
+                    report_context,
+                )
+                .await;
+                let execution = match execution {
+                    Ok(execution) => execution,
+                    Err(error) => {
+                        release_plan_usage_policy_cost_best_effort(
+                            self.state,
+                            self.decision,
+                            plan,
+                            self.transfer_tracker,
+                            "sync_execution_error",
+                        )
+                        .await;
+                        return Err(error);
+                    }
+                };
+                observe_gateway_stage_ms(
+                    "upstream_execution_gate_held",
+                    upstream_execution_gate_held_started_at
+                        .elapsed()
+                        .as_millis() as u64,
+                );
+                let mut execution = execution;
+                match &mut execution {
+                    AiAttemptExecutionOutcome::Responded(response) => {
+                        attach_redaction_execution_candidate(
+                            response,
+                            plan.candidate_id.as_deref(),
+                        );
+                    }
+                    AiAttemptExecutionOutcome::Retry {
+                        fallback_response: Some(response),
+                        ..
+                    } => {
+                        attach_redaction_execution_candidate(
+                            response,
+                            plan.candidate_id.as_deref(),
+                        );
+                        attach_deferred_usage_context(
+                            response,
+                            plan,
+                            deferred_report_context.as_ref(),
+                        );
+                    }
+                    AiAttemptExecutionOutcome::Retry {
+                        fallback_response: None,
+                        ..
+                    } => {}
+                }
+                Ok(execution)
+            })
+            .await
     }
 
     async fn mark_unused_attempts(&self, attempts: Vec<T>) -> Result<(), Self::Error> {
@@ -1383,27 +1422,48 @@ where
             LocalFailoverDecision::StopLocalFailover
         );
         let watchdog_started_at = std::time::Instant::now();
-        let execution = execute_stream_candidate_with_watchdog(
+        let provider_admission = crate::provider_pool_demand::prepare_provider_execution_admission(
             self.state,
-            self.trace_id,
-            self.plan_kind,
             plan,
-            watchdog_report_context,
-            stop_on_transport_errors,
-            move || async move {
-                execute_execution_runtime_stream_with_retry_scope(
-                    &execution_state,
-                    execution_plan,
-                    execution_trace_id.as_str(),
-                    &execution_decision,
-                    execution_plan_kind.as_str(),
-                    execution_report_kind,
-                    report_context,
-                )
-                .await
-            },
+            report_context.as_ref(),
         )
         .await;
+        let provider_admission = match provider_admission {
+            Ok(admission) => admission,
+            Err(error) => {
+                release_plan_usage_policy_cost_best_effort(
+                    self.state,
+                    self.decision,
+                    plan,
+                    self.transfer_tracker,
+                    "provider_admission_error",
+                )
+                .await;
+                return Err(error);
+            }
+        };
+        let execution = provider_admission
+            .scope(execute_stream_candidate_with_watchdog(
+                self.state,
+                self.trace_id,
+                self.plan_kind,
+                plan,
+                watchdog_report_context,
+                stop_on_transport_errors,
+                move || async move {
+                    execute_execution_runtime_stream_with_retry_scope(
+                        &execution_state,
+                        execution_plan,
+                        execution_trace_id.as_str(),
+                        &execution_decision,
+                        execution_plan_kind.as_str(),
+                        execution_report_kind,
+                        report_context,
+                    )
+                    .await
+                },
+            ))
+            .await;
         let execution = match execution {
             Ok(execution) => execution,
             Err(error) => {
@@ -1917,19 +1977,34 @@ where
     };
     let permit_hold = permit.map(UpstreamExecutionPermitHold::new);
     let watchdog_started_at = std::time::Instant::now();
+    let watchdog_budget_started_at = Instant::now();
     let watchdog_progress = StreamCandidateWatchdogProgress::shared();
     let execution = watchdog_progress.clone().scope(execute());
     tokio::pin!(execution);
     let deadline = tokio::time::sleep(timeout_duration);
     tokio::pin!(deadline);
-    let execution_result = tokio::select! {
-        biased;
-        result = &mut execution => Some(result),
-        () = &mut deadline => {
-            if watchdog_progress.terminal_started() {
-                Some(execution.await)
-            } else {
-                None
+    let execution_result = loop {
+        tokio::select! {
+            biased;
+            result = &mut execution => break Some(result),
+            () = &mut deadline => {
+                if watchdog_progress.terminal_started() {
+                    break Some(execution.await);
+                }
+                if watchdog_progress.queue_waiting() {
+                    tokio::select! {
+                        biased;
+                        result = &mut execution => break Some(result),
+                        () = watchdog_progress.queue_wait_finished() => {}
+                    }
+                }
+                let remaining = timeout_duration
+                    .saturating_add(watchdog_progress.queue_wait_elapsed())
+                    .saturating_sub(watchdog_budget_started_at.elapsed());
+                if remaining.is_zero() {
+                    break None;
+                }
+                deadline.as_mut().reset(Instant::now() + remaining);
             }
         }
     };
@@ -3571,6 +3646,59 @@ mod tests {
             ))
         ));
         assert!(writer.records.lock().await.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stream_candidate_watchdog_excludes_queue_wait_and_resumes_timeout() {
+        for stall in [false, true] {
+            let writer = TestRequestCandidateWriter::default();
+            let plan = test_plan(Some(ExecutionTimeouts {
+                first_byte_ms: Some(20),
+                ..ExecutionTimeouts::default()
+            }));
+            let context = test_report_context();
+            let started = Instant::now();
+            let outcome = execute_stream_candidate_with_watchdog(
+                &writer,
+                "trace-queue-watchdog",
+                "claude_cli_stream",
+                &plan,
+                Some(&context),
+                false,
+                || async {
+                    let queue_wait = StreamCandidateWatchdogProgress::current()
+                        .unwrap()
+                        .begin_queue_wait();
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    drop(queue_wait);
+                    tokio::time::sleep(Duration::from_millis(if stall { 100 } else { 10 })).await;
+                    Ok(AiAttemptExecutionOutcome::Responded(Response::new(
+                        Body::empty(),
+                    )))
+                },
+            )
+            .await
+            .unwrap();
+            if stall {
+                assert!(matches!(
+                    outcome,
+                    StreamCandidateWatchdogOutcome::Executed(
+                        AiAttemptExecutionOutcome::Retry { .. }
+                    )
+                ));
+                assert_eq!(started.elapsed(), Duration::from_millis(120));
+                assert_eq!(writer.records.lock().await.len(), 1);
+            } else {
+                assert!(matches!(
+                    outcome,
+                    StreamCandidateWatchdogOutcome::Executed(AiAttemptExecutionOutcome::Responded(
+                        _
+                    ))
+                ));
+                assert_eq!(started.elapsed(), Duration::from_millis(110));
+                assert!(writer.records.lock().await.is_empty());
+            }
+        }
     }
 
     #[tokio::test]

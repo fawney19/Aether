@@ -65,6 +65,7 @@ impl AiRuntimeMissDiagnosticPort for GatewayRuntimeMissDiagnosticPort<'_> {
     ) -> Self::Diagnostic {
         LocalExecutionRuntimeMissDiagnostic {
             reason: reason.to_string(),
+            execution_admitted: false,
             route_family: decision.route_family.clone(),
             route_kind: decision.route_kind.clone(),
             public_path: Some(decision.public_path.clone()),
@@ -169,6 +170,17 @@ pub(crate) fn set_local_runtime_execution_exhausted_diagnostic(
     requested_model: Option<&str>,
     candidate_count: usize,
 ) {
+    if state.local_execution_runtime_miss_diagnostic_has_candidate_signal(trace_id) {
+        state.mutate_local_execution_runtime_miss_diagnostic(trace_id, |diagnostic| {
+            diagnostic.candidate_count =
+                Some(diagnostic.candidate_count.unwrap_or(0).max(candidate_count));
+            apply_ai_runtime_candidate_terminal_plan_reason_to_diagnostic(
+                diagnostic,
+                "execution_runtime_candidates_exhausted",
+            );
+        });
+        return;
+    }
     let port = GatewayRuntimeMissDiagnosticPort { state: Some(state) };
     set_ai_runtime_execution_exhausted_diagnostic(
         &port,

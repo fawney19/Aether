@@ -3,6 +3,10 @@ use crate::handlers::admin::shared::{
 };
 use serde::Deserialize;
 
+fn default_concurrency_queue_enabled() -> bool {
+    true
+}
+
 #[derive(Deserialize)]
 pub(crate) struct AdminProviderKeyCreateRequest {
     #[serde(default)]
@@ -26,6 +30,8 @@ pub(crate) struct AdminProviderKeyCreateRequest {
     pub(crate) rpm_limit: Option<u32>,
     #[serde(default)]
     pub(crate) concurrent_limit: Option<i32>,
+    #[serde(default = "default_concurrency_queue_enabled")]
+    pub(crate) concurrency_queue_enabled: bool,
     #[serde(default)]
     pub(crate) allowed_models: Option<Vec<String>>,
     #[serde(default)]
@@ -98,6 +104,8 @@ pub(crate) struct AdminProviderKeyUpdateRequest {
     pub(crate) rpm_limit: Option<u32>,
     #[serde(default)]
     pub(crate) concurrent_limit: Option<i32>,
+    #[serde(default = "default_concurrency_queue_enabled")]
+    pub(crate) concurrency_queue_enabled: bool,
     #[serde(default)]
     pub(crate) allowed_models: Option<Vec<String>>,
     #[serde(default)]

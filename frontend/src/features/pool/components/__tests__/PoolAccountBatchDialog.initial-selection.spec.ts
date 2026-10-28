@@ -65,6 +65,7 @@ async function settle(): Promise<void> {
 }
 
 beforeEach(() => {
+  apiMocks.batchActionPoolKeys.mockReset().mockResolvedValue({ affected: 1 })
   apiMocks.refreshProviderQuota.mockReset().mockResolvedValue({
     success: 2,
     failed: 0,
@@ -82,6 +83,52 @@ afterEach(() => {
 })
 
 describe('PoolAccountBatchDialog initial selection', () => {
+  it('requires opting in before a queue-only update and submits an explicit false', async () => {
+    const root = document.createElement('div')
+    document.body.appendChild(root)
+    const app = createApp(PoolAccountBatchDialog, {
+      modelValue: true,
+      providerId: 'provider-1',
+      providerName: 'Provider 1',
+      providerType: 'openai',
+      selectedKeys: [createKey('api-key', 'api_key')],
+      selectAllFiltered: false,
+      selectedCount: 1,
+      selectionFilters: { status: 'all' },
+      initialAction: 'update_settings',
+    })
+    app.mount(root)
+    mountedApps.push({ app, root })
+    await settle()
+
+    const queue = document.querySelector<HTMLButtonElement>('[role="switch"][aria-label="并发满时排队"]')
+    const selection = document.querySelector<HTMLInputElement>('input[type="checkbox"][aria-label="修改并发排队设置"]')
+    expect(queue?.getAttribute('aria-checked')).toBe('true')
+    expect(queue?.matches(':disabled')).toBe(true)
+    queue?.click()
+    await settle()
+    expect(queue?.getAttribute('aria-checked')).toBe('true')
+
+    selection?.closest('label')?.click()
+    await settle()
+    expect(queue?.matches(':disabled')).toBe(false)
+    queue?.click()
+    await settle()
+    expect(queue?.getAttribute('aria-checked')).toBe('false')
+
+    const submit = Array.from(document.querySelectorAll<HTMLButtonElement>('button'))
+      .find(button => button.textContent?.includes('应用更多设置'))
+    expect(submit).toBeDefined()
+    submit?.click()
+    await settle()
+
+    expect(apiMocks.batchActionPoolKeys).toHaveBeenCalledWith('provider-1', {
+      key_ids: ['api-key'],
+      action: 'update_settings',
+      payload: { concurrency_queue_enabled: false },
+    })
+  })
+
   it('runs the action selected from the header menu when the dialog opens', async () => {
     const selectedKeys = [createKey('oauth-key', 'oauth'), createKey('api-key', 'api_key')]
     const open = ref(false)

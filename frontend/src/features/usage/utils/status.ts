@@ -17,6 +17,11 @@ type UsageDisplayStatusRecord = UsageFailureSignal & {
   first_byte_time_ms?: number | null
 }
 
+export function isUsageRecordQueued(record: UsageDisplayStatusRecord & { is_queued?: boolean }): boolean {
+  const status = resolveDisplayRequestStatus(record)
+  return record.is_queued === true && (status === 'pending' || status === 'streaming')
+}
+
 function hasLegacyFailureSignal(
   record: UsageFailureSignal
 ): boolean {

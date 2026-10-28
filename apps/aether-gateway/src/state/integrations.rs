@@ -654,6 +654,10 @@ impl RequestCandidateRuntimeWriter for AppState {
 
 #[async_trait]
 impl SchedulerRuntimeState for AppState {
+    fn provider_concurrency_queue_enabled(&self) -> bool {
+        self.provider_concurrency_queue.enabled()
+    }
+
     async fn read_provider_quota_snapshot(
         &self,
         provider_id: &str,

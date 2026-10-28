@@ -49,6 +49,9 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 type BoxError = Box<dyn std::error::Error>;
 type ClientSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
+#[path = "responses_websocket_e2e/cancellation.rs"]
+mod cancellation;
+
 const CLIENT_API_KEY: &str = "sk-aether-responses-ws-e2e";
 const PROVIDER_API_KEY: &str = "sk-upstream-responses-ws-e2e";
 const PROVIDER_ID: &str = "provider-responses-ws-e2e";
@@ -307,7 +310,7 @@ async fn invalid_or_control_text_on_a_bound_socket_does_not_poison_the_next_vali
 
     client
         .send(Message::Text(
-            json!({"type": "response.cancel"}).to_string().into(),
+            json!({"type": "response.unsupported"}).to_string().into(),
         ))
         .await?;
     let unsupported_control = receive_error_or_close(&mut client)
@@ -513,7 +516,7 @@ async fn client_disconnect_before_any_provider_output_settles_a_void_row() -> Re
         ProviderFixture::SingleOpenAiKey,
         PiiRedaction::Disabled,
         true,
-        None,
+        ModelPricing::Free,
     )
     .await?;
     let mut client = harness.connect().await?;
@@ -582,7 +585,7 @@ async fn client_disconnect_still_settles_the_per_request_fee_when_aborted() -> R
         ProviderFixture::SingleOpenAiKey,
         PiiRedaction::Disabled,
         true,
-        Some(0.02),
+        ModelPricing::PerRequest(0.02),
     )
     .await?;
     let mut client = harness.connect().await?;
@@ -841,6 +844,7 @@ struct Harness {
 enum ProviderFixture {
     /// 单个 openai 类型供应商、单把 key。
     SingleOpenAiKey,
+    SingleCodexKey,
     /// codex 类型供应商 + 两把 key：第一把配额耗尽后重试落到第二把。
     CodexKeyPair,
 }
@@ -849,7 +853,7 @@ impl ProviderFixture {
     const fn provider_type(self) -> &'static str {
         match self {
             Self::SingleOpenAiKey => "openai",
-            Self::CodexKeyPair => "codex",
+            Self::SingleCodexKey | Self::CodexKeyPair => "codex",
         }
     }
 
@@ -872,6 +876,15 @@ impl PiiRedaction {
     const fn is_enabled(self) -> bool {
         matches!(self, Self::Enabled)
     }
+}
+
+enum ModelPricing {
+    Free,
+    PerRequest(f64),
+    PerToken {
+        input_per_million: f64,
+        output_per_million: f64,
+    },
 }
 
 impl Harness {
@@ -927,7 +940,7 @@ impl Harness {
         fixture: ProviderFixture,
         redaction: PiiRedaction,
     ) -> Result<Self, BoxError> {
-        Self::start_configured(behavior, fixture, redaction, false, None).await
+        Self::start_configured(behavior, fixture, redaction, false, ModelPricing::Free).await
     }
 
     async fn start_configured(
@@ -935,7 +948,7 @@ impl Harness {
         fixture: ProviderFixture,
         redaction: PiiRedaction,
         cancel_on_client_disconnect: bool,
-        request_price: Option<f64>,
+        pricing: ModelPricing,
     ) -> Result<Self, BoxError> {
         let upstream = Arc::new(MockUpstreamState::new(behavior));
         let upstream_server =
@@ -950,13 +963,33 @@ impl Harness {
         )
         .await?;
 
-        if let Some(price) = request_price {
+        let model_prices = match pricing {
+            ModelPricing::Free => None,
+            ModelPricing::PerRequest(price) => Some((price, None)),
+            ModelPricing::PerToken {
+                input_per_million,
+                output_per_million,
+            } => Some((
+                0.0,
+                Some(json!({
+                    "tiers": [{
+                        "up_to": null,
+                        "input_price_per_1m": input_per_million,
+                        "output_price_per_1m": output_per_million
+                    }]
+                })),
+            )),
+        };
+        if let Some((request_price, tiered_pricing)) = model_prices {
             let pool = sqlx::PgPool::connect(&database.config.url).await?;
-            sqlx::query("UPDATE models SET price_per_request = $1 WHERE id = $2")
-                .bind(price)
-                .bind(PROVIDER_MODEL_ID)
-                .execute(&pool)
-                .await?;
+            sqlx::query(
+                "UPDATE models SET price_per_request = $1, tiered_pricing = $2 WHERE id = $3",
+            )
+            .bind(request_price)
+            .bind(tiered_pricing)
+            .bind(PROVIDER_MODEL_ID)
+            .execute(&pool)
+            .await?;
             pool.close().await;
         }
 
@@ -1216,6 +1249,7 @@ enum UpstreamBehavior {
     /// Announce, stream one delta, and complete — the ordinary turn.
     CompleteEveryTurn,
     CompleteAfterRelease,
+    CancelFirstTurnThenComplete,
     /// Announce the response and then go quiet, leaving the turn in flight.
     StallAfterCreated,
     /// Announce the response and then hang up mid-turn.
@@ -1239,6 +1273,7 @@ struct MockUpstreamState {
     behavior: UpstreamBehavior,
     connections: AtomicUsize,
     events: Mutex<Vec<Value>>,
+    cancel_frames: Mutex<Vec<String>>,
     authorization_headers: Mutex<Vec<Option<String>>>,
     handshakes: Mutex<Vec<ObservedUpstreamHandshake>>,
     release_completion: tokio::sync::Notify,
@@ -1256,6 +1291,7 @@ impl MockUpstreamState {
             behavior,
             connections: AtomicUsize::new(0),
             events: Mutex::new(Vec::new()),
+            cancel_frames: Mutex::new(Vec::new()),
             authorization_headers: Mutex::new(Vec::new()),
             handshakes: Mutex::new(Vec::new()),
             release_completion: tokio::sync::Notify::new(),
@@ -1320,6 +1356,10 @@ async fn run_mock_upstream(
                 let Ok(event) = serde_json::from_str::<Value>(text.as_str()) else {
                     break;
                 };
+                if event.get("type").and_then(Value::as_str) == Some("response.cancel") {
+                    state.cancel_frames.lock().await.push(text.to_string());
+                    continue;
+                }
                 if event.get("type").and_then(Value::as_str) != Some("response.create") {
                     continue;
                 }
@@ -1337,6 +1377,16 @@ async fn run_mock_upstream(
                 match state.behavior {
                     UpstreamBehavior::CompleteEveryTurn => {
                         if send_mock_turn(&mut socket, &response_id).await.is_err() {
+                            break;
+                        }
+                    }
+                    UpstreamBehavior::CancelFirstTurnThenComplete => {
+                        let result = if turn == 1 {
+                            cancellation::cancel_first_turn(&mut socket, &state).await
+                        } else {
+                            send_mock_turn(&mut socket, &response_id).await
+                        };
+                        if result.is_err() {
                             break;
                         }
                     }
@@ -1641,7 +1691,10 @@ fn catalog_key(
     secret: &str,
     fixture: ProviderFixture,
 ) -> Result<StoredProviderCatalogKey, BoxError> {
-    let oauth = fixture.has_alternate_key();
+    let oauth = matches!(
+        fixture,
+        ProviderFixture::SingleCodexKey | ProviderFixture::CodexKeyPair
+    );
     let auth_type = if oauth { "oauth" } else { "api_key" };
     let auth_config = if oauth {
         Some(encrypt_python_fernet_plaintext(

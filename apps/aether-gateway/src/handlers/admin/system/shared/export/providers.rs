@@ -172,6 +172,7 @@ pub(crate) async fn build_admin_system_export_providers_payload(
                                             .collect::<Vec<_>>()
                                     }),
                                 rpm_limit: key.rpm_limit,
+                                concurrency_queue_enabled: key.concurrency_queue_enabled,
                                 allowed_models: key.allowed_models.as_ref().and_then(|value| {
                                     value.as_array().map(|items| {
                                         items

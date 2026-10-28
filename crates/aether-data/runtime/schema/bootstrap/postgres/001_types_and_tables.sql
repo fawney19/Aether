@@ -573,6 +573,7 @@ CREATE TABLE IF NOT EXISTS public.provider_api_keys (
     internal_priority integer DEFAULT 50,
     rpm_limit integer,
     concurrent_limit integer,
+    concurrency_queue_enabled boolean DEFAULT true NOT NULL,
     allowed_models json,
     capabilities json,
     learned_rpm_limit integer,

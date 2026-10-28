@@ -390,6 +390,11 @@ type = "int32"
 nullable = true
 
 [[table.provider_api_keys.columns]]
+name = "concurrency_queue_enabled"
+type = "bool"
+default = true
+
+[[table.provider_api_keys.columns]]
 name = "learned_rpm_limit"
 type = "int32"
 nullable = true

@@ -467,7 +467,9 @@ fn local_request_candidate_skip_reason(
     (status == RequestCandidateStatus::Skipped)
         .then_some(error_type)
         .flatten()
-        .filter(|reason| *reason == "provider_key_concurrency_limit_reached")
+        .filter(|reason| {
+            crate::provider_concurrency_queue::is_concurrency_skip_reason(Some(reason))
+        })
         .map(ToOwned::to_owned)
 }
 
@@ -1093,37 +1095,39 @@ mod tests {
     }
 
     #[test]
-    fn saturated_provider_key_snapshot_persists_capacity_skip_reason() {
-        let mut plan = sample_plan();
-        plan.candidate_id = Some("candidate-provider-key-saturated".to_string());
-        let snapshot = snapshot_local_request_candidate_status(&plan, None)
-            .expect("candidate snapshot should build");
-        let writer = SynchronousStatusWriter::default();
+    fn saturated_provider_snapshot_persists_capacity_skip_reason() {
+        for reason in [
+            "provider_key_concurrency_limit_reached",
+            "provider_concurrency_limit_reached",
+        ] {
+            let mut plan = sample_plan();
+            plan.candidate_id = Some("candidate-provider-key-saturated".to_string());
+            let snapshot = snapshot_local_request_candidate_status(&plan, None)
+                .expect("candidate snapshot should build");
+            let writer = SynchronousStatusWriter::default();
 
-        try_enqueue_local_request_candidate_status_snapshot(
-            &writer,
-            &snapshot,
-            SchedulerRequestCandidateStatusUpdate {
-                status: RequestCandidateStatus::Skipped,
-                status_code: Some(429),
-                error_type: Some("provider_key_concurrency_limit_reached".to_string()),
-                error_message: Some("provider key concurrency limit reached: 1".to_string()),
-                latency_ms: Some(0),
-                started_at_unix_ms: Some(123),
-                finished_at_unix_ms: Some(123),
-            },
-        )
-        .expect("saturated status should use the synchronous enqueue path");
+            try_enqueue_local_request_candidate_status_snapshot(
+                &writer,
+                &snapshot,
+                SchedulerRequestCandidateStatusUpdate {
+                    status: RequestCandidateStatus::Skipped,
+                    status_code: Some(429),
+                    error_type: Some(reason.to_string()),
+                    error_message: Some("provider key concurrency limit reached: 1".to_string()),
+                    latency_ms: Some(0),
+                    started_at_unix_ms: Some(123),
+                    finished_at_unix_ms: Some(123),
+                },
+            )
+            .expect("saturated status should use the synchronous enqueue path");
 
-        let records = writer
-            .records
-            .lock()
-            .expect("synchronous status records lock");
-        assert_eq!(records.len(), 1);
-        assert_eq!(
-            records[0].skip_reason.as_deref(),
-            Some("provider_key_concurrency_limit_reached")
-        );
+            let records = writer
+                .records
+                .lock()
+                .expect("synchronous status records lock");
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].skip_reason.as_deref(), Some(reason));
+        }
     }
 
     fn sample_minimal_candidate() -> SchedulerMinimalCandidateSelectionCandidate {

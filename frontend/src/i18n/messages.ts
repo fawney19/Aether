@@ -1901,6 +1901,8 @@ const legacyExactEnglishMessages: Record<string, string> = {
   '成功': 'Success',
   '处理中': 'Processing',
   '排队中': 'Queued',
+  '并发满时排队': 'Queue when concurrency is full',
+  '关闭后不等待，尝试其他密钥': 'When off, try another key without waiting',
   '执行中': 'Running',
   '完成': 'Completed',
   '无数据变更': 'No data changes',

@@ -390,6 +390,8 @@ pub struct AppState {
     pub(crate) usage_runtime: Arc<usage::UsageRuntime>,
     pub(crate) request_activity: Arc<crate::request_activity::RequestActivity>,
     pub(crate) execution_activity: Arc<crate::execution_activity::ExecutionActivity>,
+    pub(crate) provider_concurrency_queue:
+        Arc<crate::provider_concurrency_queue::ProviderConcurrencyQueue>,
     pub(crate) video_tasks: Arc<VideoTaskService>,
     pub(crate) video_task_poller: Option<VideoTaskPollerConfig>,
     pub(crate) frontdoor_runtime_guards: Arc<FrontdoorRuntimeGuardConfig>,

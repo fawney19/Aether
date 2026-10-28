@@ -1362,15 +1362,18 @@ pub(super) async fn handle_users_me_usage_get(
         )
     };
 
+    let queued = crate::provider_concurrency_queue::queued_request_ids(state, &record_items).await;
     let records = record_items
         .into_iter()
         .map(|item| {
-            build_users_me_usage_record_payload(
+            let mut payload = build_users_me_usage_record_payload(
                 &item,
                 include_actual_cost,
                 &api_key_names,
                 auth_api_key_reader_available,
-            )
+            );
+            payload["is_queued"] = json!(queued.contains(&item.request_id));
+            payload
         })
         .collect::<Vec<_>>();
 
@@ -1500,11 +1503,13 @@ pub(super) async fn handle_users_me_usage_active_get(
             }
         };
 
+    let queued = crate::provider_concurrency_queue::queued_request_ids(state, &items).await;
     Json(json!({
         "requests": items
             .iter()
             .map(|item| {
                 let mut payload = build_users_me_usage_active_payload(item);
+                payload["is_queued"] = json!(queued.contains(&item.request_id));
                 if let (Some(payload), Some(overrides)) = (
                     payload.as_object_mut(),
                     active_state_overrides

@@ -393,6 +393,8 @@ pub(crate) struct PoolKeyCursor<'a> {
     sticky_candidate_loaded: bool,
     seen_key_ids: BTreeSet<String>,
     queued_candidates: VecDeque<EligibleLocalExecutionCandidate>,
+    concurrency_deferred: VecDeque<EligibleLocalExecutionCandidate>,
+    concurrency_deferred_ready: bool,
     skipped_candidates: Vec<SkippedLocalExecutionCandidate>,
     exhausted_logged: bool,
     returned_key_count: u32,
@@ -491,6 +493,8 @@ impl<'a> PoolKeyCursor<'a> {
             sticky_candidate_loaded: false,
             seen_key_ids: BTreeSet::new(),
             queued_candidates: VecDeque::new(),
+            concurrency_deferred: VecDeque::new(),
+            concurrency_deferred_ready: false,
             skipped_candidates: Vec::new(),
             exhausted_logged: false,
             returned_key_count: 0,
@@ -534,6 +538,11 @@ impl<'a> PoolKeyCursor<'a> {
             }
 
             if !self.refill_queued_candidates().await {
+                if !self.concurrency_deferred.is_empty() {
+                    self.concurrency_deferred_ready = true;
+                    self.queued_candidates = std::mem::take(&mut self.concurrency_deferred);
+                    continue;
+                }
                 if !observed {
                     observe_gateway_stage_ms(
                         "pool_cursor_next_key",
@@ -1107,6 +1116,13 @@ impl<'a> PoolKeyCursor<'a> {
             if self.skip_candidate_if_runtime_cooldown(&candidate).await {
                 continue;
             }
+            if !self.concurrency_deferred_ready
+                && self.state.app().provider_concurrency_queue.enabled()
+                && self.key_capacity_reached(&candidate).await
+            {
+                self.concurrency_deferred.push_back(candidate);
+                continue;
+            }
             if candidate.orchestration.candidate_group_id.is_none() {
                 candidate.orchestration.candidate_group_id =
                     Some(pool_cursor_candidate_group_id(&self.group));
@@ -1117,6 +1133,45 @@ impl<'a> PoolKeyCursor<'a> {
         }
 
         None
+    }
+
+    async fn key_capacity_reached(&self, candidate: &EligibleLocalExecutionCandidate) -> bool {
+        if self
+            .state
+            .app()
+            .provider_concurrency_queue
+            .is_waiting(&candidate.candidate.key_id)
+        {
+            return true;
+        }
+        let Ok(keys) = self
+            .state
+            .app()
+            .read_provider_catalog_keys_by_ids(std::slice::from_ref(&candidate.candidate.key_id))
+            .await
+        else {
+            return false;
+        };
+        let Some(limit) = keys
+            .into_iter()
+            .next()
+            .and_then(|key| key.concurrent_limit)
+            .filter(|limit| *limit > 0)
+            .and_then(|limit| usize::try_from(limit).ok())
+        else {
+            return false;
+        };
+        let Ok(gate) = self.state.app().runtime_state.keyed_semaphore(
+            "provider_key",
+            &candidate.candidate.key_id,
+            limit,
+            aether_runtime_state::RuntimeSemaphoreConfig::default(),
+        ) else {
+            return false;
+        };
+        gate.snapshot()
+            .await
+            .is_ok_and(|snapshot| snapshot.available_permits == 0)
     }
 
     fn skip_candidate_if_routing_profile_disallowed(
@@ -1595,7 +1650,7 @@ fn build_pool_catalog_key_context(
     signals
 }
 
-fn pool_key_requires_reauth_for_scheduling(
+pub(crate) fn pool_key_requires_reauth_for_scheduling(
     key: &StoredProviderCatalogKey,
     now_unix_secs: u64,
 ) -> bool {
@@ -3956,6 +4011,50 @@ mod tests {
         assert_eq!(candidate.orchestration.pool_key_index, Some(0));
         assert!(candidate.orchestration.pool_key_lease.is_none());
         assert_eq!(cursor.skip_reason_counts.get("pool_cooldown"), Some(&1));
+    }
+
+    #[tokio::test]
+    async fn pool_key_cursor_defers_busy_key_until_idle_keys_are_tried() {
+        let config = Some(json!({"pool_advanced": {"lru_enabled": true}}));
+        let (provider, endpoint, mut keys, rows) = large_pool_fixture(2, config.clone());
+        keys[0].concurrent_limit = Some(1);
+        let busy_id = keys[0].id.clone();
+        let data =
+            GatewayDataState::with_provider_catalog_and_minimal_candidate_selection_for_tests(
+                Arc::new(InMemoryProviderCatalogReadRepository::seed(
+                    vec![provider],
+                    vec![endpoint],
+                    keys,
+                )),
+                Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(rows)),
+            )
+            .with_encryption_key_for_tests(aether_crypto::DEVELOPMENT_ENCRYPTION_KEY);
+        let app = AppState::new().unwrap().with_data_state_for_tests(data);
+        let gate = app
+            .runtime_state
+            .keyed_semaphore(
+                "provider_key",
+                &busy_id,
+                1,
+                aether_runtime_state::RuntimeSemaphoreConfig::default(),
+            )
+            .unwrap();
+        let held = gate.try_acquire().await.unwrap();
+        let group =
+            sample_eligible_candidate("provider-pool", "endpoint-1", "pool-group", 10, config);
+        let mut cursor = PoolKeyCursor::new(PlannerAppState::new(&app), group, None, None, None);
+        let idle = cursor
+            .next_key()
+            .await
+            .expect("idle key should be selected first");
+        assert_ne!(idle.candidate.key_id, busy_id);
+        let deferred = cursor
+            .next_key()
+            .await
+            .expect("busy key should remain available for queuing");
+        assert_eq!(deferred.candidate.key_id, busy_id);
+        assert!(cursor.next_key().await.is_none());
+        held.release().await.unwrap();
     }
 
     #[tokio::test]

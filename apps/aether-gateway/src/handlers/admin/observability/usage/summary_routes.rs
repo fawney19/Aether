@@ -518,6 +518,7 @@ fn admin_usage_fast_page_total(offset: usize, limit: usize, record_count: usize)
 #[allow(clippy::too_many_arguments)]
 fn build_admin_usage_records_response_with_attempt_flags(
     items: &[StoredRequestUsageAudit],
+    queued_request_ids: &BTreeSet<String>,
     users_by_id: &BTreeMap<String, StoredUserSummary>,
     api_key_names: &BTreeMap<String, String>,
     auth_user_reader_available: bool,
@@ -548,6 +549,7 @@ fn build_admin_usage_records_response_with_attempt_flags(
                 request_candidate_reader_available,
             );
             record["has_fallback"] = json!(flags.has_fallback);
+            record["is_queued"] = json!(queued_request_ids.contains(&item.request_id));
             record["has_retry"] = json!(flags.has_retry);
             // 被跳过的候选：前端据此提示"这次没用某个提供商，是因为它在调度阶段就被排除了"。
             record["has_skipped_candidate"] = json!(flags.has_skipped_candidate);
@@ -878,8 +880,17 @@ pub(super) async fn maybe_build_local_admin_usage_summary_response(
             };
             let api_key_names = admin_usage_api_key_names(state, &items).await?;
             let provider_key_names = admin_usage_provider_key_names(state, &items).await?;
-            let active_candidate_state =
+            let mut active_candidate_state =
                 resolve_admin_usage_active_candidate_state(state, &items).await?;
+            let queued =
+                crate::provider_concurrency_queue::queued_request_ids(state.app(), &items).await;
+            for item in &items {
+                active_candidate_state
+                    .state_overrides_by_request_id
+                    .entry(item.request_id.clone())
+                    .or_insert_with(|| json!({}))["is_queued"] =
+                    json!(queued.contains(&item.request_id));
+            }
 
             return Ok(Some(build_admin_usage_active_requests_response(
                 &items,
@@ -1103,9 +1114,12 @@ pub(super) async fn maybe_build_local_admin_usage_summary_response(
             let provider_key_names = admin_usage_provider_key_names(state, &usage).await?;
             let attempt_flags_by_usage_id =
                 resolve_admin_usage_attempt_flags_by_usage_id(state, &usage).await?;
+            let queued =
+                crate::provider_concurrency_queue::queued_request_ids(state.app(), &usage).await;
 
             return Ok(Some(build_admin_usage_records_response_with_attempt_flags(
                 &usage,
+                &queued,
                 &users_by_id,
                 &api_key_names,
                 state.has_auth_user_data_reader(),

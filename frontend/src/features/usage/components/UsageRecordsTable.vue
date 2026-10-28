@@ -249,6 +249,14 @@
                 失败
               </Badge>
               <Badge
+                v-else-if="isUsageRecordQueued(record)"
+                variant="outline"
+                data-usage-queue-status
+                class="whitespace-nowrap border-muted-foreground/30 text-muted-foreground text-[10px] px-1.5 h-4 leading-4 inline-flex items-center flex-shrink-0"
+              >
+                排队中
+              </Badge>
+              <Badge
                 v-else-if="getDisplayStatus(record) === 'pending'"
                 variant="outline"
                 class="whitespace-nowrap animate-pulse border-muted-foreground/30 text-muted-foreground text-[10px] px-1.5 h-4 leading-4 inline-flex items-center flex-shrink-0"
@@ -860,6 +868,14 @@
               失败
             </Badge>
             <Badge
+              v-else-if="isUsageRecordQueued(record)"
+              variant="outline"
+              data-usage-queue-status
+              class="whitespace-nowrap border-muted-foreground/30 text-muted-foreground"
+            >
+              排队中
+            </Badge>
+            <Badge
               v-else-if="getDisplayStatus(record) === 'pending'"
               variant="outline"
               class="whitespace-nowrap animate-pulse border-muted-foreground/30 text-muted-foreground"
@@ -1093,6 +1109,7 @@ import {
   isUsageUpstreamStream,
   isUsageWebSocket,
   resolveDisplayRequestStatus,
+  isUsageRecordQueued,
   resolveUsageStreamLabelSegments
 } from '../utils/status'
 import { useRowClick } from '@/composables/useRowClick'

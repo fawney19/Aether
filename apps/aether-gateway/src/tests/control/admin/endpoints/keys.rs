@@ -901,7 +901,8 @@ async fn provider_key_concurrent_limit_create_and_list_responses() {
             "api_key": "sk-created-openai-concurrent",
             "name": "created key with concurrency",
             "rpm_limit": 60,
-            "concurrent_limit": 3
+            "concurrent_limit": 3,
+            "concurrency_queue_enabled": false
         }))
         .send()
         .await
@@ -918,6 +919,7 @@ async fn provider_key_concurrent_limit_create_and_list_responses() {
         .to_string();
     assert_eq!(create_payload["rpm_limit"], 60);
     assert_eq!(create_payload["concurrent_limit"], 3);
+    assert_eq!(create_payload["concurrency_queue_enabled"], false);
 
     let create_null_response = reqwest::Client::new()
         .post(format!(
@@ -947,6 +949,7 @@ async fn provider_key_concurrent_limit_create_and_list_responses() {
         .expect("created null-limit key id should be returned")
         .to_string();
     assert_eq!(null_payload["concurrent_limit"], serde_json::Value::Null);
+    assert_eq!(null_payload["concurrency_queue_enabled"], true);
 
     let create_negative_response = reqwest::Client::new()
         .post(format!(
@@ -1002,6 +1005,8 @@ async fn provider_key_concurrent_limit_create_and_list_responses() {
         .find(|item| item["name"].as_str() == Some("created key with null concurrency"))
         .expect("created key with null concurrency should be listed");
     assert_eq!(with_limit["concurrent_limit"], 3);
+    assert_eq!(with_limit["concurrency_queue_enabled"], false);
+    assert_eq!(with_null["concurrency_queue_enabled"], true);
     assert_eq!(with_null["concurrent_limit"], serde_json::Value::Null);
 
     let read_back = provider_catalog_repository
@@ -1962,6 +1967,7 @@ async fn provider_key_concurrent_limit_update_presence_semantics() {
         "sk-test-a",
     );
     key.concurrent_limit = Some(4);
+    key.concurrency_queue_enabled = false;
 
     let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
         vec![sample_provider("provider-openai", "openai", 10)],
@@ -2003,6 +2009,7 @@ async fn provider_key_concurrent_limit_update_presence_semantics() {
         .expect("json body should parse");
     assert_eq!(omitted_payload["name"], "renamed without concurrency");
     assert_eq!(omitted_payload["concurrent_limit"], 4);
+    assert_eq!(omitted_payload["concurrency_queue_enabled"], false);
 
     let set_response = reqwest::Client::new()
         .put(format!(
@@ -2013,7 +2020,8 @@ async fn provider_key_concurrent_limit_update_presence_semantics() {
         .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
         .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
         .json(&json!({
-            "concurrent_limit": 7
+            "concurrent_limit": 7,
+            "concurrency_queue_enabled": true
         }))
         .send()
         .await
@@ -2022,6 +2030,7 @@ async fn provider_key_concurrent_limit_update_presence_semantics() {
     assert_eq!(set_response.status(), StatusCode::OK);
     let set_payload: serde_json::Value = set_response.json().await.expect("json body should parse");
     assert_eq!(set_payload["concurrent_limit"], 7);
+    assert_eq!(set_payload["concurrency_queue_enabled"], true);
 
     let clear_response = reqwest::Client::new()
         .put(format!(
@@ -2042,6 +2051,7 @@ async fn provider_key_concurrent_limit_update_presence_semantics() {
     let clear_payload: serde_json::Value =
         clear_response.json().await.expect("json body should parse");
     assert_eq!(clear_payload["concurrent_limit"], serde_json::Value::Null);
+    assert_eq!(clear_payload["concurrency_queue_enabled"], true);
 
     let negative_response = reqwest::Client::new()
         .put(format!(
@@ -2075,6 +2085,7 @@ async fn provider_key_concurrent_limit_update_presence_semantics() {
     assert_eq!(reloaded.len(), 1);
     assert_eq!(reloaded[0].name, "renamed without concurrency");
     assert_eq!(reloaded[0].concurrent_limit, None);
+    assert!(reloaded[0].concurrency_queue_enabled);
 
     gateway_handle.abort();
 }

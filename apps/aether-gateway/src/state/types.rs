@@ -28,6 +28,7 @@ pub(crate) enum LocalMutationOutcome<T> {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct LocalExecutionRuntimeMissDiagnostic {
     pub(crate) reason: String,
+    pub(crate) execution_admitted: bool,
     pub(crate) route_family: Option<String>,
     pub(crate) route_kind: Option<String>,
     pub(crate) public_path: Option<String>,

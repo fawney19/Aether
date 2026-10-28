@@ -135,6 +135,23 @@
           </div>
 
           <div class="space-y-2 rounded-md border bg-background p-3">
+            <label class="flex min-h-6 items-center gap-2">
+              <Checkbox
+                :checked="settingsSelection.concurrency_queue_enabled"
+                aria-label="修改并发排队设置"
+                @update:checked="settingsSelection.concurrency_queue_enabled = $event === true"
+              />
+              <span class="text-xs">修改并发排队设置</span>
+            </label>
+            <fieldset
+              :disabled="!settingsSelection.concurrency_queue_enabled"
+              :class="{ 'opacity-50': !settingsSelection.concurrency_queue_enabled }"
+            >
+              <ConcurrencyQueueSetting v-model="settingsDraft.concurrency_queue_enabled" />
+            </fieldset>
+          </div>
+
+          <div class="space-y-2 rounded-md border bg-background p-3">
             <div class="flex min-h-6 items-center gap-2">
               <Checkbox
                 :checked="settingsSelection.cache_ttl_minutes"
@@ -319,6 +336,7 @@ import {
   SelectValue,
 } from '@/components/ui'
 import ProxyNodeSelect from '@/features/providers/components/ProxyNodeSelect.vue'
+import ConcurrencyQueueSetting from '@/features/providers/components/ConcurrencyQueueSetting.vue'
 import { useToast } from '@/composables/useToast'
 import { useConfirm } from '@/composables/useConfirm'
 import { parseApiError } from '@/utils/errorParser'

@@ -53,6 +53,10 @@ impl ResponsesStructuredTerminalObserver {
         self.inner.disable_with_error(parser_error);
     }
 
+    pub(super) fn response_id(&self) -> Option<&str> {
+        self.inner.latest_summary()?.response_id.as_deref()
+    }
+
     pub(super) fn finish(&mut self, report_context: &Value) -> ExecutionStreamTerminalSummary {
         match self.inner.finish(report_context) {
             Ok(Some(summary)) => summary,

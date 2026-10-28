@@ -42,6 +42,7 @@ pub fn candidate_is_selectable_with_runtime_state(
 pub fn candidate_runtime_skip_reason_with_state(
     input: CandidateRuntimeSelectabilityInput<'_>,
 ) -> Option<&'static str> {
+    let non_concurrency_input = input;
     let CandidateRuntimeSelectabilityInput {
         candidate,
         recent_candidates,
@@ -51,8 +52,7 @@ pub fn candidate_runtime_skip_reason_with_state(
         provider_quota_blocks_requests,
         account_quota_exhausted,
         oauth_invalid,
-        enforce_key_circuit_breaker,
-        rpm_reset_at,
+        ..
     } = input;
 
     if provider_quota_blocks_requests {
@@ -95,7 +95,35 @@ pub fn candidate_runtime_skip_reason_with_state(
         }
     }
 
-    if let Some(provider_key) = provider_key {
+    candidate_runtime_non_concurrency_skip_reason_with_state(non_concurrency_input)
+}
+
+/// Checks eligibility without the capacity reserved atomically at execution.
+pub fn candidate_runtime_non_concurrency_skip_reason_with_state(
+    input: CandidateRuntimeSelectabilityInput<'_>,
+) -> Option<&'static str> {
+    let CandidateRuntimeSelectabilityInput {
+        candidate,
+        recent_candidates,
+        provider_key_rpm_states,
+        now_unix_secs,
+        provider_quota_blocks_requests,
+        account_quota_exhausted,
+        oauth_invalid,
+        enforce_key_circuit_breaker,
+        rpm_reset_at,
+        ..
+    } = input;
+    if provider_quota_blocks_requests {
+        return Some("provider_quota_blocked");
+    }
+    if account_quota_exhausted {
+        return Some("account_quota_exhausted");
+    }
+    if oauth_invalid {
+        return Some("oauth_invalid");
+    }
+    if let Some(provider_key) = provider_key_rpm_states.get(&candidate.key_id) {
         if enforce_key_circuit_breaker
             && crate::is_provider_key_circuit_open_at(
                 provider_key,

@@ -481,6 +481,7 @@ const ADMIN_POOL_KEY_SETTING_FIELDS: &[&str] = &[
     "internal_priority",
     "rpm_limit",
     "concurrent_limit",
+    "concurrency_queue_enabled",
     "cache_ttl_minutes",
     "max_probe_interval_minutes",
     "is_active",
@@ -536,6 +537,12 @@ pub fn validate_admin_pool_key_settings_payload(payload: &Value) -> Result<(), S
         admin_pool_setting_i64(settings, "concurrent_limit", 0, i32::MAX as i64)?;
     }
     admin_pool_setting_i64(settings, "cache_ttl_minutes", 0, 60)?;
+    if settings
+        .get("concurrency_queue_enabled")
+        .is_some_and(|value| !value.is_boolean())
+    {
+        return Err("concurrency_queue_enabled must be a boolean".to_string());
+    }
     admin_pool_setting_i64(settings, "max_probe_interval_minutes", 0, 32)?;
     if settings
         .get("is_active")
@@ -567,6 +574,12 @@ pub fn apply_admin_pool_key_settings(
     if let Some(value) = admin_pool_setting_i64(settings, "internal_priority", 0, i32::MAX as i64)?
     {
         key.internal_priority = value as i32;
+    }
+    if let Some(value) = settings
+        .get("concurrency_queue_enabled")
+        .and_then(Value::as_bool)
+    {
+        key.concurrency_queue_enabled = value;
     }
     if let Some(value) = settings.get("rpm_limit") {
         key.rpm_limit = if value.is_null() {
@@ -992,6 +1005,31 @@ mod tests {
     }
 
     #[test]
+    fn concurrency_queue_setting_round_trips_and_rejects_non_booleans() {
+        let mut key = sample_key(None);
+        assert!(key.concurrency_queue_enabled);
+        for enabled in [false, true] {
+            super::apply_admin_pool_key_settings(
+                &mut key,
+                &json!({
+                    "concurrency_queue_enabled": enabled
+                }),
+            )
+            .expect("queue setting should apply");
+            assert_eq!(key.concurrency_queue_enabled, enabled);
+        }
+        for invalid in [json!(null), json!("false"), json!(0)] {
+            assert!(super::apply_admin_pool_key_settings(
+                &mut key,
+                &json!({
+                    "concurrency_queue_enabled": invalid
+                })
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
     fn admin_pool_payload_projects_historical_status_and_cooldown_diagnostics() {
         let mut key = sample_key(None);
         key.status_snapshot = Some(json!({
@@ -1173,6 +1211,7 @@ pub fn build_admin_pool_key_payload(
         "rate_multipliers": admin_pool_secret_safe_json_object(key.rate_multipliers.as_ref()),
         "internal_priority": key.internal_priority,
         "rpm_limit": key.rpm_limit,
+        "concurrency_queue_enabled": key.concurrency_queue_enabled,
         "cache_ttl_minutes": key.cache_ttl_minutes,
         "max_probe_interval_minutes": key.max_probe_interval_minutes,
         "note": key.note,

@@ -196,6 +196,7 @@ pub(crate) async fn build_admin_create_provider_key_record(
     key.internal_priority = payload.internal_priority.unwrap_or(50);
     key.rpm_limit = payload.rpm_limit;
     key.concurrent_limit = normalize_optional_api_key_concurrent_limit(payload.concurrent_limit)?;
+    key.concurrency_queue_enabled = payload.concurrency_queue_enabled;
     key.cache_ttl_minutes = payload.cache_ttl_minutes.unwrap_or(5);
     key.max_probe_interval_minutes =
         normalize_max_probe_interval_minutes(payload.max_probe_interval_minutes.unwrap_or(32))?;

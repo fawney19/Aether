@@ -12,6 +12,7 @@ pub use enumeration::{
 };
 pub use selectability::{
     auth_api_key_concurrency_limit_reached, candidate_is_selectable_with_runtime_state,
+    candidate_runtime_non_concurrency_skip_reason_with_state,
     candidate_runtime_skip_reason_with_state, CandidateRuntimeSelectabilityInput,
 };
 pub use types::{
@@ -621,6 +622,55 @@ mod tests {
             }),
             Some("key_rpm_exhausted")
         );
+    }
+
+    #[test]
+    fn queued_concurrency_does_not_bypass_non_capacity_restrictions() {
+        let recent = vec![stored_candidate(
+            "busy",
+            RequestCandidateStatus::Pending,
+            95_000,
+        )];
+        let limits = BTreeMap::from([("provider-1".to_string(), 1)]);
+        let candidate = sample_candidate("1", None);
+        for expected in [
+            None,
+            Some("key_circuit_open"),
+            Some("key_health_score_zero"),
+            Some("key_rpm_exhausted"),
+        ] {
+            let mut key = sample_key_with_concurrent_limit("1", Some(1));
+            match expected {
+                Some("key_circuit_open") => {
+                    key.circuit_breaker_by_format =
+                        Some(serde_json::json!({"openai:chat": {"open": true}}))
+                }
+                Some("key_health_score_zero") => key = sample_key("1", 0.0),
+                Some("key_rpm_exhausted") => key.rpm_limit = Some(1),
+                _ => {}
+            }
+            let keys = BTreeMap::from([("key-1".to_string(), key)]);
+            let input = CandidateRuntimeSelectabilityInput {
+                candidate: &candidate,
+                recent_candidates: &recent,
+                provider_concurrent_limits: &limits,
+                provider_key_rpm_states: &keys,
+                now_unix_secs: 100,
+                provider_quota_blocks_requests: false,
+                account_quota_exhausted: false,
+                oauth_invalid: false,
+                enforce_key_circuit_breaker: true,
+                rpm_reset_at: None,
+            };
+            assert_eq!(
+                candidate_runtime_skip_reason_with_state(input),
+                Some("provider_concurrency_limit_reached")
+            );
+            assert_eq!(
+                super::candidate_runtime_non_concurrency_skip_reason_with_state(input),
+                expected
+            );
+        }
     }
 
     #[test]

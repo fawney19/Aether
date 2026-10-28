@@ -4764,6 +4764,7 @@ mod tests {
             body: RequestBody::from_json(json!({
                 "model": "gpt-5.4",
                 "input": "This cancelled request has terminal upstream usage",
+                "provider_cancelled_usage": true,
                 "stream": true
             })),
             stream: true,
@@ -4784,7 +4785,8 @@ mod tests {
             report_kind: "openai_responses_stream_cancelled".to_string(),
             report_context: Some(json!({
                 "client_api_format": "openai:responses",
-                "provider_api_format": "openai:responses"
+                "provider_api_format": "openai:responses",
+                "provider_cancelled_usage": true
             })),
             status_code: 499,
             headers: BTreeMap::new(),
@@ -4815,6 +4817,14 @@ mod tests {
         assert_eq!(event.data.total_tokens, Some(34));
         assert_eq!(event.data.cache_creation_input_tokens, Some(2));
         assert_eq!(event.data.cache_read_input_tokens, Some(3));
+        let record = crate::build_upsert_usage_record_from_event(&event)
+            .expect("cancelled usage record should build");
+        assert_eq!(record.billing_status, "void");
+        assert!(record
+            .request_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("provider_cancelled_usage"))
+            .is_none());
     }
 
     #[test]

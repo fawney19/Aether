@@ -16,6 +16,7 @@ use uuid::Uuid;
 use super::adapter::resolve_responses_websocket_adapter;
 use super::binding::UpstreamBindingIdentity;
 use super::client::consume_response_create_rate_limit;
+use super::client_event::parse_response_cancel;
 use super::connection::{relay_bound_connection, wait_for_connection_permit_loss};
 use super::continuation::{
     ResponsesWebSocketContinuationRecord, ResponsesWebSocketContinuationRegistry,
@@ -59,8 +60,10 @@ use crate::handlers::proxy::websocket::session::{
     RESPONSES_WEBSOCKET_SESSION_LIMITS, WEBSOCKET_LOG_TRANSPORT,
 };
 use crate::handlers::proxy::websocket::transport::{
-    close_client_socket, send_gateway_error, send_gateway_error_with_status,
-    send_gateway_error_with_stream_id, send_responses_websocket_error_with_param,
+    close_client_socket, responses_websocket_error_event,
+    responses_websocket_error_event_with_stream_id, send_gateway_error,
+    send_gateway_error_with_status, send_gateway_error_with_stream_id,
+    send_responses_websocket_error_with_param,
 };
 use crate::privacy::RedactionSession;
 use crate::AppState;
@@ -359,8 +362,14 @@ pub(super) async fn run_responses_websocket(
         }
     };
 
+    // Chained turns run on this task's stack; heap-pin the large relay future.
     let relay_result = supervise_responses_websocket_phase(
-        relay_bound_connection(&mut client_socket, &mut bound, &state, &context),
+        Box::pin(relay_bound_connection(
+            &mut client_socket,
+            &mut bound,
+            &state,
+            &context,
+        )),
         connection_deadline,
         connection_permit.as_ref(),
     )
@@ -1261,6 +1270,35 @@ where
                 let event: Value = serde_json::from_str(&text).map_err(|_| {
                     InitialMessageFailure::new(InitialMessageError::InvalidJson, last_frame)
                 })?;
+                if event.get("type").and_then(Value::as_str) == Some("response.cancel") {
+                    let error = match parse_response_cancel(&event, &text) {
+                        Ok(_) => responses_websocket_error_event(
+                            400,
+                            "gateway_error",
+                            "response_cancel_not_active",
+                            "There is no active response to cancel",
+                        ),
+                        Err(error) => responses_websocket_error_event_with_stream_id(
+                            400,
+                            "gateway_error",
+                            error.code,
+                            error.message(),
+                            error.stream_id.as_deref(),
+                        ),
+                    };
+                    tokio::time::timeout_at(
+                        deadline,
+                        socket.send(AxumWsMessage::Text(error.to_string().into())),
+                    )
+                    .await
+                    .map_err(|_| {
+                        InitialMessageFailure::new(InitialMessageError::TimedOut, last_frame)
+                    })?
+                    .map_err(|_| {
+                        InitialMessageFailure::new(InitialMessageError::ClientRead, last_frame)
+                    })?;
+                    continue;
+                }
                 validate_initial_response_create(&event)
                     .map_err(|error| InitialMessageFailure::for_event(error, last_frame, &event))?;
                 return Ok((text, event));
@@ -2572,6 +2610,42 @@ mod tests {
             ),
             "expected TimedOut after absolute deadline, got: {result:?}"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn initial_cancel_does_not_restart_the_initial_message_deadline() {
+        use super::{receive_initial_response_create_with_deadline, InitialMessageError};
+
+        let (mut fake, mut pair) = fake_socket();
+        let handle = tokio::spawn(async move {
+            receive_initial_response_create_with_deadline(&mut fake, Duration::from_millis(80))
+                .await
+        });
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(60)).await;
+        pair.tx
+            .send(axum::extract::ws::Message::Text(
+                r#"{"type":"response.cancel"}"#.into(),
+            ))
+            .await
+            .unwrap();
+        let error = tokio::time::timeout(Duration::from_millis(500), pair.pong_rx.recv())
+            .await
+            .expect("cancel error should arrive")
+            .expect("socket remains open");
+        let axum::extract::ws::Message::Text(error) = error else {
+            panic!("expected recoverable error text");
+        };
+        let error: serde_json::Value = serde_json::from_str(error.as_str()).unwrap();
+        assert_eq!(error["error"]["code"], "response_cancel_not_active");
+        tokio::time::advance(Duration::from_millis(21)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            handle.is_finished(),
+            "cancel must not extend the original deadline"
+        );
+        let failure = handle.await.unwrap().expect_err("no create arrived");
+        assert_eq!(failure.error, InitialMessageError::TimedOut);
     }
 
     /// 验证 deadline 内收到合法 response.create 时正常返回，Ping 被正确回复 Pong。

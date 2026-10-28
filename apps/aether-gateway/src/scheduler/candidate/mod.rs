@@ -33,7 +33,8 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
 pub(crate) use self::runtime::{
-    select_with_auth_concurrency_wait, wait_for_auth_api_key_concurrency_retry,
+    key_requires_oauth_reauth, select_with_auth_concurrency_wait,
+    wait_for_auth_api_key_concurrency_retry,
 };
 pub(crate) use self::selection::{
     is_auth_api_key_concurrency_limit_skip_reason, SchedulerSkippedCandidate,

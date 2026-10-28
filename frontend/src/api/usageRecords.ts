@@ -67,6 +67,7 @@ export interface UsageRecord {
   status_code?: number
   error_message?: string
   status?: RequestStatus  // 请求状态: pending, streaming, completed, failed
+  is_queued?: boolean
   created_at: string
   updated_at?: string | null
   response_time_updated_at?: string | null

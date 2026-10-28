@@ -1381,6 +1381,10 @@ pub(super) fn build_admin_pool_key_payload(
     payload.insert("rpm_limit".to_string(), json!(key.rpm_limit));
     payload.insert("concurrent_limit".to_string(), json!(key.concurrent_limit));
     payload.insert(
+        "concurrency_queue_enabled".to_string(),
+        json!(key.concurrency_queue_enabled),
+    );
+    payload.insert(
         "cache_ttl_minutes".to_string(),
         json!(key.cache_ttl_minutes),
     );

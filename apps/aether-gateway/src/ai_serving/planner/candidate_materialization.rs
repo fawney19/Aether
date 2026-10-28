@@ -341,7 +341,28 @@ impl PoolGroupExhaustionPersistenceContext {
 
 pub(crate) use aether_ai_serving::AiCandidateResolutionMode as LocalCandidateResolutionMode;
 
+fn take_concurrency_deferred(
+    state: PlannerAppState<'_>,
+    skipped: &mut Vec<SkippedLocalExecutionCandidate>,
+) -> Vec<SchedulerMinimalCandidateSelectionCandidate> {
+    let mut waiting = Vec::new();
+    if state.app().provider_concurrency_queue.enabled() {
+        skipped.retain(|skipped| {
+            if crate::provider_concurrency_queue::is_concurrency_skip_reason(Some(
+                skipped.skip_reason,
+            )) {
+                waiting.push(skipped.candidate.clone());
+                false
+            } else {
+                true
+            }
+        });
+    }
+    waiting
+}
+
 struct GatewayLocalCandidateMaterializationPort<'a, F, G> {
+    concurrency_deferred: Vec<SchedulerMinimalCandidateSelectionCandidate>,
     state: PlannerAppState<'a>,
     trace_id: &'a str,
     client_api_format: &'a str,
@@ -396,7 +417,7 @@ where
         &self,
         candidates: Vec<Self::Candidate>,
     ) -> Result<(Vec<Self::Eligible>, Vec<Self::Skipped>), Self::Error> {
-        let resolved = resolve_and_rank_logical_local_execution_candidates(
+        let (mut eligible, mut skipped) = resolve_and_rank_logical_local_execution_candidates(
             self.state,
             candidates,
             self.client_api_format,
@@ -410,7 +431,26 @@ where
             self.resolution_mode,
         )
         .await;
-        Ok(resolved)
+        if !self.concurrency_deferred.is_empty() {
+            let (mut waiting, mut waiting_skipped) =
+                resolve_and_rank_logical_local_execution_candidates(
+                    self.state,
+                    self.concurrency_deferred.clone(),
+                    self.client_api_format,
+                    self.requested_model,
+                    self.auth_snapshot,
+                    self.client_session_affinity,
+                    self.required_capabilities,
+                    self.routing_policy,
+                    self.sticky_session_token,
+                    self.request_auth_channel,
+                    self.resolution_mode,
+                )
+                .await;
+            eligible.append(&mut waiting);
+            skipped.append(&mut waiting_skipped);
+        }
+        Ok((eligible, skipped))
     }
 
     fn decorate_skipped_candidate(&self, skipped: Self::Skipped) -> Self::Skipped {
@@ -604,7 +644,7 @@ pub(crate) async fn materialize_local_execution_candidates_with_serving<F, G>(
     request_auth_channel: Option<&str>,
     persistence_policy: LocalCandidatePersistencePolicy<'_>,
     candidates: Vec<SchedulerMinimalCandidateSelectionCandidate>,
-    preselection_skipped: Vec<SkippedLocalExecutionCandidate>,
+    mut preselection_skipped: Vec<SkippedLocalExecutionCandidate>,
     resolution_mode: LocalCandidateResolutionMode,
     build_available_extra_data: F,
     decorate_skipped_candidate: G,
@@ -616,6 +656,7 @@ where
     let scheduler_cache_affinity_enabled =
         scheduler_cache_affinity_enabled(state, routing_policy).await;
     let port = GatewayLocalCandidateMaterializationPort {
+        concurrency_deferred: take_concurrency_deferred(state, &mut preselection_skipped),
         state,
         trace_id,
         client_api_format,
@@ -653,7 +694,7 @@ pub(crate) async fn build_local_execution_candidate_attempt_source_with_serving<
     request_auth_channel: Option<&str>,
     persistence_policy: LocalCandidatePersistencePolicy<'_>,
     candidates: Vec<SchedulerMinimalCandidateSelectionCandidate>,
-    preselection_skipped: Vec<SkippedLocalExecutionCandidate>,
+    mut preselection_skipped: Vec<SkippedLocalExecutionCandidate>,
     resolution_mode: LocalCandidateResolutionMode,
     build_available_extra_data: F,
     decorate_skipped_candidate: G,
@@ -665,20 +706,40 @@ where
     let scheduler_cache_affinity_enabled =
         scheduler_cache_affinity_enabled(state, routing_policy).await;
     let _ = build_available_extra_data;
-    let (candidates, resolved_skipped) = resolve_and_rank_logical_local_execution_candidates(
-        state,
-        candidates,
-        client_api_format,
-        requested_model,
-        auth_snapshot,
-        client_session_affinity,
-        required_capabilities,
-        routing_policy,
-        sticky_session_token,
-        request_auth_channel,
-        resolution_mode,
-    )
-    .await;
+    let waiting_candidates = take_concurrency_deferred(state, &mut preselection_skipped);
+    let (mut candidates, mut resolved_skipped) =
+        resolve_and_rank_logical_local_execution_candidates(
+            state,
+            candidates,
+            client_api_format,
+            requested_model,
+            auth_snapshot,
+            client_session_affinity,
+            required_capabilities,
+            routing_policy,
+            sticky_session_token,
+            request_auth_channel,
+            resolution_mode,
+        )
+        .await;
+    if !waiting_candidates.is_empty() {
+        let (mut waiting, mut skipped) = resolve_and_rank_logical_local_execution_candidates(
+            state,
+            waiting_candidates,
+            client_api_format,
+            requested_model,
+            auth_snapshot,
+            client_session_affinity,
+            required_capabilities,
+            routing_policy,
+            sticky_session_token,
+            request_auth_channel,
+            resolution_mode,
+        )
+        .await;
+        candidates.append(&mut waiting);
+        resolved_skipped.append(&mut skipped);
+    }
     let skipped_candidate_count = preselection_skipped.len() + resolved_skipped.len();
     let skipped_candidates = preselection_skipped
         .into_iter()
@@ -2437,6 +2498,7 @@ mod tests {
         let app = AppState::new().expect("state should build");
         let auth_snapshot = sample_auth_snapshot();
         let port = GatewayLocalCandidateMaterializationPort {
+            concurrency_deferred: Vec::new(),
             state: PlannerAppState::new(&app),
             trace_id: "trace-affinity-disabled",
             client_api_format: "openai:chat",

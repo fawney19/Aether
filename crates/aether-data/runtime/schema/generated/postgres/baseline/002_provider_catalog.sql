@@ -92,6 +92,7 @@ CREATE TABLE IF NOT EXISTS public.provider_api_keys (
     proxy jsonb,
     fingerprint jsonb,
     concurrent_limit integer,
+    concurrency_queue_enabled boolean DEFAULT true NOT NULL,
     learned_rpm_limit integer,
     concurrent_429_count integer DEFAULT 0 NOT NULL,
     rpm_429_count integer DEFAULT 0 NOT NULL,

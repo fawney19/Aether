@@ -25,12 +25,34 @@ const UPSTREAM_IS_STREAM_KEY: &str = "upstream_is_stream";
 const PLAN_USAGE_RESERVATION_TOKEN_KEY: &str = "plan_usage_reservation_token";
 const BODY_SIZE_BASIS: &str = "serialized gateway request bodies after normalization";
 pub const CANCELLED_REQUEST_FEE_METADATA_KEY: &str = "cancelled_request_fee";
+pub const PROVIDER_CANCELLED_USAGE_METADATA_KEY: &str = "provider_cancelled_usage";
 
 pub fn cancelled_request_fee_is_billable(metadata: Option<&Value>) -> bool {
     metadata
         .and_then(|metadata| metadata.get(CANCELLED_REQUEST_FEE_METADATA_KEY))
         .and_then(Value::as_bool)
         .unwrap_or(false)
+}
+
+pub fn provider_cancelled_usage_is_billable(metadata: Option<&Value>) -> bool {
+    metadata.is_some_and(|metadata| {
+        metadata
+            .get(PROVIDER_CANCELLED_USAGE_METADATA_KEY)
+            .and_then(Value::as_bool)
+            == Some(true)
+            && metadata
+                .get(USAGE_AVAILABLE_METADATA_KEY)
+                .and_then(Value::as_bool)
+                != Some(false)
+            && metadata
+                .get(USAGE_PRICING_AVAILABLE_METADATA_KEY)
+                .and_then(Value::as_bool)
+                != Some(false)
+    })
+}
+
+pub fn cancelled_usage_is_billable(metadata: Option<&Value>) -> bool {
+    cancelled_request_fee_is_billable(metadata) || provider_cancelled_usage_is_billable(metadata)
 }
 
 /// Projects request metadata onto the persistence contract. Unknown fields and malformed values
@@ -181,6 +203,7 @@ pub fn sanitize_usage_request_metadata_object(source: &Map<String, Value>) -> Op
         "transport_error",
         "is_free_tier",
         CANCELLED_REQUEST_FEE_METADATA_KEY,
+        PROVIDER_CANCELLED_USAGE_METADATA_KEY,
         USAGE_AVAILABLE_METADATA_KEY,
         CHAT_PII_REDACTION_METADATA_KEY,
         USAGE_PRICING_AVAILABLE_METADATA_KEY,

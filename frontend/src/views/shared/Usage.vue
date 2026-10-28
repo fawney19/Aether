@@ -608,6 +608,7 @@ async function pollActiveRequests() {
         record.status = update.status
       }
       if (shouldApplyData) {
+        record.is_queued = update.is_queued === true
         if ('image_progress' in update) {
           record.image_progress = update.image_progress ?? null
         }

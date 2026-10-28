@@ -8,6 +8,8 @@ use uuid::Uuid;
 use wreq::ws::message::Message as WreqWsMessage;
 
 use super::adapter::{resolve_responses_websocket_adapter, ResponsesWebSocketDrainDirective};
+use super::cancellation::forward_response_cancel;
+use super::client_event::{parse_client_event, ResponsesClientEvent};
 use super::control::{resolve_responses_websocket_turn_control, ResponsesWebSocketTurnControl};
 use super::lifecycle::{
     await_pending_turn_finalization, queue_turn_finalization,
@@ -27,8 +29,7 @@ use super::request::{
     planned_request_uses_codex_responses_lite, planned_response_create_event,
     prepare_responses_lite_continuation, provider_model_from_decision,
     response_create_has_previous_response_id, response_create_model_or_current,
-    validate_response_create_previous_response_id, validate_response_create_stream_id_support,
-    validated_named_stream_id, ResponsesLiteStaticConfig,
+    ResponsesLiteStaticConfig,
 };
 use super::state::BoundResponsesConnection;
 use super::turn::{
@@ -91,47 +92,6 @@ pub(super) fn adapter_drain_ready(
                 observation,
                 Some(ResponsesWebSocketTurnObservation::Terminal(_))
             ))
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ResponseCreateParseError {
-    code: &'static str,
-    stream_id: Option<String>,
-}
-
-impl ResponseCreateParseError {
-    fn new(code: &'static str, event: Option<&Value>) -> Self {
-        // A syntactically valid named lane is safe to reflect on every
-        // request-scoped error, even when another response.create field fails
-        // validation first. Invalid lane values never pass this helper and
-        // therefore cannot be reflected.
-        let stream_id = event
-            .and_then(validated_named_stream_id)
-            .map(str::to_string);
-        Self { code, stream_id }
-    }
-}
-
-fn parse_response_create_event(text: &str) -> Result<Value, ResponseCreateParseError> {
-    let event = serde_json::from_str::<Value>(text)
-        .map_err(|_| ResponseCreateParseError::new("invalid_response_create", None))?;
-    if event.as_object().is_none() {
-        return Err(ResponseCreateParseError::new(
-            "invalid_response_create",
-            Some(&event),
-        ));
-    }
-    if event.get("type").and_then(Value::as_str) != Some("response.create") {
-        return Err(ResponseCreateParseError::new(
-            "expected_response_create",
-            Some(&event),
-        ));
-    }
-    validate_response_create_previous_response_id(&event)
-        .map_err(|code| ResponseCreateParseError::new(code, Some(&event)))?;
-    validate_response_create_stream_id_support(&event)
-        .map_err(|code| ResponseCreateParseError::new(code, Some(&event)))?;
-    Ok(event)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -197,25 +157,16 @@ pub(super) async fn forward_client_message(
     match client_message {
         AxumWsMessage::Text(text) => {
             let text = text.to_string();
-            let mut client_event = match parse_response_create_event(&text) {
-                Ok(event) => event,
+            let mut client_event = match parse_client_event(&text) {
+                Ok(ResponsesClientEvent::Create(event)) => event,
+                Ok(ResponsesClientEvent::Cancel(cancel)) => {
+                    return forward_response_cancel(cancel, bound, client_socket).await;
+                }
                 Err(error) => {
-                    let message = match error.code {
-                        "invalid_response_create_previous_response_id" => {
-                            "response.create.previous_response_id must be null or a non-empty string"
-                        }
-                        "invalid_response_create_stream_id" => {
-                            "response.create.stream_id must be 1-256 ASCII letters, numbers, underscores, hyphens, or periods"
-                        }
-                        "responses_websocket_named_stream_unsupported" => {
-                            "Aether currently supports only the implicit default WebSocket lane; omit response.create.stream_id"
-                        }
-                        _ => "WebSocket client text events must be response.create JSON objects",
-                    };
                     send_gateway_error_with_stream_id(
                         client_socket,
                         error.code,
-                        message,
+                        error.message(),
                         error.stream_id.as_deref(),
                     )
                     .await;
@@ -1272,81 +1223,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        continuation_constraint, parse_response_create_event, pinned_continuation_planning_event,
-        ContinuationConstraint,
+        continuation_constraint, pinned_continuation_planning_event, ContinuationConstraint,
     };
-
-    #[test]
-    fn invalid_client_text_does_not_poison_the_next_response_create() {
-        assert_eq!(
-            parse_response_create_event("not-json")
-                .expect_err("invalid JSON")
-                .code,
-            "invalid_response_create"
-        );
-        assert_eq!(
-            parse_response_create_event("[]")
-                .expect_err("non-object JSON")
-                .code,
-            "invalid_response_create"
-        );
-        assert_eq!(
-            parse_response_create_event(r#"{"type":"response.cancel"}"#)
-                .expect_err("wrong event type")
-                .code,
-            "expected_response_create"
-        );
-        for invalid_previous_response_id in [
-            r#"{"type":"response.create","previous_response_id":""}"#,
-            r#"{"type":"response.create","previous_response_id":42}"#,
-            r#"{"type":"response.create","previous_response_id":{"id":"resp_1"}}"#,
-        ] {
-            assert_eq!(
-                parse_response_create_event(invalid_previous_response_id)
-                    .expect_err("invalid previous_response_id")
-                    .code,
-                "invalid_response_create_previous_response_id"
-            );
-        }
-        let invalid_previous_on_named_lane = parse_response_create_event(
-            r#"{"type":"response.create","stream_id":"main","previous_response_id":""}"#,
-        )
-        .expect_err("invalid previous_response_id must retain a valid lane identity");
-        assert_eq!(
-            invalid_previous_on_named_lane.code,
-            "invalid_response_create_previous_response_id"
-        );
-        assert_eq!(
-            invalid_previous_on_named_lane.stream_id.as_deref(),
-            Some("main")
-        );
-        let named_stream = parse_response_create_event(
-            r#"{"type":"response.create","stream_id":"main-lane_1.test"}"#,
-        )
-        .expect_err("named streams are not implemented");
-        assert_eq!(
-            named_stream.code,
-            "responses_websocket_named_stream_unsupported"
-        );
-        assert_eq!(named_stream.stream_id.as_deref(), Some("main-lane_1.test"));
-        for invalid_stream_id in [
-            r#"{"type":"response.create","stream_id":null}"#,
-            r#"{"type":"response.create","stream_id":""}"#,
-            r#"{"type":"response.create","stream_id":"not/a/lane"}"#,
-        ] {
-            let error = parse_response_create_event(invalid_stream_id)
-                .expect_err("invalid stream_id must be rejected");
-            assert_eq!(error.code, "invalid_response_create_stream_id");
-            assert_eq!(error.stream_id, None);
-        }
-
-        let valid = parse_response_create_event(
-            r#"{"type":"response.create","model":"gpt-test","store":true}"#,
-        )
-        .expect("a valid event after rejected text should still parse");
-        assert_eq!(valid["type"], "response.create");
-        assert_eq!(valid["store"], true);
-    }
 
     #[test]
     fn continuation_without_an_upstream_never_falls_through_to_replanning() {

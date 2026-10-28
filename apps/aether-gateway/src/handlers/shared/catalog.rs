@@ -3155,6 +3155,10 @@ pub(crate) fn build_admin_provider_key_response(
     payload.insert("rpm_limit".to_string(), json!(key.rpm_limit));
     payload.insert("concurrent_limit".to_string(), json!(key.concurrent_limit));
     payload.insert(
+        "concurrency_queue_enabled".to_string(),
+        json!(key.concurrency_queue_enabled),
+    );
+    payload.insert(
         "allowed_models".to_string(),
         serde_json::Value::Array(
             json_string_list(key.allowed_models.as_ref())

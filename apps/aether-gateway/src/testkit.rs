@@ -19,6 +19,9 @@ use sha2::{Digest, Sha256};
 use crate::data::GatewayDataState;
 use crate::AppState;
 
+#[cfg(test)]
+mod provider_concurrency_queue_tests;
+
 pub use crate::tunnel::build_tunnel_pressure_router;
 
 pub async fn gateway_metric_samples(

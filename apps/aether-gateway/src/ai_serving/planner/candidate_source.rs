@@ -344,6 +344,7 @@ pub(crate) async fn preselect_local_execution_candidates_for_api_formats_with_se
 }
 
 pub(crate) struct LocalCandidatePreselectionPageCursor<'a> {
+    concurrency_deferred: Vec<SchedulerMinimalCandidateSelectionCandidate>,
     state: PlannerAppState<'a>,
     trace_id: String,
     client_api_format: String,
@@ -453,6 +454,7 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
             ranking_seed: request_distribution_seed(),
             priority_page_emitted: false,
             deferred_pages_by_format: BTreeMap::new(),
+            concurrency_deferred: Vec::new(),
             format_index: 0,
             requested_name_indexes: BTreeMap::new(),
             requested_name_offsets: BTreeMap::new(),
@@ -467,6 +469,44 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
     }
 
     pub(crate) async fn next_page(
+        &mut self,
+    ) -> Result<
+        Option<
+            AiCandidatePreselectionOutcome<
+                SchedulerMinimalCandidateSelectionCandidate,
+                SkippedLocalExecutionCandidate,
+            >,
+        >,
+        GatewayError,
+    > {
+        loop {
+            let Some(mut page) = self.next_page_before_concurrency_queue().await? else {
+                return Ok((!self.concurrency_deferred.is_empty()).then(|| {
+                    AiCandidatePreselectionOutcome {
+                        candidates: std::mem::take(&mut self.concurrency_deferred),
+                        skipped_candidates: Vec::new(),
+                    }
+                }));
+            };
+            if self.state.app().provider_concurrency_queue.enabled() {
+                page.skipped_candidates.retain(|skipped| {
+                    if crate::provider_concurrency_queue::is_concurrency_skip_reason(Some(
+                        skipped.skip_reason,
+                    )) {
+                        self.concurrency_deferred.push(skipped.candidate.clone());
+                        false
+                    } else {
+                        true
+                    }
+                });
+            }
+            if !page.candidates.is_empty() || !page.skipped_candidates.is_empty() {
+                return Ok(Some(page));
+            }
+        }
+    }
+
+    async fn next_page_before_concurrency_queue(
         &mut self,
     ) -> Result<
         Option<
@@ -552,6 +592,7 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
     }
 
     pub(crate) fn restart_scan(&mut self) {
+        self.concurrency_deferred.clear();
         self.format_index = 0;
         self.requested_name_indexes.clear();
         self.requested_name_offsets.clear();
@@ -1731,6 +1772,79 @@ mod tests {
             api_key_ip_rules: None,
             currently_usable: true,
         }
+    }
+
+    #[tokio::test]
+    async fn paged_preselection_defers_concurrency_until_later_pages_are_exhausted() {
+        let rows = [
+            standard_candidate_row("busy", "openai:chat", 0),
+            standard_candidate_row("idle", "openai:chat", 1),
+        ];
+        let data = GatewayDataState::with_minimal_candidate_selection_reader_for_tests(Arc::new(
+            InMemoryMinimalCandidateSelectionReadRepository::seed(rows),
+        ));
+        let app = AppState::new().unwrap().with_data_state_for_tests(data);
+        let auth = unrestricted_auth_snapshot();
+        let policy = crate::system_features::ModelDirectivePolicySnapshot::load(&app).await;
+        let mut cursor = LocalCandidatePreselectionPageCursor::new(
+            PlannerAppState::new(&app),
+            &policy,
+            "openai:chat",
+            "gpt-5",
+            None,
+            false,
+            None,
+            &auth,
+            None,
+            None,
+            None,
+            true,
+            LocalCandidatePreselectionKeyMode::ProviderEndpointKeyModelAndApiFormat,
+            false,
+            None,
+        )
+        .await;
+        let mut candidates = cursor.next_page().await.unwrap().unwrap().candidates;
+        let busy = candidates.remove(
+            candidates
+                .iter()
+                .position(|candidate| candidate.provider_id == "busy")
+                .unwrap(),
+        );
+        let idle = candidates.remove(0);
+        cursor.restart_scan();
+        cursor.priority_page_emitted = true;
+        cursor
+            .exhausted_api_formats
+            .extend(cursor.candidate_api_formats.clone());
+        cursor.deferred_pages_by_format.insert(
+            "openai:chat".to_string(),
+            VecDeque::from([
+                AiCandidatePreselectionOutcome {
+                    candidates: Vec::new(),
+                    skipped_candidates: vec![SkippedLocalExecutionCandidate {
+                        candidate: busy.clone(),
+                        skip_reason: "provider_key_concurrency_limit_reached",
+                        transport: None,
+                        ranking: None,
+                        extra_data: None,
+                    }],
+                },
+                AiCandidatePreselectionOutcome {
+                    candidates: vec![idle.clone()],
+                    skipped_candidates: Vec::new(),
+                },
+            ]),
+        );
+        assert_eq!(
+            cursor.next_page().await.unwrap().unwrap().candidates,
+            vec![idle]
+        );
+        assert_eq!(
+            cursor.next_page().await.unwrap().unwrap().candidates,
+            vec![busy]
+        );
+        assert!(cursor.next_page().await.unwrap().is_none());
     }
 
     #[tokio::test]

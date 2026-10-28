@@ -172,6 +172,7 @@ SELECT
   fingerprint,
   rpm_limit,
   concurrent_limit,
+  concurrency_queue_enabled,
   learned_rpm_limit,
   concurrent_429_count,
   rpm_429_count,
@@ -231,6 +232,7 @@ SELECT
   fingerprint,
   rpm_limit,
   concurrent_limit,
+  concurrency_queue_enabled,
   learned_rpm_limit,
   concurrent_429_count,
   rpm_429_count,
@@ -293,6 +295,7 @@ SELECT
   NULL::jsonb AS fingerprint,
   NULL::integer AS rpm_limit,
   NULL::integer AS concurrent_limit,
+  concurrency_queue_enabled,
   NULL::integer AS learned_rpm_limit,
   NULL::integer AS concurrent_429_count,
   NULL::integer AS rpm_429_count,
@@ -381,7 +384,8 @@ SET
     ELSE TO_TIMESTAMP($26::double precision)
   END,
   auth_type_by_format = $27,
-  allow_auth_channel_mismatch_formats = $28
+  allow_auth_channel_mismatch_formats = $28,
+  concurrency_queue_enabled = $29
 WHERE id = $1
   AND provider_id = $2
   AND auth_type = $4
@@ -565,6 +569,7 @@ fn key_update_query(key: &StoredProviderCatalogKey) -> Query<'_, Postgres, PgArg
         .bind(key.updated_at_unix_secs.map(|value| value as f64))
         .bind(&key.auth_type_by_format)
         .bind(&key.allow_auth_channel_mismatch_formats)
+        .bind(key.concurrency_queue_enabled)
 }
 
 fn push_admin_key_assignments<'args>(
@@ -595,6 +600,8 @@ fn push_admin_key_assignments<'args>(
         .push_bind(key.rpm_limit.map(|value| value as i32))
         .push(", concurrent_limit = ")
         .push_bind(key.concurrent_limit)
+        .push(", concurrency_queue_enabled = ")
+        .push_bind(key.concurrency_queue_enabled)
         .push(", allowed_models = ")
         .push_bind(&key.allowed_models)
         .push(", capabilities = ")
@@ -1765,7 +1772,8 @@ INSERT INTO provider_api_keys (
   is_active,
   created_at,
   updated_at,
-  allow_auth_channel_mismatch_formats
+  allow_auth_channel_mismatch_formats,
+  concurrency_queue_enabled
 ) VALUES (
   $1,
   $2,
@@ -1843,7 +1851,8 @@ INSERT INTO provider_api_keys (
     WHEN $52::double precision IS NULL THEN NOW()
     ELSE TO_TIMESTAMP($52::double precision)
   END,
-  $53
+  $53,
+  $54
 )
 "#,
         )
@@ -1918,6 +1927,7 @@ INSERT INTO provider_api_keys (
         .bind(key.created_at_unix_ms.map(|value| value as f64))
         .bind(key.updated_at_unix_secs.map(|value| value as f64))
         .bind(&key.allow_auth_channel_mismatch_formats)
+        .bind(key.concurrency_queue_enabled)
         .execute(&self.pool)
         .await
         .map_postgres_err()?;
@@ -3594,6 +3604,7 @@ fn map_key_row(row: &PgRow) -> Result<StoredProviderCatalogKey, DataLayerError> 
         })
         .transpose()?;
     let concurrent_limit = row_get::<Option<i32>>(row, "concurrent_limit")?;
+    let concurrency_queue_enabled = row_get::<bool>(row, "concurrency_queue_enabled")?;
     let learned_rpm_limit = row_get::<Option<i32>>(row, "learned_rpm_limit")?
         .map(|value| {
             u32::try_from(value).map_err(|_| {
@@ -3780,6 +3791,7 @@ fn map_key_row(row: &PgRow) -> Result<StoredProviderCatalogKey, DataLayerError> 
                 row.try_get("circuit_breaker_by_format").ok(),
             );
         key.note = row.try_get("note").ok();
+        key.concurrency_queue_enabled = concurrency_queue_enabled;
         key.internal_priority = row.try_get("internal_priority").unwrap_or(50);
         key.cache_ttl_minutes = row.try_get("cache_ttl_minutes").unwrap_or(5);
         key.max_probe_interval_minutes = row.try_get("max_probe_interval_minutes").unwrap_or(32);
@@ -3813,6 +3825,7 @@ fn map_key_row(row: &PgRow) -> Result<StoredProviderCatalogKey, DataLayerError> 
 #[cfg(test)]
 mod tests {
     use aether_data_contracts::repository::provider_catalog::ProviderCatalogKeyRuntimeMetadataUpdate;
+    use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey;
     use serde_json::json;
 
     use super::{optional_u64, SqlxProviderCatalogReadRepository};
@@ -3835,6 +3848,81 @@ mod tests {
         let pool = factory.connect_lazy().expect("pool should build");
         let repository = SqlxProviderCatalogReadRepository::new(pool);
         let _ = repository.pool();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires AETHER_TEST_DATABASE_URL and PostgreSQL migrations"]
+    async fn live_concurrency_queue_setting_defaults_and_round_trips() {
+        let database_url = std::env::var("AETHER_TEST_DATABASE_URL")
+            .expect("AETHER_TEST_DATABASE_URL must point at the test database");
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&database_url)
+            .await
+            .unwrap();
+        crate::run_migrations(&pool).await.unwrap();
+        let repository = SqlxProviderCatalogReadRepository::new(pool);
+        let provider_id = uuid::Uuid::new_v4().to_string();
+        let key_id = uuid::Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO providers (id, name, provider_type) VALUES ($1, $1, 'openai')")
+            .bind(&provider_id)
+            .execute(repository.pool())
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO provider_api_keys (id, name, provider_id, total_tokens, total_cost_usd) VALUES ($1, $1, $2, 0, 0)")
+            .bind(&key_id)
+            .bind(&provider_id)
+            .execute(repository.pool())
+            .await
+            .unwrap();
+        let default_key = repository
+            .list_keys_by_ids(std::slice::from_ref(&key_id))
+            .await
+            .unwrap()
+            .remove(0);
+        assert!(default_key.concurrency_queue_enabled);
+        let mut key = StoredProviderCatalogKey::new(
+            uuid::Uuid::new_v4().to_string(),
+            provider_id.clone(),
+            "queue-disabled".to_string(),
+            "api_key".to_string(),
+            None,
+            true,
+        )
+        .unwrap();
+        key.concurrency_queue_enabled = false;
+        let created = repository.create_key(&key).await.unwrap();
+        assert!(!created.concurrency_queue_enabled);
+        let listed = repository
+            .list_keys_by_provider_ids(std::slice::from_ref(&provider_id))
+            .await
+            .unwrap();
+        assert!(
+            !listed
+                .iter()
+                .find(|stored| stored.id == key.id)
+                .unwrap()
+                .concurrency_queue_enabled
+        );
+        key.concurrency_queue_enabled = true;
+        let updated = repository.update_key(&key).await.unwrap();
+        assert!(updated.concurrency_queue_enabled);
+        let reloaded = repository
+            .list_keys_by_ids(std::slice::from_ref(&key.id))
+            .await
+            .unwrap()
+            .remove(0);
+        assert!(reloaded.concurrency_queue_enabled);
+        sqlx::query("DELETE FROM provider_api_keys WHERE provider_id = $1")
+            .bind(&provider_id)
+            .execute(repository.pool())
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM providers WHERE id = $1")
+            .bind(&provider_id)
+            .execute(repository.pool())
+            .await
+            .unwrap();
     }
 
     #[test]
