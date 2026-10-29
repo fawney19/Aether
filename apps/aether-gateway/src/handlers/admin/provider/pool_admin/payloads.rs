@@ -384,6 +384,128 @@ fn admin_pool_current_unix_secs() -> u64 {
         .unwrap_or(0)
 }
 
+/// A quota window whose request/token/cost usage is summarized per reset cycle
+/// on the pool page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AdminPoolCycleWindowSpec {
+    pub(crate) code: String,
+    pub(crate) window_minutes: u64,
+    pub(crate) include_model_prefix: Option<&'static str>,
+    pub(crate) exclude_model_prefix: Option<&'static str>,
+}
+
+pub(crate) fn admin_pool_provider_supports_cycle_stats(provider_type: &str) -> bool {
+    matches!(
+        provider_type.trim().to_ascii_lowercase().as_str(),
+        "codex" | "xai" | "antigravity"
+    )
+}
+
+fn admin_pool_named_window_minutes(name: &str) -> Option<u64> {
+    let name = name.trim();
+    if name.eq_ignore_ascii_case("5h") {
+        Some(300)
+    } else if name.eq_ignore_ascii_case("weekly") {
+        Some(10_080)
+    } else if name.eq_ignore_ascii_case("monthly") {
+        Some(43_800)
+    } else {
+        None
+    }
+}
+
+fn admin_pool_json_is_zero(value: Option<&serde_json::Value>) -> bool {
+    let parsed = match value {
+        Some(serde_json::Value::Number(number)) => number.as_f64(),
+        Some(serde_json::Value::String(text)) => text.trim().parse::<f64>().ok(),
+        _ => None,
+    };
+    parsed == Some(0.0)
+}
+
+fn admin_pool_window_str<'a>(
+    window: &'a serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) -> Option<&'a str> {
+    window
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+pub(crate) fn admin_pool_cycle_window_spec(
+    provider_type: &str,
+    window: &serde_json::Map<String, serde_json::Value>,
+) -> Option<AdminPoolCycleWindowSpec> {
+    let code = admin_pool_window_str(window, "code")?.to_ascii_lowercase();
+    let scope = admin_pool_window_str(window, "scope").unwrap_or("account");
+    // `window_minutes: 0` marks a placeholder window; `admin_pool_json_to_u64`
+    // maps it to None, so check the raw value before falling back to a name.
+    if admin_pool_json_is_zero(window.get("window_minutes")) {
+        return None;
+    }
+    let explicit_minutes = admin_pool_json_to_u64(window.get("window_minutes"));
+    let named_minutes =
+        || admin_pool_window_str(window, "window").and_then(admin_pool_named_window_minutes);
+
+    let mut spec = AdminPoolCycleWindowSpec {
+        code,
+        window_minutes: 0,
+        include_model_prefix: None,
+        exclude_model_prefix: None,
+    };
+    match provider_type.trim().to_ascii_lowercase().as_str() {
+        "codex" => {
+            if !scope.eq_ignore_ascii_case("account") || spec.code.starts_with("spark_") {
+                return None;
+            }
+            spec.window_minutes =
+                explicit_minutes.or_else(|| admin_pool_named_window_minutes(&spec.code))?;
+        }
+        "xai" => {
+            if !scope.eq_ignore_ascii_case("account") || spec.code != "usage" {
+                return None;
+            }
+            // Snapshots stored before the `window` field existed only carry
+            // the period in their label.
+            let labelled_minutes = || match admin_pool_window_str(window, "label") {
+                Some("周额度") => Some(10_080),
+                Some("月额度") => Some(43_800),
+                _ => None,
+            };
+            spec.window_minutes = explicit_minutes
+                .or_else(named_minutes)
+                .or_else(labelled_minutes)?;
+            // Calendar months vary in length, so a monthly cycle is only
+            // summarized from the period start xAI reports.
+            if spec.window_minutes != 10_080
+                && admin_pool_json_to_u64(window.get("period_start_at")).is_none()
+            {
+                return None;
+            }
+        }
+        "antigravity" => {
+            if !scope.eq_ignore_ascii_case("quota_group") {
+                return None;
+            }
+            spec.window_minutes = explicit_minutes.or_else(named_minutes)?;
+            // Antigravity quota groups do not list their member models; the
+            // buckets are "gemini-*" (Gemini models) and "3p-*" (Claude/GPT).
+            let bucket_id = admin_pool_window_str(window, "bucket_id")?.to_ascii_lowercase();
+            if bucket_id.starts_with("gemini") {
+                spec.include_model_prefix = Some("gemini");
+            } else if bucket_id.starts_with("3p") {
+                spec.exclude_model_prefix = Some("gemini");
+            } else {
+                return None;
+            }
+        }
+        _ => return None,
+    }
+    Some(spec)
+}
+
 fn admin_pool_is_regular_codex_cycle_window(
     window: &serde_json::Map<String, serde_json::Value>,
 ) -> bool {
@@ -444,13 +566,11 @@ fn admin_pool_prune_expired_codex_window_usage(status_snapshot: &mut serde_json:
     admin_pool_prune_expired_codex_window_usage_at(status_snapshot, admin_pool_current_unix_secs());
 }
 
-fn admin_pool_apply_codex_window_usage_summaries(
+fn admin_pool_apply_cycle_window_usage_summaries(
+    provider_type: &str,
     status_snapshot: &mut serde_json::Value,
     usage_by_code: Option<&BTreeMap<String, StoredProviderApiKeyWindowUsageSummary>>,
 ) {
-    let Some(usage_by_code) = usage_by_code else {
-        return;
-    };
     let Some(windows) = status_snapshot
         .get_mut("quota")
         .and_then(serde_json::Value::as_object_mut)
@@ -460,16 +580,25 @@ fn admin_pool_apply_codex_window_usage_summaries(
         return;
     };
 
+    let is_codex = provider_type.trim().eq_ignore_ascii_case("codex");
     for window in windows
         .iter_mut()
         .filter_map(serde_json::Value::as_object_mut)
     {
+        // Non-codex cycle windows often carry only a named period ("weekly");
+        // expose the derived length so the UI can label the cycle, even when
+        // the window is expired and has no usage summary.
+        if !is_codex && !window.contains_key("window_minutes") {
+            if let Some(spec) = admin_pool_cycle_window_spec(provider_type, window) {
+                window.insert("window_minutes".to_string(), json!(spec.window_minutes));
+            }
+        }
         let Some(summary) = window
             .get("code")
             .and_then(serde_json::Value::as_str)
             .map(str::trim)
             .map(str::to_ascii_lowercase)
-            .and_then(|code| usage_by_code.get(&code))
+            .and_then(|code| usage_by_code?.get(&code))
         else {
             continue;
         };
@@ -1104,7 +1233,7 @@ pub(super) fn build_admin_pool_key_payload(
     runtime: &AdminProviderPoolRuntimeState,
     pool_config: Option<AdminProviderPoolConfig>,
     pool_score: Option<&StoredPoolMemberScore>,
-    codex_cycle_usage_by_code: Option<&BTreeMap<String, StoredProviderApiKeyWindowUsageSummary>>,
+    cycle_usage_by_code: Option<&BTreeMap<String, StoredProviderApiKeyWindowUsageSummary>>,
     now_unix_secs: u64,
 ) -> serde_json::Value {
     let cooldown_reason = runtime
@@ -1136,11 +1265,14 @@ pub(super) fn build_admin_pool_key_payload(
         None
     };
     let mut status_snapshot = provider_key_status_snapshot_payload(key, provider_type);
-    if provider_type.trim().eq_ignore_ascii_case("codex") {
-        admin_pool_apply_codex_window_usage_summaries(
+    if admin_pool_provider_supports_cycle_stats(provider_type) {
+        admin_pool_apply_cycle_window_usage_summaries(
+            provider_type,
             &mut status_snapshot,
-            codex_cycle_usage_by_code,
+            cycle_usage_by_code,
         );
+    }
+    if provider_type.trim().eq_ignore_ascii_case("codex") {
         admin_pool_prune_expired_codex_window_usage_at(&mut status_snapshot, now_unix_secs);
     }
     let account_snapshot = status_snapshot
@@ -1543,6 +1675,31 @@ mod tests {
         assert_eq!(usage["request_count"], json!(3));
         assert_eq!(usage["total_tokens"], json!(375));
         assert_eq!(usage["total_cost_usd"], json!("0.60000000"));
+    }
+
+    #[test]
+    fn cycle_window_minutes_are_exposed_without_usage_summaries() {
+        let mut snapshot = json!({
+            "quota": {
+                "windows": [
+                    {
+                        "code": "usage",
+                        "label": "周额度",
+                        "scope": "account",
+                        "window": "weekly",
+                        "reset_at": 1_000u64
+                    },
+                    {"code": "prepaid", "label": "预付额度", "scope": "account"}
+                ]
+            }
+        });
+
+        admin_pool_apply_cycle_window_usage_summaries("xai", &mut snapshot, None);
+
+        let windows = &snapshot["quota"]["windows"];
+        assert_eq!(windows[0]["window_minutes"], json!(10_080u64));
+        assert!(windows[0].get("usage").is_none());
+        assert!(windows[1].get("window_minutes").is_none());
     }
 
     #[test]

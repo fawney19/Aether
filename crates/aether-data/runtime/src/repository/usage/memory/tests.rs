@@ -2729,12 +2729,16 @@ async fn summarizes_provider_api_key_window_usage_with_zero_rows() {
                 window_code: "5h".to_string(),
                 start_unix_secs: 1_711_000_000,
                 end_unix_secs: 1_711_000_300,
+                include_model_prefix: None,
+                exclude_model_prefix: None,
             },
             ProviderApiKeyWindowUsageRequest {
                 provider_api_key_id: "provider-key-empty".to_string(),
                 window_code: "weekly".to_string(),
                 start_unix_secs: 1_711_000_000,
                 end_unix_secs: 1_711_000_300,
+                include_model_prefix: None,
+                exclude_model_prefix: None,
             },
         ])
         .await
@@ -2751,6 +2755,44 @@ async fn summarizes_provider_api_key_window_usage_with_zero_rows() {
     assert_eq!(usage[1].request_count, 0);
     assert_eq!(usage[1].total_tokens, 0);
     assert_eq!(usage[1].total_cost_usd, 0.0);
+}
+
+#[tokio::test]
+async fn summarizes_provider_api_key_window_usage_by_model_prefix() {
+    let mut gemini = sample_usage("req-gemini", 1_711_000_000);
+    gemini.model = "gemini-3.8-flash".to_string();
+    gemini.target_model = Some("Gemini-3.8-Flash-High".to_string());
+    let mut claude = sample_usage("req-claude", 1_711_000_100);
+    claude.model = "claude-sonnet-4-6".to_string();
+    claude.target_model = None;
+    let repository = InMemoryUsageReadRepository::seed(vec![gemini, claude]);
+    let request = |window_code: &str, include: Option<&str>, exclude: Option<&str>| {
+        ProviderApiKeyWindowUsageRequest {
+            provider_api_key_id: "provider-key-1".to_string(),
+            window_code: window_code.to_string(),
+            start_unix_secs: 1_711_000_000,
+            end_unix_secs: 1_711_000_300,
+            include_model_prefix: include.map(str::to_string),
+            exclude_model_prefix: exclude.map(str::to_string),
+        }
+    };
+
+    let usage = repository
+        .summarize_usage_by_provider_api_key_windows(&[
+            request("gemini", Some("gemini"), None),
+            request("3p", None, Some("gemini")),
+            request("all", None, None),
+        ])
+        .await
+        .expect("window summary should succeed");
+
+    assert_eq!(
+        usage
+            .iter()
+            .map(|summary| (summary.window_code.as_str(), summary.request_count))
+            .collect::<Vec<_>>(),
+        vec![("gemini", 1), ("3p", 1), ("all", 2)]
+    );
 }
 
 #[tokio::test]

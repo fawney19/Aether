@@ -3756,6 +3756,9 @@ pub fn parse_xai_billing_response(
     let period_type = period
         .and_then(|value| value.get("type").or_else(|| value.get("periodType")))
         .and_then(normalize_xai_period_type);
+    let period_start_at = period
+        .and_then(|value| value.get("start"))
+        .and_then(parse_xai_timestamp);
     let next_reset_at = period
         .and_then(|value| value.get("end"))
         .and_then(parse_xai_timestamp)
@@ -3825,6 +3828,9 @@ pub fn parse_xai_billing_response(
     }
     if let Some(value) = period_type {
         result.insert("period_type".to_string(), json!(value));
+    }
+    if let Some(value) = period_start_at {
+        result.insert("period_start_at".to_string(), json!(value));
     }
     if let Some(value) = prepaid_balance {
         result.insert("prepaid_balance".to_string(), json!(value));
@@ -3946,6 +3952,7 @@ mod xai_quota_tests {
         assert_eq!(metadata["usage_percentage"], json!(46.0));
         assert_eq!(metadata["period_type"], json!("weekly"));
         assert_eq!(metadata["next_reset_at"], json!(1_786_758_789u64));
+        assert_eq!(metadata["period_start_at"], json!(1_786_153_989u64));
         assert_eq!(metadata["prepaid_balance"], json!(0.0));
         assert_eq!(metadata["on_demand_cap"], json!(0.0));
         assert_eq!(metadata["subscription_title"], json!("SuperGrok"));

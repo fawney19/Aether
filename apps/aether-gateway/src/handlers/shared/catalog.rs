@@ -1442,7 +1442,7 @@ fn build_xai_quota_status_snapshot(
         || current_usage.is_some()
         || next_reset_at.is_some()
     {
-        windows.push(json!({
+        let mut usage_window = json!({
             "code": "usage",
             "label": usage_label,
             "scope": "account",
@@ -1454,7 +1454,16 @@ fn build_xai_quota_status_snapshot(
             "limit_value": usage_limit,
             "reset_at": next_reset_at,
             "reset_seconds": reset_seconds,
-        }));
+        });
+        if let Some(period_type @ ("weekly" | "monthly")) = period_type.as_deref() {
+            usage_window["window"] = json!(period_type);
+        }
+        if let Some(period_start_at) =
+            provider_quota_timestamp_unix_secs(metadata.get("period_start_at"))
+        {
+            usage_window["period_start_at"] = json!(period_start_at);
+        }
+        windows.push(usage_window);
     }
 
     let prepaid_balance = metadata
@@ -4515,6 +4524,7 @@ mod tests {
                 "updated_at": 1_778_067_246u64,
                 "usage_percentage": 46.0,
                 "period_type": "weekly",
+                "period_start_at": 1_777_552_372u64,
                 "next_reset_at": 1_778_157_172u64,
                 "subscription_title": "SuperGrok",
                 "prepaid_balance": 0.0,
@@ -4542,6 +4552,11 @@ mod tests {
         assert_eq!(windows.len(), 1);
         assert_eq!(windows[0].get("code"), Some(&json!("usage")));
         assert_eq!(windows[0].get("label"), Some(&json!("周额度")));
+        assert_eq!(windows[0].get("window"), Some(&json!("weekly")));
+        assert_eq!(
+            windows[0].get("period_start_at"),
+            Some(&json!(1_777_552_372u64))
+        );
     }
 
     #[test]
