@@ -133,9 +133,78 @@ pub fn build_antigravity_safe_v1internal_request(
     AntigravityRequestEnvelopeSupport::Supported(envelope)
 }
 
+/// Antigravity cannot combine its built-in tools with client function
+/// declarations, even when `includeServerSideToolInvocations` is enabled.
+/// Prefer the client functions so Codex-style agents keep their tool loop.
+fn prefer_antigravity_client_functions(request: &mut Map<String, Value>) -> bool {
+    let has_functions = request
+        .get("tools")
+        .and_then(Value::as_array)
+        .is_some_and(|tools| {
+            tools.iter().any(|tool| {
+                ["functionDeclarations", "function_declarations"]
+                    .iter()
+                    .any(|key| {
+                        tool.get(*key)
+                            .and_then(Value::as_array)
+                            .is_some_and(|declarations| !declarations.is_empty())
+                    })
+            })
+        });
+    if !has_functions {
+        return false;
+    }
+
+    let remove_tools = {
+        let Some(tools) = request.get_mut("tools").and_then(Value::as_array_mut) else {
+            return true;
+        };
+        tools.retain_mut(|tool| {
+            let Some(tool_object) = tool.as_object_mut() else {
+                return true;
+            };
+            for key in [
+                "googleSearch",
+                "google_search",
+                "googleSearchRetrieval",
+                "google_search_retrieval",
+                "codeExecution",
+                "code_execution",
+                "urlContext",
+                "url_context",
+                "retrieval",
+            ] {
+                tool_object.remove(key);
+            }
+            !tool_object.is_empty()
+        });
+        tools.is_empty()
+    };
+    if remove_tools {
+        request.remove("tools");
+    }
+
+    for key in ["toolConfig", "tool_config"] {
+        if let Some(tool_config) = request.get_mut(key).and_then(Value::as_object_mut) {
+            tool_config.remove("includeServerSideToolInvocations");
+            tool_config.remove("include_server_side_tool_invocations");
+        }
+        if request
+            .get(key)
+            .and_then(Value::as_object)
+            .is_some_and(|tool_config| tool_config.is_empty())
+        {
+            request.remove(key);
+        }
+    }
+    true
+}
+
 /// Antigravity's private v1internal Gemini surface takes the same
 /// `googleSearch` grounding tool as the public one. Only the snake_case alias
-/// needs folding into the canonical camelCase key.
+/// needs folding into the canonical camelCase key. Search-only requests keep
+/// that built-in; requests with client functions are handled above because the
+/// private surface rejects the mixed combination.
 ///
 /// This used to rewrite `googleSearch` into the Gemini 1.5-era
 /// `googleSearchRetrieval` spelling. Gemini 3 rejects that: the model emits a
@@ -146,6 +215,9 @@ pub fn build_antigravity_safe_v1internal_request(
 /// `tools: [{"googleSearchRetrieval": {}}]` and no function declarations.
 /// CLIProxyAPI sends `googleSearch` to the same v1internal surface.
 fn normalize_antigravity_builtin_tool_names(request: &mut Map<String, Value>) {
+    if prefer_antigravity_client_functions(request) {
+        return;
+    }
     let Some(tools) = request.get_mut("tools").and_then(Value::as_array_mut) else {
         return;
     };
@@ -788,7 +860,7 @@ mod tests {
     }
 
     #[test]
-    fn real_agent_request_preserves_antigravity_agent_fields() {
+    fn real_agent_request_prefers_client_functions_over_antigravity_builtins() {
         let request_body = json!({
             "model": "client-side-model-should-not-be-nested",
             "contents": [
@@ -885,27 +957,28 @@ mod tests {
             envelope["request"]["toolConfig"]["functionCallingConfig"]["mode"],
             "VALIDATED"
         );
-        assert_eq!(
-            envelope["request"]["toolConfig"]["includeServerSideToolInvocations"],
-            true
-        );
+        assert!(envelope["request"]["toolConfig"]
+            .get("includeServerSideToolInvocations")
+            .is_none());
         assert!(envelope["request"]["toolConfig"]
             .get("include_server_side_tool_invocations")
             .is_none());
-        assert!(envelope["request"]["tools"][0]
-            .get("googleSearchRetrieval")
-            .is_none());
-        assert_eq!(envelope["request"]["tools"][0]["googleSearch"], json!({}));
+        let tools = envelope["request"]["tools"]
+            .as_array()
+            .expect("function tools should survive");
+        assert_eq!(tools.len(), 1, "{tools:?}");
+        assert!(tools[0].get("googleSearch").is_none(), "{tools:?}");
+        assert!(tools[0].get("googleSearchRetrieval").is_none(), "{tools:?}");
         assert_eq!(
-            envelope["request"]["tools"][1]["functionDeclarations"][0]["name"],
+            envelope["request"]["tools"][0]["functionDeclarations"][0]["name"],
             "run_command"
         );
         assert_eq!(
-            envelope["request"]["tools"][1]["functionDeclarations"][0]["parameters"]["properties"]
+            envelope["request"]["tools"][0]["functionDeclarations"][0]["parameters"]["properties"]
                 ["cmd"]["type"],
             "string"
         );
-        assert!(envelope["request"]["tools"][1]["functionDeclarations"][0]
+        assert!(envelope["request"]["tools"][0]["functionDeclarations"][0]
             .get("parametersJsonSchema")
             .is_none());
         assert_eq!(
@@ -913,6 +986,111 @@ mod tests {
             "trajectory-123"
         );
         assert_eq!(envelope["request"]["sessionId"], "session-ant-123");
+    }
+
+    #[test]
+    fn antigravity_mixed_tools_keep_functions_and_drop_builtin_tool_config() {
+        for wrapped in [false, true] {
+            let mut body = json!({
+                "contents": [{ "role": "user", "parts": [{ "text": "look it up" }] }],
+                "tools": [
+                    { "googleSearch": {}, "codeExecution": {}, "urlContext": {} },
+                    { "google_search": {}, "code_execution": {}, "url_context": {} },
+                    { "googleSearchRetrieval": {}, "google_search_retrieval": {} },
+                    {
+                        "functionDeclarations": [{
+                            "name": "lookup",
+                            "parameters": { "type": "object" }
+                        }]
+                    },
+                    {
+                        "function_declarations": [{
+                            "name": "save",
+                            "parameters": { "type": "object" }
+                        }]
+                    }
+                ],
+                "toolConfig": {
+                    "includeServerSideToolInvocations": true,
+                    "include_server_side_tool_invocations": true,
+                    "functionCallingConfig": { "mode": "AUTO" }
+                }
+            });
+            if wrapped {
+                body = json!({ "request": body, "requestId": "client-id" });
+            }
+            let original = body.clone();
+
+            let AntigravityRequestEnvelopeSupport::Supported(envelope) =
+                build_antigravity_safe_v1internal_request(
+                    &sample_auth(),
+                    "trace-id",
+                    "gemini-3.8-flash-high",
+                    &body,
+                    AntigravityEnvelopeRequestType::Agent,
+                )
+            else {
+                panic!("mixed tools should be downgraded instead of rejected");
+            };
+
+            let tools = envelope["request"]["tools"]
+                .as_array()
+                .expect("function tools should survive");
+            assert_eq!(tools.len(), 2, "wrapped={wrapped}: {tools:?}");
+            for builtin in [
+                "googleSearch",
+                "google_search",
+                "googleSearchRetrieval",
+                "google_search_retrieval",
+                "codeExecution",
+                "code_execution",
+                "urlContext",
+                "url_context",
+                "retrieval",
+            ] {
+                assert!(
+                    tools.iter().all(|tool| tool.get(builtin).is_none()),
+                    "wrapped={wrapped}: {builtin} must be removed: {tools:?}"
+                );
+            }
+
+            let mut declaration_names = Vec::new();
+            for tool in tools {
+                for key in ["functionDeclarations", "function_declarations"] {
+                    if let Some(declarations) = tool.get(key).and_then(Value::as_array) {
+                        declaration_names.extend(
+                            declarations
+                                .iter()
+                                .filter_map(|declaration| declaration["name"].as_str()),
+                        );
+                    }
+                }
+            }
+            assert_eq!(
+                declaration_names,
+                vec!["lookup", "save"],
+                "wrapped={wrapped}"
+            );
+            assert_eq!(
+                envelope["request"]["toolConfig"],
+                json!({ "functionCallingConfig": { "mode": "AUTO" } }),
+                "wrapped={wrapped}"
+            );
+            assert_eq!(body, original, "caller-owned input must remain unchanged");
+
+            let AntigravityRequestEnvelopeSupport::Supported(rebuilt) =
+                build_antigravity_safe_v1internal_request(
+                    &sample_auth(),
+                    "trace-id",
+                    "gemini-3.8-flash-high",
+                    &envelope,
+                    AntigravityEnvelopeRequestType::Agent,
+                )
+            else {
+                panic!("converted envelope should be supported");
+            };
+            assert_eq!(rebuilt, envelope, "normalization must be idempotent");
+        }
     }
 
     #[test]
@@ -1116,7 +1294,7 @@ mod tests {
                     else {
                         panic!("Fabric request should be supported");
                     };
-                    let declaration = &envelope["request"]["tools"][1][declarations_key][0];
+                    let declaration = &envelope["request"]["tools"][0][declarations_key][0];
                     assert_eq!(
                         declaration["parameters"], expected,
                         "{declarations_key}/{parameters_key}/wrapped={wrapped}"
@@ -1129,10 +1307,11 @@ mod tests {
                         4096
                     );
                     assert_eq!(envelope["request"]["labels"]["const"], "not a schema");
-                    assert_eq!(
-                        envelope["request"]["tools"][0],
-                        json!({ "googleSearch": {} })
-                    );
+                    let tools = envelope["request"]["tools"]
+                        .as_array()
+                        .expect("function tool should survive");
+                    assert_eq!(tools.len(), 1, "{tools:?}");
+                    assert!(tools[0].get("googleSearch").is_none(), "{tools:?}");
                     assert_eq!(
                         envelope["requestId"],
                         if wrapped { "client-id" } else { "trace-id" }
