@@ -885,6 +885,21 @@ fn project_dimensions(value: &Value) -> Option<Value> {
         "cache_creation_ephemeral_5m_tokens",
         "cache_creation_ephemeral_1h_tokens",
         "cache_read_tokens",
+        "input_text_tokens",
+        "input_image_tokens",
+        "input_audio_tokens",
+        "input_video_tokens",
+        "input_document_tokens",
+        "output_text_tokens",
+        "output_image_tokens",
+        "output_audio_tokens",
+        "output_video_tokens",
+        "output_document_tokens",
+        "cache_read_text_tokens",
+        "cache_read_image_tokens",
+        "cache_read_audio_tokens",
+        "cache_read_video_tokens",
+        "cache_read_document_tokens",
         "request_count",
         "image_count",
         "image_count_unmetered",
@@ -1606,6 +1621,40 @@ mod tests {
             "provider_response_model": "x".repeat(257)
         })))
         .is_none());
+    }
+
+    #[test]
+    fn persistence_projection_preserves_gemini_modality_token_dimensions() {
+        let dimensions = json!({
+            "input_text_tokens": 31,
+            "input_image_tokens": 258,
+            "input_audio_tokens": 80,
+            "input_video_tokens": 64,
+            "input_document_tokens": 128,
+            "output_text_tokens": 12,
+            "output_image_tokens": 1024,
+            "output_audio_tokens": 40,
+            "output_video_tokens": 32,
+            "output_document_tokens": 16,
+            "cache_read_text_tokens": 20,
+            "cache_read_image_tokens": 256,
+            "cache_read_audio_tokens": 60,
+            "cache_read_video_tokens": 48,
+            "cache_read_document_tokens": 96
+        });
+        let metadata = sanitize_usage_request_metadata(Some(json!({
+            "dimensions": dimensions,
+            "billing_dimensions": dimensions,
+            "settlement_snapshot": {"resolved_dimensions": dimensions}
+        })))
+        .expect("modality token dimensions should remain");
+
+        assert_eq!(metadata["dimensions"], dimensions);
+        assert_eq!(metadata["billing_dimensions"], dimensions);
+        assert_eq!(
+            metadata["settlement_snapshot"]["resolved_dimensions"],
+            dimensions
+        );
     }
 
     #[test]
