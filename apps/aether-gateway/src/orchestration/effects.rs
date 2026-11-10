@@ -1845,7 +1845,8 @@ fn local_candidate_failure_should_invalidate_affinity(
         }
         LocalFailoverClassification::StopErrorPattern
         | LocalFailoverClassification::StopExecutionError
-        | LocalFailoverClassification::StopCyberPolicy => false,
+        | LocalFailoverClassification::StopCyberPolicy
+        | LocalFailoverClassification::StopContextOverflow => false,
     }
 }
 
