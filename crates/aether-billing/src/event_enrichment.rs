@@ -265,8 +265,24 @@ fn calculate_billing_computation(
         input.image_count = 0;
     }
 
+    let mut dimensions = event
+        .data
+        .request_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("dimensions"))
+        .and_then(Value::as_object)
+        .map(|dimensions| {
+            dimensions
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+    if cancelled {
+        dimensions = std::collections::BTreeMap::new();
+    }
     BillingService::new()
-        .calculate(pricing, &input)
+        .calculate_with_usage_dimensions(pricing, &input, &dimensions)
         .map_err(|err| {
             DataLayerError::UnexpectedValue(format!("billing calculation failed: {err}"))
         })

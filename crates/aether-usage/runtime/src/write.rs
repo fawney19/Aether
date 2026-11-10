@@ -2808,7 +2808,6 @@ fn standardized_usage_total_tokens(usage: &StandardizedUsage) -> u64 {
 
     positive_usage_component(usage.input_tokens)
         .saturating_add(positive_usage_component(usage.output_tokens))
-        .saturating_add(positive_usage_component(usage.reasoning_tokens))
 }
 
 fn standardized_usage_explicit_total_tokens(usage: &StandardizedUsage) -> Option<u64> {
@@ -3638,6 +3637,17 @@ fn empty_to_none(value: Option<String>) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn total_tokens_does_not_count_reasoning_twice() {
+        let usage = aether_contracts::StandardizedUsage {
+            input_tokens: 35,
+            output_tokens: 70,
+            reasoning_tokens: 65,
+            ..aether_contracts::StandardizedUsage::new()
+        };
+        assert_eq!(super::standardized_usage_total_tokens(&usage), 105);
+    }
+
     use super::{
         build_pending_usage_event_from_owned_seed, build_pending_usage_record,
         build_pending_usage_record_from_seed, build_stream_terminal_usage_event,

@@ -644,12 +644,18 @@ pub fn gemini_model_uses_thinking_level(model: &str) -> bool {
     gemini_model_supports_mixed_tools(model)
 }
 
+pub fn gemini_model_requires_function_response_ids(model: &str) -> bool {
+    let normalized = model.trim().to_ascii_lowercase();
+    let model = normalized.rsplit('/').next().unwrap_or_default();
+    model == "gemini-3.8-flash" || model.starts_with("gemini-4-")
+}
+
 pub(crate) fn gemini_model_supports_mixed_tools(model: &str) -> bool {
     model
         .trim()
         .to_ascii_lowercase()
         .split('/')
-        .any(|part| part.starts_with("gemini-3"))
+        .any(|part| part.starts_with("gemini-3") || part.starts_with("gemini-4"))
 }
 
 pub fn openai_model_supports_max_reasoning_effort(model: &str) -> bool {

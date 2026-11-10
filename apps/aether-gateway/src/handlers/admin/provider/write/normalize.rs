@@ -266,7 +266,11 @@ pub(crate) fn validate_vertex_api_formats(
 
     let allowed = match auth_type {
         "api_key" => &["gemini:generate_content", "gemini:embedding"][..],
-        "service_account" | "vertex_ai" => &["gemini:generate_content", "gemini:embedding"][..],
+        "service_account" | "vertex_ai" => &[
+            "gemini:generate_content",
+            "gemini:embedding",
+            "gemini:interactions",
+        ][..],
         _ => return Ok(()),
     };
     let invalid = api_formats

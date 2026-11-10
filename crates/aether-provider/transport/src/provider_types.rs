@@ -379,9 +379,15 @@ const GEMINI_CLI_FIXED_PROVIDER_TEMPLATE: FixedProviderTemplate = FixedProviderT
 
 const VERTEX_AI_FIXED_PROVIDER_TEMPLATE: FixedProviderTemplate = FixedProviderTemplate {
     provider_type: "vertex_ai",
-    version: 2,
+    version: 3,
     base_url: "https://aiplatform.googleapis.com",
     endpoints: &[
+        FixedProviderEndpointTemplate {
+            item_key: "gemini:interactions",
+            api_format: "gemini:interactions",
+            custom_path: None,
+            config_defaults: EMPTY_ENDPOINT_CONFIG_DEFAULTS,
+        },
         FixedProviderEndpointTemplate {
             item_key: "gemini:generate_content",
             api_format: "gemini:generate_content",
@@ -1053,14 +1059,18 @@ mod tests {
         let template =
             fixed_provider_template("vertex_ai").expect("vertex_ai template should exist");
 
-        assert_eq!(template.version, 2);
+        assert_eq!(template.version, 3);
         assert_eq!(
             template
                 .endpoints
                 .iter()
                 .map(|item| item.api_format)
                 .collect::<Vec<_>>(),
-            vec!["gemini:generate_content", "gemini:embedding"]
+            vec![
+                "gemini:interactions",
+                "gemini:generate_content",
+                "gemini:embedding"
+            ]
         );
 
         assert!(

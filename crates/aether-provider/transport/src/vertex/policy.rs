@@ -46,7 +46,7 @@ fn local_vertex_gemini_transport_unsupported_reason_with_network_impl(
         aether_ai_formats::normalize_api_format_alias(&transport.endpoint.api_format);
     if !matches!(
         endpoint_api_format.as_str(),
-        "gemini:generate_content" | "gemini:embedding"
+        "gemini:generate_content" | "gemini:embedding" | "gemini:interactions"
     ) {
         return Some("transport_api_format_mismatch");
     }
@@ -62,6 +62,9 @@ fn local_vertex_gemini_transport_unsupported_reason_with_network_impl(
     let has_api_key_auth = resolve_local_vertex_api_key_query_auth(transport).is_some();
     let has_service_account_auth = supports_local_vertex_service_account_auth_resolution(transport)
         && supports_local_oauth_request_auth_resolution(transport);
+    if endpoint_api_format == "gemini:interactions" && !has_service_account_auth {
+        return Some("transport_auth_unavailable");
+    }
     if require_api_key {
         if !has_api_key_auth {
             return Some("transport_auth_unavailable");

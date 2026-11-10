@@ -193,13 +193,13 @@ pub fn request_pair_transport_unsupported_reason(
     }
 
     match provider_api_format.as_str() {
-        "gemini:embedding" => {
+        "gemini:embedding" | "gemini:interactions" => {
             if is_vertex_transport_context(transport) {
                 local_vertex_gemini_transport_unsupported_reason_with_network(transport)
             } else {
                 local_gemini_transport_unsupported_reason_with_network(
                     transport,
-                    "gemini:embedding",
+                    provider_api_format.as_str(),
                 )
             }
         }

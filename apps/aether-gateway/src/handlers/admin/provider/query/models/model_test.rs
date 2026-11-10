@@ -3438,7 +3438,7 @@ async fn provider_query_execute_standard_test_candidate(
         "claude:messages" => {
             crate::provider_transport::auth::resolve_local_standard_auth(&transport).or(oauth_auth)
         }
-        "gemini:generate_content" | "gemini:embedding" => {
+        "gemini:generate_content" | "gemini:embedding" | "gemini:interactions" => {
             if uses_vertex_query_auth {
                 oauth_auth
             } else {

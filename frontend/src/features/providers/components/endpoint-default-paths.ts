@@ -188,6 +188,9 @@ export function getDefaultEndpointPath(params: {
     }
   }
   if (providerType === 'vertex_ai') {
+    if (normalizedApiFormat === 'gemini:interactions') {
+      return '/v1beta1/projects/{project_id}/locations/{region}/interactions'
+    }
     if (normalizedApiFormat === 'gemini:generate_content') {
       return '/v1/projects/{project_id}/locations/{region}/publishers/google/models/{model}:{action}'
     }

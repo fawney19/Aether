@@ -50,6 +50,11 @@ describe('endpoint default paths', () => {
 
   it('uses Vertex AI project/location paths for Vertex provider Gemini endpoints', () => {
     expect(getDefaultEndpointPath({
+      apiFormat: 'gemini:interactions',
+      providerType: 'vertex_ai',
+      apiFormats,
+    })).toBe('/v1beta1/projects/{project_id}/locations/{region}/interactions')
+    expect(getDefaultEndpointPath({
       apiFormat: 'gemini:generate_content',
       providerType: 'vertex_ai',
       apiFormats,

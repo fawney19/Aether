@@ -583,6 +583,7 @@ fn build_same_format_provider_request_body_inner(
         }
     }
     if input.is_vertex
+        && !aether_ai_formats::gemini_model_requires_function_response_ids(input.mapped_model)
         && matches!(input.family, SameFormatProviderFamily::Gemini)
         && aether_ai_formats::api_format_alias_matches(
             input.provider_api_format,
@@ -2339,6 +2340,42 @@ mod tests {
                 && edit.action
                     == SameFormatProviderCompatibilityEditAction::ProviderCompatibilityRewrite
         }));
+    }
+
+    #[test]
+    fn modern_vertex_gemini_keeps_function_response_ids_and_continuation_token() {
+        for model in ["gemini-3.8-flash", "gemini-4-argon", "gemini-4-carbon"] {
+            let body = json!({
+                "contents":[{"role":"user","parts":[{"functionResponse":{
+                    "id":"call-1", "name":"lookup", "response":{"ok":true}
+                }}]}],
+                "continuationToken":"opaque-continuation"
+            });
+            let output = build_same_format_provider_request_body_with_compatibility_report(
+                SameFormatProviderRequestBodyInput {
+                    body_json: &body,
+                    mapped_model: model,
+                    client_api_format: "gemini:generate_content",
+                    provider_api_format: "gemini:generate_content",
+                    source_model: Some(model),
+                    family: SameFormatProviderFamily::Gemini,
+                    body_rules: None,
+                    request_headers: None,
+                    upstream_is_stream: false,
+                    force_body_stream_field: false,
+                    kiro_auth_config: None,
+                    is_claude_code: false,
+                    is_vertex: true,
+                    enable_model_directives: false,
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                output.body["contents"][0]["parts"][0]["functionResponse"]["id"],
+                "call-1"
+            );
+            assert_eq!(output.body["continuationToken"], "opaque-continuation");
+        }
     }
 
     #[test]
