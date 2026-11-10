@@ -182,6 +182,17 @@ pub fn request_pair_transport_unsupported_reason(
     let client_api_format = normalize_api_format_alias(client_api_format);
     let provider_api_format = normalize_api_format_alias(provider_api_format);
 
+    if client_api_format == "gemini:interactions" && client_api_format == provider_api_format {
+        return if is_vertex_transport_context(transport) {
+            local_vertex_gemini_transport_unsupported_reason_with_network(transport)
+        } else {
+            local_gemini_transport_unsupported_reason_with_network(
+                transport,
+                provider_api_format.as_str(),
+            )
+        };
+    }
+
     if let Some(kind) =
         request_conversion_kind(client_api_format.as_str(), provider_api_format.as_str())
     {
@@ -193,7 +204,7 @@ pub fn request_pair_transport_unsupported_reason(
     }
 
     match provider_api_format.as_str() {
-        "gemini:embedding" | "gemini:interactions" => {
+        "gemini:embedding" => {
             if is_vertex_transport_context(transport) {
                 local_vertex_gemini_transport_unsupported_reason_with_network(transport)
             } else {
