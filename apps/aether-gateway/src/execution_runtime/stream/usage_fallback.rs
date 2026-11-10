@@ -310,6 +310,8 @@ struct UsageEnvelope {
     message: Option<Box<UsageEnvelope>>,
     #[serde(deserialize_with = "deserialize_nested_usage")]
     item: Option<Box<UsageEnvelope>>,
+    #[serde(deserialize_with = "deserialize_nested_usage")]
+    interaction: Option<Box<UsageEnvelope>>,
     #[serde(deserialize_with = "deserialize_usage_array")]
     candidates: Option<Vec<UsageEnvelope>>,
     #[serde(deserialize_with = "deserialize_usage_array")]
@@ -517,7 +519,7 @@ impl UsageEnvelope {
             && self.usage_metadata.is_none()
             && self.service_tier.is_none()
             && self.speed.is_none()
-            && [&self.response, &self.message, &self.item]
+            && [&self.response, &self.message, &self.item, &self.interaction]
                 .into_iter()
                 .all(|value| value.as_ref().is_none_or(|value| value.is_empty()))
             && [&self.candidates, &self.chunks].into_iter().all(|values| {
@@ -546,6 +548,7 @@ impl UsageEnvelope {
             ("response", self.response),
             ("message", self.message),
             ("item", self.item),
+            ("interaction", self.interaction),
         ] {
             if let Some(value) = value {
                 object.insert(key.to_string(), value.into_value());
@@ -569,7 +572,7 @@ fn contains_explicit_usage(value: &Value) -> bool {
             .get(key)
             .and_then(Value::as_object)
             .is_some_and(|value| !value.is_empty())
-    }) || ["response", "message", "item"]
+    }) || ["response", "message", "item", "interaction"]
         .into_iter()
         .any(|key| value.get(key).is_some_and(contains_explicit_usage))
         || ["candidates", "chunks"].into_iter().any(|key| {
@@ -584,6 +587,38 @@ fn contains_explicit_usage(value: &Value) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn stream_capture_fallback_preserves_interactions_completed_usage() {
+        let context = json!({"provider_api_format": "gemini:interactions"});
+        let completed = json!({
+            "event_type": "interaction.completed",
+            "interaction": {
+                "outputs": [{"type": "text", "text": "answer"}],
+                "usage": {
+                    "total_input_tokens": 533,
+                    "total_output_tokens": 27,
+                    "total_thought_tokens": 230
+                }
+            }
+        });
+        let expected = map_usage_from_response(&completed, "gemini:interactions");
+        assert_eq!(expected.input_tokens, 533);
+        assert_eq!(expected.output_tokens, 257);
+        let projected = serde_json::from_value::<UsageEnvelope>(completed.clone())
+            .unwrap()
+            .into_value();
+        assert!(projected.pointer("/interaction/outputs").is_none());
+        assert!(contains_explicit_usage(&projected));
+        let sse = format!("data: {completed}\n\n");
+        for chunk_size in [1, 3, 17, sse.len()] {
+            let mut fallback = StreamUsageFallback::new(1024);
+            for chunk in sse.as_bytes().chunks(chunk_size) {
+                fallback.observe(&context, chunk);
+            }
+            assert_eq!(fallback.finish(&context), Some(expected.clone()));
+        }
+    }
 
     #[test]
     fn stream_capture_fallback_preserves_present_null_usage_lookup_barriers() {

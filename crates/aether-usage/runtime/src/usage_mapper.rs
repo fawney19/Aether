@@ -405,10 +405,10 @@ fn resolve_usage_value<'a>(
 ) -> Option<&'a serde_json::Value> {
     match family {
         "gemini" => {
-            if let Some(usage) = response.get("usage") {
+            if let Some(usage) = response.get("usageMetadata") {
                 return Some(usage);
             }
-            if let Some(usage) = response.get("usageMetadata") {
+            if let Some(usage) = response.get("usage") {
                 return Some(usage);
             }
             if let Some(usage) = response
@@ -840,6 +840,19 @@ mod tests {
         assert_eq!(usage.input_tokens, 14);
         assert_eq!(usage.output_tokens, 6);
         assert_eq!(usage.cache_read_tokens, 2);
+    }
+
+    #[test]
+    fn gemini_metadata_keeps_precedence_over_generic_usage() {
+        let usage = map_usage_from_response(
+            &serde_json::json!({
+                "usage": {"prompt_tokens": 99, "completion_tokens": 88},
+                "usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 20}
+            }),
+            "gemini:generate_content",
+        );
+        assert_eq!(usage.input_tokens, 10);
+        assert_eq!(usage.output_tokens, 20);
     }
 
     #[test]
