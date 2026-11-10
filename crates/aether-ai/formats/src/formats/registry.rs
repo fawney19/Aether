@@ -1656,6 +1656,28 @@ fn request_extension_key_is_cross_format_safe(
     namespace: &str,
     key: &str,
 ) -> bool {
+    // Responses reasoning items carry this internal marker for the response
+    // serializer. Chat consumes the marker rather than forwarding it.
+    if location == "messages[].content[]"
+        && matches!(
+            (source, target),
+            (FormatId::OpenAiResponses | FormatId::OpenAiResponsesCompact, FormatId::OpenAiChat)
+        )
+        && namespace == "openai"
+        && key == "omit_reasoning_parts"
+    {
+        return true;
+    }
+    if location == "messages[]"
+        && matches!(
+            (source, target),
+            (FormatId::OpenAiResponses | FormatId::OpenAiResponsesCompact, FormatId::OpenAiChat)
+        )
+        && matches!(namespace, "openai_responses" | "openai_cli")
+        && matches!(key, "id" | "status")
+    {
+        return true;
+    }
     if matches!(
         source,
         FormatId::OpenAiResponses | FormatId::OpenAiResponsesCompact
@@ -5089,6 +5111,90 @@ mod tests {
         assert_eq!(converted["model"], "gpt-source");
         assert_eq!(converted["messages"][0]["content"], "hello");
         assert!(converted.get("client_metadata").is_none());
+    }
+
+    #[test]
+    fn openai_responses_message_identity_and_status_are_ignored_for_chat() {
+        let body = json!({
+            "model": "gpt-source",
+            "input": [
+                {
+                    "type": "message",
+                    "id": "msg_user",
+                    "status": "completed",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "hello"}]
+                },
+                {
+                    "type": "message",
+                    "id": "msg_assistant",
+                    "status": "completed",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "world"}]
+                }
+            ]
+        });
+
+        let pure = convert_request_pure("openai:responses", "openai:chat", &body)
+            .expect("message identity and status should not block Chat conversion")
+            .value;
+        let runtime = convert_request(
+            "openai:responses",
+            "openai:chat",
+            &body,
+            &FormatContext::default(),
+        )
+        .expect("runtime message identity and status should not block Chat conversion");
+
+        assert_eq!(pure, runtime);
+        assert_eq!(pure["messages"][0]["content"], "hello");
+        assert_eq!(pure["messages"][1]["content"], "world");
+        for message in pure["messages"]
+            .as_array()
+            .expect("converted Chat messages")
+        {
+            assert!(message.get("id").is_none());
+            assert!(message.get("status").is_none());
+        }
+    }
+
+    #[test]
+    fn openai_responses_reasoning_transport_marker_is_ignored_for_chat() {
+        let body = json!({
+            "model": "gpt-source",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "hello"}]
+                },
+                {
+                    "type": "reasoning",
+                    "id": "rs_reasoning",
+                    "summary": [{"type": "summary_text", "text": "thinking"}]
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "world"}]
+                }
+            ]
+        });
+
+        let pure = convert_request_pure("openai:responses", "openai:chat", &body)
+            .expect("Responses reasoning transport metadata should not block Chat conversion")
+            .value;
+        let runtime = convert_request(
+            "openai:responses",
+            "openai:chat",
+            &body,
+            &FormatContext::default(),
+        )
+        .expect("runtime Responses reasoning transport metadata should not block Chat conversion");
+
+        assert_eq!(pure, runtime);
+        assert!(!pure.to_string().contains("omit_reasoning_parts"));
+        assert_eq!(pure["messages"][0]["content"], "hello");
     }
 
     #[test]
