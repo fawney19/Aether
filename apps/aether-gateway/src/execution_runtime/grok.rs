@@ -4655,12 +4655,9 @@ mod tests {
             )
             .unwrap();
 
-            // Sync honors the response's explicit total. The existing stream
-            // summary has no explicit total, so its fallback also adds reasoning.
-            let sync_total = expected.input_tokens + expected.output_tokens;
-            let stream_total = sync_total + expected.reasoning_tokens;
-            for (event, expected_total) in [(sync_event, sync_total), (stream_event, stream_total)]
-            {
+            // Output already includes reasoning in both wire representations.
+            let expected_total = expected.input_tokens + expected.output_tokens;
+            for event in [sync_event, stream_event] {
                 assert_eq!(event.event_type, UsageEventType::Completed, "{format}");
                 assert_eq!(event.data.input_tokens, Some(expected.input_tokens));
                 assert_eq!(event.data.output_tokens, Some(expected.output_tokens));
