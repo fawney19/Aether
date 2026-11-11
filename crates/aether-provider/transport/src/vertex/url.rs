@@ -38,10 +38,17 @@ pub fn build_vertex_api_key_imagen_content_url(
 
 pub fn build_vertex_api_key_gemini_embedding_url(
     model: &str,
+    batch: bool,
     api_key: &str,
     request_query: Option<&str>,
 ) -> Option<String> {
-    build_vertex_api_key_google_model_url(model, "predict", false, api_key, request_query)
+    build_vertex_api_key_google_model_url(
+        model,
+        vertex_gemini_embedding_action(model, batch),
+        false,
+        api_key,
+        request_query,
+    )
 }
 
 pub fn build_vertex_service_account_gemini_content_url(
@@ -60,16 +67,34 @@ pub fn build_vertex_service_account_gemini_content_url(
 
 pub fn build_vertex_service_account_gemini_embedding_url(
     model: &str,
+    batch: bool,
     auth_config: &VertexServiceAccountAuthConfig,
     request_query: Option<&str>,
 ) -> Option<String> {
     build_vertex_service_account_google_model_url(
         model,
-        "predict",
+        vertex_gemini_embedding_action(model, batch),
         false,
         auth_config,
         request_query,
     )
+}
+
+pub(crate) fn uses_vertex_gemini_embed_content(model: &str) -> bool {
+    matches!(
+        model.trim().strip_prefix("models/").unwrap_or(model.trim()),
+        "gemini-embedding-2" | "gemini-embedding-2-preview"
+    )
+}
+
+fn vertex_gemini_embedding_action(model: &str, batch: bool) -> &'static str {
+    if !uses_vertex_gemini_embed_content(model) {
+        "predict"
+    } else if batch {
+        "batchEmbedContents"
+    } else {
+        "embedContent"
+    }
 }
 
 fn build_vertex_api_key_google_model_url(
@@ -287,6 +312,22 @@ mod tests {
         build_vertex_service_account_gemini_content_url, resolve_vertex_service_account_region,
     };
     use crate::vertex::VertexServiceAccountAuthConfig;
+
+    #[test]
+    fn embedding_actions_match_new_and_legacy_vertex_contracts() {
+        for (model, batch, action) in [
+            ("gemini-embedding-2", false, "embedContent"),
+            ("gemini-embedding-2-preview", false, "embedContent"),
+            ("gemini-embedding-2", true, "batchEmbedContents"),
+            ("gemini-embedding-001", false, "predict"),
+            ("gemini-embedding-001", true, "predict"),
+        ] {
+            let actual =
+                super::build_vertex_api_key_gemini_embedding_url(model, batch, "test-key", None)
+                    .expect("embedding URL should build");
+            assert_eq!(actual, format!("https://aiplatform.googleapis.com/v1/publishers/google/models/{model}:{action}?key=test-key"));
+        }
+    }
 
     #[test]
     fn gemini_four_uses_beta_global_endpoint_and_respects_model_region_override() {

@@ -117,7 +117,7 @@ fn build_transport_request_url_inner(
             return Some(url);
         }
     }
-    if let Some(url) = build_transport_hook_url(transport, params) {
+    if let Some(url) = build_transport_hook_url(transport, params, gemini_embedding_batch) {
         return Some(url);
     }
 
@@ -431,6 +431,7 @@ pub fn build_kiro_cross_format_upstream_url(
 fn build_transport_hook_url(
     transport: &GatewayProviderTransportSnapshot,
     params: TransportRequestUrlParams<'_>,
+    gemini_embedding_batch: bool,
 ) -> Option<String> {
     if let Some(api_region) = params.kiro_api_region {
         return crate::kiro::build_kiro_generate_assistant_response_url(
@@ -507,6 +508,7 @@ fn build_transport_hook_url(
             if let Some(auth) = resolve_local_vertex_api_key_query_auth(transport) {
                 return build_vertex_api_key_gemini_embedding_url(
                     params.mapped_model?,
+                    gemini_embedding_batch,
                     &auth.value,
                     params.request_query,
                 );
@@ -514,6 +516,7 @@ fn build_transport_hook_url(
             if let Some(auth_config) = resolve_local_vertex_service_account_auth_config(transport) {
                 return build_vertex_service_account_gemini_embedding_url(
                     params.mapped_model?,
+                    gemini_embedding_batch,
                     &auth_config,
                     params.request_query,
                 );
@@ -1184,7 +1187,7 @@ mod tests {
 
         assert_eq!(
             url,
-            "https://aiplatform.googleapis.com/v1/projects/demo-project/locations/global/publishers/google/models/gemini-embedding-2:predict?foo=bar"
+            "https://aiplatform.googleapis.com/v1/projects/demo-project/locations/global/publishers/google/models/gemini-embedding-2:embedContent?foo=bar"
         );
     }
 
@@ -1243,7 +1246,7 @@ mod tests {
     }
 
     #[test]
-    fn vertex_gemini_embedding_batch_request_uses_vertex_predict_endpoint() {
+    fn vertex_gemini_embedding_batch_request_uses_batch_embed_contents_endpoint() {
         let mut transport = sample_transport(
             "vertex_ai",
             "gemini:embedding",
@@ -1286,7 +1289,7 @@ mod tests {
             )
             .as_deref(),
             Some(
-                "https://aiplatform.googleapis.com/v1/projects/demo-project/locations/global/publishers/google/models/gemini-embedding-2:predict"
+                "https://aiplatform.googleapis.com/v1/projects/demo-project/locations/global/publishers/google/models/gemini-embedding-2:batchEmbedContents"
             )
         );
     }

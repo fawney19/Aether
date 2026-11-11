@@ -3,6 +3,8 @@ mod context;
 mod policy;
 mod url;
 
+pub(crate) use url::uses_vertex_gemini_embed_content;
+
 pub use auth::{
     parse_vertex_service_account_auth_config, resolve_local_vertex_api_key_query_auth,
     resolve_local_vertex_service_account_auth_config,

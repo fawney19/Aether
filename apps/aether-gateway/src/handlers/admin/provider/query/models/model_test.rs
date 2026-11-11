@@ -3228,6 +3228,7 @@ async fn provider_query_execute_standard_test_candidate(
                 &mut provider_request_body,
                 &transport,
                 normalized_provider_api_format.as_str(),
+                request_model,
             ) {
                 return Ok(provider_query_skipped_execution_outcome(
                     provider_request_body,
@@ -3274,6 +3275,7 @@ async fn provider_query_execute_standard_test_candidate(
                 &mut provider_request_body,
                 &transport,
                 normalized_provider_api_format.as_str(),
+                request_model,
             ) {
                 return Ok(provider_query_skipped_execution_outcome(
                     provider_request_body,

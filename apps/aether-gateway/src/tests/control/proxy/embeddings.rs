@@ -575,7 +575,7 @@ fn assert_openai_to_vertex_gemini_embedding_execution_plan(plan: &ExecutionPlan)
     assert_eq!(plan.method, "POST");
     assert_eq!(
         plan.url,
-        "https://aiplatform.googleapis.com/v1/publishers/google/models/gemini-embedding-2:predict?key=sk-upstream-vertex-gemini-embedding"
+        "https://aiplatform.googleapis.com/v1/publishers/google/models/gemini-embedding-2:embedContent?key=sk-upstream-vertex-gemini-embedding"
     );
     assert_eq!(
         plan.model_name.as_deref(),
@@ -585,10 +585,10 @@ fn assert_openai_to_vertex_gemini_embedding_execution_plan(plan: &ExecutionPlan)
     let body = plan.body.json_body.as_ref().expect("json request body");
     assert!(
         body.get("model").is_none(),
-        "Vertex predict carries the model in the path; the body must not repeat it"
+        "Vertex embedContent carries the model in the path; the body must not repeat it"
     );
-    assert_eq!(body["instances"][0]["content"], "hello");
-    assert!(body.get("content").is_none());
+    assert_eq!(body["content"]["parts"][0]["text"], "hello");
+    assert!(body.get("instances").is_none());
     assert!(body.get("input").is_none());
     assert!(body.get("messages").is_none());
 }
@@ -708,14 +708,9 @@ fn vertex_gemini_embedding_execution_result(plan: &ExecutionPlan) -> ExecutionRe
         response_observation: None,
         body: Some(ResponseBody {
             json_body: Some(json!({
-                "predictions": [
-                    {
-                        "embeddings": {
-                            "values": [0.1, 0.2, 0.3]
-                        }
-                    }
-                ],
-                "deployedModelId": "gemini-embedding-2"
+                "embedding": {"values": [0.1, 0.2, 0.3]},
+                "modelVersion": "gemini-embedding-2",
+                "usageMetadata": {"promptTokenCount": 4, "totalTokenCount": 4}
             })),
             body_bytes_b64: None,
         }),

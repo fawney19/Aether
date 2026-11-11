@@ -4,7 +4,7 @@ use crate::claude_code::{
     apply_claude_code_body_mimicry_for_transport, sanitize_claude_code_request_body,
 };
 use crate::snapshot::GatewayProviderTransportSnapshot;
-use crate::vertex::is_vertex_transport_context;
+use crate::vertex::{is_vertex_transport_context, uses_vertex_gemini_embed_content};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransportRequestBodySemanticsError {
@@ -33,6 +33,7 @@ pub fn apply_transport_request_body_semantics(
     provider_request_body: &mut Value,
     transport: &GatewayProviderTransportSnapshot,
     provider_api_format: &str,
+    mapped_model: &str,
 ) -> Result<(), TransportRequestBodySemanticsError> {
     let provider_api_format = aether_ai_formats::normalize_api_format_alias(provider_api_format);
     if provider_api_format == "claude:messages"
@@ -55,19 +56,32 @@ pub fn apply_transport_request_body_semantics(
         provider_api_format.as_str(),
     );
     if provider_api_format == "gemini:embedding" && is_vertex_transport_context(transport) {
-        apply_vertex_gemini_embedding_body_semantics(provider_request_body)?;
+        apply_vertex_gemini_embedding_body_semantics(provider_request_body, mapped_model)?;
     }
     Ok(())
 }
 
 fn apply_vertex_gemini_embedding_body_semantics(
     provider_request_body: &mut Value,
+    mapped_model: &str,
 ) -> Result<(), TransportRequestBodySemanticsError> {
     let object = provider_request_body.as_object_mut().ok_or_else(|| {
         TransportRequestBodySemanticsError::new(
             "Vertex Gemini embedding request body must be a JSON object",
         )
     })?;
+
+    if uses_vertex_gemini_embed_content(mapped_model) {
+        object.remove("model");
+        if let Some(requests) = object.get_mut("requests").and_then(Value::as_array_mut) {
+            for request in requests {
+                if let Some(item) = request.as_object_mut() {
+                    item.remove("model");
+                }
+            }
+        }
+        return Ok(());
+    }
 
     if object.contains_key("instances") {
         validate_existing_vertex_predict_body(object)?;
@@ -322,17 +336,75 @@ mod tests {
     }
 
     #[test]
+    fn vertex_gemini_embedding_2_preserves_multimodal_content() {
+        let transport = sample_transport("vertex_ai", "https://aiplatform.googleapis.com");
+        let payload = json!({
+            "content": {"parts": [
+                {"text": "describe this image"},
+                {"inlineData": {"mimeType": "image/png", "data": "AA=="}}
+            ]},
+            "embedContentConfig": {"outputDimensionality": 128, "documentOcr": true}
+        });
+        let mut body = payload.clone();
+        body["model"] = json!("gemini-embedding-2");
+        apply_transport_request_body_semantics(
+            &mut body,
+            &transport,
+            "gemini:embedding",
+            "gemini-embedding-2",
+        )
+        .expect("Embedding 2 should use the embedContent body");
+        assert_eq!(body, payload);
+        apply_transport_request_body_semantics(
+            &mut body,
+            &transport,
+            "gemini:embedding",
+            "gemini-embedding-2",
+        )
+        .expect("reapplying transport semantics should preserve content");
+        assert_eq!(body, payload);
+    }
+
+    #[test]
+    fn vertex_gemini_embedding_2_batch_removes_item_models() {
+        let transport = sample_transport("vertex_ai", "https://aiplatform.googleapis.com");
+        let mut body = json!({"requests": [
+            {"model": "models/gemini-embedding-2", "content": {"parts": [{"text": "one"}]}, "outputDimensionality": 128},
+            {"model": "models/gemini-embedding-2", "content": {"parts": [{"text": "two"}]}, "outputDimensionality": 128}
+        ]});
+        apply_transport_request_body_semantics(
+            &mut body,
+            &transport,
+            "gemini:embedding",
+            "gemini-embedding-2",
+        )
+        .expect("Embedding 2 batch should retain separate content requests");
+        assert_eq!(
+            body,
+            json!({"requests": [
+                {"content": {"parts": [{"text": "one"}]}, "outputDimensionality": 128},
+                {"content": {"parts": [{"text": "two"}]}, "outputDimensionality": 128}
+            ]})
+        );
+    }
+
+    #[test]
     fn vertex_gemini_embedding_single_body_uses_predict_contract() {
         let transport = sample_transport("vertex_ai", "https://aiplatform.googleapis.com");
         let mut body = json!({
-            "model": "gemini-embedding-2",
+            "model": "gemini-embedding-001",
             "content": {"parts": [{"text": "hello"}]},
             "taskType": "RETRIEVAL_QUERY",
             "outputDimensionality": 768
         });
 
-        apply_transport_request_body_semantics(&mut body, &transport, "gemini:embedding")
-            .expect("body semantics should apply");
+        apply_transport_request_body_semantics(
+            &mut body,
+            &transport,
+            "gemini:embedding",
+            "gemini-embedding-001",
+        )
+        .expect("body semantics should apply");
 
         assert!(body.get("model").is_none());
         assert!(body.get("content").is_none());
@@ -350,8 +422,13 @@ mod tests {
             "content": {"parts": [{"text": "hello"}]}
         });
 
-        apply_transport_request_body_semantics(&mut body, &transport, "gemini:embedding")
-            .expect("developer API body should pass through");
+        apply_transport_request_body_semantics(
+            &mut body,
+            &transport,
+            "gemini:embedding",
+            "gemini-embedding-2",
+        )
+        .expect("developer API body should pass through");
 
         assert_eq!(body["model"], "gemini-embedding-2");
     }
@@ -370,8 +447,13 @@ mod tests {
             }]
         });
 
-        apply_transport_request_body_semantics(&mut body, &transport, "claude:messages")
-            .expect("Claude Code body semantics should apply");
+        apply_transport_request_body_semantics(
+            &mut body,
+            &transport,
+            "claude:messages",
+            "claude-sonnet-5-5",
+        )
+        .expect("Claude Code body semantics should apply");
 
         assert_eq!(
             body["messages"][0]["content"],
@@ -385,18 +467,23 @@ mod tests {
         let mut body = json!({
             "requests": [
                 {
-                    "model": "models/gemini-embedding-2",
+                    "model": "models/gemini-embedding-001",
                     "content": {"parts": [{"text": "hello"}]}
                 },
                 {
-                    "model": "models/gemini-embedding-2",
+                    "model": "models/gemini-embedding-001",
                     "content": {"parts": [{"text": "world"}]}
                 }
             ]
         });
 
-        apply_transport_request_body_semantics(&mut body, &transport, "gemini:embedding")
-            .expect("batch body semantics should apply");
+        apply_transport_request_body_semantics(
+            &mut body,
+            &transport,
+            "gemini:embedding",
+            "gemini-embedding-001",
+        )
+        .expect("batch body semantics should apply");
 
         assert!(body.get("requests").is_none());
         assert_eq!(body["instances"][0]["content"], "hello");
@@ -407,7 +494,7 @@ mod tests {
     fn vertex_gemini_embedding_existing_predict_body_removes_duplicate_model() {
         let transport = sample_transport("vertex_ai", "https://aiplatform.googleapis.com");
         let mut body = json!({
-            "model": "gemini-embedding-2",
+            "model": "gemini-embedding-001",
             "instances": [
                 {"content": "hello", "task_type": "RETRIEVAL_QUERY"}
             ],
@@ -416,8 +503,13 @@ mod tests {
             }
         });
 
-        apply_transport_request_body_semantics(&mut body, &transport, "gemini:embedding")
-            .expect("existing predict body should be accepted");
+        apply_transport_request_body_semantics(
+            &mut body,
+            &transport,
+            "gemini:embedding",
+            "gemini-embedding-001",
+        )
+        .expect("existing predict body should be accepted");
 
         assert!(body.get("model").is_none());
         assert_eq!(body["instances"][0]["content"], "hello");
@@ -428,16 +520,20 @@ mod tests {
     fn vertex_gemini_embedding_existing_predict_body_rejects_unconsumed_fields() {
         let transport = sample_transport("vertex_ai", "https://aiplatform.googleapis.com");
         let mut body = json!({
-            "model": "gemini-embedding-2",
+            "model": "gemini-embedding-001",
             "instances": [
                 {"content": "hello"}
             ],
             "input": "this field would not be consumed by Vertex predict"
         });
 
-        let error =
-            apply_transport_request_body_semantics(&mut body, &transport, "gemini:embedding")
-                .expect_err("predict body must not carry unconsumed OpenAI fields");
+        let error = apply_transport_request_body_semantics(
+            &mut body,
+            &transport,
+            "gemini:embedding",
+            "gemini-embedding-001",
+        )
+        .expect_err("predict body must not carry unconsumed OpenAI fields");
 
         assert!(error.message().contains("unsupported top-level fields"));
         assert!(body.get("model").is_some());
@@ -447,13 +543,17 @@ mod tests {
     fn vertex_gemini_embedding_rejects_unconverted_openai_body() {
         let transport = sample_transport("vertex_ai", "https://aiplatform.googleapis.com");
         let mut body = json!({
-            "model": "gemini-embedding-2",
+            "model": "gemini-embedding-001",
             "input": "hello"
         });
 
-        let error =
-            apply_transport_request_body_semantics(&mut body, &transport, "gemini:embedding")
-                .expect_err("OpenAI embedding body must not be sent to Vertex native predict");
+        let error = apply_transport_request_body_semantics(
+            &mut body,
+            &transport,
+            "gemini:embedding",
+            "gemini-embedding-001",
+        )
+        .expect_err("OpenAI embedding body must not be sent to Vertex native predict");
 
         assert!(error.message().contains("cannot be mapped"));
         assert!(body.get("input").is_some());
@@ -472,23 +572,38 @@ mod tests {
 
         let transport = sample_transport("claude_code", "https://api.anthropic.com");
         let mut body = pi_body();
-        apply_transport_request_body_semantics(&mut body, &transport, "claude:messages")
-            .expect("semantics should apply");
+        apply_transport_request_body_semantics(
+            &mut body,
+            &transport,
+            "claude:messages",
+            "claude-sonnet-5-5",
+        )
+        .expect("semantics should apply");
         assert_eq!(body["system"].as_array().map(Vec::len), Some(3));
         assert!(body["metadata"]["user_id"].as_str().is_some());
         assert_eq!(body["messages"].as_array().map(Vec::len), Some(3));
 
         // Running the semantics twice (cross-format planners do) must not stack the rewrite.
         let once = body.clone();
-        apply_transport_request_body_semantics(&mut body, &transport, "claude:messages")
-            .expect("semantics should apply");
+        apply_transport_request_body_semantics(
+            &mut body,
+            &transport,
+            "claude:messages",
+            "claude-sonnet-5-5",
+        )
+        .expect("semantics should apply");
         assert_eq!(body, once);
 
         // Non-claude_code providers are never touched.
         let other = sample_transport("custom", "https://example.com");
         let mut untouched = pi_body();
-        apply_transport_request_body_semantics(&mut untouched, &other, "claude:messages")
-            .expect("semantics should apply");
+        apply_transport_request_body_semantics(
+            &mut untouched,
+            &other,
+            "claude:messages",
+            "claude-sonnet-5-5",
+        )
+        .expect("semantics should apply");
         assert_eq!(untouched, pi_body());
     }
 }
