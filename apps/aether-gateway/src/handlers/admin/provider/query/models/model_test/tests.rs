@@ -88,7 +88,7 @@ fn sample_catalog_key_with_allowed_models(
 }
 
 #[test]
-fn provider_query_model_test_allows_keys_without_model_restrictions() {
+fn provider_query_model_test_allows_unrestricted_keys_and_rejects_empty_permissions() {
     let unrestricted = sample_catalog_key_with_allowed_models(None);
     let empty = sample_catalog_key_with_allowed_models(Some(json!([])));
 
@@ -97,7 +97,7 @@ fn provider_query_model_test_allows_keys_without_model_restrictions() {
         "model-b",
         "model-b-upstream",
     ));
-    assert!(provider_query_key_allows_effective_test_model(
+    assert!(!provider_query_key_allows_effective_test_model(
         &empty,
         "model-b",
         "model-b-upstream",

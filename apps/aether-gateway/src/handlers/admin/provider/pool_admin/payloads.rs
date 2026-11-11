@@ -1389,10 +1389,7 @@ pub(super) fn build_admin_pool_key_payload(
         json!(key.max_probe_interval_minutes),
     );
     payload.insert("note".to_string(), json!(key.note));
-    payload.insert(
-        "allowed_models".to_string(),
-        json!(admin_pool_string_list(key.allowed_models.as_ref())),
-    );
+    payload.insert("allowed_models".to_string(), json!(key.allowed_models));
     payload.insert(
         "capabilities".to_string(),
         admin_pool_secret_safe_json_object(key.capabilities.as_ref()),

@@ -1,5 +1,13 @@
 use std::collections::BTreeSet;
 
+pub(crate) fn normalize_allowed_models(values: Option<Vec<String>>) -> Option<serde_json::Value> {
+    values.map(|values| {
+        serde_json::json!(
+            crate::handlers::admin::shared::normalize_string_list(Some(values)).unwrap_or_default()
+        )
+    })
+}
+
 pub(crate) fn normalize_provider_type_input(value: &str) -> Result<String, String> {
     let normalized = value.trim().to_ascii_lowercase();
     match normalized.as_str() {
@@ -314,6 +322,23 @@ mod tests {
         validate_vertex_api_formats,
     };
     use serde_json::json;
+
+    #[test]
+    fn allowed_models_preserves_unrestricted_empty_and_explicit_permissions() {
+        assert_eq!(super::normalize_allowed_models(None), None);
+        assert_eq!(
+            super::normalize_allowed_models(Some(vec![])),
+            Some(json!([]))
+        );
+        assert_eq!(
+            super::normalize_allowed_models(Some(vec![
+                " model-a ".into(),
+                "model-a".into(),
+                "".into()
+            ])),
+            Some(json!(["model-a"]))
+        );
+    }
 
     #[test]
     fn normalize_pool_advanced_preserves_empty_object() {

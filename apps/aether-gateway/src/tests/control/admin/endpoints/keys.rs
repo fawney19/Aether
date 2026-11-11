@@ -1943,11 +1943,37 @@ async fn gateway_updates_admin_provider_key_locally_with_trusted_admin_principal
     assert_eq!(reloaded[0].internal_priority, 15);
     assert_eq!(reloaded[0].rpm_limit, None);
     assert_eq!(reloaded[0].learned_rpm_limit, None);
-    assert_eq!(reloaded[0].allowed_models, None);
+    assert_eq!(reloaded[0].allowed_models, Some(json!([])));
     assert_eq!(reloaded[0].note.as_deref(), Some("updated from rust"));
     assert!(!reloaded[0].is_active);
     let decrypted = open_provider_catalog_api_key_for_test(&reloaded[0]);
     assert_eq!(decrypted, "sk-updated-openai");
+
+    for allowed_models in [serde_json::Value::Null, json!(["gpt-4.1"])] {
+        let response = reqwest::Client::new()
+            .put(format!(
+                "{gateway_url}/api/admin/endpoints/keys/key-openai-a"
+            ))
+            .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+            .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+            .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+            .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+            .json(&json!({"allowed_models": allowed_models}))
+            .send()
+            .await
+            .expect("permission update should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        let payload: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(payload["allowed_models"], allowed_models);
+        let reloaded = provider_catalog_repository
+            .list_keys_by_ids(&["key-openai-a".to_string()])
+            .await
+            .unwrap();
+        assert_eq!(
+            reloaded[0].allowed_models,
+            (!allowed_models.is_null()).then_some(allowed_models)
+        );
+    }
 
     gateway_handle.abort();
     upstream_handle.abort();
@@ -2147,7 +2173,7 @@ async fn gateway_clears_allowed_models_when_disabling_auto_fetch_on_provider_key
     assert_eq!(response.status(), StatusCode::OK);
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
     assert_eq!(payload["auto_fetch_models"], false);
-    assert_eq!(payload["allowed_models"], json!([]));
+    assert_eq!(payload["allowed_models"], serde_json::Value::Null);
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     let reloaded = provider_catalog_repository

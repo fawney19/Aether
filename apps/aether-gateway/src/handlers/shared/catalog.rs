@@ -3156,12 +3156,9 @@ pub(crate) fn build_admin_provider_key_response(
     payload.insert("concurrent_limit".to_string(), json!(key.concurrent_limit));
     payload.insert(
         "allowed_models".to_string(),
-        serde_json::Value::Array(
-            json_string_list(key.allowed_models.as_ref())
-                .into_iter()
-                .map(serde_json::Value::String)
-                .collect(),
-        ),
+        key.allowed_models
+            .clone()
+            .unwrap_or(serde_json::Value::Null),
     );
     payload.insert(
         "capabilities".to_string(),

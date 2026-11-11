@@ -1176,7 +1176,7 @@ pub fn build_admin_pool_key_payload(
         "cache_ttl_minutes": key.cache_ttl_minutes,
         "max_probe_interval_minutes": key.max_probe_interval_minutes,
         "note": key.note,
-        "allowed_models": admin_pool_string_list(key.allowed_models.as_ref()),
+        "allowed_models": key.allowed_models,
         "capabilities": admin_pool_secret_safe_json_object(key.capabilities.as_ref()),
         "auto_fetch_models": key.auto_fetch_models,
         "locked_models": admin_pool_string_list(key.locked_models.as_ref()),

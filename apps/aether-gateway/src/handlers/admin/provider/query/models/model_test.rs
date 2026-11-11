@@ -1084,7 +1084,7 @@ fn provider_query_key_allows_effective_test_model(
     effective_model: &str,
 ) -> bool {
     let allowed_models = json_string_list(key.allowed_models.as_ref());
-    if key.allowed_models.is_none() || allowed_models.is_empty() {
+    if key.allowed_models.is_none() {
         return true;
     }
 
