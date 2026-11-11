@@ -207,6 +207,18 @@ pub(super) fn build_claude_model_detail_response(
 }
 
 fn build_gemini_model_value(row: &StoredMinimalCandidateSelectionRow) -> serde_json::Value {
+    if row.model_provider_model_name.trim_start_matches("models/") == "gemini-decision-1" {
+        return json!({
+            "name": format!("models/{}", row.global_model_name),
+            "baseModelId": row.global_model_name,
+            "version": row.model_provider_model_name,
+            "displayName": row.global_model_name,
+            "description": format!("Model {}", row.global_model_name),
+            "inputTokenLimit": 262144,
+            "outputTokenLimit": 1,
+            "supportedGenerationMethods": ["createDecision"],
+        });
+    }
     json!({
         "name": format!("models/{}", row.global_model_name),
         "baseModelId": row.global_model_name,

@@ -47,9 +47,32 @@ Gemini 4 使用隐式缓存，不支持显式 cached content。`gemini-3.8-flash
 
 ## 官方参考
 
+- [Decisions API](https://aistudio.google.com/docs/decisions-api)
+- [Gemini Decision 1](https://aistudio.google.com/docs/models/gemini-decision-1)
+
 - [Gemini 4 入门与迁移](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/start/get-started-with-gemini-4)
 - [Gemini 4 Argon 开发指南](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/guides/gemini-4-argon)
 - [Gemini 3.8 Flash](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/gemini/3-8-flash)
 - [Interactions API](https://docs.cloud.google.com/gemini-enterprise-agent-platform/reference/models/interactions-api)
 - [AI Studio 定价](https://ai.google.dev/gemini-api/docs/pricing)
 - [Agent Platform 定价](https://cloud.google.com/model-garden/pricing)
+
+## Decisions API
+
+Gemini Decision 1 使用独立格式 `gemini:decisions`，客户端向 `POST /v1beta/decisions` 发送原生请求。端点可配置为 `https://generativelanguage.googleapis.com/v1beta`，路径为 `/decisions`。该接口目前由 Gemini Developer API 提供。
+
+请求的 `input` 支持文本、图片、音频、视频和 PDF；`questions` 可同时包含 `noul`、`choice` 和 `score` 问题。网关只执行模型映射和已配置的请求规则，完整保留输入块、问题、选项与返回的 `answers`、概率、置信度及评分图例。该接口同步返回 JSON，不转换为聊天生成格式。
+
+```json
+{
+  "model": "gemini-decision-1",
+  "input": "收到的杯子破损了，需要换货。",
+  "questions": {
+    "damaged": {"type": "noul", "instructions": "商品是否破损？"},
+    "queue": {"type": "choice", "instructions": "选择处理队列", "criteria": {"replacement": "破损换货", "billing": "账单问题"}},
+    "severity": {"type": "score", "instructions": "评估损坏程度", "criteria": ["完好", "轻微损坏", "无法使用"]}
+  }
+}
+```
+
+用量读取 `usage.total_input_tokens`、`total_output_tokens`、`total_tokens` 和 `input_tokens_by_modality`。共享输入只按上游实际用量计算一次，不按问题数重复计费。标准价格为每百万输入 token 0.10 美元，输出 0 美元；模型价格通过现有管理配置设置。管理端支持端点配置、格式权限、原生模型测试和判断结果预览。

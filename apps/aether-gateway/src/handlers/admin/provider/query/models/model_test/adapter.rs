@@ -31,7 +31,9 @@ pub(super) fn provider_query_standard_test_client_api_format(
     provider_api_format: &str,
 ) -> &'static str {
     let normalized_api_format = crate::ai_serving::normalize_api_format_alias(provider_api_format);
-    if normalized_api_format == "openai:responses:compact" {
+    if normalized_api_format == "gemini:decisions" {
+        "gemini:decisions"
+    } else if normalized_api_format == "openai:responses:compact" {
         "openai:responses:compact"
     } else if normalized_api_format == "openai:search" {
         "openai:search"
@@ -93,7 +95,7 @@ pub(super) fn provider_query_standard_test_unsupported_reason(
                 transport,
             )
         }
-        "gemini:generate_content" | "gemini:embedding" | "gemini:interactions" => {
+        "gemini:generate_content" | "gemini:embedding" | "gemini:interactions" | "gemini:decisions" => {
             crate::provider_transport::policy::local_gemini_transport_unsupported_reason_with_network(
                 transport,
                 api_format,
@@ -268,6 +270,7 @@ pub(super) fn provider_query_test_adapter_for_provider_api_format(
             | "claude:messages"
             | "gemini:generate_content"
             | "gemini:interactions"
+            | "gemini:decisions"
             | "openai:embedding"
             | "gemini:embedding"
             | "jina:embedding"
@@ -385,6 +388,7 @@ pub(super) fn provider_query_transport_supports_model_test_execution(
                 transport, api_format,
             )
         }
+        "gemini:decisions" => state.supports_local_gemini_transport_with_network(transport, api_format),
         "gemini:generate_content" | "gemini:embedding" | "gemini:interactions" => {
             if crate::provider_transport::is_vertex_transport_context(transport) {
                 aether_provider_transport::vertex::supports_local_vertex_gemini_transport_with_network(transport)

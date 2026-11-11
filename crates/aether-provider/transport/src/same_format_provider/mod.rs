@@ -465,9 +465,9 @@ fn build_same_format_provider_request_body_inner(
             }
         }
         SameFormatProviderFamily::Gemini => {
-            if aether_ai_formats::api_format_alias_matches(
-                input.provider_api_format,
-                "gemini:interactions",
+            if matches!(
+                aether_ai_formats::normalize_api_format_alias(input.provider_api_format).as_str(),
+                "gemini:interactions" | "gemini:decisions"
             ) {
                 let rewrite_field = if provider_request_body.contains_key("model") {
                     "model"
@@ -933,6 +933,7 @@ pub fn same_format_provider_transport_unsupported_reason_for_trace(
             "claude:messages" => "claude:messages",
             "gemini:generate_content" => "gemini:generate_content",
             "gemini:interactions" => "gemini:interactions",
+            "gemini:decisions" => "gemini:decisions",
             _ => return Some("transport_api_format_unsupported"),
         };
     let behavior = classify_same_format_provider_request_behavior(

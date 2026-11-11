@@ -2,6 +2,28 @@ use std::collections::BTreeMap;
 
 use crate::StandardizedUsage;
 
+#[cfg(test)]
+mod decisions_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn decisions_counts_shared_input_once_and_preserves_zero_output_and_modalities() {
+        let response = json!({"answers": {"a": {"type": "noul", "noul": 0.99}, "b": {"type": "score", "score": 1.5}}, "usage": {
+            "total_input_tokens": 150, "total_output_tokens": 0, "total_tokens": 150,
+            "input_tokens_by_modality": [{"modality": "text", "tokens": 30}, {"modality": "image", "tokens": 100}, {"modality": "audio", "tokens": 20}]
+        }});
+        let usage = UsageMapper::map_from_response(&response, "gemini:decisions");
+        assert_eq!(usage.input_tokens, 150);
+        assert_eq!(usage.output_tokens, 0);
+        assert_eq!(usage.reasoning_tokens, 0);
+        assert_eq!(usage.cache_read_tokens, 0);
+        assert_eq!(usage.dimensions["input_text_tokens"], 30);
+        assert_eq!(usage.dimensions["input_image_tokens"], 100);
+        assert_eq!(usage.dimensions["input_audio_tokens"], 20);
+    }
+}
+
 pub struct UsageMapper;
 
 impl UsageMapper {
@@ -56,7 +78,7 @@ fn apply_gemini_usage(
         return;
     }
     let raw = raw_usage.get("usageMetadata").unwrap_or(raw_usage);
-    let interactions = api_kind(api_format) == "interactions";
+    let interactions = matches!(api_kind(api_format).as_str(), "interactions" | "decisions");
     let (input, output, thoughts, cached) = if interactions {
         (
             "total_input_tokens",

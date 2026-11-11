@@ -32,6 +32,7 @@ const AI_POST_ROUTE_PATTERNS: &[&str] = &[
     "/v1/images/edits",
     "/v1/interactions",
     "/v1beta/interactions",
+    "/v1beta/decisions",
     "/v1internal:loadCodeAssist",
     "/v1internal:fetchAvailableModels",
     "/v1internal:retrieveUserQuotaSummary",

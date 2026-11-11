@@ -21,6 +21,7 @@ pub(crate) fn models_api_format(request_context: &GatewayPublicRequestContext) -
         "openai:rerank" => Some("openai:rerank"),
         "claude:messages" => Some("claude:messages"),
         "gemini:generate_content" => Some("gemini:generate_content"),
+        "gemini:decisions" => Some("gemini:decisions"),
         "gemini:embedding" => Some("gemini:embedding"),
         "jina:embedding" => Some("jina:embedding"),
         "jina:rerank" => Some("jina:rerank"),
@@ -37,6 +38,7 @@ const MODELS_CROSS_FORMAT_QUERY_API_FORMATS: &[&str] = &[
     "openai:image",
     "claude:messages",
     "gemini:generate_content",
+    "gemini:decisions",
 ];
 
 const MODELS_EMBEDDING_QUERY_API_FORMATS: &[&str] = &[
@@ -56,6 +58,7 @@ pub(super) fn models_query_api_formats(api_format: &str) -> &'static [&'static s
         | "claude:messages"
         | "gemini:generate_content" => MODELS_CROSS_FORMAT_QUERY_API_FORMATS,
         "openai:image" => &["openai:image"],
+        "gemini:decisions" => &["gemini:decisions"],
         "openai:embedding"
         | "jina:embedding"
         | "gemini:embedding"

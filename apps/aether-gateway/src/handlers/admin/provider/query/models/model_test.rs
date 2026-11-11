@@ -618,6 +618,11 @@ fn provider_query_build_test_request_body_for_api_format_with_search_session(
     let message = provider_query_extract_message(payload)
         .unwrap_or_else(|| DEFAULT_PROVIDER_QUERY_TEST_MESSAGE.to_string());
     match client_api_format.as_str() {
+        "gemini:decisions" => json!({
+            "model": model,
+            "input": message,
+            "questions": {"greeting": {"type": "noul", "instructions": "Does the input contain a greeting?"}},
+        }),
         "openai:embedding" => json!({
             "model": model,
             "input": message,
@@ -692,6 +697,9 @@ fn provider_query_insert_default_test_conversation(
     let message = provider_query_extract_message(payload)
         .unwrap_or_else(|| DEFAULT_PROVIDER_QUERY_TEST_MESSAGE.to_string());
     match client_api_format {
+        "gemini:decisions" => {
+            object.insert("input".to_string(), Value::String(message));
+        }
         "openai:embedding" => {
             object.insert("input".to_string(), Value::String(message));
         }
@@ -835,6 +843,7 @@ fn provider_query_request_body_has_conversation_for_api_format(
     client_api_format: &str,
 ) -> bool {
     match provider_query_normalize_api_format_alias(client_api_format).as_str() {
+        "gemini:decisions" => value_has_non_empty_text(body.get("input")),
         "openai:responses" | "openai:responses:compact" | "openai:search" => {
             value_has_non_empty_text(body.get("input"))
                 || value_has_non_empty_text(body.get("prompt"))
@@ -3198,7 +3207,7 @@ async fn provider_query_execute_standard_test_candidate(
             );
             provider_request_body
         }
-        "openai:search" => {
+        "openai:search" | "gemini:decisions" => {
             let Some(mut provider_request_body) =
                 crate::provider_transport::build_same_format_provider_request_body(
                     crate::provider_transport::SameFormatProviderRequestBodyInput {
@@ -3207,7 +3216,11 @@ async fn provider_query_execute_standard_test_candidate(
                         client_api_format,
                         provider_api_format,
                         source_model: request_body.get("model").and_then(Value::as_str),
-                        family: crate::provider_transport::SameFormatProviderFamily::Standard,
+                        family: if normalized_provider_api_format == "gemini:decisions" {
+                            crate::provider_transport::SameFormatProviderFamily::Gemini
+                        } else {
+                            crate::provider_transport::SameFormatProviderFamily::Standard
+                        },
                         body_rules: transport.endpoint.body_rules.as_ref(),
                         request_headers: Some(&incoming_request_headers),
                         upstream_is_stream,
@@ -3440,7 +3453,10 @@ async fn provider_query_execute_standard_test_candidate(
         "claude:messages" => {
             crate::provider_transport::auth::resolve_local_standard_auth(&transport).or(oauth_auth)
         }
-        "gemini:generate_content" | "gemini:embedding" | "gemini:interactions" => {
+        "gemini:generate_content"
+        | "gemini:embedding"
+        | "gemini:interactions"
+        | "gemini:decisions" => {
             if uses_vertex_query_auth {
                 oauth_auth
             } else {

@@ -265,6 +265,7 @@ pub(crate) fn internal_finalize_report_kind_is_supported(report_kind: &str) -> b
             | "claude_cli_sync_finalize"
             | "gemini_chat_sync_finalize"
             | "gemini_interactions_sync_finalize"
+            | "gemini_decisions_sync_finalize"
             | "gemini_cli_sync_finalize"
             | "openai_video_create_sync_finalize"
             | "openai_video_remix_sync_finalize"
@@ -273,6 +274,16 @@ pub(crate) fn internal_finalize_report_kind_is_supported(report_kind: &str) -> b
             | "gemini_video_create_sync_finalize"
             | "gemini_video_cancel_sync_finalize"
     )
+}
+
+#[cfg(test)]
+mod decisions_tests {
+    #[test]
+    fn accepts_decisions_sync_finalize() {
+        assert!(super::internal_finalize_report_kind_is_supported(
+            "gemini_decisions_sync_finalize"
+        ));
+    }
 }
 
 pub(crate) async fn maybe_build_internal_finalize_video_response(

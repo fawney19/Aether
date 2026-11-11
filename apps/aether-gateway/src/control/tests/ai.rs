@@ -408,6 +408,21 @@ fn classifies_gemini_interactions_as_interactions_route() {
 }
 
 #[test]
+fn classifies_gemini_decisions_as_native_api_key_route() {
+    let headers = headers(&[("x-goog-api-key", "example-key")]);
+    let uri: Uri = "/v1beta/decisions".parse().unwrap();
+    let decision = classify_control_route(&http::Method::POST, &uri, &headers).unwrap();
+    assert_eq!(decision.route_family.as_deref(), Some("gemini"));
+    assert_eq!(decision.route_kind.as_deref(), Some("decisions"));
+    assert_eq!(decision.request_auth_channel.as_deref(), Some("api_key"));
+    assert_eq!(
+        decision.auth_endpoint_signature.as_deref(),
+        Some("gemini:decisions")
+    );
+    assert!(decision.is_execution_runtime_candidate());
+}
+
+#[test]
 fn classifies_gemini_predict_long_running_as_video_route() {
     let headers = headers(&[]);
     let uri: Uri = "/v1beta/models/veo-3:predictLongRunning"

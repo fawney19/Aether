@@ -46,6 +46,10 @@ pub use crate::contracts::{
     OPENAI_VIDEO_CREATE_SYNC_PLAN_KIND, OPENAI_VIDEO_DELETE_SYNC_PLAN_KIND,
     OPENAI_VIDEO_REMIX_SYNC_PLAN_KIND,
 };
+pub use crate::contracts::{
+    GEMINI_DECISIONS_SYNC_ERROR_REPORT_KIND, GEMINI_DECISIONS_SYNC_FINALIZE_REPORT_KIND,
+    GEMINI_DECISIONS_SYNC_PLAN_KIND, GEMINI_DECISIONS_SYNC_SUCCESS_REPORT_KIND,
+};
 pub use crate::formats::claude::messages::stream::{ClaudeClientEmitter, ClaudeProviderState};
 pub use crate::formats::gemini::generate_content::stream::{
     GeminiClientEmitter, GeminiProviderState,

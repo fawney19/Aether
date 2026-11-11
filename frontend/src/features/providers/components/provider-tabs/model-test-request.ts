@@ -220,6 +220,16 @@ export function buildDefaultModelTestRequestBody(
     }, null, 2)
   }
 
+  if (normalizedApiFormat === 'gemini:decisions') {
+    return JSON.stringify({
+      model: modelName,
+      input: DEFAULT_MODEL_TEST_MESSAGE,
+      questions: {
+        greeting: { type: 'noul', instructions: 'Does the input contain a greeting?' },
+      },
+    }, null, 2)
+  }
+
   if (normalizedApiFormat === 'openai:search') {
     return JSON.stringify({
       id: buildModelTestSearchSessionId(),

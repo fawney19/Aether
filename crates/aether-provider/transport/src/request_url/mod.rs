@@ -293,6 +293,12 @@ fn build_transport_request_url_inner(
         "gemini:interactions" => {
             build_gemini_interactions_url(request_base_url, params.request_query)
         }
+        "gemini:decisions" => build_passthrough_path_url(
+            request_base_url,
+            "/v1beta/decisions",
+            params.request_query,
+            &["key"],
+        ),
         "doubao:embedding" => {
             build_passthrough_path_url(request_base_url, "/embeddings", params.request_query, &[])
         }
@@ -2136,6 +2142,32 @@ mod tests {
             .as_deref(),
             Some("https://generativelanguage.googleapis.com/v1/interactions?trace=2")
         );
+    }
+
+    #[test]
+    fn gemini_decisions_uses_beta_endpoint_and_removes_client_query_key() {
+        for base in [
+            "https://generativelanguage.googleapis.com",
+            "https://generativelanguage.googleapis.com/v1beta",
+        ] {
+            let transport = sample_transport("custom", "gemini:decisions", base, None);
+            let url = build_transport_request_url(
+                &transport,
+                TransportRequestUrlParams {
+                    provider_api_format: "gemini:decisions",
+                    mapped_model: Some("gemini-decision-1"),
+                    upstream_is_stream: false,
+                    request_query: Some("key=example-client-key&trace=1"),
+                    kiro_api_region: None,
+                    api_operation: None,
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                url,
+                "https://generativelanguage.googleapis.com/v1beta/decisions?trace=1"
+            );
+        }
     }
 
     #[test]

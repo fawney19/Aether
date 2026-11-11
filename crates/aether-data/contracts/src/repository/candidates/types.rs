@@ -1632,6 +1632,7 @@ fn sanitize_candidate_api_format(value: &str) -> Option<&'static str> {
         "claude:messages" | "anthropic:messages" => Some("claude:messages"),
         "gemini:generate_content" => Some("gemini:generate_content"),
         "gemini:interactions" => Some("gemini:interactions"),
+        "gemini:decisions" => Some("gemini:decisions"),
         "gemini:embedding" => Some("gemini:embedding"),
         "gemini:files" => Some("gemini:files"),
         "gemini:video" => Some("gemini:video"),
