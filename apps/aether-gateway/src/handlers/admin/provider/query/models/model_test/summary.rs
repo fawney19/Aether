@@ -88,14 +88,36 @@ fn provider_query_endpoint_route_payload(
         .unwrap_or(0);
 
     let (product, variant, action, batch_strategy) = match api_format.as_str() {
+        "gemini:embedding"
+            if is_vertex
+                && request_url
+                    .split('?')
+                    .next()
+                    .is_some_and(|path| path.ends_with(":predict")) =>
+        {
+            (
+                "Vertex AI",
+                "vertex_native",
+                "predict",
+                if vertex_instance_count > 1 {
+                    "predict_instances"
+                } else {
+                    "single_instance"
+                },
+            )
+        }
         "gemini:embedding" if is_vertex => (
             "Vertex AI",
             "vertex_native",
-            "predict",
-            if vertex_instance_count > 1 {
-                "predict_instances"
+            if is_batch {
+                "batchEmbedContents"
             } else {
-                "single_instance"
+                "embedContent"
+            },
+            if is_batch {
+                "native_batch"
+            } else {
+                "single_native"
             },
         ),
         "gemini:embedding" if is_gemini_api => (
