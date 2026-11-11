@@ -69,7 +69,7 @@ pub fn build_core_error_body_for_client_format(
                 ("error".to_string(), Value::Object(error_object)),
             ])))
         }
-        "gemini:generate_content" => Some(Value::Object(Map::from_iter([(
+        "gemini:generate_content" | "gemini:decisions" => Some(Value::Object(Map::from_iter([(
             "error".to_string(),
             Value::Object(Map::from_iter([
                 (

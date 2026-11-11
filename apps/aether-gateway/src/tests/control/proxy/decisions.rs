@@ -53,6 +53,7 @@ fn decisions_success_state(execution_runtime_url: String, client_api_format: &st
         ]));
     let mut provider = sample_provider("provider-decisions", "Gemini Decisions", 1);
     provider.provider_type = "gemini".to_string();
+    provider.config = Some(json!({"failover_rules": {"stop_status_codes": [400]}}));
     let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
         vec![provider],
         vec![sample_endpoint(
@@ -128,6 +129,7 @@ fn decisions_proxy_preserves_questions_multimodal_input_answers_and_model_mappin
         }});
         for (input, status_code) in [
             (json!("Hello, my order arrived damaged."), 200),
+            (json!({"type": "text", "text": "Review this order"}), 200),
             (
                 json!([
                     {"type": "text", "text": "Review these files"},
@@ -195,13 +197,17 @@ fn decisions_proxy_preserves_questions_multimodal_input_answers_and_model_mappin
             let (runtime_url, runtime_handle) = start_server(execution_runtime).await;
             let state = decisions_success_state(runtime_url, "gemini:decisions");
             let (gateway_url, gateway_handle) = start_server(build_router_with_state(state)).await;
-            let response = reqwest::Client::new()
-                .post(format!("{gateway_url}/v1beta/decisions"))
-                .header("x-goog-api-key", "sk-decisions-success")
-                .json(&request)
-                .send()
-                .await
-                .unwrap();
+            let client = reqwest::Client::new();
+            let builder = if request["input"].is_object() {
+                client.post(format!(
+                    "{gateway_url}/v1beta/decisions?key=sk-decisions-success"
+                ))
+            } else {
+                client
+                    .post(format!("{gateway_url}/v1beta/decisions"))
+                    .header("x-goog-api-key", "sk-decisions-success")
+            };
+            let response = builder.json(&request).send().await.unwrap();
             assert_eq!(response.status().as_u16(), status_code);
             let payload: serde_json::Value = response.json().await.unwrap();
             assert_eq!(payload, expected_response);
@@ -227,6 +233,9 @@ fn decisions_proxy_requires_api_key_authentication() {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let payload: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(payload["error"]["code"], 401);
+        assert_eq!(payload["error"]["status"], "UNAUTHENTICATED");
         gateway_handle.abort();
     });
 }
