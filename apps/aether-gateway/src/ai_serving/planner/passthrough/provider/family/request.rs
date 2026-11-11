@@ -28,6 +28,7 @@ use crate::ai_serving::{
 };
 use crate::{AppState, GatewayError};
 
+mod decisions_files;
 mod policy;
 mod prepare;
 
@@ -61,6 +62,7 @@ pub(crate) fn resolve_same_format_provider_transport_unsupported_reason_for_trac
             "claude:messages" => "claude:messages",
             "gemini:generate_content" => "gemini:generate_content",
             "gemini:embedding" => "gemini:embedding",
+            "gemini:decisions" => "gemini:decisions",
             "jina:embedding" => "jina:embedding",
             "jina:rerank" => "jina:rerank",
             "doubao:embedding" => "doubao:embedding",
@@ -130,6 +132,27 @@ pub(crate) async fn resolve_local_same_format_provider_candidate_payload_parts(
     spec: LocalSameFormatProviderSpec,
 ) -> Result<Option<LocalSameFormatProviderCandidatePayloadParts>, GatewayError> {
     let candidate = &attempt.eligible.candidate;
+    if spec.api_format == "gemini:decisions"
+        && !decisions_files::candidate_matches_decisions_file_mappings(
+            state,
+            body_json,
+            &input.auth_context.user_id,
+            &attempt.eligible.transport.key.id,
+        )
+        .await?
+    {
+        mark_skipped_local_same_format_provider_candidate(
+            state,
+            input,
+            trace_id,
+            candidate,
+            attempt.candidate_index,
+            &attempt.candidate_id,
+            "gemini_file_mapping_mismatch",
+        )
+        .await;
+        return Ok(None);
+    }
     if let Some(skip_reason) = same_format_provider_operation_skip_reason(
         &attempt.eligible.transport,
         attempt.eligible.provider_api_format.as_str(),
