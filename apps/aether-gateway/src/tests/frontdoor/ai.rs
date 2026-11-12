@@ -3323,8 +3323,7 @@ async fn gateway_gemini_model_cards_use_configured_limits() {
                     model,
                     10,
                 )
-            })
-            .collect(),
+            }),
     ));
     let global_model_repository = Arc::new(InMemoryGlobalModelReadRepository::seed(vec![
         StoredPublicGlobalModel::new(
