@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
 use std::future::Future;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -84,6 +84,27 @@ fn build_models_read_fallback_response(
         }
         _ => build_empty_models_list_response(api_format),
     }
+}
+
+async fn load_gemini_model_configs(
+    state: &AppState,
+    rows: &[StoredMinimalCandidateSelectionRow],
+) -> Option<BTreeMap<String, Value>> {
+    let models = await_models_route_read(
+        "gemini_model_configs",
+        futures_util::future::try_join_all(
+            rows.iter()
+                .map(|row| state.get_public_global_model_by_name(&row.global_model_name)),
+        ),
+    )
+    .await?;
+    Some(
+        models
+            .into_iter()
+            .flatten()
+            .filter_map(|model| model.config.map(|config| (model.name, config)))
+            .collect(),
+    )
 }
 
 fn sort_model_rows(
@@ -431,7 +452,24 @@ pub(super) async fn maybe_build_local_models_route_response(
                         request_context.request_query_string.as_deref(),
                         "pageToken",
                     );
-                    build_gemini_models_list_response(&rows, page_size, page_token.as_deref())
+                    let start_idx = page_token
+                        .as_deref()
+                        .and_then(|value| value.parse::<usize>().ok())
+                        .unwrap_or(0);
+                    let page_rows = &rows[start_idx.min(rows.len())
+                        ..start_idx.saturating_add(page_size).min(rows.len())];
+                    let Some(configs) = load_gemini_model_configs(state, page_rows).await else {
+                        return Some(build_models_read_fallback_response(
+                            request_context,
+                            api_format,
+                        ));
+                    };
+                    build_gemini_models_list_response(
+                        &rows,
+                        &configs,
+                        page_size,
+                        page_token.as_deref(),
+                    )
                 }
                 _ => build_openai_models_list_response(&rows),
             };
@@ -460,7 +498,17 @@ pub(super) async fn maybe_build_local_models_route_response(
             };
             let response = match api_format {
                 "claude:messages" => build_claude_model_detail_response(row),
-                "gemini:generate_content" => build_gemini_model_detail_response(row),
+                "gemini:generate_content" => {
+                    let Some(configs) =
+                        load_gemini_model_configs(state, std::slice::from_ref(row)).await
+                    else {
+                        return Some(build_models_read_fallback_response(
+                            request_context,
+                            api_format,
+                        ));
+                    };
+                    build_gemini_model_detail_response(row, configs.get(&row.global_model_name))
+                }
                 _ => build_openai_model_detail_response(row),
             };
             Some(response)
