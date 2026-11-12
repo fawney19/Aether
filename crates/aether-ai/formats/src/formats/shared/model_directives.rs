@@ -121,6 +121,18 @@ impl ReasoningEffort {
         }
     }
 
+    pub fn as_gemini_level_value_for_model(self, model: &str) -> &'static str {
+        let normalized = model.trim().to_ascii_lowercase();
+        let model = normalized.rsplit('/').next().unwrap_or_default();
+        if (model == "gemini-4-hydrogen" || model.starts_with("gemini-4-hydrogen-"))
+            && matches!(self, Self::XHigh | Self::Max)
+        {
+            "xhigh"
+        } else {
+            self.as_gemini_level_value()
+        }
+    }
+
     pub fn thinking_budget_tokens(self) -> u64 {
         match self {
             Self::None => 0,
@@ -611,12 +623,12 @@ fn gemini_reasoning_effort_config(
         if thinking_key == "thinking_config" {
             return json!({
                 "include_thoughts": true,
-                "thinking_level": effort.as_gemini_level_value(),
+                "thinking_level": effort.as_gemini_level_value_for_model(provider_model),
             });
         }
         return json!({
             "includeThoughts": true,
-            "thinkingLevel": effort.as_gemini_level_value(),
+            "thinkingLevel": effort.as_gemini_level_value_for_model(provider_model),
         });
     }
 
@@ -882,6 +894,67 @@ mod tests {
             parse_model_directive_with_suffixes("deployment-alias-VendorFuture", ["high"]),
             None
         );
+    }
+
+    #[test]
+    fn hydrogen_preserves_xhigh_in_camel_and_snake_case_directives() {
+        for model in [
+            "gemini-4-hydrogen",
+            "models/gemini-4-hydrogen",
+            "publishers/google/models/gemini-4-hydrogen",
+        ] {
+            for (effort, expected) in [
+                (ReasoningEffort::Low, "low"),
+                (ReasoningEffort::Medium, "medium"),
+                (ReasoningEffort::High, "high"),
+                (ReasoningEffort::XHigh, "xhigh"),
+                (ReasoningEffort::Max, "xhigh"),
+            ] {
+                let camel = super::gemini_reasoning_effort_config(effort, model, "thinkingConfig");
+                let snake = super::gemini_reasoning_effort_config(effort, model, "thinking_config");
+                assert_eq!(camel["thinkingLevel"], expected, "{model}: {effort:?}");
+                assert_eq!(snake["thinking_level"], expected, "{model}: {effort:?}");
+                assert!(camel.get("thinkingBudget").is_none());
+                assert!(snake.get("thinking_budget").is_none());
+            }
+        }
+        for model in ["gemini-4-argon", "gemini-4-carbon", "gemini-3.8-flash"] {
+            assert_eq!(
+                super::gemini_reasoning_effort_config(
+                    ReasoningEffort::XHigh,
+                    model,
+                    "thinkingConfig"
+                )["thinkingLevel"],
+                "high"
+            );
+        }
+    }
+
+    #[test]
+    fn hydrogen_reasoning_suffix_applies_through_directive_entrypoint() {
+        for suffix in ["xhigh", "max"] {
+            for (generation_key, thinking_key, level_key) in [
+                ("generationConfig", "thinkingConfig", "thinkingLevel"),
+                ("generation_config", "thinking_config", "thinking_level"),
+            ] {
+                let mut body = json!({"model":"gemini-4-hydrogen"});
+                body[generation_key] = json!({thinking_key: {"existing": true}});
+                apply_model_directive_overrides_from_model(
+                    &mut body,
+                    "gemini:generate_content",
+                    "gemini-4-hydrogen",
+                    &format!("gemini-4-hydrogen-{suffix}"),
+                )
+                .expect("Hydrogen reasoning suffix should apply");
+                assert_eq!(body[generation_key][thinking_key][level_key], "xhigh");
+                assert!(body[generation_key][thinking_key]
+                    .get("thinkingBudget")
+                    .is_none());
+                assert!(body[generation_key][thinking_key]
+                    .get("thinking_budget")
+                    .is_none());
+            }
+        }
     }
 
     #[test]

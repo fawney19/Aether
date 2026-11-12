@@ -2345,7 +2345,12 @@ mod tests {
 
     #[test]
     fn modern_vertex_gemini_keeps_function_response_ids_and_continuation_token() {
-        for model in ["gemini-3.8-flash", "gemini-4-argon", "gemini-4-carbon"] {
+        for model in [
+            "gemini-3.8-flash",
+            "gemini-4-argon",
+            "gemini-4-carbon",
+            "gemini-4-hydrogen",
+        ] {
             let body = json!({
                 "contents":[{"role":"user","parts":[{"functionResponse":{
                     "id":"call-1", "name":"lookup", "response":{"ok":true}

@@ -339,7 +339,7 @@ mod tests {
             region: Some("us-central1".to_string()),
             model_regions: BTreeMap::new(),
         };
-        for model in ["gemini-4-argon", "gemini-4-carbon"] {
+        for model in ["gemini-4-argon", "gemini-4-carbon", "gemini-4-hydrogen"] {
             let url = build_vertex_service_account_gemini_content_url(
                 model,
                 true,

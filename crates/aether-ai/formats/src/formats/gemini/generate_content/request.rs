@@ -705,7 +705,7 @@ fn gemini_thinking_config_from_reasoning(
                     .map(map_thinking_budget_to_openai_reasoning_effort)
                     .and_then(ReasoningEffort::parse)
             })
-            .map(ReasoningEffort::as_gemini_level_value)?;
+            .map(|effort| effort.as_gemini_level_value_for_model(mapped_model))?;
         return Some(json!({
             "includeThoughts": true,
             "thinkingLevel": level,
@@ -1277,7 +1277,12 @@ mod tests {
 
     #[test]
     fn gemini_four_and_flash_38_convert_reasoning_and_omit_legacy_sampling() {
-        for model in ["gemini-4-carbon", "gemini-4-argon", "gemini-3.8-flash"] {
+        for model in [
+            "gemini-4-carbon",
+            "gemini-4-argon",
+            "gemini-4-hydrogen",
+            "gemini-3.8-flash",
+        ] {
             let canonical = crate::formats::openai::chat::request::from_raw(&json!({
                 "model": model, "messages": [{"role":"user","content":"hello"}],
                 "reasoning_effort":"high", "temperature":0.3, "top_p":0.8, "n":2
@@ -1299,6 +1304,26 @@ mod tests {
             }
         }
         assert!(!gemini_model_uses_thinking_level("gemini-2.5-flash"));
+    }
+
+    #[test]
+    fn hydrogen_preserves_xhigh_from_openai_reasoning() {
+        for effort in ["xhigh", "max"] {
+            let canonical = crate::formats::openai::chat::request::from_raw(&json!({
+                "model": "gemini-4-hydrogen",
+                "messages": [{"role":"user","content":"solve"}],
+                "reasoning_effort": effort
+            }))
+            .unwrap();
+            let output = to_raw(&canonical, "gemini-4-hydrogen", false).unwrap();
+            assert_eq!(
+                output["generationConfig"]["thinkingConfig"]["thinkingLevel"],
+                "xhigh"
+            );
+            assert!(output["generationConfig"]["thinkingConfig"]
+                .get("thinkingBudget")
+                .is_none());
+        }
     }
 
     #[test]

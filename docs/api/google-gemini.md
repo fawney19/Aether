@@ -4,7 +4,8 @@ Aether 使用 Gemini 原生格式接入 AI Studio 和 Vertex AI / Gemini Enterpr
 
 ## 模型与参数
 
-- Gemini 4 Argon、Carbon 和 Gemini 3.8 Flash 使用 `thinkingLevel`。跨格式请求的推理强度映射为 `low`、`medium`、`high`，不再为 Gemini 4 生成 `thinkingBudget`。
+- Gemini 4 Argon、Carbon、Hydrogen 和 Gemini 3.8 Flash 使用 `thinkingLevel`。跨格式请求的推理强度映射为 `low`、`medium`、`high`；Hydrogen 还支持 `xhigh`，请求的 `xhigh` 和 `max` 均映射为该级别。不再为 Gemini 4 生成 `thinkingBudget`。
+- Hydrogen 使用 1,048,576 token 的统一输入与输出窗口，默认单段输出上限为 65,536 token，支持流式和非流式生成。更长输出沿用下文的原生续接方式。
 - 跨格式生成请求会去掉这些模型不使用的 sampling 参数及旧的 `candidateCount`。原生请求保持原始参数，由上游执行模型级校验。
 - Gemini 2.5 继续使用整数 thinking budget；既有 Gemini 3 模型的行为保持兼容。
 - Gemini 3.8 / 4 的 Vertex 工具调用保留 `functionResponse.id`。历史模型仍使用其原有兼容策略。
@@ -43,6 +44,8 @@ Gemini 4 的长输出续接使用 Vertex `v1beta1`。原生 GenerateContent 请�
 
 Gemini 4 使用隐式缓存，不支持显式 cached content。`gemini-3.8-flash` 是普通生成模型，不能作为 Live 模型使用。
 
+Hydrogen 的 GenerateContent 原生请求保留图片、音频、视频、PDF、Office 和 OpenDocument 文件输入，以及工具调用、结构化输出、thought signature 和续接 token。模型只生成文本，不支持图片生成、语音生成或 Live API。标准价格为每百万输入 token 1.50 美元、输出 token 7.50 美元、缓存读取 token 0.075 美元；免费额度和 Batch、Flex 等折扣不改变管理端配置的标准模型价格。
+
 此适配覆盖现有 GenerateContent、流式生成、Embedding、文件和原生 Interactions 路径。Gemini Live/Bidi、独立 cachedContents 管理以及异步批量资源管理尚无专用协议适配；它们不能通过修改模型名称获得支持。Interactions 也不转换为 OpenAI/Claude 消息格式。
 
 ## 官方参考
@@ -52,6 +55,8 @@ Gemini 4 使用隐式缓存，不支持显式 cached content。`gemini-3.8-flash
 
 - [Gemini 4 入门与迁移](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/start/get-started-with-gemini-4)
 - [Gemini 4 Argon 开发指南](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/guides/gemini-4-argon)
+- [Gemini 4 Hydrogen](https://aistudio.google.com/docs/models/gemini-4-hydrogen)
+- [Gemini 4 Hydrogen 开发指南](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/guides/gemini-4-hydrogen)
 - [Gemini 3.8 Flash](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/gemini/3-8-flash)
 - [Interactions API](https://docs.cloud.google.com/gemini-enterprise-agent-platform/reference/models/interactions-api)
 - [AI Studio 定价](https://ai.google.dev/gemini-api/docs/pricing)
