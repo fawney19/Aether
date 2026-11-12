@@ -18,7 +18,7 @@ const MODEL_FETCH_FORMAT_PRIORITY: &[&[&str]] = &[
         "openai:responses:compact",
     ],
     &["claude:messages"],
-    &["gemini:generate_content"],
+    &["gemini:generate_content", "gemini:decisions"],
 ];
 
 pub(crate) const CODEX_MODELS_MAX_ITEMS: usize = 512;
@@ -540,6 +540,7 @@ pub fn endpoint_supports_rust_models_fetch(api_format: &str) -> bool {
             | "openai:responses:compact"
             | "claude:messages"
             | "gemini:generate_content"
+            | "gemini:decisions"
     )
 }
 
@@ -1181,6 +1182,32 @@ fn normalize_api_format(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn decisions_endpoint_fetches_models_and_preserves_the_official_model_card() {
+        let base = "https://generativelanguage.googleapis.com/v1beta";
+        assert_eq!(
+            super::build_models_fetch_url("custom", "gemini:decisions", base),
+            Some((format!("{base}/models"), "gemini:decisions".to_string()))
+        );
+        let endpoints = vec![sample_endpoint(
+            "provider-1",
+            "decisions-endpoint",
+            "gemini:decisions",
+            base,
+        )];
+        let key = sample_key("provider-1", "key-1", &["gemini:decisions"]);
+        let selected = super::selected_models_fetch_endpoints(&endpoints, &key);
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].id, "decisions-endpoint");
+        let body = serde_json::json!({"models": [{"name": "models/gemini-decision-1", "displayName": "Gemini Decision 1", "inputTokenLimit": 262144, "outputTokenLimit": 1, "supportedGenerationMethods": ["createDecision"]}]});
+        let parsed = super::parse_models_response("gemini:decisions", &body).unwrap();
+        assert_eq!(parsed.fetched_model_ids, vec!["gemini-decision-1"]);
+        assert_eq!(parsed.cached_models[0]["inputTokenLimit"], 262144);
+        assert_eq!(
+            parsed.cached_models[0]["api_formats"],
+            serde_json::json!(["gemini:decisions"])
+        );
+    }
     use aether_data_contracts::repository::provider_catalog::{
         StoredProviderCatalogEndpoint, StoredProviderCatalogKey,
     };

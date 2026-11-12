@@ -463,6 +463,10 @@ function extractReasoningFromContentParts(value: unknown, depth = 0): string | n
 function extractResponseSummary(responseBody: unknown): string | null {
   if (!isJsonRecord(responseBody)) return null
 
+  if (isJsonRecord(responseBody.answers)) {
+    return compactPreviewText(JSON.stringify(responseBody.answers))
+  }
+
   if (Array.isArray(responseBody.data)) {
     const embeddingDimensions = responseBody.data
       .map(item => isJsonRecord(item) && Array.isArray(item.embedding) ? item.embedding.length : null)

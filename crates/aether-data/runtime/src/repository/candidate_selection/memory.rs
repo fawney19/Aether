@@ -369,10 +369,11 @@ fn key_auth_channel_matches(row: &StoredMinimalCandidateSelectionRow, api_format
             matches!(
                 auth_type.as_str(),
                 "api_key" | "service_account" | "vertex_ai"
-            ) && matches!(
+            ) && (matches!(
                 api_format.as_str(),
                 "gemini:generate_content" | "gemini:embedding"
-            )
+            ) || api_format == "gemini:interactions"
+                && matches!(auth_type.as_str(), "service_account" | "vertex_ai"))
         }
         _ => auth_type != "oauth",
     }
@@ -865,6 +866,30 @@ mod tests {
             auth_types.sort();
             assert_eq!(auth_types, ["api_key", "service_account", "vertex_ai"]);
         }
+    }
+
+    #[tokio::test]
+    async fn vertex_interactions_inherits_only_service_account_formats() {
+        let rows: Vec<_> = ["api_key", "service_account", "vertex_ai"]
+            .into_iter()
+            .map(|auth| {
+                let mut row = sample_row(auth, "gemini:interactions", "gemini-4-carbon", 10);
+                row.provider_type = "vertex_ai".to_string();
+                row.key_auth_type = auth.to_string();
+                row
+            })
+            .collect();
+        let repository = InMemoryMinimalCandidateSelectionReadRepository::seed(rows);
+        let rows = repository
+            .list_for_exact_api_format("gemini:interactions")
+            .await
+            .unwrap();
+        let mut auth_types = rows
+            .into_iter()
+            .map(|row| row.key_auth_type)
+            .collect::<Vec<_>>();
+        auth_types.sort();
+        assert_eq!(auth_types, ["service_account", "vertex_ai"]);
     }
 
     #[tokio::test]

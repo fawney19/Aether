@@ -204,6 +204,25 @@ fn to_raw_with_schema_policy(
         preserve_tool_schemas,
     )?;
     apply_gemini_request_extensions(&mut output, &canonical.extensions)?;
+    // These models ignore sampling controls and reject legacy candidate counts.
+    // Native requests bypass conversion and retain their original validation.
+    if crate::gemini_model_requires_function_response_ids(mapped_model) {
+        if let Some(config) = output
+            .get_mut("generationConfig")
+            .and_then(Value::as_object_mut)
+        {
+            for key in [
+                "temperature",
+                "topP",
+                "topK",
+                "candidateCount",
+                "frequencyPenalty",
+                "presencePenalty",
+            ] {
+                config.remove(key);
+            }
+        }
+    }
     if !canonical_has_raw_gemini_tools(canonical) {
         enable_server_side_tool_invocations_for_mixed_tools(&mut output, mapped_model)?;
     }
@@ -489,11 +508,26 @@ fn canonical_block_to_gemini_part(
     is_first_tool_use: bool,
 ) -> Option<Option<Value>> {
     match block {
-        CanonicalContentBlock::Text { text, .. } => Some(Some(json!({ "text": text }))),
+        CanonicalContentBlock::Text { text, extensions } => {
+            let mut part = json!({ "text": text });
+            if let Some(signature) = extensions
+                .get("gemini")
+                .and_then(|value| {
+                    value
+                        .get("thoughtSignature")
+                        .or_else(|| value.get("thought_signature"))
+                })
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+            {
+                part["thoughtSignature"] = Value::String(signature.to_string());
+            }
+            Some(Some(part))
+        }
         CanonicalContentBlock::Thinking {
             text, signature, ..
         } => {
-            if text.trim().is_empty() {
+            if text.trim().is_empty() && signature.as_ref().is_none_or(String::is_empty) {
                 return Some(None);
             }
             let mut part = Map::new();
@@ -671,7 +705,7 @@ fn gemini_thinking_config_from_reasoning(
                     .map(map_thinking_budget_to_openai_reasoning_effort)
                     .and_then(ReasoningEffort::parse)
             })
-            .map(ReasoningEffort::as_gemini_level_value)?;
+            .map(|effort| effort.as_gemini_level_value_for_model(mapped_model))?;
         return Some(json!({
             "includeThoughts": true,
             "thinkingLevel": level,
@@ -1240,6 +1274,76 @@ fn gemini_string_array(value: &Value) -> Option<Value> {
 mod tests {
     use super::*;
     use crate::CanonicalContentBlock;
+
+    #[test]
+    fn gemini_four_and_flash_38_convert_reasoning_and_omit_legacy_sampling() {
+        for model in [
+            "gemini-4-carbon",
+            "gemini-4-argon",
+            "gemini-4-hydrogen",
+            "gemini-3.8-flash",
+        ] {
+            let canonical = crate::formats::openai::chat::request::from_raw(&json!({
+                "model": model, "messages": [{"role":"user","content":"hello"}],
+                "reasoning_effort":"high", "temperature":0.3, "top_p":0.8, "n":2
+            }))
+            .unwrap();
+            let output = to_raw(&canonical, model, false).unwrap();
+            assert_eq!(
+                output["generationConfig"]["thinkingConfig"]["thinkingLevel"],
+                "high"
+            );
+            assert!(output["generationConfig"]["thinkingConfig"]
+                .get("thinkingBudget")
+                .is_none());
+            for key in ["temperature", "topP", "candidateCount"] {
+                assert!(
+                    output["generationConfig"].get(key).is_none(),
+                    "{model}: {key}"
+                );
+            }
+        }
+        assert!(!gemini_model_uses_thinking_level("gemini-2.5-flash"));
+    }
+
+    #[test]
+    fn hydrogen_preserves_xhigh_from_openai_reasoning() {
+        for effort in ["xhigh", "max"] {
+            let canonical = crate::formats::openai::chat::request::from_raw(&json!({
+                "model": "gemini-4-hydrogen",
+                "messages": [{"role":"user","content":"solve"}],
+                "reasoning_effort": effort
+            }))
+            .unwrap();
+            let output = to_raw(&canonical, "gemini-4-hydrogen", false).unwrap();
+            assert_eq!(
+                output["generationConfig"]["thinkingConfig"]["thinkingLevel"],
+                "xhigh"
+            );
+            assert!(output["generationConfig"]["thinkingConfig"]
+                .get("thinkingBudget")
+                .is_none());
+        }
+    }
+
+    #[test]
+    fn roundtrip_keeps_text_and_empty_thought_signatures_separate() {
+        let request = from_raw(
+            &json!({"contents":[{"role":"model","parts":[
+                {"text":"", "thought":true, "thoughtSignature":"opaque-thought"},
+                {"text":"answer", "thoughtSignature":"opaque-text"},
+                {"text":"unsigned"}
+            ]}]}),
+            "/v1beta/models/gemini-4-carbon:generateContent",
+        )
+        .unwrap();
+        let output = to_raw(&request, "gemini-4-carbon", false).unwrap();
+        let parts = output["contents"][0]["parts"].as_array().unwrap();
+        assert_eq!(parts.len(), 3);
+        assert_eq!(parts[0]["thoughtSignature"], "opaque-thought");
+        assert_eq!(parts[1]["thoughtSignature"], "opaque-text");
+        assert!(parts[2].get("thoughtSignature").is_none());
+    }
 
     #[test]
     fn canonical_tool_declaration_sanitizes_json_schema_for_gemini() {

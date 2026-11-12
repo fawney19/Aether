@@ -35,6 +35,8 @@
 | `gemini:generate_content` | `models/{model}:generateContent` / `:streamGenerateContent` | `GenerateContentRequest` | `GenerateContentResponse` |
 | `gemini:embedding` | `models/{model}:embedContent` / `:batchEmbedContents` | `EmbedContentRequest` / `BatchEmbedContentsRequest` | `EmbedContentResponse` / `BatchEmbedContentsResponse` |
 
+Vertex 的 `gemini-embedding-2` 与 `gemini-embedding-2-preview` 使用 `embedContent` 或 `batchEmbedContents`。请求保留 `content.parts`、多模态数据和 `embedContentConfig`，模型由 URL 指定，正文及批量子请求中不重复发送 `model`。旧版 `gemini-embedding-001` 继续使用 Vertex 的 `predict` 与 `instances` 契约。AI Studio 使用 Gemini Developer API 的单条和批量 embedding 契约。
+
 ## OpenAI Endpoints
 
 | Method | Path | Request content type | Request schema | Response schema |

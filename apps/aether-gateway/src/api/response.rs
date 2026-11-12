@@ -517,6 +517,12 @@ fn build_local_error_payload(
     kind: LocalCoreSyncErrorKind,
     fallback_payload: serde_json::Value,
 ) -> serde_json::Value {
+    if control_decision.is_some_and(|decision| {
+        decision.auth_endpoint_signature.as_deref() == Some("gemini:decisions")
+    }) {
+        return build_core_error_body_for_client_format("gemini:decisions", message, None, kind)
+            .unwrap_or(fallback_payload);
+    }
     if !local_error_uses_claude_format(control_decision, request_path) {
         return fallback_payload;
     }

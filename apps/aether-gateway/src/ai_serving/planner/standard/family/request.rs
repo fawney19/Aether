@@ -668,6 +668,7 @@ pub(crate) async fn resolve_local_standard_candidate_payload_parts(
         &mut provider_request_body,
         transport,
         provider_api_format,
+        prepared_candidate.mapped_model.as_str(),
     ) {
         mark_skipped_local_standard_candidate_with_failure_diagnostic(
             state,
@@ -713,6 +714,7 @@ pub(crate) async fn resolve_local_standard_candidate_payload_parts(
             &mut provider_request_body,
             transport,
             provider_api_format,
+            prepared_candidate.mapped_model.as_str(),
         ) {
             mark_skipped_local_standard_candidate_with_failure_diagnostic(
                 state,
@@ -983,11 +985,13 @@ fn apply_transport_request_body_semantics(
     provider_request_body: &mut Value,
     transport: &GatewayProviderTransportSnapshot,
     provider_api_format: &str,
+    mapped_model: &str,
 ) -> Result<(), crate::ai_serving::transport::TransportRequestBodySemanticsError> {
     crate::ai_serving::transport::apply_transport_request_body_semantics(
         provider_request_body,
         transport,
         provider_api_format,
+        mapped_model,
     )
 }
 

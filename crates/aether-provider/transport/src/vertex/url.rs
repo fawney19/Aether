@@ -38,10 +38,17 @@ pub fn build_vertex_api_key_imagen_content_url(
 
 pub fn build_vertex_api_key_gemini_embedding_url(
     model: &str,
+    batch: bool,
     api_key: &str,
     request_query: Option<&str>,
 ) -> Option<String> {
-    build_vertex_api_key_google_model_url(model, "predict", false, api_key, request_query)
+    build_vertex_api_key_google_model_url(
+        model,
+        vertex_gemini_embedding_action(model, batch),
+        false,
+        api_key,
+        request_query,
+    )
 }
 
 pub fn build_vertex_service_account_gemini_content_url(
@@ -60,16 +67,34 @@ pub fn build_vertex_service_account_gemini_content_url(
 
 pub fn build_vertex_service_account_gemini_embedding_url(
     model: &str,
+    batch: bool,
     auth_config: &VertexServiceAccountAuthConfig,
     request_query: Option<&str>,
 ) -> Option<String> {
     build_vertex_service_account_google_model_url(
         model,
-        "predict",
+        vertex_gemini_embedding_action(model, batch),
         false,
         auth_config,
         request_query,
     )
+}
+
+pub(crate) fn uses_vertex_gemini_embed_content(model: &str) -> bool {
+    matches!(
+        model.trim().strip_prefix("models/").unwrap_or(model.trim()),
+        "gemini-embedding-2" | "gemini-embedding-2-preview"
+    )
+}
+
+fn vertex_gemini_embedding_action(model: &str, batch: bool) -> &'static str {
+    if !uses_vertex_gemini_embed_content(model) {
+        "predict"
+    } else if batch {
+        "batchEmbedContents"
+    } else {
+        "embedContent"
+    }
 }
 
 fn build_vertex_api_key_google_model_url(
@@ -87,7 +112,8 @@ fn build_vertex_api_key_google_model_url(
     }
 
     let encoded_model = encode_url_path_segment(trimmed_model);
-    let path = format!("/v1/publishers/google/models/{encoded_model}:{trimmed_action}");
+    let version = gemini_api_version(trimmed_model, trimmed_action);
+    let path = format!("/{version}/publishers/google/models/{encoded_model}:{trimmed_action}");
     let merged_query = build_vertex_api_key_query(trimmed_api_key, request_query, stream);
     build_passthrough_path_url(VERTEX_API_KEY_BASE_URL, &path, merged_query.as_deref(), &[])
 }
@@ -118,11 +144,47 @@ fn build_vertex_service_account_google_model_url(
     }
     let encoded_project_id = encode_url_path_segment(project_id);
     let encoded_model = encode_url_path_segment(trimmed_model);
+    let version = gemini_api_version(trimmed_model, trimmed_action);
     let path = format!(
-        "/v1/projects/{encoded_project_id}/locations/{region}/publishers/google/models/{encoded_model}:{trimmed_action}"
+        "/{version}/projects/{encoded_project_id}/locations/{region}/publishers/google/models/{encoded_model}:{trimmed_action}"
     );
     let merged_query = build_vertex_service_account_query(request_query, stream);
     build_passthrough_path_url(&base_url, &path, merged_query.as_deref(), &[])
+}
+
+// Gemini 4 continuation tokens require the beta inference API. Embeddings and
+// older model families retain their stable endpoint.
+fn gemini_api_version(model: &str, action: &str) -> &'static str {
+    if model.starts_with("gemini-4-")
+        && matches!(action, "generateContent" | "streamGenerateContent")
+    {
+        "v1beta1"
+    } else {
+        "v1"
+    }
+}
+
+pub fn build_vertex_service_account_interactions_url(
+    model: &str,
+    auth_config: &VertexServiceAccountAuthConfig,
+    request_query: Option<&str>,
+) -> Option<String> {
+    let project = auth_config.project_id.trim();
+    if project.is_empty() || matches!(project, "." | "..") {
+        return None;
+    }
+    let region = resolve_vertex_service_account_region(model, auth_config);
+    let base = if region == "global" {
+        VERTEX_API_KEY_BASE_URL.to_string()
+    } else {
+        format!("https://{region}-aiplatform.googleapis.com")
+    };
+    let path = format!(
+        "/v1beta1/projects/{}/locations/{region}/interactions",
+        encode_url_path_segment(project)
+    );
+    let query = build_vertex_service_account_query(request_query, false);
+    build_passthrough_path_url(&base, &path, query.as_deref(), &[])
 }
 
 pub fn resolve_vertex_service_account_region(
@@ -154,7 +216,10 @@ pub fn resolve_vertex_service_account_region(
 }
 
 fn default_vertex_model_region(model: &str) -> Option<&'static str> {
-    if model.starts_with("gemini-3.") || model == "gemini-3-pro-image-preview" {
+    if model.starts_with("gemini-3.")
+        || model.starts_with("gemini-4-")
+        || model == "gemini-3-pro-image-preview"
+    {
         return Some("global");
     }
     if matches!(
@@ -247,6 +312,59 @@ mod tests {
         build_vertex_service_account_gemini_content_url, resolve_vertex_service_account_region,
     };
     use crate::vertex::VertexServiceAccountAuthConfig;
+
+    #[test]
+    fn embedding_actions_match_new_and_legacy_vertex_contracts() {
+        for (model, batch, action) in [
+            ("gemini-embedding-2", false, "embedContent"),
+            ("gemini-embedding-2-preview", false, "embedContent"),
+            ("gemini-embedding-2", true, "batchEmbedContents"),
+            ("gemini-embedding-001", false, "predict"),
+            ("gemini-embedding-001", true, "predict"),
+        ] {
+            let actual =
+                super::build_vertex_api_key_gemini_embedding_url(model, batch, "test-key", None)
+                    .expect("embedding URL should build");
+            assert_eq!(actual, format!("https://aiplatform.googleapis.com/v1/publishers/google/models/{model}:{action}?key=test-key"));
+        }
+    }
+
+    #[test]
+    fn gemini_four_uses_beta_global_endpoint_and_respects_model_region_override() {
+        let auth = VertexServiceAccountAuthConfig {
+            client_email: "test@example.com".to_string(),
+            private_key: "fixture".to_string(),
+            project_id: "test-project".to_string(),
+            token_uri: "https://oauth2.googleapis.com/token".to_string(),
+            region: Some("us-central1".to_string()),
+            model_regions: BTreeMap::new(),
+        };
+        for model in ["gemini-4-argon", "gemini-4-carbon", "gemini-4-hydrogen"] {
+            let url = build_vertex_service_account_gemini_content_url(
+                model,
+                true,
+                &auth,
+                Some("key=client-secret&beta=1"),
+            )
+            .unwrap();
+            assert_eq!(url, format!("https://aiplatform.googleapis.com/v1beta1/projects/test-project/locations/global/publishers/google/models/{model}:streamGenerateContent?alt=sse"));
+            let url = super::build_vertex_service_account_interactions_url(
+                model,
+                &auth,
+                Some("key=client-secret&trace=1"),
+            )
+            .unwrap();
+            assert_eq!(url, "https://aiplatform.googleapis.com/v1beta1/projects/test-project/locations/global/interactions?trace=1");
+        }
+        let mut override_auth = auth;
+        override_auth
+            .model_regions
+            .insert("gemini-4-carbon".to_string(), "europe-west4".to_string());
+        assert_eq!(
+            resolve_vertex_service_account_region("gemini-4-carbon", &override_auth),
+            "europe-west4"
+        );
+    }
 
     #[test]
     fn builds_vertex_gemini_api_key_stream_url() {

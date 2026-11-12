@@ -30,6 +30,14 @@ pub struct LocalSameFormatProviderSpec {
 
 pub fn resolve_sync_spec(plan_kind: &str) -> Option<LocalSameFormatProviderSpec> {
     match plan_kind {
+        crate::contracts::GEMINI_DECISIONS_SYNC_PLAN_KIND => Some(LocalSameFormatProviderSpec {
+            api_format: "gemini:decisions",
+            decision_kind: crate::contracts::GEMINI_DECISIONS_SYNC_PLAN_KIND,
+            report_kind: crate::contracts::GEMINI_DECISIONS_SYNC_SUCCESS_REPORT_KIND,
+            family: LocalSameFormatProviderFamily::Gemini,
+            require_streaming: false,
+            operation: None,
+        }),
         OPENAI_MEMORIES_SYNC_PLAN_KIND => Some(LocalSameFormatProviderSpec {
             api_format: "openai:responses",
             decision_kind: OPENAI_MEMORIES_SYNC_PLAN_KIND,

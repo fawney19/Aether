@@ -28,6 +28,7 @@ use crate::ai_serving::{
 };
 use crate::{AppState, GatewayError};
 
+mod decisions_files;
 mod policy;
 mod prepare;
 
@@ -61,6 +62,7 @@ pub(crate) fn resolve_same_format_provider_transport_unsupported_reason_for_trac
             "claude:messages" => "claude:messages",
             "gemini:generate_content" => "gemini:generate_content",
             "gemini:embedding" => "gemini:embedding",
+            "gemini:decisions" => "gemini:decisions",
             "jina:embedding" => "jina:embedding",
             "jina:rerank" => "jina:rerank",
             "doubao:embedding" => "doubao:embedding",
@@ -130,6 +132,27 @@ pub(crate) async fn resolve_local_same_format_provider_candidate_payload_parts(
     spec: LocalSameFormatProviderSpec,
 ) -> Result<Option<LocalSameFormatProviderCandidatePayloadParts>, GatewayError> {
     let candidate = &attempt.eligible.candidate;
+    if spec.api_format == "gemini:decisions"
+        && !decisions_files::candidate_matches_decisions_file_mappings(
+            state,
+            body_json,
+            &input.auth_context.user_id,
+            &attempt.eligible.transport.key.id,
+        )
+        .await?
+    {
+        mark_skipped_local_same_format_provider_candidate(
+            state,
+            input,
+            trace_id,
+            candidate,
+            attempt.candidate_index,
+            &attempt.candidate_id,
+            "gemini_file_mapping_mismatch",
+        )
+        .await;
+        return Ok(None);
+    }
     if let Some(skip_reason) = same_format_provider_operation_skip_reason(
         &attempt.eligible.transport,
         attempt.eligible.provider_api_format.as_str(),
@@ -320,8 +343,43 @@ pub(crate) async fn resolve_local_same_format_provider_candidate_payload_parts(
     }
     }
 
-    // Same-format requests skip `apply_transport_request_body_semantics`, so the opt-in
-    // Claude Code body mimicry has to be applied here as well.
+    // 原生 Gemini 请求也要在模型映射之后应用 Vertex 的请求体契约。
+    if prepared.is_vertex && prepared.provider_api_format == "gemini:embedding" {
+        let before_transport_semantics = base_provider_request_body.clone();
+        if let Err(err) = crate::ai_serving::transport::apply_transport_request_body_semantics(
+            &mut base_provider_request_body,
+            &transport,
+            prepared.provider_api_format.as_str(),
+            prepared.mapped_model.as_str(),
+        ) {
+            mark_skipped_local_same_format_provider_candidate_with_failure_diagnostic(
+                state,
+                input,
+                trace_id,
+                candidate,
+                attempt.candidate_index,
+                &attempt.candidate_id,
+                "transport_request_body_semantics_failed",
+                CandidateFailureDiagnostic::request_conversion_failed(
+                    spec.api_format,
+                    prepared.provider_api_format.as_str(),
+                    "same_format_provider_transport_body_semantics",
+                    err.to_string(),
+                ),
+            )
+            .await;
+            return Ok(None);
+        }
+        if before_transport_semantics != base_provider_request_body {
+            compatibility_edits.push(SameFormatProviderCompatibilityEdit {
+                field: "body".to_string(),
+                action: SameFormatProviderCompatibilityEditAction::ProviderCompatibilityRewrite,
+                detail: "已按 Vertex Embedding 接口规范调整请求体".to_string(),
+            });
+        }
+    }
+
+    // 其他同格式请求仍在此应用可选的 Claude Code 请求体适配。
     if crate::ai_serving::transport::claude_code::apply_claude_code_body_mimicry_for_transport(
         &mut base_provider_request_body,
         &transport,

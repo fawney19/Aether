@@ -1,5 +1,67 @@
 //! Format identity and aliases.
 
+#[cfg(test)]
+mod decisions_tests {
+    use super::*;
+    use crate::formats::shared::routing::{
+        resolve_execution_runtime_stream_plan_kind, resolve_execution_runtime_sync_plan_kind,
+        supports_sync_execution_decision_kind,
+    };
+
+    #[test]
+    fn decisions_has_independent_identity_permissions_and_sync_plan() {
+        for alias in ["gemini:decisions", "GEMINI_DECISIONS", "/v1beta/decisions"] {
+            assert_eq!(FormatId::parse(alias), Some(FormatId::GeminiDecisions));
+            assert_eq!(normalize_api_format_alias(alias), "gemini:decisions");
+        }
+        assert_eq!(FormatId::GeminiDecisions.family(), FormatFamily::Gemini);
+        assert!(api_format_permission_covers(
+            "GEMINI_DECISIONS",
+            "gemini:decisions"
+        ));
+        assert!(!api_format_permission_covers(
+            "gemini:generate_content",
+            "gemini:decisions"
+        ));
+        assert_eq!(
+            crate::request_candidate_api_formats("gemini:decisions", false),
+            vec!["gemini:decisions"]
+        );
+        assert_eq!(
+            crate::request_candidate_api_format_preference(
+                "gemini:decisions",
+                "gemini:generate_content"
+            ),
+            None
+        );
+        assert_eq!(
+            resolve_execution_runtime_sync_plan_kind(
+                Some("ai_public"),
+                Some("gemini"),
+                Some("decisions"),
+                Some("api_key"),
+                &http::Method::POST,
+                "/v1beta/decisions"
+            ),
+            Some(crate::contracts::GEMINI_DECISIONS_SYNC_PLAN_KIND)
+        );
+        assert!(supports_sync_execution_decision_kind(
+            crate::contracts::GEMINI_DECISIONS_SYNC_PLAN_KIND
+        ));
+        assert_eq!(
+            resolve_execution_runtime_stream_plan_kind(
+                Some("ai_public"),
+                Some("gemini"),
+                Some("decisions"),
+                Some("api_key"),
+                &http::Method::POST,
+                "/v1beta/decisions"
+            ),
+            None
+        );
+    }
+}
+
 use std::{fmt, str::FromStr};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -32,6 +94,7 @@ pub enum FormatId {
     ClaudeMessages,
     GeminiGenerateContent,
     GeminiInteractions,
+    GeminiDecisions,
     GeminiEmbedding,
     JinaEmbedding,
     JinaRerank,
@@ -59,9 +122,10 @@ impl FormatId {
             | Self::OpenAiRerank => FormatFamily::OpenAi,
             Self::CodexLive => FormatFamily::Codex,
             Self::ClaudeMessages => FormatFamily::Claude,
-            Self::GeminiGenerateContent | Self::GeminiInteractions | Self::GeminiEmbedding => {
-                FormatFamily::Gemini
-            }
+            Self::GeminiGenerateContent
+            | Self::GeminiInteractions
+            | Self::GeminiDecisions
+            | Self::GeminiEmbedding => FormatFamily::Gemini,
             Self::JinaEmbedding | Self::JinaRerank => FormatFamily::Jina,
             Self::DoubaoEmbedding => FormatFamily::Doubao,
             Self::AliyunMultimodalEmbedding => FormatFamily::Aliyun,
@@ -88,6 +152,7 @@ impl FormatId {
             Self::ClaudeMessages => "claude:messages",
             Self::GeminiGenerateContent => "gemini:generate_content",
             Self::GeminiInteractions => "gemini:interactions",
+            Self::GeminiDecisions => "gemini:decisions",
             Self::GeminiEmbedding => "gemini:embedding",
             Self::JinaEmbedding => "jina:embedding",
             Self::JinaRerank => "jina:rerank",
@@ -130,6 +195,9 @@ impl FromStr for FormatId {
             | "gemini_interaction"
             | "/v1/interactions"
             | "/v1beta/interactions" => Ok(Self::GeminiInteractions),
+            "gemini:decisions" | "gemini_decisions" | "/v1beta/decisions" => {
+                Ok(Self::GeminiDecisions)
+            }
             "gemini:embedding" => Ok(Self::GeminiEmbedding),
             "jina:embedding" | "/jina/v1/embeddings" => Ok(Self::JinaEmbedding),
             "jina:rerank" | "/jina/v1/rerank" => Ok(Self::JinaRerank),

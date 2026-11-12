@@ -2,13 +2,23 @@
   <Dialog
     :model-value="isOpen"
     :title="props.apiKey?.name ? t('ui.modelPermissionsValue', { name: props.apiKey.name }) : t('guide.nav.concepts.modelPermission')"
-    :description="isAutoFetchMode ? t('ui.automaticModeAllowsOnlySelectedModelsLockedModelsAreRetained') : t('ui.allowAccessToSelectedModelsSelectNoneToAllowAll')"
+    :description="t('ui.modelPermissionSelectionHelp')"
     :icon="Shield"
     size="2xl"
     @update:model-value="handleDialogUpdate"
   >
     <template #default>
       <div class="space-y-4">
+        <label class="flex items-center gap-2 text-sm cursor-pointer">
+          <Checkbox
+            :checked="allowAllModels"
+            :indeterminate="!allowAllModels && selectedModels.length > 0"
+            :aria-label="t('ui.selectAll')"
+            @update:checked="toggleAllModels"
+          />
+          <span>{{ t('ui.selectAll') }}</span>
+          <span class="text-muted-foreground">{{ t('ui.allModels') }}</span>
+        </label>
         <!-- 搜索栏 -->
         <div class="flex items-center gap-2">
           <div class="flex-1 relative">
@@ -21,11 +31,11 @@
           </div>
           <!-- 已选数量徽章 -->
           <span
-            v-if="selectedModels.length === 0 && !isAutoFetchMode"
+            v-if="allowAllModels"
             class="h-7 px-2.5 text-xs rounded-md flex items-center bg-muted text-muted-foreground shrink-0"
           > {{ t('ui.allModels') }} </span>
           <span
-            v-else-if="selectedModels.length === 0 && isAutoFetchMode"
+            v-else-if="selectedModels.length === 0"
             class="h-7 px-2.5 text-xs rounded-md flex items-center bg-amber-500/10 text-amber-600 dark:text-amber-400 shrink-0"
           > {{ t('ui.noModelsSelected') }} </span>
           <span
@@ -66,7 +76,7 @@
           <div class="max-h-96 overflow-y-auto">
             <!-- 加载中 -->
             <div
-              v-if="loadingProviderModels"
+              v-if="loadingProviderModels || fetchingUpstreamModels"
               class="flex items-center justify-center py-12"
             >
               <Loader2 class="w-6 h-6 animate-spin text-primary" />
@@ -117,16 +127,16 @@
                   >
                     <div
                       class="w-4 h-4 border rounded flex items-center justify-center shrink-0"
-                      :class="selectedModels.includes(model) ? 'bg-primary border-primary' : ''"
+                      :class="isModelSelected(model) ? 'bg-primary border-primary' : ''"
                     >
                       <Check
-                        v-if="selectedModels.includes(model)"
+                        v-if="isModelSelected(model)"
                         class="w-3 h-3 text-primary-foreground"
                       />
                     </div>
                     <span class="text-sm font-mono truncate flex-1">{{ model }}</span>
                     <button
-                      v-if="selectedModels.includes(model)"
+                      v-if="isModelSelected(model)"
                       type="button"
                       class="p-1 rounded hover:bg-muted-foreground/10 transition-colors shrink-0 text-muted-foreground"
                       :title="isLocked(model) ? t('ui.lockedClickToUnlock') : t('ui.lockToRetainDuringRefresh')"
@@ -181,10 +191,10 @@
                   >
                     <div
                       class="w-4 h-4 border rounded flex items-center justify-center shrink-0"
-                      :class="selectedModels.includes(model.name) ? 'bg-primary border-primary' : ''"
+                      :class="isModelSelected(model.name) ? 'bg-primary border-primary' : ''"
                     >
                       <Check
-                        v-if="selectedModels.includes(model.name)"
+                        v-if="isModelSelected(model.name)"
                         class="w-3 h-3 text-primary-foreground"
                       />
                     </div>
@@ -200,7 +210,7 @@
                       </p>
                     </div>
                     <button
-                      v-if="selectedModels.includes(model.name)"
+                      v-if="isModelSelected(model.name)"
                       type="button"
                       class="p-1 rounded hover:bg-muted-foreground/10 transition-colors shrink-0 text-muted-foreground"
                       :title="isLocked(model.name) ? t('ui.lockedClickToUnlock') : t('ui.lockToRetainDuringRefresh')"
@@ -262,12 +272,12 @@
                     <div
                       class="w-4 h-4 border rounded flex items-center justify-center shrink-0"
                       :class="[
-                        selectedModels.includes(model.id) ? 'bg-primary border-primary' : '',
+                        isModelSelected(model.id) ? 'bg-primary border-primary' : '',
                         isAutoFetchMode ? 'opacity-50' : ''
                       ]"
                     >
                       <Check
-                        v-if="selectedModels.includes(model.id)"
+                        v-if="isModelSelected(model.id)"
                         class="w-3 h-3 text-primary-foreground"
                       />
                     </div>
@@ -283,7 +293,7 @@
                       </span>
                     </div>
                     <button
-                      v-if="selectedModels.includes(model.id)"
+                      v-if="isModelSelected(model.id)"
                       type="button"
                       class="p-1 rounded hover:bg-muted-foreground/10 transition-colors shrink-0 text-muted-foreground"
                       :title="isLocked(model.id) ? t('ui.lockedClickToUnlock') : t('ui.lockToRetainDuringRefresh')"
@@ -325,7 +335,7 @@
         </p>
         <div class="flex items-center gap-2">
           <Button
-            :disabled="saving || !hasChanges"
+            :disabled="saving || loadingProviderModels || fetchingUpstreamModels || !hasChanges"
             @click="handleSave"
           >
             {{ saving ? t('ui.saving') : t('ui.save') }}
@@ -358,7 +368,7 @@ import {
   RefreshCw,
   Zap
 } from 'lucide-vue-next'
-import { Dialog, Button, Input } from '@/components/ui'
+import { Dialog, Button, Checkbox, Input } from '@/components/ui'
 import { useToast } from '@/composables/useToast'
 import { useDiscardConfirm } from '@/composables/useDiscardConfirm'
 import { parseApiError } from '@/utils/errorParser'
@@ -415,6 +425,8 @@ const upstreamModels = ref<UpstreamModel[]>([])
 // 已选中的模型
 const selectedModels = ref<string[]>([])
 const initialSelectedModels = ref<string[]>([])
+const allowAllModels = ref(false)
+const initialAllowAllModels = ref(false)
 
 // 已锁定的模型
 const lockedModels = ref<string[]>([])
@@ -438,6 +450,7 @@ const collapsedGroups = ref<Set<string>>(new Set())
 
 // 是否有更改
 const hasChanges = computed(() => {
+  if (allowAllModels.value !== initialAllowAllModels.value) return true
   // 检查选中模型是否有变化
   if (selectedModels.value.length !== initialSelectedModels.value.length) return true
   const sorted1 = [...selectedModels.value].sort()
@@ -458,6 +471,21 @@ const allKnownModels = computed(() => {
   upstreamModels.value.forEach(m => set.add(m.id))
   return set
 })
+
+function isModelSelected(model: string): boolean {
+  return allowAllModels.value || selectedModels.value.includes(model)
+}
+
+function toggleAllModels(checked: boolean) {
+  allowAllModels.value = checked
+  selectedModels.value = []
+}
+
+function materializeModelSelection() {
+  if (!allowAllModels.value) return
+  selectedModels.value = [...new Set([...allKnownModels.value, ...allCustomModels.value])]
+  allowAllModels.value = false
+}
 
 // 提供商模型名称集合（用于判断模型是否为“提供商模型”分组项）
 const providerModelNamesSet = computed(() => {
@@ -488,11 +516,12 @@ const filteredUpstreamModels = computed(() => {
 // 上游模型是否全选
 const isAllUpstreamModelsSelected = computed(() => {
   if (filteredUpstreamModels.value.length === 0) return false
-  return filteredUpstreamModels.value.every(m => selectedModels.value.includes(m.id))
+  return filteredUpstreamModels.value.every(m => isModelSelected(m.id))
 })
 
 // 全选/取消全选上游模型
 function toggleAllUpstreamModels() {
+  materializeModelSelection()
   const allIds = filteredUpstreamModels.value.map(m => m.id)
   if (isAllUpstreamModelsSelected.value) {
     selectedModels.value = selectedModels.value.filter(id => !allIds.includes(id))
@@ -564,11 +593,12 @@ const filteredProviderModels = computed(() => {
 // 提供商模型是否全选
 const isAllProviderModelsSelected = computed(() => {
   if (filteredProviderModels.value.length === 0) return false
-  return filteredProviderModels.value.every(m => selectedModels.value.includes(m.name))
+  return filteredProviderModels.value.every(m => isModelSelected(m.name))
 })
 
 // 切换模型选中状态
 function toggleModel(modelId: string) {
+  materializeModelSelection()
   const idx = selectedModels.value.indexOf(modelId)
   if (idx === -1) {
     selectedModels.value.push(modelId)
@@ -593,7 +623,7 @@ function toggleModel(modelId: string) {
 function toggleLock(modelId: string, event: Event) {
   event.stopPropagation()
   // 只有已选中的模型才能锁定
-  if (!selectedModels.value.includes(modelId)) return
+  if (!isModelSelected(modelId)) return
 
   const idx = lockedModels.value.indexOf(modelId)
   if (idx === -1) {
@@ -623,6 +653,7 @@ function addCustomModel() {
 
 // 全选/取消全选提供商模型
 function toggleAllProviderModels() {
+  materializeModelSelection()
   const allNames = filteredProviderModels.value.map(m => m.name)
   if (isAllProviderModelsSelected.value) {
     // 取消全选
@@ -720,6 +751,8 @@ async function initializeDialogState(apiKey: EndpointAPIKey) {
   loadingCancelled = false
 
   const parsed = parseAllowedModels(apiKey.allowed_models ?? null)
+  allowAllModels.value = apiKey.allowed_models == null
+  initialAllowAllModels.value = allowAllModels.value
   selectedModels.value = [...parsed]
   initialSelectedModels.value = [...parsed]
 
@@ -779,12 +812,10 @@ async function handleSave() {
 
   saving.value = true
   try {
-    const newAllowed: AllowedModels = selectedModels.value.length > 0
-      ? [...selectedModels.value]
-      : null
+    const newAllowed: AllowedModels = allowAllModels.value ? null : [...selectedModels.value]
 
     // 只保存已选中且被锁定的模型
-    const newLocked = lockedModels.value.filter(m => selectedModels.value.includes(m))
+    const newLocked = lockedModels.value.filter(m => isModelSelected(m))
 
     await updateProviderKey(props.apiKey.id, {
       allowed_models: newAllowed,

@@ -26,7 +26,8 @@ use crate::url::{
 use crate::vertex::{
     build_vertex_api_key_gemini_content_url, build_vertex_api_key_gemini_embedding_url,
     build_vertex_service_account_gemini_content_url,
-    build_vertex_service_account_gemini_embedding_url, resolve_local_vertex_api_key_query_auth,
+    build_vertex_service_account_gemini_embedding_url,
+    build_vertex_service_account_interactions_url, resolve_local_vertex_api_key_query_auth,
     resolve_local_vertex_service_account_auth_config,
 };
 #[derive(Clone, Copy)]
@@ -116,7 +117,7 @@ fn build_transport_request_url_inner(
             return Some(url);
         }
     }
-    if let Some(url) = build_transport_hook_url(transport, params) {
+    if let Some(url) = build_transport_hook_url(transport, params, gemini_embedding_batch) {
         return Some(url);
     }
 
@@ -292,6 +293,12 @@ fn build_transport_request_url_inner(
         "gemini:interactions" => {
             build_gemini_interactions_url(request_base_url, params.request_query)
         }
+        "gemini:decisions" => build_passthrough_path_url(
+            request_base_url,
+            "/v1beta/decisions",
+            params.request_query,
+            &["key"],
+        ),
         "doubao:embedding" => {
             build_passthrough_path_url(request_base_url, "/embeddings", params.request_query, &[])
         }
@@ -430,6 +437,7 @@ pub fn build_kiro_cross_format_upstream_url(
 fn build_transport_hook_url(
     transport: &GatewayProviderTransportSnapshot,
     params: TransportRequestUrlParams<'_>,
+    gemini_embedding_batch: bool,
 ) -> Option<String> {
     if let Some(api_region) = params.kiro_api_region {
         return crate::kiro::build_kiro_generate_assistant_response_url(
@@ -493,10 +501,20 @@ fn build_transport_hook_url(
                 );
             }
         }
+        "gemini:interactions" => {
+            if let Some(auth_config) = resolve_local_vertex_service_account_auth_config(transport) {
+                return build_vertex_service_account_interactions_url(
+                    params.mapped_model?,
+                    &auth_config,
+                    params.request_query,
+                );
+            }
+        }
         "gemini:embedding" => {
             if let Some(auth) = resolve_local_vertex_api_key_query_auth(transport) {
                 return build_vertex_api_key_gemini_embedding_url(
                     params.mapped_model?,
+                    gemini_embedding_batch,
                     &auth.value,
                     params.request_query,
                 );
@@ -504,6 +522,7 @@ fn build_transport_hook_url(
             if let Some(auth_config) = resolve_local_vertex_service_account_auth_config(transport) {
                 return build_vertex_service_account_gemini_embedding_url(
                     params.mapped_model?,
+                    gemini_embedding_batch,
                     &auth_config,
                     params.request_query,
                 );
@@ -1058,6 +1077,46 @@ mod tests {
     }
 
     #[test]
+    fn vertex_interactions_uses_service_account_project_endpoint() {
+        let mut transport = sample_transport(
+            "vertex_ai",
+            "gemini:interactions",
+            "https://aiplatform.googleapis.com",
+            None,
+        );
+        transport.key.auth_type = "service_account".to_string();
+        transport.key.decrypted_auth_config = Some(serde_json::json!({
+            "client_email":"test@example.com", "private_key":"fixture", "project_id":"test-project", "region":"us-central1",
+            "model_regions":{"gemini-4-carbon":"us-central1"}
+        }).to_string());
+        let url = build_transport_request_url(
+            &transport,
+            TransportRequestUrlParams {
+                provider_api_format: "gemini:interactions",
+                mapped_model: Some("gemini-4-carbon"),
+                upstream_is_stream: true,
+                request_query: Some("key=client-secret&trace=1"),
+                kiro_api_region: None,
+                api_operation: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(url, "https://us-central1-aiplatform.googleapis.com/v1beta1/projects/test-project/locations/us-central1/interactions?trace=1");
+        assert!(crate::vertex::supports_local_vertex_gemini_transport_with_network(&transport));
+        assert_eq!(
+            crate::request_pair_transport_unsupported_reason(
+                &transport,
+                "gemini:interactions",
+                "gemini:interactions"
+            ),
+            None
+        );
+        transport.key.auth_type = "api_key".to_string();
+        transport.key.decrypted_auth_config = None;
+        assert!(!crate::vertex::supports_local_vertex_gemini_transport_with_network(&transport));
+    }
+
+    #[test]
     fn uses_vertex_service_account_hook_before_default_gemini_url() {
         let mut transport = sample_transport(
             "vertex_ai",
@@ -1134,7 +1193,7 @@ mod tests {
 
         assert_eq!(
             url,
-            "https://aiplatform.googleapis.com/v1/projects/demo-project/locations/global/publishers/google/models/gemini-embedding-2:predict?foo=bar"
+            "https://aiplatform.googleapis.com/v1/projects/demo-project/locations/global/publishers/google/models/gemini-embedding-2:embedContent?foo=bar"
         );
     }
 
@@ -1193,7 +1252,7 @@ mod tests {
     }
 
     #[test]
-    fn vertex_gemini_embedding_batch_request_uses_vertex_predict_endpoint() {
+    fn vertex_gemini_embedding_batch_request_uses_batch_embed_contents_endpoint() {
         let mut transport = sample_transport(
             "vertex_ai",
             "gemini:embedding",
@@ -1236,7 +1295,7 @@ mod tests {
             )
             .as_deref(),
             Some(
-                "https://aiplatform.googleapis.com/v1/projects/demo-project/locations/global/publishers/google/models/gemini-embedding-2:predict"
+                "https://aiplatform.googleapis.com/v1/projects/demo-project/locations/global/publishers/google/models/gemini-embedding-2:batchEmbedContents"
             )
         );
     }
@@ -2083,6 +2142,32 @@ mod tests {
             .as_deref(),
             Some("https://generativelanguage.googleapis.com/v1/interactions?trace=2")
         );
+    }
+
+    #[test]
+    fn gemini_decisions_uses_beta_endpoint_and_removes_client_query_key() {
+        for base in [
+            "https://generativelanguage.googleapis.com",
+            "https://generativelanguage.googleapis.com/v1beta",
+        ] {
+            let transport = sample_transport("custom", "gemini:decisions", base, None);
+            let url = build_transport_request_url(
+                &transport,
+                TransportRequestUrlParams {
+                    provider_api_format: "gemini:decisions",
+                    mapped_model: Some("gemini-decision-1"),
+                    upstream_is_stream: false,
+                    request_query: Some("key=example-client-key&trace=1"),
+                    kiro_api_region: None,
+                    api_operation: None,
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                url,
+                "https://generativelanguage.googleapis.com/v1beta/decisions?trace=1"
+            );
+        }
     }
 
     #[test]

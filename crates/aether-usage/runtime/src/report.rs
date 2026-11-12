@@ -172,6 +172,9 @@ pub fn infer_internal_finalize_signature(payload: &GatewaySyncReportRequest) -> 
     if report_kind.starts_with("gemini_chat_") {
         return Some("gemini:generate_content".to_string());
     }
+    if report_kind.starts_with("gemini_decisions_") {
+        return Some("gemini:decisions".to_string());
+    }
     if report_kind.starts_with("gemini_cli_") {
         return Some("gemini:generate_content".to_string());
     }
@@ -222,6 +225,11 @@ pub fn resolve_internal_finalize_route(signature: &str) -> Option<InternalFinali
             public_path: "/v1beta/models",
             route_family: "gemini",
             route_kind: "generate_content",
+        }),
+        "gemini:decisions" => Some(InternalFinalizeRoute {
+            public_path: "/v1beta/decisions",
+            route_family: "gemini",
+            route_kind: "decisions",
         }),
         "gemini:video" => Some(InternalFinalizeRoute {
             public_path: "/v1beta/models",
@@ -295,6 +303,8 @@ pub fn is_local_ai_sync_report_kind(report_kind: &str) -> bool {
         "openai_chat_sync_success"
             | "claude_chat_sync_success"
             | "gemini_chat_sync_success"
+            | "gemini_decisions_sync_success"
+            | "gemini_decisions_sync_error"
             | "openai_chat_sync_error"
             | "claude_chat_sync_error"
             | "gemini_chat_sync_error"
@@ -899,6 +909,37 @@ mod tests {
             body_base64: None,
             telemetry: None,
         }
+    }
+
+    #[test]
+    fn decisions_finalize_and_usage_reports_resolve_to_native_route() {
+        let mut payload = sample_sync_report("gemini_decisions_sync_finalize", 200);
+        payload.report_context = Some(serde_json::json!({}));
+        assert_eq!(
+            infer_internal_finalize_signature(&payload).as_deref(),
+            Some("gemini:decisions")
+        );
+        assert_eq!(
+            resolve_internal_finalize_route("gemini:decisions"),
+            Some(InternalFinalizeRoute {
+                public_path: "/v1beta/decisions",
+                route_family: "gemini",
+                route_kind: "decisions"
+            })
+        );
+        assert!(is_local_ai_sync_report_kind(
+            "gemini_decisions_sync_success"
+        ));
+        assert!(is_local_ai_sync_report_kind("gemini_decisions_sync_error"));
+        let context = serde_json::json!({"request_id": "request-decisions", "provider_id": "provider-decisions"});
+        assert!(should_handle_local_sync_report(
+            Some(&context),
+            "gemini_decisions_sync_success"
+        ));
+        assert!(should_handle_local_sync_report(
+            Some(&context),
+            "gemini_decisions_sync_error"
+        ));
     }
 
     fn sample_sync_report_with_context(

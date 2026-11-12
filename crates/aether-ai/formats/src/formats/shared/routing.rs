@@ -270,6 +270,14 @@ pub fn resolve_execution_runtime_sync_plan_kind_with_client_surface(
         return Some(GEMINI_INTERACTIONS_SYNC_PLAN_KIND);
     }
 
+    if route_family == Some("gemini")
+        && route_kind == Some("decisions")
+        && *method == Method::POST
+        && path == "/v1beta/decisions"
+    {
+        return Some(crate::contracts::GEMINI_DECISIONS_SYNC_PLAN_KIND);
+    }
+
     if route_family == Some("openai")
         && route_kind == Some("chat")
         && *method == Method::POST
@@ -602,6 +610,7 @@ pub fn supports_sync_execution_decision_kind(plan_kind: &str) -> bool {
             | GEMINI_CLI_SYNC_PLAN_KIND
             | GEMINI_EMBEDDING_SYNC_PLAN_KIND
             | GEMINI_INTERACTIONS_SYNC_PLAN_KIND
+            | crate::contracts::GEMINI_DECISIONS_SYNC_PLAN_KIND
             | GEMINI_FILES_UPLOAD_PLAN_KIND
             | OPENAI_VIDEO_CREATE_SYNC_PLAN_KIND
             | OPENAI_VIDEO_REMIX_SYNC_PLAN_KIND

@@ -42,7 +42,8 @@ pub fn parse_request(
         FormatId::OpenAiRealtime
         | FormatId::OpenAiSearch
         | FormatId::CodexLive
-        | FormatId::GeminiInteractions => None,
+        | FormatId::GeminiInteractions
+        | FormatId::GeminiDecisions => None,
     }
     .ok_or_else(|| FormatError::RequestParseFailed {
         format: source.as_str().to_string(),
@@ -79,7 +80,8 @@ fn emit_request_inner(
         FormatId::OpenAiRealtime
         | FormatId::OpenAiSearch
         | FormatId::CodexLive
-        | FormatId::GeminiInteractions => None,
+        | FormatId::GeminiInteractions
+        | FormatId::GeminiDecisions => None,
     }
     .ok_or_else(|| FormatError::RequestEmitFailed {
         format: target.as_str().to_string(),
@@ -393,7 +395,8 @@ pub fn parse_response(
         | FormatId::DoubaoEmbedding
         | FormatId::AliyunMultimodalEmbedding
         | FormatId::CodexLive
-        | FormatId::GeminiInteractions => None,
+        | FormatId::GeminiInteractions
+        | FormatId::GeminiDecisions => None,
     }
     .ok_or_else(|| FormatError::ResponseParseFailed {
         format: source.as_str().to_string(),
@@ -434,7 +437,8 @@ fn emit_response_inner(
         | FormatId::DoubaoEmbedding
         | FormatId::AliyunMultimodalEmbedding
         | FormatId::CodexLive
-        | FormatId::GeminiInteractions => None,
+        | FormatId::GeminiInteractions
+        | FormatId::GeminiDecisions => None,
     }
     .ok_or_else(|| FormatError::ResponseEmitFailed {
         format: target.as_str().to_string(),
@@ -1206,6 +1210,7 @@ fn standard_request_root_field_is_audited(source: FormatId, key: &str) -> bool {
                 | "tool_config"
                 | "tools"
         ),
+        FormatId::GeminiDecisions => matches!(key, "model" | "input" | "questions"),
         FormatId::OpenAiEmbedding
         | FormatId::OpenAiRealtime
         | FormatId::OpenAiSearch
@@ -1868,7 +1873,7 @@ fn validate_source_response_stop_enums(
         }
         FormatId::ClaudeMessages => validate_claude_response_stop_reason(body),
         FormatId::GeminiGenerateContent => validate_gemini_response_finish_reasons(body, target),
-        FormatId::GeminiInteractions => Ok(()),
+        FormatId::GeminiInteractions | FormatId::GeminiDecisions => Ok(()),
         FormatId::OpenAiEmbedding
         | FormatId::OpenAiRealtime
         | FormatId::OpenAiSearch

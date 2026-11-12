@@ -1,10 +1,11 @@
 use crate::handlers::admin::provider::oauth::provisioning::rotate_codex_credential_generation;
 use crate::handlers::admin::provider::shared::payloads::AdminProviderKeyUpdatePatch;
 use crate::handlers::admin::provider::write::normalize::{
-    normalize_allow_auth_channel_mismatch_formats, normalize_api_format_json_object_keys,
-    normalize_api_format_list, normalize_auth_type, normalize_auth_type_by_format,
-    normalize_max_probe_interval_minutes, normalize_rate_multipliers,
-    reconcile_allow_auth_channel_mismatch_formats, validate_vertex_api_formats,
+    normalize_allow_auth_channel_mismatch_formats, normalize_allowed_models,
+    normalize_api_format_json_object_keys, normalize_api_format_list, normalize_auth_type,
+    normalize_auth_type_by_format, normalize_max_probe_interval_minutes,
+    normalize_rate_multipliers, reconcile_allow_auth_channel_mismatch_formats,
+    validate_vertex_api_formats,
 };
 use crate::handlers::admin::request::AdminAppState;
 use crate::handlers::admin::shared::{
@@ -330,8 +331,7 @@ pub(crate) fn build_admin_update_provider_key_record_with_existing_keys(
             normalize_optional_api_key_concurrent_limit(payload.concurrent_limit)?;
     }
     if fields.contains("allowed_models") {
-        updated.allowed_models =
-            normalize_string_list(payload.allowed_models).map(|value| json!(value));
+        updated.allowed_models = normalize_allowed_models(payload.allowed_models);
     }
     if fields.contains("capabilities") {
         updated.capabilities = normalize_json_object(payload.capabilities, "capabilities")?;

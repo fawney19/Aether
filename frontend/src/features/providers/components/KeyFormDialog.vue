@@ -451,7 +451,7 @@ function getVertexAllowedFormatsByAuth(authType: ProviderKeyFormAuthType): Set<s
     return new Set(['gemini:generate_content', 'gemini:embedding'])
   }
   if (authType === 'service_account') {
-    return new Set(['gemini:generate_content', 'gemini:embedding', 'claude:messages'])
+    return new Set(['gemini:generate_content', 'gemini:embedding', 'gemini:interactions', 'claude:messages'])
   }
   return new Set()
 }

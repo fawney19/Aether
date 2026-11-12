@@ -88,7 +88,7 @@ fn sample_catalog_key_with_allowed_models(
 }
 
 #[test]
-fn provider_query_model_test_allows_keys_without_model_restrictions() {
+fn provider_query_model_test_allows_unrestricted_keys_and_rejects_empty_permissions() {
     let unrestricted = sample_catalog_key_with_allowed_models(None);
     let empty = sample_catalog_key_with_allowed_models(Some(json!([])));
 
@@ -97,7 +97,7 @@ fn provider_query_model_test_allows_keys_without_model_restrictions() {
         "model-b",
         "model-b-upstream",
     ));
-    assert!(provider_query_key_allows_effective_test_model(
+    assert!(!provider_query_key_allows_effective_test_model(
         &empty,
         "model-b",
         "model-b-upstream",
@@ -1285,4 +1285,30 @@ fn provider_query_dall_e_3_image_test_keeps_single_generation_boundary() {
         ),
         "Provider request body could not be normalized for openai:image: selected provider supports n=1..1 for generation"
     );
+}
+#[test]
+fn decisions_model_test_uses_native_body_and_preserves_custom_questions() {
+    assert_eq!(
+        provider_query_standard_test_client_api_format("gemini:decisions"),
+        "gemini:decisions"
+    );
+    let body = provider_query_build_test_request_body_for_api_format(
+        &json!({}),
+        "gemini-decision-1",
+        "/test-model",
+        "gemini:decisions",
+    );
+    assert_eq!(body["model"], "gemini-decision-1");
+    assert_eq!(body["questions"]["greeting"]["type"], "noul");
+    assert!(body.get("max_tokens").is_none());
+    assert!(body.get("messages").is_none());
+    assert!(body.get("stream").is_none());
+    let custom = json!({"model": "gemini-decision-1", "input": [{"type": "text", "text": "example"}], "questions": {"q": {"type": "choice", "instructions": "Choose", "criteria": {"a": "A", "b": "B"}}}});
+    let result = provider_query_build_test_request_body_for_api_format(
+        &json!({"request_body": custom}),
+        "gemini-decision-1",
+        "/test-model",
+        "gemini:decisions",
+    );
+    assert_eq!(result, custom);
 }

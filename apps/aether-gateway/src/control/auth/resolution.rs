@@ -231,6 +231,13 @@ pub(in super::super) async fn resolve_control_decision_auth_with_trusted_auth(
         apply_resolved_auth_context_to_decision(trace_id, &mut decision, auth_context);
     }
 
+    if decision.auth_endpoint_signature.as_deref() == Some("gemini:decisions")
+        && decision.auth_context.is_none()
+        && decision.local_auth_rejection.is_none()
+    {
+        decision.local_auth_rejection = Some(GatewayLocalAuthRejection::InvalidApiKey);
+    }
+
     if decision.local_auth_rejection.is_some() {
         log_local_auth_rejection(trace_id, &decision);
         return Ok(ControlDecisionAuthResolution::Resolved(decision));

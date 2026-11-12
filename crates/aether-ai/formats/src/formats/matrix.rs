@@ -46,6 +46,7 @@ const EMBEDDING_CANDIDATE_API_FORMATS: &[&str] = &[
 ];
 const RERANK_CANDIDATE_API_FORMATS: &[&str] = &["openai:rerank", "jina:rerank"];
 const GEMINI_INTERACTIONS_CANDIDATE_API_FORMATS: &[&str] = &["gemini:interactions"];
+const GEMINI_DECISIONS_CANDIDATE_API_FORMATS: &[&str] = &["gemini:decisions"];
 
 pub fn request_candidate_api_format_preference(
     client_api_format: &str,
@@ -65,6 +66,9 @@ pub fn request_candidate_api_format_preference(
     }
     if is_gemini_interactions_api_format(client_api_format.as_str()) {
         return (provider_api_format == "gemini:interactions").then_some((0, 0));
+    }
+    if client_api_format == "gemini:decisions" {
+        return (provider_api_format == "gemini:decisions").then_some((0, 0));
     }
     if is_embedding_api_format(client_api_format.as_str()) {
         return is_embedding_api_format(provider_api_format.as_str()).then_some((
@@ -126,6 +130,9 @@ pub fn request_candidate_api_formats(
     }
     if is_gemini_interactions_api_format(client_api_format.as_str()) {
         return GEMINI_INTERACTIONS_CANDIDATE_API_FORMATS.to_vec();
+    }
+    if client_api_format == "gemini:decisions" {
+        return GEMINI_DECISIONS_CANDIDATE_API_FORMATS.to_vec();
     }
     if is_embedding_api_format(client_api_format.as_str()) {
         let mut candidate_api_formats = EMBEDDING_CANDIDATE_API_FORMATS.to_vec();
@@ -297,6 +304,7 @@ pub fn api_data_format_id(api_format: &str) -> Option<&'static str> {
         "claude:messages" => Some("claude"),
         "gemini:generate_content" => Some("gemini"),
         "gemini:interactions" => Some("gemini_interactions"),
+        "gemini:decisions" => Some("gemini_decisions"),
         "openai:chat" => Some("openai_chat"),
         "openai:responses" | "openai:responses:compact" => Some("openai_responses"),
         "openai:embedding"

@@ -36,13 +36,23 @@ impl BillingService {
         pricing: &BillingModelPricingSnapshot,
         input: &BillingUsageInput,
     ) -> Result<BillingComputation, ExpressionEvaluationError> {
+        self.calculate_with_usage_dimensions(pricing, input, &BTreeMap::new())
+    }
+
+    /// Adds measured modality counts without overriding canonical pricing inputs.
+    pub fn calculate_with_usage_dimensions(
+        &self,
+        pricing: &BillingModelPricingSnapshot,
+        input: &BillingUsageInput,
+        usage_dimensions: &BTreeMap<String, Value>,
+    ) -> Result<BillingComputation, ExpressionEvaluationError> {
         let pricing_resolution = pricing
             .resolve_pricing_checked(
                 input.requested_processing_tier.as_deref(),
                 input.actual_processing_tier.as_deref(),
             )
             .map_err(|err| ExpressionEvaluationError::Failed(err.to_string()))?;
-        self.calculate_with_resolution(pricing, input, pricing_resolution)
+        self.calculate_with_resolution(pricing, input, pricing_resolution, Some(usage_dimensions))
     }
 
     pub fn estimate_authorization_cost_upper_bound(
@@ -134,8 +144,12 @@ impl BillingService {
 
                 // Validate the selected catalog and its finite coverage using the same path as
                 // settlement before evaluating every reachable tier as an upper-bound candidate.
-                let selected =
-                    self.calculate_with_resolution(pricing, scenario, pricing_resolution.clone())?;
+                let selected = self.calculate_with_resolution(
+                    pricing,
+                    scenario,
+                    pricing_resolution.clone(),
+                    None,
+                )?;
                 if !billing_computation_is_bounded(&selected) {
                     if !is_requested_catalog
                         && billing_computation_is_outside_catalog_context(&selected)
@@ -147,7 +161,7 @@ impl BillingService {
 
                 for candidate in pricing_candidates {
                     let computation =
-                        self.calculate_with_resolution(pricing, scenario, candidate)?;
+                        self.calculate_with_resolution(pricing, scenario, candidate, None)?;
                     if !billing_computation_is_bounded(&computation) {
                         return Ok(None);
                     }
@@ -163,6 +177,7 @@ impl BillingService {
         pricing: &BillingModelPricingSnapshot,
         input: &BillingUsageInput,
         pricing_resolution: BillingPricingResolution,
+        usage_dimensions: Option<&BTreeMap<String, Value>>,
     ) -> Result<BillingComputation, ExpressionEvaluationError> {
         if pricing_resolution.requires_actual_processing_tier() {
             return Ok(no_rule_computation(
@@ -242,7 +257,26 @@ impl BillingService {
             ));
         };
 
-        let dims = build_dimensions(input, &pricing_resolution);
+        let mut dims = build_dimensions(input, &pricing_resolution);
+        if let Some(measured) = usage_dimensions {
+            for prefix in ["input", "output", "cache_read"] {
+                let limit = match prefix {
+                    "output" => input.output_tokens,
+                    "cache_read" => input.cache_read_tokens,
+                    _ => input.input_tokens,
+                };
+                for modality in ["text", "image", "audio", "video", "document"] {
+                    let field = format!("{prefix}_{modality}_tokens");
+                    if let Some(tokens) = measured
+                        .get(&field)
+                        .and_then(Value::as_i64)
+                        .filter(|tokens| *tokens >= 0 && *tokens <= limit)
+                    {
+                        dims.entry(field).or_insert_with(|| json!(tokens));
+                    }
+                }
+            }
+        }
         let result = self.engine.evaluate(
             &rule.expression,
             Some(&rule.variables),
@@ -912,6 +946,34 @@ mod tests {
         BillingAuthorizationEstimateInput, BillingModelPricingSnapshot, BillingPricingSource,
         BillingSnapshotStatus, BillingUsageInput,
     };
+
+    #[test]
+    fn measured_modality_dimensions_do_not_override_canonical_tokens_or_prices() {
+        let input = BillingUsageInput {
+            input_tokens: 1000,
+            output_tokens: 100,
+            api_format: Some("gemini:generate_content".to_string()),
+            ..BillingUsageInput::new("chat")
+        };
+        let measured = std::collections::BTreeMap::from([
+            ("input_audio_tokens".to_string(), json!(700)),
+            ("output_image_tokens".to_string(), json!(80)),
+            ("input_tokens".to_string(), json!(999999)),
+            ("input_price_per_1m".to_string(), json!(0)),
+            ("output_audio_tokens".to_string(), json!(-1)),
+        ]);
+        let service = BillingService::new();
+        let base = service.calculate(&pricing(), &input).unwrap();
+        let result = service
+            .calculate_with_usage_dimensions(&pricing(), &input, &measured)
+            .unwrap();
+        assert_eq!(base.actual_total_cost, result.actual_total_cost);
+        let dims = result.cost_result.snapshot.resolved_dimensions;
+        assert_eq!(dims["input_audio_tokens"], 700);
+        assert_eq!(dims["output_image_tokens"], 80);
+        assert_eq!(dims["input_tokens"], 1000);
+        assert!(!dims.contains_key("output_audio_tokens"));
+    }
 
     fn pricing() -> BillingModelPricingSnapshot {
         BillingModelPricingSnapshot {

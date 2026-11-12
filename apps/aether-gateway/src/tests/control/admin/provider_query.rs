@@ -2054,20 +2054,20 @@ async fn gateway_handles_admin_provider_query_vertex_gemini_embedding_model_test
             assert_eq!(plan.provider_api_format, "gemini:embedding");
             assert_eq!(
                 plan.url,
-                "https://aiplatform.googleapis.com/v1/publishers/google/models/gemini-embedding-2:predict?key=sk-vertex-gemini-embedding"
+                "https://aiplatform.googleapis.com/v1/publishers/google/models/gemini-embedding-2:embedContent?key=sk-vertex-gemini-embedding"
             );
             assert_eq!(plan.model_name.as_deref(), Some("gemini-embedding-2"));
             assert!(!plan.stream);
             let body = plan.body.json_body.as_ref().expect("json body");
             assert!(
                 body.get("model").is_none(),
-                "Vertex predict carries the model in the URL path; the test body must not repeat it"
+                "Vertex embedContent 已在 URL 路径中指定模型，正文不应重复发送"
             );
             assert_eq!(
-                body["instances"][0]["content"],
+                body["content"]["parts"][0]["text"],
                 json!("This is a test embedding input.")
             );
-            assert!(body.get("content").is_none());
+            assert!(body.get("instances").is_none());
             assert!(body.get("requests").is_none());
             assert!(
                 body.get("stream").is_none(),
@@ -2082,14 +2082,8 @@ async fn gateway_handles_admin_provider_query_vertex_gemini_embedding_model_test
                 },
                 "body": {
                     "json_body": {
-                        "predictions": [
-                            {
-                                "embeddings": {
-                                    "values": [0.1, 0.2, 0.3]
-                                }
-                            }
-                        ],
-                        "deployedModelId": "gemini-embedding-2"
+                        "embedding": {"values": [0.1, 0.2, 0.3]},
+                        "usageMetadata": {"promptTokenCount": 7, "totalTokenCount": 7}
                     }
                 },
                 "telemetry": {
@@ -2155,7 +2149,7 @@ async fn gateway_handles_admin_provider_query_vertex_gemini_embedding_model_test
     assert_eq!(payload["error"], serde_json::Value::Null);
     assert_eq!(payload["attempts"][0]["status"], json!("success"));
     assert_eq!(
-        payload["attempts"][0]["request_body"]["instances"][0]["content"],
+        payload["attempts"][0]["request_body"]["content"]["parts"][0]["text"],
         json!("This is a test embedding input.")
     );
     assert_eq!(
@@ -2166,10 +2160,13 @@ async fn gateway_handles_admin_provider_query_vertex_gemini_embedding_model_test
         payload["attempts"][0]["endpoint_variant"],
         json!("vertex_native")
     );
-    assert_eq!(payload["attempts"][0]["endpoint_action"], json!("predict"));
+    assert_eq!(
+        payload["attempts"][0]["endpoint_action"],
+        json!("embedContent")
+    );
     assert_eq!(
         payload["attempts"][0]["endpoint_batch_strategy"],
-        json!("single_instance")
+        json!("single_native")
     );
     assert!(
         payload["attempts"][0]["request_body"]

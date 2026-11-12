@@ -21,6 +21,8 @@ use crate::constants::{
 };
 use aether_data_contracts::repository::candidate_selection::StoredMinimalCandidateSelectionRow;
 
+mod native;
+
 const EMBEDDING_PROXY_TEST_STACK_BYTES: usize = 16 * 1024 * 1024;
 
 fn run_embedding_proxy_test<F, Fut>(test_name: &'static str, make_future: F)
@@ -154,15 +156,18 @@ fn gemini_embedding_success_state(
         .with_data_state_for_tests(data_state)
 }
 
-fn vertex_gemini_embedding_success_state(execution_runtime_url: String) -> AppState {
+fn vertex_gemini_embedding_success_state(
+    execution_runtime_url: String,
+    client_api_format: &str,
+) -> AppState {
     let mut snapshot = sample_currently_usable_auth_snapshot(
         "key-vertex-gemini-embedding-success",
         "user-vertex-gemini-embedding-success",
     );
     snapshot.user_allowed_providers = None;
     snapshot.api_key_allowed_providers = Some(vec!["openai".to_string(), "vertex_ai".to_string()]);
-    snapshot.user_allowed_api_formats = Some(vec!["openai:embedding".to_string()]);
-    snapshot.api_key_allowed_api_formats = Some(vec!["openai:embedding".to_string()]);
+    snapshot.user_allowed_api_formats = Some(vec![client_api_format.to_string()]);
+    snapshot.api_key_allowed_api_formats = Some(vec![client_api_format.to_string()]);
     snapshot.user_allowed_models = Some(vec!["gemini-embedding-2-preview".to_string()]);
     snapshot.api_key_allowed_models = Some(vec!["gemini-embedding-2-preview".to_string()]);
     let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
@@ -575,7 +580,7 @@ fn assert_openai_to_vertex_gemini_embedding_execution_plan(plan: &ExecutionPlan)
     assert_eq!(plan.method, "POST");
     assert_eq!(
         plan.url,
-        "https://aiplatform.googleapis.com/v1/publishers/google/models/gemini-embedding-2:predict?key=sk-upstream-vertex-gemini-embedding"
+        "https://aiplatform.googleapis.com/v1/publishers/google/models/gemini-embedding-2:embedContent?key=sk-upstream-vertex-gemini-embedding"
     );
     assert_eq!(
         plan.model_name.as_deref(),
@@ -585,10 +590,10 @@ fn assert_openai_to_vertex_gemini_embedding_execution_plan(plan: &ExecutionPlan)
     let body = plan.body.json_body.as_ref().expect("json request body");
     assert!(
         body.get("model").is_none(),
-        "Vertex predict carries the model in the path; the body must not repeat it"
+        "Vertex embedContent carries the model in the path; the body must not repeat it"
     );
-    assert_eq!(body["instances"][0]["content"], "hello");
-    assert!(body.get("content").is_none());
+    assert_eq!(body["content"]["parts"][0]["text"], "hello");
+    assert!(body.get("instances").is_none());
     assert!(body.get("input").is_none());
     assert!(body.get("messages").is_none());
 }
@@ -708,14 +713,9 @@ fn vertex_gemini_embedding_execution_result(plan: &ExecutionPlan) -> ExecutionRe
         response_observation: None,
         body: Some(ResponseBody {
             json_body: Some(json!({
-                "predictions": [
-                    {
-                        "embeddings": {
-                            "values": [0.1, 0.2, 0.3]
-                        }
-                    }
-                ],
-                "deployedModelId": "gemini-embedding-2"
+                "embedding": {"values": [0.1, 0.2, 0.3]},
+                "modelVersion": "gemini-embedding-2",
+                "usageMetadata": {"promptTokenCount": 4, "totalTokenCount": 4}
             })),
             body_bytes_b64: None,
         }),
@@ -932,8 +932,10 @@ fn embeddings_route_converts_openai_payload_to_vertex_gemini_embedding_provider(
 async fn embeddings_route_converts_openai_payload_to_vertex_gemini_embedding_provider_impl() {
     let (execution_runtime_url, execution_runtime_handle) =
         start_server(vertex_gemini_embedding_conversion_execution_runtime()).await;
-    let gateway =
-        build_router_with_state(vertex_gemini_embedding_success_state(execution_runtime_url));
+    let gateway = build_router_with_state(vertex_gemini_embedding_success_state(
+        execution_runtime_url,
+        "openai:embedding",
+    ));
     let (gateway_url, gateway_handle) = start_server(gateway).await;
 
     let response = reqwest::Client::new()

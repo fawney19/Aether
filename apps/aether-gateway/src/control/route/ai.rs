@@ -165,6 +165,15 @@ pub(super) fn classify_ai_public_route(
             "gemini:interactions",
             true,
         ))
+    } else if method == http::Method::POST && normalized_path == "/v1beta/decisions" {
+        Some(classified_with_request_auth_channel(
+            "ai_public",
+            "gemini",
+            "decisions",
+            "api_key",
+            "gemini:decisions",
+            true,
+        ))
     } else if method == http::Method::POST && is_gemini_models_route(normalized_path) {
         if normalized_path.ends_with(":predictLongRunning") {
             Some(classified(

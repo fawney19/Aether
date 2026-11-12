@@ -26,7 +26,7 @@ use aether_data_contracts::repository::candidate_selection::{
     StoredRequestedModelCandidateRowsQuery,
 };
 use aether_data_contracts::repository::global_models::{
-    StoredAdminGlobalModel, UpdateAdminGlobalModelRecord,
+    StoredAdminGlobalModel, StoredPublicGlobalModel, UpdateAdminGlobalModelRecord,
 };
 use aether_data_contracts::repository::provider_catalog::{
     ProviderCatalogReadRepository, StoredProviderCatalogEndpoint, StoredProviderCatalogKey,
@@ -3304,6 +3304,88 @@ async fn gateway_handles_public_gemini_models_without_hitting_fallback_probe() {
 
     gateway_handle.abort();
     fallback_probe_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_gemini_model_cards_use_configured_limits() {
+    let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+        Some(hash_api_key("sk-gemini-model-cards")),
+        unrestricted_models_snapshot("key-gemini-cards", "user-gemini-cards"),
+    )]));
+    let candidate_repository = Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(
+        ["gemini-4-hydrogen", "gemini-2.5-flash", "gemini-decision-1"]
+            .into_iter()
+            .map(|model| {
+                sample_models_candidate_row(
+                    "provider-gemini",
+                    "gemini",
+                    "gemini:generate_content",
+                    model,
+                    10,
+                )
+            }),
+    ));
+    let global_model_repository = Arc::new(InMemoryGlobalModelReadRepository::seed(vec![
+        StoredPublicGlobalModel::new(
+            "global-hydrogen".to_string(),
+            "gemini-4-hydrogen".to_string(),
+            None,
+            true,
+            None,
+            None,
+            None,
+            Some(json!({"context_limit": 1048576, "output_limit": 65536})),
+            0,
+        )
+        .expect("global model should build"),
+    ]));
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(
+                GatewayDataState::with_minimal_candidate_selection_and_auth_for_tests(
+                    candidate_repository,
+                    auth_repository,
+                )
+                .with_global_model_repository_for_tests(global_model_repository),
+            ),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+    let client = reqwest::Client::new();
+    let response = client
+        .get(format!("{gateway_url}/v1beta/models"))
+        .header("x-goog-api-key", "sk-gemini-model-cards")
+        .send()
+        .await
+        .expect("list request should succeed");
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    let models = payload["models"]
+        .as_array()
+        .expect("models should be an array");
+    assert_eq!(models.len(), 3);
+    for (model, input, output) in [
+        ("gemini-4-hydrogen", 1048576, 65536),
+        ("gemini-2.5-flash", 128000, 8192),
+        ("gemini-decision-1", 262144, 1),
+    ] {
+        let card = models
+            .iter()
+            .find(|card| card["name"] == format!("models/{model}"))
+            .expect("model should be listed");
+        assert_eq!(card["inputTokenLimit"], input);
+        assert_eq!(card["outputTokenLimit"], output);
+        let response = client
+            .get(format!("{gateway_url}/v1beta/models/{model}"))
+            .header("x-goog-api-key", "sk-gemini-model-cards")
+            .send()
+            .await
+            .expect("detail request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        let detail: serde_json::Value = response.json().await.expect("json body should parse");
+        assert_eq!(detail, *card);
+    }
+    gateway_handle.abort();
 }
 
 #[tokio::test]

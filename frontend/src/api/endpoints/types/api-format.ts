@@ -16,6 +16,7 @@ export const API_FORMATS = {
   GEMINI: 'gemini:generate_content',
   GEMINI_GENERATE_CONTENT: 'gemini:generate_content',
   GEMINI_INTERACTIONS: 'gemini:interactions',
+  GEMINI_DECISIONS: 'gemini:decisions',
   GEMINI_VIDEO: 'gemini:video',
   GEMINI_FILES: 'gemini:files',
   GEMINI_EMBEDDING: 'gemini:embedding',
@@ -42,6 +43,7 @@ export const API_FORMAT_LABELS: Record<string, string> = {
   [API_FORMATS.CODEX_LIVE]: 'OpenAI Live',
   [API_FORMATS.GEMINI_GENERATE_CONTENT]: 'Gemini Generate Content',
   [API_FORMATS.GEMINI_INTERACTIONS]: 'Gemini Interactions',
+  [API_FORMATS.GEMINI_DECISIONS]: 'Gemini Decisions',
   [API_FORMATS.GEMINI_VIDEO]: 'Gemini Video',
   [API_FORMATS.GEMINI_FILES]: 'Gemini Files',
   [API_FORMATS.GEMINI_EMBEDDING]: 'Gemini Embedding',
@@ -66,6 +68,7 @@ export const API_FORMAT_LABELS: Record<string, string> = {
   GEMINI: 'Gemini Generate Content',
   GEMINI_GENERATE_CONTENT: 'Gemini Generate Content',
   GEMINI_INTERACTIONS: 'Gemini Interactions',
+  GEMINI_DECISIONS: 'Gemini Decisions',
   GEMINI_VIDEO: 'Gemini Video',
   GEMINI_FILES: 'Gemini Files',
   GEMINI_EMBEDDING: 'Gemini Embedding',
@@ -90,6 +93,7 @@ export const API_FORMAT_SHORT: Record<string, string> = {
   [API_FORMATS.CLAUDE_MESSAGES]: 'CM',
   [API_FORMATS.GEMINI_GENERATE_CONTENT]: 'G',
   [API_FORMATS.GEMINI_INTERACTIONS]: 'GI',
+  [API_FORMATS.GEMINI_DECISIONS]: 'GD',
   [API_FORMATS.GEMINI_VIDEO]: 'GV',
   [API_FORMATS.GEMINI_FILES]: 'GF',
   [API_FORMATS.GEMINI_EMBEDDING]: 'GE',
@@ -114,6 +118,7 @@ export const API_FORMAT_SHORT: Record<string, string> = {
   GEMINI: 'G',
   GEMINI_GENERATE_CONTENT: 'G',
   GEMINI_INTERACTIONS: 'GI',
+  GEMINI_DECISIONS: 'GD',
   GEMINI_VIDEO: 'GV',
   GEMINI_FILES: 'GF',
   GEMINI_EMBEDDING: 'GE',
@@ -138,6 +143,7 @@ export const API_FORMAT_ORDER: string[] = [
   API_FORMATS.CLAUDE_MESSAGES,
   API_FORMATS.GEMINI_GENERATE_CONTENT,
   API_FORMATS.GEMINI_INTERACTIONS,
+  API_FORMATS.GEMINI_DECISIONS,
   API_FORMATS.GEMINI_EMBEDDING,
   API_FORMATS.GEMINI_VIDEO,
   API_FORMATS.GEMINI_FILES,
@@ -169,6 +175,7 @@ export const API_FORMAT_KIND_LABELS: Record<string, string> = {
   messages: 'Messages',
   generate_content: 'Generate Content',
   interactions: 'Interactions',
+  decisions: 'Decisions',
   image: 'Image',
   video: 'Video',
   files: 'Files',
@@ -222,6 +229,8 @@ export function normalizeApiFormatAlias(format: string | null | undefined): stri
       return API_FORMATS.GEMINI_GENERATE_CONTENT
     case 'GEMINI_INTERACTIONS':
       return API_FORMATS.GEMINI_INTERACTIONS
+    case 'GEMINI_DECISIONS':
+      return API_FORMATS.GEMINI_DECISIONS
     case 'GEMINI_VIDEO':
       return API_FORMATS.GEMINI_VIDEO
     case 'GEMINI_FILES':

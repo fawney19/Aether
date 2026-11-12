@@ -2808,7 +2808,6 @@ fn standardized_usage_total_tokens(usage: &StandardizedUsage) -> u64 {
 
     positive_usage_component(usage.input_tokens)
         .saturating_add(positive_usage_component(usage.output_tokens))
-        .saturating_add(positive_usage_component(usage.reasoning_tokens))
 }
 
 fn standardized_usage_explicit_total_tokens(usage: &StandardizedUsage) -> Option<u64> {
@@ -3584,22 +3583,10 @@ fn extract_token_counts_from_json(value: &Value) -> Option<(u64, u64, u64)> {
             .or_else(|| usage.get("completion_tokens"))
             .and_then(Value::as_u64)
             .unwrap_or_default();
-        let reasoning = usage
-            .get("reasoning_tokens")
-            .and_then(Value::as_u64)
-            .or_else(|| {
-                usage
-                    .get("output_tokens_details")
-                    .or_else(|| usage.get("completion_tokens_details"))
-                    .and_then(Value::as_object)
-                    .and_then(|details| details.get("reasoning_tokens"))
-                    .and_then(Value::as_u64)
-            })
-            .unwrap_or_default();
         let total = usage
             .get("total_tokens")
             .and_then(Value::as_u64)
-            .unwrap_or_else(|| input.saturating_add(output).saturating_add(reasoning));
+            .unwrap_or_else(|| input.saturating_add(output));
         return Some((input, output, total));
     }
 
@@ -3611,11 +3598,17 @@ fn extract_token_counts_from_json(value: &Value) -> Option<(u64, u64, u64)> {
         let output = usage
             .get("candidatesTokenCount")
             .and_then(Value::as_u64)
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .saturating_add(
+                usage
+                    .get("thoughtsTokenCount")
+                    .and_then(Value::as_u64)
+                    .unwrap_or_default(),
+            );
         let raw_total = usage
             .get("totalTokenCount")
             .and_then(Value::as_u64)
-            .unwrap_or(input + output);
+            .unwrap_or_else(|| input.saturating_add(output));
         return Some((input, output, raw_total));
     }
 
@@ -3638,6 +3631,17 @@ fn empty_to_none(value: Option<String>) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn total_tokens_does_not_count_reasoning_twice() {
+        let usage = aether_contracts::StandardizedUsage {
+            input_tokens: 35,
+            output_tokens: 70,
+            reasoning_tokens: 65,
+            ..aether_contracts::StandardizedUsage::new()
+        };
+        assert_eq!(super::standardized_usage_total_tokens(&usage), 105);
+    }
+
     use super::{
         build_pending_usage_event_from_owned_seed, build_pending_usage_record,
         build_pending_usage_record_from_seed, build_stream_terminal_usage_event,
@@ -3676,6 +3680,32 @@ mod tests {
         .expect("tokens should exist");
 
         assert_eq!(tokens, (3, 5, 8));
+    }
+
+    #[test]
+    fn extracts_openai_usage_without_counting_reasoning_twice() {
+        let tokens = extract_token_counts_from_json(&json!({
+            "usage": {
+                "input_tokens": 3,
+                "output_tokens": 5,
+                "output_tokens_details": { "reasoning_tokens": 2 }
+            }
+        }))
+        .unwrap();
+        assert_eq!(tokens, (3, 5, 8));
+    }
+
+    #[test]
+    fn extracts_gemini_usage_with_thoughts_in_output() {
+        let tokens = extract_token_counts_from_json(&json!({
+            "usageMetadata": {
+                "promptTokenCount": 3,
+                "candidatesTokenCount": 5,
+                "thoughtsTokenCount": 2
+            }
+        }))
+        .unwrap();
+        assert_eq!(tokens, (3, 7, 10));
     }
 
     #[test]

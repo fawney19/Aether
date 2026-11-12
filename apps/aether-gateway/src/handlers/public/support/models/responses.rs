@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use aether_data_contracts::repository::candidate_selection::StoredMinimalCandidateSelectionRow;
 use axum::{
     body::Body,
@@ -206,15 +208,30 @@ pub(super) fn build_claude_model_detail_response(
     .into_response()
 }
 
-fn build_gemini_model_value(row: &StoredMinimalCandidateSelectionRow) -> serde_json::Value {
+fn build_gemini_model_value(
+    row: &StoredMinimalCandidateSelectionRow,
+    config: Option<&serde_json::Value>,
+) -> serde_json::Value {
+    if row.model_provider_model_name.trim_start_matches("models/") == "gemini-decision-1" {
+        return json!({
+            "name": format!("models/{}", row.global_model_name),
+            "baseModelId": row.global_model_name,
+            "version": row.model_provider_model_name,
+            "displayName": row.global_model_name,
+            "description": format!("Model {}", row.global_model_name),
+            "inputTokenLimit": 262144,
+            "outputTokenLimit": 1,
+            "supportedGenerationMethods": ["createDecision"],
+        });
+    }
     json!({
         "name": format!("models/{}", row.global_model_name),
         "baseModelId": row.global_model_name,
         "version": "001",
         "displayName": row.global_model_name,
         "description": format!("Model {}", row.global_model_name),
-        "inputTokenLimit": 128000,
-        "outputTokenLimit": 8192,
+        "inputTokenLimit": config.and_then(|value| value["context_limit"].as_u64()).unwrap_or(128000),
+        "outputTokenLimit": config.and_then(|value| value["output_limit"].as_u64()).unwrap_or(8192),
         "supportedGenerationMethods": ["generateContent", "countTokens"],
         "temperature": 1.0,
         "maxTemperature": 2.0,
@@ -225,6 +242,7 @@ fn build_gemini_model_value(row: &StoredMinimalCandidateSelectionRow) -> serde_j
 
 pub(super) fn build_gemini_models_list_response(
     rows: &[StoredMinimalCandidateSelectionRow],
+    configs: &BTreeMap<String, serde_json::Value>,
     page_size: usize,
     page_token: Option<&str>,
 ) -> Response<Body> {
@@ -236,7 +254,7 @@ pub(super) fn build_gemini_models_list_response(
         .iter()
         .skip(start_idx)
         .take(page_size)
-        .map(build_gemini_model_value)
+        .map(|row| build_gemini_model_value(row, configs.get(&row.global_model_name)))
         .collect::<Vec<_>>();
     let mut payload = json!({ "models": window });
     if end_idx < rows.len() {
@@ -247,6 +265,7 @@ pub(super) fn build_gemini_models_list_response(
 
 pub(super) fn build_gemini_model_detail_response(
     row: &StoredMinimalCandidateSelectionRow,
+    config: Option<&serde_json::Value>,
 ) -> Response<Body> {
-    Json(build_gemini_model_value(row)).into_response()
+    Json(build_gemini_model_value(row, config)).into_response()
 }

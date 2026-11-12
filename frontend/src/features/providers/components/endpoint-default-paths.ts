@@ -102,6 +102,7 @@ function usesVersionedApiRootByDefault(apiFormat: string): boolean {
     || apiFormat === 'claude:messages'
     || apiFormat === 'gemini:generate_content'
     || apiFormat === 'gemini:interactions'
+    || apiFormat === 'gemini:decisions'
     || apiFormat === 'gemini:embedding'
     || apiFormat === 'gemini:video'
 }
@@ -114,6 +115,7 @@ function versionedApiRootSuffix(apiFormat: string): '/v1' | '/v1beta' {
   }
   if (
     apiFormat === 'gemini:generate_content'
+    || apiFormat === 'gemini:decisions'
     || apiFormat === 'gemini:embedding'
     || apiFormat === 'gemini:video'
   ) {
@@ -126,6 +128,7 @@ function skipsVersionedApiRootDefault(apiFormat: string, baseUrl: string): boole
   if (
     apiFormat === 'gemini:generate_content'
     || apiFormat === 'gemini:interactions'
+    || apiFormat === 'gemini:decisions'
     || apiFormat === 'gemini:embedding'
     || apiFormat === 'gemini:video'
   ) {
@@ -188,6 +191,9 @@ export function getDefaultEndpointPath(params: {
     }
   }
   if (providerType === 'vertex_ai') {
+    if (normalizedApiFormat === 'gemini:interactions') {
+      return '/v1beta1/projects/{project_id}/locations/{region}/interactions'
+    }
     if (normalizedApiFormat === 'gemini:generate_content') {
       return '/v1/projects/{project_id}/locations/{region}/publishers/google/models/{model}:{action}'
     }

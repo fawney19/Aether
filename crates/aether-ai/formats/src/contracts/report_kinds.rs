@@ -9,6 +9,9 @@ pub const OPENAI_CHAT_SYNC_FINALIZE_REPORT_KIND: &str = "openai_chat_sync_finali
 pub const CLAUDE_CHAT_SYNC_FINALIZE_REPORT_KIND: &str = "claude_chat_sync_finalize";
 pub const GEMINI_CHAT_SYNC_FINALIZE_REPORT_KIND: &str = "gemini_chat_sync_finalize";
 pub const GEMINI_INTERACTIONS_SYNC_FINALIZE_REPORT_KIND: &str = "gemini_interactions_sync_finalize";
+pub const GEMINI_DECISIONS_SYNC_FINALIZE_REPORT_KIND: &str = "gemini_decisions_sync_finalize";
+pub const GEMINI_DECISIONS_SYNC_SUCCESS_REPORT_KIND: &str = "gemini_decisions_sync_success";
+pub const GEMINI_DECISIONS_SYNC_ERROR_REPORT_KIND: &str = "gemini_decisions_sync_error";
 pub const OPENAI_RESPONSES_SYNC_FINALIZE_REPORT_KIND: &str = "openai_responses_sync_finalize";
 pub const OPENAI_RESPONSES_COMPACT_SYNC_FINALIZE_REPORT_KIND: &str =
     "openai_responses_compact_sync_finalize";
@@ -71,6 +74,9 @@ pub fn implicit_sync_finalize_report_kind(plan_kind: &str) -> Option<&'static st
         CLAUDE_CHAT_SYNC_PLAN_KIND => Some(CLAUDE_CHAT_SYNC_FINALIZE_REPORT_KIND),
         GEMINI_CHAT_SYNC_PLAN_KIND => Some(GEMINI_CHAT_SYNC_FINALIZE_REPORT_KIND),
         GEMINI_INTERACTIONS_SYNC_PLAN_KIND => Some(GEMINI_INTERACTIONS_SYNC_FINALIZE_REPORT_KIND),
+        super::plan_kinds::GEMINI_DECISIONS_SYNC_PLAN_KIND => {
+            Some(GEMINI_DECISIONS_SYNC_FINALIZE_REPORT_KIND)
+        }
         OPENAI_RESPONSES_SYNC_PLAN_KIND => Some(OPENAI_RESPONSES_SYNC_FINALIZE_REPORT_KIND),
         OPENAI_RESPONSES_COMPACT_SYNC_PLAN_KIND => {
             Some(OPENAI_RESPONSES_COMPACT_SYNC_FINALIZE_REPORT_KIND)
@@ -90,6 +96,7 @@ pub fn core_error_default_client_api_format(report_kind: &str) -> Option<&'stati
         CLAUDE_CHAT_SYNC_FINALIZE_REPORT_KIND => Some("claude:messages"),
         GEMINI_CHAT_SYNC_FINALIZE_REPORT_KIND => Some("gemini:generate_content"),
         GEMINI_INTERACTIONS_SYNC_FINALIZE_REPORT_KIND => Some("gemini:interactions"),
+        GEMINI_DECISIONS_SYNC_FINALIZE_REPORT_KIND => Some("gemini:decisions"),
         OPENAI_RESPONSES_SYNC_FINALIZE_REPORT_KIND => Some("openai:responses"),
         OPENAI_RESPONSES_COMPACT_SYNC_FINALIZE_REPORT_KIND => Some("openai:responses:compact"),
         OPENAI_EMBEDDING_SYNC_FINALIZE_REPORT_KIND => Some("openai:embedding"),
@@ -104,6 +111,7 @@ pub fn core_error_default_client_api_format(report_kind: &str) -> Option<&'stati
 
 pub fn core_error_background_report_kind(report_kind: &str) -> Option<&'static str> {
     match report_kind {
+        GEMINI_DECISIONS_SYNC_FINALIZE_REPORT_KIND => Some(GEMINI_DECISIONS_SYNC_ERROR_REPORT_KIND),
         OPENAI_MEMORIES_SYNC_FINALIZE_REPORT_KIND => Some(OPENAI_RESPONSES_SYNC_ERROR_REPORT_KIND),
         OPENAI_CHAT_SYNC_FINALIZE_REPORT_KIND => Some(OPENAI_CHAT_SYNC_ERROR_REPORT_KIND),
         CLAUDE_CHAT_SYNC_FINALIZE_REPORT_KIND => Some(CLAUDE_CHAT_SYNC_ERROR_REPORT_KIND),
@@ -131,6 +139,9 @@ pub fn core_error_background_report_kind(report_kind: &str) -> Option<&'static s
 
 pub fn core_success_background_report_kind(report_kind: &str) -> Option<&'static str> {
     match report_kind {
+        GEMINI_DECISIONS_SYNC_FINALIZE_REPORT_KIND => {
+            Some(GEMINI_DECISIONS_SYNC_SUCCESS_REPORT_KIND)
+        }
         OPENAI_MEMORIES_SYNC_FINALIZE_REPORT_KIND => Some(OPENAI_MEMORIES_SYNC_SUCCESS_REPORT_KIND),
         OPENAI_CHAT_SYNC_FINALIZE_REPORT_KIND => Some(OPENAI_CHAT_SYNC_SUCCESS_REPORT_KIND),
         CLAUDE_CHAT_SYNC_FINALIZE_REPORT_KIND => Some(CLAUDE_CHAT_SYNC_SUCCESS_REPORT_KIND),
