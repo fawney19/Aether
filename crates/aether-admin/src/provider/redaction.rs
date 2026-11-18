@@ -1089,6 +1089,7 @@ fn project_quota_window(value: &Value) -> Option<Value> {
         "reset_seconds",
         "window_minutes",
         "usage_reset_at",
+        "period_start_at",
     ] {
         copy_json_number_or_null(source, &mut projected, field);
     }

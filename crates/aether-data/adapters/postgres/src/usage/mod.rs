@@ -1625,6 +1625,13 @@ const SUMMARIZE_USAGE_BY_PROVIDER_API_KEY_IDS_SQL: &str =
 const SUMMARIZE_PROVIDER_API_KEY_WINDOW_USAGE_SQL: &str =
     include_str!("queries/summarize_provider_api_key_window_usage_sql.sql");
 
+fn normalized_window_model_prefix(prefix: Option<&str>) -> Option<String> {
+    prefix
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase)
+}
+
 const APPLY_API_KEY_USAGE_DELTA_SQL: &str =
     include_str!("queries/apply_api_key_usage_delta_sql.sql");
 
@@ -8744,6 +8751,8 @@ ORDER BY "usage".user_id ASC
         let mut window_codes = Vec::with_capacity(requests.len());
         let mut start_unix_secs = Vec::with_capacity(requests.len());
         let mut end_unix_secs = Vec::with_capacity(requests.len());
+        let mut include_model_prefixes = Vec::with_capacity(requests.len());
+        let mut exclude_model_prefixes = Vec::with_capacity(requests.len());
 
         for request in requests {
             let provider_api_key_id = request.provider_api_key_id.trim();
@@ -8776,6 +8785,12 @@ ORDER BY "usage".user_id ASC
                     "provider api key window usage end_unix_secs is out of range".to_string(),
                 )
             })?);
+            include_model_prefixes.push(normalized_window_model_prefix(
+                request.include_model_prefix.as_deref(),
+            ));
+            exclude_model_prefixes.push(normalized_window_model_prefix(
+                request.exclude_model_prefix.as_deref(),
+            ));
         }
 
         let mut rows = sqlx::query(SUMMARIZE_PROVIDER_API_KEY_WINDOW_USAGE_SQL)
@@ -8783,6 +8798,8 @@ ORDER BY "usage".user_id ASC
             .bind(&window_codes)
             .bind(&start_unix_secs)
             .bind(&end_unix_secs)
+            .bind(&include_model_prefixes)
+            .bind(&exclude_model_prefixes)
             .fetch(&self.pool);
 
         let mut summaries = Vec::new();

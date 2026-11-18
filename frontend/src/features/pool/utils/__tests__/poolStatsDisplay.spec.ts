@@ -164,4 +164,82 @@ describe('poolStatsDisplay', () => {
     if (display.kind !== 'account_total') throw new Error('expected account total display')
     expect(metricValues(display.metrics).total_tokens).toBe('1.5B')
   })
+
+  it('builds xAI weekly cycle stats only from annotated usage windows', () => {
+    const display = buildPoolStatsDisplay(
+      {
+        request_count: 1291,
+        status_snapshot: {
+          quota: {
+            windows: [
+              {
+                code: 'usage',
+                label: '周额度',
+                scope: 'account',
+                window_minutes: 10_080,
+                usage: { request_count: 12, total_tokens: 3000, total_cost_usd: '0.5' },
+              },
+              { code: 'prepaid', label: '预付额度', scope: 'account' },
+            ],
+          },
+        },
+      },
+      'xai',
+      'current_cycle',
+    )
+
+    expect(display.kind).toBe('codex_cycle')
+    if (display.kind !== 'codex_cycle') throw new Error('expected cycle display')
+    expect(display.groups.map(group => group.label)).toEqual(['周'])
+    expect(metricValues(display.groups[0].metrics).request_count).toBe('12')
+  })
+
+  it('groups Antigravity quota-group cycle stats by model family', () => {
+    const groupWindow = (index: number, bucketId: string, minutes: number, requests: number) => ({
+      code: `group:${index}:${bucketId}`,
+      scope: 'quota_group',
+      quota_group_label: index === 0 ? 'Gemini Models' : 'Claude and GPT models',
+      bucket_id: bucketId,
+      window_minutes: minutes,
+      usage: { request_count: requests, total_tokens: 0, total_cost_usd: '0' },
+    })
+    const display = buildPoolStatsDisplay(
+      {
+        status_snapshot: {
+          quota: {
+            windows: [
+              groupWindow(1, '3p-weekly', 10_080, 4),
+              groupWindow(0, 'gemini-weekly', 10_080, 30),
+              { code: 'model:gemini-3-flash', scope: 'model', label: 'Gemini 3 Flash' },
+              groupWindow(0, 'gemini-5h', 300, 3),
+              groupWindow(1, '3p-5h', 300, 1),
+            ],
+          },
+        },
+      },
+      'antigravity',
+      'current_cycle',
+    )
+
+    expect(display.kind).toBe('codex_cycle')
+    if (display.kind !== 'codex_cycle') throw new Error('expected cycle display')
+    expect(display.groups.map(group => [group.section, group.label])).toEqual([
+      ['Gemini', 'Gemini 5H'],
+      ['Gemini', 'Gemini 周'],
+      ['Claude/GPT', 'Claude/GPT 5H'],
+      ['Claude/GPT', 'Claude/GPT 周'],
+    ])
+    expect(display.groups.map(group => metricValues(group.metrics).request_count))
+      .toEqual(['3', '30', '1', '4'])
+  })
+
+  it('keeps account totals for non-codex keys without cycle windows', () => {
+    const display = buildPoolStatsDisplay(
+      { request_count: 7, status_snapshot: { quota: { windows: [] } } },
+      'antigravity',
+      'current_cycle',
+    )
+
+    expect(display.kind).toBe('account_total')
+  })
 })

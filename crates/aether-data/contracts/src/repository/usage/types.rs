@@ -1244,6 +1244,31 @@ pub struct ProviderApiKeyWindowUsageRequest {
     pub window_code: String,
     pub start_unix_secs: u64,
     pub end_unix_secs: u64,
+    /// Only count usage whose effective model (`target_model`, falling back to
+    /// `model`) starts with this lowercase prefix.
+    #[serde(default)]
+    pub include_model_prefix: Option<String>,
+    /// Skip usage whose effective model starts with this lowercase prefix.
+    #[serde(default)]
+    pub exclude_model_prefix: Option<String>,
+}
+
+impl ProviderApiKeyWindowUsageRequest {
+    pub fn matches_model(&self, model: &str, target_model: Option<&str>) -> bool {
+        let effective = target_model
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(model.trim())
+            .to_ascii_lowercase();
+        let prefix_matches = |prefix: Option<&str>| {
+            prefix
+                .map(str::trim)
+                .filter(|prefix| !prefix.is_empty())
+                .map(|prefix| effective.starts_with(&prefix.to_ascii_lowercase()))
+        };
+        prefix_matches(self.include_model_prefix.as_deref()).unwrap_or(true)
+            && !prefix_matches(self.exclude_model_prefix.as_deref()).unwrap_or(false)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
