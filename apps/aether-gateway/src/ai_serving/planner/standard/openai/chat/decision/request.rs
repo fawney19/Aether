@@ -808,6 +808,7 @@ pub(crate) async fn resolve_local_openai_chat_candidate_payload_parts(
         Some(input.auth_context.api_key_id.as_str()),
         effective_headers,
         false,
+        input.strict_format_conversion(),
     ) else {
         mark_skipped_local_openai_chat_candidate_with_extra_data(
             state,
@@ -2435,6 +2436,7 @@ mod tests {
             None,
             None,
             &http::HeaderMap::new(),
+            false,
             false,
         )
         .expect("Responses-shaped chat request should build");

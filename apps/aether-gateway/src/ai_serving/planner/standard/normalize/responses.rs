@@ -197,6 +197,7 @@ pub(crate) fn build_cross_format_openai_responses_request_body(
         user_api_key_id,
         None,
         enable_model_directives,
+        false,
     )
 }
 
@@ -213,6 +214,7 @@ pub(crate) fn build_cross_format_openai_responses_request_body_with_codex_model_
     history_scope: Option<&str>,
     model_capabilities: Option<&crate::ai_serving::CodexResponsesModelCapabilities>,
     enable_model_directives: bool,
+    strict_format_conversion: bool,
 ) -> Option<Value> {
     let provider_request_body = surface_build_cross_format_openai_responses_request_body(
         body_json,
@@ -223,6 +225,7 @@ pub(crate) fn build_cross_format_openai_responses_request_body_with_codex_model_
         upstream_is_stream,
         enable_model_directives,
         history_scope,
+        strict_format_conversion,
     )?;
     let mut provider_request_body =
         apply_standard_provider_request_body_rules_with_request_headers(
@@ -317,6 +320,7 @@ mod antigravity_schema_tests {
                     &http::HeaderMap::new(),
                     Some("antigravity-schema-test"),
                     None,
+                    false,
                     false,
                 )
                 .unwrap();

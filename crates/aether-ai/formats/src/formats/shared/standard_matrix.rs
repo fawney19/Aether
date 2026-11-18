@@ -115,6 +115,7 @@ pub fn build_standard_request_body_with_model_directives_and_request_headers(
         request_headers,
         enable_model_directives,
         crate::formats::openai::responses::OpenAiResponsesReasoningReplayPolicy::OpenAiItemIds,
+        false,
     )
 }
 
@@ -132,6 +133,7 @@ pub fn build_standard_request_body_with_model_directives_and_request_headers_and
     request_headers: Option<&http::HeaderMap>,
     enable_model_directives: bool,
     reasoning_replay_policy: crate::formats::openai::responses::OpenAiResponsesReasoningReplayPolicy,
+    strict_format_conversion: bool,
 ) -> Option<Value> {
     let reasoning_replay_policy = if provider_type.trim().eq_ignore_ascii_case("xai") {
         crate::formats::openai::responses::OpenAiResponsesReasoningReplayPolicy::XaiEncrypted
@@ -139,6 +141,7 @@ pub fn build_standard_request_body_with_model_directives_and_request_headers_and
         reasoning_replay_policy
     };
     let mut format_context = FormatContext::default()
+        .with_strict_format_conversion(strict_format_conversion)
         .with_mapped_model(mapped_model)
         .with_request_path(request_path)
         .with_upstream_stream(upstream_is_stream);
@@ -163,7 +166,7 @@ pub fn build_standard_request_body_with_model_directives_and_request_headers_and
             crate::formats::shared::standard_normalize::chat_compatible_body_for_standard_source(
                 body_json,
                 source_api_format.as_ref(),
-                user_api_key_id,
+                &format_context,
             )?,
         )
     } else {
@@ -645,6 +648,7 @@ mod tests {
             None,
             false,
             OpenAiResponsesReasoningReplayPolicy::DeepSeekOpaque,
+            false,
         )
         .expect("same-family Responses body should build");
         assert_eq!(preserved["model"], "deepseek-v4-flash");
@@ -676,6 +680,7 @@ mod tests {
             None,
             false,
             OpenAiResponsesReasoningReplayPolicy::OpenAiItemIds,
+            false,
         )
         .expect("strict same-family Responses body should build");
         assert_eq!(
@@ -701,6 +706,7 @@ mod tests {
             None,
             false,
             OpenAiResponsesReasoningReplayPolicy::DeepSeekOpaque,
+            false,
         )
         .expect("Compact body should continue through canonical normalization");
         assert_eq!(

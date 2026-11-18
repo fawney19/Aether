@@ -37,6 +37,7 @@ struct OpenAIChatProviderToolState {
 
 #[derive(Default)]
 pub struct OpenAIChatProviderState {
+    pub(crate) observed_end: bool,
     terminal_only: bool,
     response_id: Option<String>,
     model: Option<String>,
@@ -156,6 +157,13 @@ impl OpenAIChatProviderState {
         line: Vec<u8>,
     ) -> Result<Vec<CanonicalStreamFrame>, AiSurfaceFinalizeError> {
         let Some(value) = decode_json_data_line(&line) else {
+            if line
+                .trim_ascii()
+                .strip_prefix(b"data:")
+                .is_some_and(|data| data.trim_ascii() == b"[DONE]")
+            {
+                self.observed_end = true;
+            }
             return Ok(Vec::new());
         };
         let Some(chunk_object) = value.as_object() else {
@@ -178,6 +186,11 @@ impl OpenAIChatProviderState {
         }
 
         let mut out = Vec::new();
+        if openai_stream_payload_is_terminal_error(&value) {
+            self.observed_end = true;
+            out.push(self.unknown_frame(report_context, value));
+            return Ok(out);
+        }
         let Some(chunk_choices) = chunk_object.get("choices").and_then(Value::as_array) else {
             if let Some(usage) = Self::finish_usage(chunk_object.get("usage")) {
                 self.ensure_started(report_context, &mut out);
@@ -226,6 +239,10 @@ impl OpenAIChatProviderState {
                 continue;
             };
             let finish_reason_key_present = choice_object.contains_key("finish_reason");
+            self.observed_end |= choice_object
+                .get("finish_reason")
+                .and_then(Value::as_str)
+                .is_some_and(|reason| !reason.trim().is_empty());
             let Some(delta) = choice_object.get("delta").and_then(Value::as_object) else {
                 if let Some(finish_reason) = normalize_openai_finish_reason(
                     choice_object.get("finish_reason").and_then(Value::as_str),
@@ -435,6 +452,10 @@ impl OpenAIChatProviderState {
 }
 
 impl OpenAIResponsesProviderState {
+    pub(crate) fn observed_end(&self) -> bool {
+        self.finished
+    }
+
     pub(crate) fn terminal_observation() -> Self {
         Self {
             terminal_only: true,
@@ -2187,6 +2208,35 @@ struct OpenAIResponsesClientToolState {
     thought_signature_output_index: Option<usize>,
     output_index: Option<usize>,
     web_search: bool,
+    wrapped_custom: bool,
+    custom_input: Option<String>,
+}
+
+impl OpenAIResponsesClientToolState {
+    fn call_item(&self, item_id: &str, call_id: &str, completed: bool) -> Value {
+        let mut item = json!({
+            "id": item_id, "call_id": call_id, "name": self.name,
+            "status": if completed { "completed" } else { "in_progress" },
+        });
+        if self.wrapped_custom {
+            item["type"] = json!("custom_tool_call");
+            item["input"] = json!(self.custom_input.as_deref().unwrap_or_default());
+        } else {
+            item["type"] = json!("function_call");
+            item["arguments"] = json!(if completed {
+                self.arguments.as_str()
+            } else {
+                ""
+            });
+        }
+        if completed && self.name.is_empty() {
+            item["name"] = json!("unknown");
+        }
+        if let Some(namespace) = &self.namespace {
+            item["namespace"] = json!(namespace);
+        }
+        item
+    }
 }
 
 #[derive(Clone, Default)]
@@ -3000,6 +3050,18 @@ impl OpenAIResponsesClientEmitter {
         let indices = self.tool_calls.keys().copied().collect::<Vec<_>>();
         for index in indices {
             let output_index = self.ensure_tool_output_index(index);
+            let tool = self.tool_calls.get_mut(&index).expect("known tool index");
+            if tool.wrapped_custom {
+                // Chat may split JSON escape sequences between argument fragments.
+                tool.custom_input = Some(
+                    crate::formats::openai::namespace::wrapped_custom_input(&tool.arguments)
+                        .ok_or_else(|| {
+                            AiSurfaceFinalizeError::new(
+                                "custom tool arguments require a string input",
+                            )
+                        })?,
+                );
+            }
             let state = self.tool_calls.get(&index).cloned().unwrap_or_default();
             let call_id = if state.call_id.is_empty() {
                 build_generated_tool_call_id(index)
@@ -3032,31 +3094,31 @@ impl OpenAIResponsesClientEmitter {
                 )?);
                 continue;
             }
-            out.extend(self.encode_response_event(
-                "response.function_call_arguments.done",
-                json!({
-                    "type": "response.function_call_arguments.done",
-                    "response_id": self.response_id(),
-                    "output_index": output_index,
-                    "item_id": item_id.clone(),
-                    "call_id": call_id.clone(),
-                    "name": name,
-                    "arguments": state.arguments.as_str(),
-                }),
-            )?);
-            let mut completed_item = json!({
-                "type": "function_call",
-                "id": item_id.clone(),
-                "call_id": call_id,
-                "name": name,
-                "arguments": state.arguments.as_str(),
-                "status": "completed",
-            });
-            if let (Some(namespace), Some(item)) =
-                (state.namespace.clone(), completed_item.as_object_mut())
-            {
-                item.insert("namespace".to_string(), Value::String(namespace));
+            if let Some(input) = &state.custom_input {
+                for (event, field) in [
+                    ("response.custom_tool_call_input.delta", "delta"),
+                    ("response.custom_tool_call_input.done", "input"),
+                ] {
+                    out.extend(self.encode_response_event(event, json!({
+                        "type": event, "response_id": self.response_id(), "output_index": output_index,
+                        "item_id": item_id, "call_id": call_id, (field): input,
+                    }))?);
+                }
+            } else {
+                out.extend(self.encode_response_event(
+                    "response.function_call_arguments.done",
+                    json!({
+                        "type": "response.function_call_arguments.done",
+                        "response_id": self.response_id(),
+                        "output_index": output_index,
+                        "item_id": item_id.clone(),
+                        "call_id": call_id.clone(),
+                        "name": name,
+                        "arguments": state.arguments.as_str(),
+                    }),
+                )?);
             }
+            let completed_item = state.call_item(&item_id, &call_id, true);
             out.extend(self.encode_response_event(
                 "response.output_item.done",
                 json!({
@@ -3216,23 +3278,7 @@ impl OpenAIResponsesClientEmitter {
                     ));
                     continue;
                 }
-                let mut item = json!({
-                    "type": "function_call",
-                    "id": item_id.clone(),
-                    "call_id": call_id,
-                    "name": if state.name.is_empty() {
-                        "unknown".to_string()
-                    } else {
-                        state.name.clone()
-                    },
-                    "arguments": state.arguments.clone(),
-                    "status": "completed",
-                });
-                if let (Some(namespace), Some(item)) =
-                    (state.namespace.clone(), item.as_object_mut())
-                {
-                    item.insert("namespace".to_string(), Value::String(namespace));
-                }
+                let item = state.call_item(&item_id, &call_id, true);
                 ordered_output.push((output_index, item));
             }
         }
@@ -3530,10 +3576,8 @@ impl OpenAIResponsesClientEmitter {
                 state.name = emitted_name;
                 state.namespace = emitted_namespace;
                 state.web_search = web_search;
-                let emitted_call_id = state.call_id.clone();
-                let emitted_name = state.name.clone();
-                let emitted_namespace = state.namespace.clone();
-                let mut item = if state.web_search {
+                state.wrapped_custom = self.namespace_tool_aliases.is_wrapped_custom(&name);
+                let item = if state.web_search {
                     json!({
                         "type": "web_search_call",
                         "id": item_id,
@@ -3544,18 +3588,8 @@ impl OpenAIResponsesClientEmitter {
                         },
                     })
                 } else {
-                    json!({
-                        "type": "function_call",
-                        "id": item_id,
-                        "call_id": emitted_call_id,
-                        "name": emitted_name,
-                        "arguments": "",
-                        "status": "in_progress",
-                    })
+                    state.call_item(&item_id, &call_id, false)
                 };
-                if let (Some(namespace), Some(item)) = (emitted_namespace, item.as_object_mut()) {
-                    item.insert("namespace".to_string(), Value::String(namespace));
-                }
                 out.extend(self.encode_response_event(
                     "response.output_item.added",
                     json!({
@@ -3636,7 +3670,7 @@ impl OpenAIResponsesClientEmitter {
                 let response_id = self.response_id().to_string();
                 let state = self.tool_calls.entry(index).or_default();
                 state.arguments.push_str(&arguments);
-                if state.web_search {
+                if state.web_search || state.wrapped_custom {
                     return Ok(out);
                 }
                 let call_id = if state.call_id.is_empty() {
@@ -6145,6 +6179,78 @@ mod tests {
         assert!(sse.contains("\"type\":\"function_call_output\""));
         assert!(sse.contains("\"call_id\":\"call_123\""));
         assert!(sse.contains("\"output\":\"{\\\"ok\\\":true}\""));
+    }
+
+    #[test]
+    fn streamed_chat_wrapped_custom_call_restores_raw_input() {
+        use crate::formats::shared::stream_core::StreamingStandardFormatMatrix;
+
+        let context = json!({
+            "provider_api_format": "openai:chat", "client_api_format": "openai:responses",
+            "original_request_body": {"tools":[{"type":"namespace","name":"notes",
+                "description":"Notes","tools":[{"type":"custom","name":"write","format":{"type":"text"}}]}]}
+        });
+        let mut matrix = StreamingStandardFormatMatrix::default();
+        let payload = "a\nb \"c\"";
+        let args = json!({"input":payload}).to_string();
+        let split = args.find('\\').unwrap() + 1;
+        let mut output = Vec::new();
+        for (delta, reason) in [
+            (
+                json!({"tool_calls":[{"index":0,"type":"function","id":"call_note","function":{"name":"write","arguments": &args[..split]}}]}),
+                Value::Null,
+            ),
+            (
+                json!({"tool_calls":[{"index":0,"function":{"arguments": &args[split..]}}]}),
+                Value::Null,
+            ),
+            (json!({}), json!("tool_calls")),
+        ] {
+            output.extend(
+                matrix
+                    .transform_line(
+                        &context,
+                        data_line(json!({
+                            "id":"chatcmpl_notes", "model":"test",
+                            "choices":[{"index":0,"delta":delta,"finish_reason":reason}]
+                        })),
+                    )
+                    .unwrap(),
+            );
+        }
+        output.extend(
+            matrix
+                .transform_line(&context, b"data: [DONE]".to_vec())
+                .unwrap(),
+        );
+        output.extend(matrix.finish(&context).unwrap());
+        let events: Vec<Value> = std::str::from_utf8(&output)
+            .unwrap()
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .map(|data| serde_json::from_str(data).unwrap())
+            .collect();
+        let event = |kind: &str| events.iter().find(|value| value["type"] == kind).unwrap();
+        let start = &event("response.output_item.added")["item"];
+        let done = &event("response.output_item.done")["item"];
+        assert_eq!(start["type"], "custom_tool_call");
+        assert_eq!(start["namespace"], "notes");
+        assert_eq!(start["input"], "");
+        assert_eq!(done["call_id"], "call_note");
+        assert_eq!(done["name"], "write");
+        assert_eq!(done["input"], payload);
+        assert_eq!(
+            event("response.custom_tool_call_input.delta")["delta"],
+            payload
+        );
+        assert_eq!(
+            event("response.custom_tool_call_input.done")["input"],
+            payload
+        );
+        assert_eq!(&event("response.completed")["response"]["output"][0], done);
+        assert!(!events
+            .iter()
+            .any(|value| value["type"] == "response.function_call_arguments.delta"));
     }
 
     #[test]

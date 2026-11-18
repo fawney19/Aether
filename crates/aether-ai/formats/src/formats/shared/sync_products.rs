@@ -26,6 +26,7 @@ use serde_json::{json, Map, Value};
 
 use super::{decode_sync_report_body_base64, AiSurfaceFinalizeError};
 use crate::formats::claude::messages::stream::ClaudeProviderState;
+use crate::formats::context::strict_format_conversion;
 use crate::formats::gemini::generate_content::stream::GeminiProviderState;
 use crate::formats::openai::chat::response::openai_chat_reasoning_texts;
 use crate::formats::openai::chat::stream::{OpenAIChatProviderState, OpenAIResponsesProviderState};
@@ -33,9 +34,9 @@ use crate::formats::shared::model_directives::model_directive_display_model_from
 use crate::formats::shared::response::sanitize_claude_read_tool_inputs;
 use crate::formats::shared::stream_core::common::{
     content_part_from_openai_image_generation_item, gemini_usage_metadata_from_usage,
-    map_openai_finish_reason_to_gemini, parse_json_arguments_value,
-    unsupported_stream_event_message, CanonicalContentPart, CanonicalStreamEvent,
-    CanonicalStreamFrame, CanonicalUsage,
+    map_openai_finish_reason_to_gemini, openai_stream_payload_is_terminal_error,
+    parse_json_arguments_value, unsupported_stream_event_message, CanonicalContentPart,
+    CanonicalStreamEvent, CanonicalStreamFrame, CanonicalUsage,
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -87,27 +88,22 @@ pub fn maybe_build_standard_cross_format_sync_product_from_normalized_payload(
                     report_context,
                     provider_api_format,
                 );
-            if is_standard_chat_finalize_kind(report_kind) {
-                let body = try_aggregate_standard_chat_stream_sync_response(
-                    &body_bytes,
-                    &provider_stream_event_api_format,
-                )?;
-                let api_format = body
-                    .as_ref()
-                    .map(|_| provider_stream_event_api_format.clone());
-                (body, api_format)
-            } else if is_standard_cli_finalize_kind(report_kind) {
-                let body = try_aggregate_standard_cli_stream_sync_response(
-                    &body_bytes,
-                    &provider_stream_event_api_format,
-                )?;
-                let api_format = body
-                    .as_ref()
-                    .map(|_| provider_stream_event_api_format.clone());
-                (body, api_format)
-            } else {
+            if !is_standard_chat_finalize_kind(report_kind)
+                && !is_standard_cli_finalize_kind(report_kind)
+            {
                 return Ok(None);
             }
+            let body = try_aggregate_standard_chat_stream_sync_response(
+                &body_bytes,
+                &provider_stream_event_api_format,
+                strict_format_conversion(report_context).unwrap_or(false),
+                crate::formats::shared::stream_core::common::required_stream_end(
+                    &provider_stream_event_api_format,
+                    report_context,
+                ),
+            )?;
+            let api_format = body.as_ref().map(|_| provider_stream_event_api_format);
+            (body, api_format)
         }
         None => (None, None),
     };
@@ -119,6 +115,9 @@ pub fn maybe_build_standard_cross_format_sync_product_from_normalized_payload(
     let Some(provider_body_json) = aggregated_stream_body.or_else(|| body_json.cloned()) else {
         return Ok(None);
     };
+    if is_error_like_sync_body(&provider_body_json) {
+        return Ok(None);
+    }
     let projection_fallback_body = aggregated_from_stream.then(|| provider_body_json.clone());
 
     let product = maybe_build_standard_cross_format_sync_product(
@@ -267,6 +266,8 @@ pub fn maybe_build_openai_chat_cross_format_sync_product_from_normalized_payload
             body_json,
             body_base64,
             &provider_api_format,
+            strict_format_conversion(report_context).unwrap_or(false),
+            report_context,
         )?
     else {
         return Ok(None);
@@ -348,6 +349,8 @@ pub fn maybe_build_openai_responses_cross_format_sync_product_from_normalized_pa
             body_json,
             body_base64,
             &provider_api_format,
+            strict_format_conversion(report_context).unwrap_or(false),
+            report_context,
         )?
     else {
         return Ok(None);
@@ -823,6 +826,11 @@ fn maybe_build_standard_same_format_stream_sync_body(
     let Some(mut body) = try_aggregate_standard_chat_stream_sync_response(
         &body_bytes,
         &provider_stream_event_api_format,
+        strict_format_conversion(report_context).unwrap_or(false),
+        crate::formats::shared::stream_core::common::required_stream_end(
+            &provider_stream_event_api_format,
+            report_context,
+        ),
     )?
     else {
         return Ok(None);
@@ -967,9 +975,12 @@ fn maybe_build_openai_responses_same_family_stream_sync_body(
         return Ok(None);
     };
     let body_bytes = decode_sync_report_body_base64(body_base64)?;
-    // Same-family clients retain the authoritative terminal body verbatim, including future
-    // output item fields, but unknown intermediate event types still fail closed.
-    ensure_no_unknown_openai_responses_stream_events(&body_bytes, true)?;
+    // The terminal body retains same-family output extensions verbatim.
+    ensure_no_unknown_openai_responses_stream_events(
+        &body_bytes,
+        true,
+        strict_format_conversion(report_context).unwrap_or(false),
+    )?;
     let terminal_body = validated_terminal_openai_responses_stream_response(&body_bytes)?;
     if terminal_body.get("status").and_then(Value::as_str) != Some("completed")
         || terminal_body
@@ -1055,22 +1066,23 @@ fn maybe_build_openai_cross_format_provider_body_from_normalized_payload(
     body_json: Option<&Value>,
     body_base64: Option<&str>,
     provider_api_format: &str,
+    strict: bool,
+    report_context: &Value,
 ) -> Result<Option<OpenAiCrossFormatProviderBody>, AiSurfaceFinalizeError> {
     let aggregated_stream_body = match body_base64 {
         Some(body_base64) => {
             let body_bytes = decode_sync_report_body_base64(body_base64)?;
             let normalized_provider_api_format =
                 normalize_openai_responses_family_api_format(provider_api_format);
-            match normalized_provider_api_format.as_str() {
-                "claude:messages" => try_aggregate_claude_stream_sync_response(&body_bytes)?,
-                "gemini:generate_content" => {
-                    try_aggregate_gemini_stream_sync_response(&body_bytes)?
-                }
-                "openai:responses" | "openai:responses:compact" => {
-                    try_aggregate_openai_responses_stream_sync_response(&body_bytes)?
-                }
-                _ => None,
-            }
+            try_aggregate_standard_chat_stream_sync_response(
+                &body_bytes,
+                &normalized_provider_api_format,
+                strict,
+                crate::formats::shared::stream_core::common::required_stream_end(
+                    &normalized_provider_api_format,
+                    report_context,
+                ),
+            )?
         }
         None => None,
     };
@@ -1227,7 +1239,7 @@ pub fn aggregate_standard_chat_stream_sync_response(
     body: &[u8],
     provider_api_format: &str,
 ) -> Option<Value> {
-    try_aggregate_standard_chat_stream_sync_response(body, provider_api_format)
+    try_aggregate_standard_chat_stream_sync_response(body, provider_api_format, true, None)
         .ok()
         .flatten()
 }
@@ -1235,14 +1247,18 @@ pub fn aggregate_standard_chat_stream_sync_response(
 fn try_aggregate_standard_chat_stream_sync_response(
     body: &[u8],
     provider_api_format: &str,
+    strict: bool,
+    required_end: Option<&str>,
 ) -> Result<Option<Value>, AiSurfaceFinalizeError> {
     match aether_ai_formats::normalize_api_format_alias(provider_api_format).as_str() {
-        "openai:chat" => try_aggregate_openai_chat_stream_sync_response(body),
+        "openai:chat" => try_aggregate_openai_chat_stream_sync_response(body, strict, required_end),
         "openai:responses" | "openai:responses:compact" => {
-            try_aggregate_openai_responses_stream_sync_response(body)
+            try_aggregate_openai_responses_stream_sync_response(body, strict)
         }
-        "claude:messages" => try_aggregate_claude_stream_sync_response(body),
-        "gemini:generate_content" => try_aggregate_gemini_stream_sync_response(body),
+        "claude:messages" => try_aggregate_claude_stream_sync_response(body, strict, required_end),
+        "gemini:generate_content" => {
+            try_aggregate_gemini_stream_sync_response(body, strict, required_end)
+        }
         _ => Ok(None),
     }
 }
@@ -1312,13 +1328,6 @@ pub fn aggregate_standard_cli_stream_sync_response(
     provider_api_format: &str,
 ) -> Option<Value> {
     aggregate_standard_chat_stream_sync_response(body, provider_api_format)
-}
-
-fn try_aggregate_standard_cli_stream_sync_response(
-    body: &[u8],
-    provider_api_format: &str,
-) -> Result<Option<Value>, AiSurfaceFinalizeError> {
-    try_aggregate_standard_chat_stream_sync_response(body, provider_api_format)
 }
 
 pub fn convert_standard_cli_response(
@@ -1736,9 +1745,11 @@ fn convert_claude_canonical_response_to_openai_chat(
     body_json: &Value,
     report_context: &Value,
 ) -> Option<Value> {
-    let mut canonical = from_claude_to_canonical_response(body_json)?;
-    apply_report_context_model_fallback(&mut canonical.model, report_context);
-    let mut response = canonical_to_openai_chat_response(&canonical);
+    let mut response =
+        crate::formats::conversion::response::convert_claude_chat_response_to_openai_chat(
+            body_json,
+            report_context,
+        )?;
     if let Some(service_tier) = report_context
         .get("original_request_body")
         .and_then(Value::as_object)
@@ -1841,12 +1852,7 @@ fn convert_gemini_canonical_response_to_openai_chat(
     body_json: &Value,
     report_context: &Value,
 ) -> Option<Value> {
-    if !gemini_response_can_use_single_response_canonical(body_json) {
-        return convert_gemini_chat_response_to_openai_chat(body_json, report_context);
-    }
-    let mut canonical = from_gemini_to_canonical_response(body_json)?;
-    apply_report_context_model_fallback(&mut canonical.model, report_context);
-    Some(canonical_to_openai_chat_response(&canonical))
+    convert_gemini_chat_response_to_openai_chat(body_json, report_context)
 }
 
 fn convert_gemini_canonical_response_to_openai_responses(
@@ -1854,6 +1860,20 @@ fn convert_gemini_canonical_response_to_openai_responses(
     report_context: &Value,
     compact: bool,
 ) -> Option<Value> {
+    if strict_format_conversion(report_context).unwrap_or(false) {
+        let target = if compact {
+            "openai:responses:compact"
+        } else {
+            "openai:responses"
+        };
+        return convert_response(
+            "gemini:generate_content",
+            target,
+            body_json,
+            &format_context_from_report_context(report_context),
+        )
+        .ok();
+    }
     let openai_chat = convert_gemini_canonical_response_to_openai_chat(body_json, report_context)?;
     convert_openai_chat_response_to_openai_responses(&openai_chat, report_context, compact)
 }
@@ -2079,19 +2099,23 @@ fn parse_stream_json_events(body: &[u8]) -> Option<Vec<Value>> {
 
 fn try_aggregate_openai_chat_stream_sync_response(
     body: &[u8],
+    strict: bool,
+    required_end: Option<&str>,
 ) -> Result<Option<Value>, AiSurfaceFinalizeError> {
     let report_context = Value::Object(Map::new());
     let mut provider = OpenAIChatProviderState::default();
-    ensure_no_unknown_provider_stream_events(body, |line| {
+    ensure_no_unknown_provider_stream_events(body, strict, |line| {
         provider.push_line(&report_context, line)
     })?;
+    ensure_aggregated_stream_end(required_end, provider.observed_end)?;
     Ok(aggregate_openai_chat_stream_sync_response(body))
 }
 
 fn try_aggregate_openai_responses_stream_sync_response(
     body: &[u8],
+    strict: bool,
 ) -> Result<Option<Value>, AiSurfaceFinalizeError> {
-    ensure_no_unknown_openai_responses_stream_events(body, false)?;
+    ensure_no_unknown_openai_responses_stream_events(body, false, strict)?;
     let terminal_response = validated_terminal_openai_responses_stream_response(body)?;
     Ok(
         aggregate_openai_responses_stream_sync_response_from_validated_terminal(
@@ -2104,6 +2128,7 @@ fn try_aggregate_openai_responses_stream_sync_response(
 fn ensure_no_unknown_openai_responses_stream_events(
     body: &[u8],
     allow_authoritative_terminal_output_extensions: bool,
+    strict: bool,
 ) -> Result<(), AiSurfaceFinalizeError> {
     let Ok(text) = std::str::from_utf8(body) else {
         return Ok(());
@@ -2153,6 +2178,7 @@ fn ensure_no_unknown_openai_responses_stream_events(
         if let Some(payload) = frames.iter().find_map(|frame| match &frame.event {
             CanonicalStreamEvent::UnknownEvent(payload)
                 if payload.get("type").and_then(Value::as_str) != Some("response.failed")
+                    && (strict || openai_stream_payload_is_terminal_error(payload))
                     && !terminal_output_extensions_are_lossless =>
             {
                 Some(payload)
@@ -2167,17 +2193,21 @@ fn ensure_no_unknown_openai_responses_stream_events(
 
 fn try_aggregate_claude_stream_sync_response(
     body: &[u8],
+    strict: bool,
+    required_end: Option<&str>,
 ) -> Result<Option<Value>, AiSurfaceFinalizeError> {
     let report_context = Value::Object(Map::new());
     let mut provider = ClaudeProviderState::default();
-    ensure_no_unknown_provider_stream_events(body, |line| {
+    ensure_no_unknown_provider_stream_events(body, strict, |line| {
         provider.push_line(&report_context, line)
     })?;
+    ensure_aggregated_stream_end(required_end, provider.observed_end)?;
     Ok(aggregate_claude_stream_sync_response(body))
 }
 
 fn ensure_no_unknown_provider_stream_events(
     body: &[u8],
+    strict: bool,
     mut push_line: impl FnMut(Vec<u8>) -> Result<Vec<CanonicalStreamFrame>, AiSurfaceFinalizeError>,
 ) -> Result<(), AiSurfaceFinalizeError> {
     let Ok(text) = std::str::from_utf8(body) else {
@@ -2186,7 +2216,11 @@ fn ensure_no_unknown_provider_stream_events(
     for raw_line in text.lines() {
         let frames = push_line(raw_line.as_bytes().to_vec())?;
         if let Some(payload) = frames.iter().find_map(|frame| match &frame.event {
-            CanonicalStreamEvent::UnknownEvent(payload) => Some(payload),
+            CanonicalStreamEvent::UnknownEvent(payload)
+                if strict || openai_stream_payload_is_terminal_error(payload) =>
+            {
+                Some(payload)
+            }
             _ => None,
         }) {
             return Err(unsupported_stream_event_finalize_error(payload));
@@ -2381,7 +2415,7 @@ pub fn aggregate_openai_chat_stream_sync_response(body: &[u8]) -> Option<Value> 
 }
 
 pub fn aggregate_openai_responses_stream_sync_response(body: &[u8]) -> Option<Value> {
-    try_aggregate_openai_responses_stream_sync_response(body)
+    try_aggregate_openai_responses_stream_sync_response(body, true)
         .ok()
         .flatten()
 }
@@ -3635,14 +3669,28 @@ pub fn aggregate_claude_stream_sync_response(body: &[u8]) -> Option<Value> {
     Some(Value::Object(message))
 }
 
+fn ensure_aggregated_stream_end(
+    required_end: Option<&str>,
+    observed: bool,
+) -> Result<(), AiSurfaceFinalizeError> {
+    if let Some(marker) = required_end.filter(|_| !observed) {
+        return Err(AiSurfaceFinalizeError::new(format!(
+            "Upstream stream ended before {marker}"
+        )));
+    }
+    Ok(())
+}
+
 pub fn aggregate_gemini_stream_sync_response(body: &[u8]) -> Option<Value> {
-    try_aggregate_gemini_stream_sync_response(body)
+    try_aggregate_gemini_stream_sync_response(body, true, None)
         .ok()
         .flatten()
 }
 
 fn try_aggregate_gemini_stream_sync_response(
     body: &[u8],
+    strict: bool,
+    required_end: Option<&str>,
 ) -> Result<Option<Value>, AiSurfaceFinalizeError> {
     let Some(events) = parse_stream_json_events(body) else {
         return Ok(None);
@@ -3670,6 +3718,9 @@ fn try_aggregate_gemini_stream_sync_response(
         let Some(raw_event_object) = event.as_object() else {
             return Ok(None);
         };
+        if openai_stream_payload_is_terminal_error(event) {
+            return Err(unsupported_stream_event_finalize_error(event));
+        }
         if let Some(id) = raw_event_object.get("responseId") {
             response_id = Some(id.clone());
         }
@@ -3816,7 +3867,9 @@ fn try_aggregate_gemini_stream_sync_response(
                     ));
                 }
                 CanonicalStreamEvent::UnknownEvent(payload) => {
-                    return Err(unsupported_stream_event_finalize_error(&payload))
+                    if strict || openai_stream_payload_is_terminal_error(&payload) {
+                        return Err(unsupported_stream_event_finalize_error(&payload));
+                    }
                 }
                 CanonicalStreamEvent::ReasoningSummaryDone => {}
                 CanonicalStreamEvent::Finish {
@@ -3836,6 +3889,7 @@ fn try_aggregate_gemini_stream_sync_response(
         }
     }
 
+    ensure_aggregated_stream_end(required_end, provider.observed_end)?;
     let frames = provider.finish(&report_context)?;
     for frame in frames {
         if response_id.is_none() && !frame.id.is_empty() {
@@ -3846,7 +3900,9 @@ fn try_aggregate_gemini_stream_sync_response(
         }
         match frame.event {
             CanonicalStreamEvent::UnknownEvent(payload) => {
-                return Err(unsupported_stream_event_finalize_error(&payload))
+                if strict || openai_stream_payload_is_terminal_error(&payload) {
+                    return Err(unsupported_stream_event_finalize_error(&payload));
+                }
             }
             CanonicalStreamEvent::Finish {
                 finish_reason: frame_finish_reason,
@@ -4591,6 +4647,7 @@ mod tests {
     #[test]
     fn gemini_stream_finalize_rejects_unknown_parts_even_with_json_fallback() {
         let report_context = json!({
+            "routing_execution_policy": {"strict_format_conversion": true},
             "provider_api_format": "gemini:generate_content",
             "client_api_format": "openai:chat",
         });
@@ -5418,6 +5475,7 @@ mod tests {
             "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_cross_unknown\",\"object\":\"response\",\"model\":\"gpt-5.6-sol\",\"status\":\"completed\",\"output\":[{\"type\":\"program\",\"id\":\"program-1\"}]}}\n\n",
         );
         let report_context = json!({
+            "routing_execution_policy": {"strict_format_conversion": true},
             "provider_api_format": "openai:responses",
             "client_api_format": "openai:chat",
             "needs_conversion": true,
@@ -5770,7 +5828,7 @@ mod tests {
             "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_chat_metadata_123\",\"object\":\"response\",\"model\":\"gpt-5\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}\n\n",
         );
 
-        let result = try_aggregate_openai_responses_stream_sync_response(body.as_bytes())
+        let result = try_aggregate_openai_responses_stream_sync_response(body.as_bytes(), true)
             .expect("chat-backed function call metadata should pass stream validation")
             .expect("chat-backed function call stream should aggregate");
 
@@ -6625,6 +6683,7 @@ mod tests {
     #[test]
     fn strict_response_conversion_errors_do_not_use_legacy_fallback() {
         let openai_context = json!({
+            "routing_execution_policy": {"strict_format_conversion": true},
             "provider_api_format": "openai:chat",
             "client_api_format": "claude:messages",
             "model": "claude-sonnet-4-5",
@@ -6653,6 +6712,7 @@ mod tests {
         .is_none());
 
         let claude_context = json!({
+            "routing_execution_policy": {"strict_format_conversion": true},
             "provider_api_format": "claude:messages",
             "client_api_format": "openai:chat",
             "model": "gpt-5",
@@ -6683,6 +6743,7 @@ mod tests {
     #[test]
     fn stream_finalize_rejects_unknown_openai_chat_events_without_body_fallback() {
         let report_context = json!({
+            "routing_execution_policy": {"strict_format_conversion": true},
             "provider_api_format": "openai:chat",
             "client_api_format": "claude:messages",
             "model": "claude-sonnet-4-5",
@@ -6717,6 +6778,7 @@ mod tests {
     #[test]
     fn stream_finalize_rejects_unknown_claude_events_without_body_fallback() {
         let report_context = json!({
+            "routing_execution_policy": {"strict_format_conversion": true},
             "provider_api_format": "claude:messages",
             "client_api_format": "openai:chat",
             "model": "gpt-5",
@@ -6761,6 +6823,7 @@ mod tests {
     #[test]
     fn responses_same_family_stream_finalize_rejects_unknown_events_without_body_fallback() {
         let report_context = json!({
+            "routing_execution_policy": {"strict_format_conversion": true},
             "provider_api_format": "openai:responses",
             "client_api_format": "openai:responses",
             "needs_conversion": false,
@@ -6799,6 +6862,7 @@ mod tests {
     #[test]
     fn responses_same_family_stream_rejects_unknown_event_before_valid_terminal_snapshot() {
         let report_context = json!({
+            "routing_execution_policy": {"strict_format_conversion": true},
             "provider_api_format": "openai:responses",
             "client_api_format": "openai:responses",
             "needs_conversion": false,
@@ -6856,8 +6920,9 @@ mod tests {
         ];
 
         for (stream_body, expected_message) in cases {
-            let error = try_aggregate_openai_responses_stream_sync_response(stream_body.as_bytes())
-                .expect_err("invalid terminal lifecycle must fail closed");
+            let error =
+                try_aggregate_openai_responses_stream_sync_response(stream_body.as_bytes(), true)
+                    .expect_err("invalid terminal lifecycle must fail closed");
             assert!(
                 error.to_string().contains(expected_message),
                 "unexpected error: {error}"
@@ -7195,6 +7260,7 @@ mod tests {
     #[test]
     fn standard_sync_finalize_projects_validated_responses_stream_metadata_to_chat() {
         let report_context = json!({
+            "routing_execution_policy": {"strict_format_conversion": true},
             "provider_api_format": "openai:responses",
             "provider_stream_event_api_format": "openai:responses",
             "client_api_format": "openai:chat",
@@ -7381,6 +7447,7 @@ mod tests {
     #[test]
     fn standard_sync_finalize_rejects_unknown_canonical_output_from_known_stream_event() {
         let report_context = json!({
+            "routing_execution_policy": {"strict_format_conversion": true},
             "provider_api_format": "openai:responses",
             "provider_stream_event_api_format": "openai:responses",
             "client_api_format": "openai:chat",
@@ -7410,6 +7477,7 @@ mod tests {
     #[test]
     fn standard_sync_finalize_keeps_direct_responses_metadata_conversion_strict() {
         let report_context = json!({
+            "routing_execution_policy": {"strict_format_conversion": true},
             "provider_api_format": "openai:responses",
             "client_api_format": "openai:chat",
             "model": "gpt-5.6-luna",
@@ -7528,8 +7596,73 @@ mod tests {
     }
 
     #[test]
+    fn sync_aggregation_rejects_early_eof_on_identified_chat_upstream() {
+        let stream = base64::engine::general_purpose::STANDARD.encode(
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"truncated\"}}]}\n\n",
+        );
+        let mut ctx = json!({
+            "client_api_format":"claude:messages", "provider_api_format":"openai:chat", "needs_conversion":true,
+            "upstream_url":"https://api.openai.com/v1/chat/completions"
+        });
+        let finalize = |ctx: &serde_json::Value| {
+            maybe_build_standard_sync_finalize_product_from_normalized_payload(
+                "claude_chat_sync_finalize",
+                200,
+                Some(ctx),
+                None,
+                Some(&stream),
+            )
+        };
+        assert!(finalize(&ctx)
+            .unwrap_err()
+            .to_string()
+            .contains("Chat finish_reason"));
+        ctx["upstream_url"] = json!("https://custom.example/v1/chat/completions");
+        assert!(finalize(&ctx).unwrap().is_some());
+    }
+
+    #[test]
+    fn sync_finalize_tolerates_unknown_extension_between_responses_text_and_terminal_by_default() {
+        let stream_body = concat!(
+            "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"content_index\":0,\"delta\":\"retained\"}\n\n",
+            "data: {\"type\":\"response.future.delta\",\"detail\":\"provider-only\"}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_future\",\"status\":\"completed\",\"model\":\"m\",\"output\":[]}}\n\n",
+        );
+        let encoded = base64::engine::general_purpose::STANDARD.encode(stream_body);
+        let mut context = json!({
+            "provider_api_format": "openai:responses",
+            "client_api_format": "openai:chat",
+            "needs_conversion": true,
+        });
+        let convert = |context: &serde_json::Value| {
+            maybe_build_standard_sync_finalize_product_from_normalized_payload(
+                "openai_chat_sync_finalize",
+                200,
+                Some(context),
+                None,
+                Some(&encoded),
+            )
+        };
+        let Some(StandardSyncFinalizeNormalizedProduct::CrossFormat(product)) =
+            convert(&context).unwrap()
+        else {
+            panic!("missing response projection");
+        };
+        assert_eq!(
+            product.client_body_json["choices"][0]["message"]["content"],
+            "retained"
+        );
+        context["routing_execution_policy"] = json!({"strict_format_conversion": true});
+        assert!(convert(&context)
+            .unwrap_err()
+            .to_string()
+            .contains("response.future.delta"));
+    }
+
+    #[test]
     fn standard_sync_finalize_rejects_unknown_capture_envelope_events() {
         let report_context = json!({
+            "routing_execution_policy": {"strict_format_conversion": true},
             "provider_api_format": "openai:responses",
             "client_api_format": "openai:chat",
             "model": "client-model",

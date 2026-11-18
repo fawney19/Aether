@@ -3263,6 +3263,7 @@ async fn provider_query_execute_standard_test_candidate(
                         transport.endpoint.base_url.as_str(),
                         request_model,
                     ),
+                    false,
                 )
             else {
                 return Ok(provider_query_skipped_execution_outcome(

@@ -12,6 +12,7 @@ export interface RoutingDefaultPolicy extends RoutingFailoverPolicy {
   priority_mode: RoutingPriorityMode
   scheduling_mode: RoutingSchedulingMode
   keep_priority_on_conversion: boolean
+  strict_format_conversion: boolean
   enable_cf_heartbeat: boolean
   cyber_continue_failover: boolean
   cancel_on_client_disconnect: boolean
@@ -87,6 +88,7 @@ export function createEmptyRoutingGroupConfig(): RoutingGroupConfig {
       priority_mode: 'provider',
       scheduling_mode: 'cache_affinity',
       keep_priority_on_conversion: false,
+      strict_format_conversion: false,
       enable_cf_heartbeat: false,
       cyber_continue_failover: false,
       cancel_on_client_disconnect: false,
@@ -144,6 +146,7 @@ export function normalizeRoutingGroupConfig(value: Partial<RoutingGroupConfig> |
       ...base.default_policy,
       ...defaultPolicyWithoutLegacyHeartbeat,
       ...normalizeRoutingFailoverPolicy(rawDefaultPolicy),
+      strict_format_conversion: rawDefaultPolicy.strict_format_conversion === true,
       enable_cf_heartbeat: Boolean(
         rawDefaultPolicy.enable_cf_heartbeat || legacyImageHeartbeat || legacyTextHeartbeat,
       ),

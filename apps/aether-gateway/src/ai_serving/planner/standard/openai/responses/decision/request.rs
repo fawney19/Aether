@@ -505,6 +505,7 @@ pub(crate) async fn resolve_local_openai_responses_candidate_payload_parts_with_
             Some(input.auth_context.api_key_id.as_str()),
             codex_model_capabilities.as_ref(),
             false,
+            input.strict_format_conversion(),
         )
     } else if websocket_continuation {
         build_local_openai_responses_request_body_with_codex_model_capabilities_for_websocket_continuation(

@@ -2621,11 +2621,11 @@ pub(crate) fn openai_responses_input_to_canonical_messages(
                         let tool_use = CanonicalContentBlock::ToolUse {
                             id,
                             name,
-                            input: parse_jsonish_value(
-                                item_object
-                                    .get("input")
-                                    .or_else(|| item_object.get("arguments")),
-                            ),
+                            input: item_object
+                                .get("input")
+                                .or_else(|| item_object.get("arguments"))
+                                .cloned()
+                                .unwrap_or_default(),
                             extensions,
                         };
                         append_openai_responses_tool_use(
@@ -5654,6 +5654,7 @@ pub(crate) fn openai_responses_tool_choice_to_canonical(
             "required" => Some(CanonicalToolChoice::Required),
             _ => None,
         },
+        Some(Value::Object(object)) if object.contains_key("namespace") => None,
         Some(Value::Object(object)) => {
             let choice_type = object
                 .get("type")

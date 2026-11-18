@@ -633,6 +633,7 @@ pub(crate) async fn resolve_local_standard_candidate_payload_parts(
             Some(effective_headers),
             false,
             reasoning_replay_policy,
+            input.strict_format_conversion(),
         ) {
             Some(body) => body,
             None => {

@@ -214,6 +214,10 @@ pub(crate) async fn resolve_local_same_format_provider_candidate_payload_parts(
             prepared.is_vertex,
             false,
             reasoning_replay_policy,
+            input
+                .routing_policy
+                .as_ref()
+                .is_some_and(|policy| policy.execution_policy.strict_format_conversion),
         )
     else {
         mark_skipped_local_same_format_provider_candidate_with_extra_data(

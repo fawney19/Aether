@@ -414,6 +414,13 @@ mod tests {
         let mut routing_policy = aether_routing_core::resolve_routing_policy(
             &aether_routing_core::RoutingGroupConfig {
                 billing_multiplier: 0.25,
+                default_policy: aether_routing_core::RoutingDefaultPolicy {
+                    execution_policy: aether_routing_core::RoutingExecutionPolicy {
+                        strict_format_conversion: true,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
                 ..Default::default()
             },
             aether_routing_core::RoutingPolicyInput {
@@ -491,6 +498,10 @@ mod tests {
             });
 
         assert_eq!(report_context["routing_group_billing_multiplier"], 0.25);
+        assert_eq!(
+            report_context["routing_execution_policy"]["strict_format_conversion"],
+            true
+        );
         assert_eq!(
             report_context["billing_multiplier_snapshot"],
             json!({

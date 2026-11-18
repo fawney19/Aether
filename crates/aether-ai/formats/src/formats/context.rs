@@ -3,8 +3,17 @@ use std::{error::Error, fmt};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+pub(crate) fn strict_format_conversion(report_context: &Value) -> Option<bool> {
+    report_context
+        .get("routing_execution_policy")?
+        .get("strict_format_conversion")?
+        .as_bool()
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct FormatContext {
+    /// Reject fields and content without an audited cross-format mapping.
+    pub strict_format_conversion: bool,
     pub mapped_model: Option<String>,
     pub request_path: Option<String>,
     pub upstream_is_stream: bool,
@@ -15,6 +24,11 @@ pub struct FormatContext {
 }
 
 impl FormatContext {
+    pub fn with_strict_format_conversion(mut self, strict: bool) -> Self {
+        self.strict_format_conversion = strict;
+        self
+    }
+
     pub fn with_mapped_model(mut self, mapped_model: impl Into<String>) -> Self {
         self.mapped_model = Some(mapped_model.into());
         self
@@ -31,6 +45,9 @@ impl FormatContext {
     }
 
     pub fn with_report_context(mut self, report_context: Value) -> Self {
+        if let Some(strict) = strict_format_conversion(&report_context) {
+            self.strict_format_conversion = strict;
+        }
         self.report_context = Some(report_context);
         self
     }
@@ -42,6 +59,7 @@ impl FormatContext {
 
     pub fn without_runtime_request_edits(&self) -> Self {
         Self {
+            strict_format_conversion: self.strict_format_conversion,
             mapped_model: None,
             request_path: self.request_path.clone(),
             upstream_is_stream: false,

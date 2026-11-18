@@ -33,13 +33,13 @@ pub fn from(body: &Value, _ctx: &FormatContext) -> Option<CanonicalResponse> {
 
 pub fn to(response: &CanonicalResponse, ctx: &FormatContext) -> Option<Value> {
     let report_context = ctx.report_context_value();
-    let response = to_raw(response, &report_context, false);
+    let response = try_to_raw(response, &report_context, false)?;
     record_converted_response_history(&report_context, &response);
     Some(response)
 }
 
 pub fn to_compact(response: &CanonicalResponse, ctx: &FormatContext) -> Option<Value> {
-    Some(to_raw(response, &ctx.report_context_value(), true))
+    try_to_raw(response, &ctx.report_context_value(), true)
 }
 
 pub fn from_raw(body_json: &Value) -> Option<CanonicalResponse> {
@@ -123,6 +123,14 @@ fn canonical_incomplete_reason(canonical: &CanonicalResponse) -> Option<&'static
 }
 
 pub fn to_raw(canonical: &CanonicalResponse, report_context: &Value, compact: bool) -> Value {
+    try_to_raw(canonical, report_context, compact).unwrap_or(Value::Null)
+}
+
+fn try_to_raw(
+    canonical: &CanonicalResponse,
+    report_context: &Value,
+    compact: bool,
+) -> Option<Value> {
     let namespace_tool_aliases = NamespaceToolAliases::from_report_context(report_context);
     let mut response = Map::new();
     let response_id = canonical.id.replace("chatcmpl", "resp");
@@ -297,6 +305,14 @@ pub fn to_raw(canonical: &CanonicalResponse, report_context: &Value, compact: bo
                     );
                     if let Some((namespace, _)) = namespaced_tool {
                         if let Some(item) = item.as_object_mut() {
+                            if namespace_tool_aliases.is_wrapped_custom(name) {
+                                let text = crate::formats::openai::namespace::wrapped_custom_input(
+                                    item.get("arguments")?.as_str()?,
+                                )?;
+                                item.remove("arguments");
+                                item.insert("type".into(), "custom_tool_call".into());
+                                item.insert("input".into(), text.into());
+                            }
                             item.insert(
                                 "namespace".to_string(),
                                 Value::String(namespace.to_string()),
@@ -407,7 +423,7 @@ pub fn to_raw(canonical: &CanonicalResponse, report_context: &Value, compact: bo
             .and_then(openai_responses_timestamp_value)
             .unwrap_or_else(openai_responses_current_timestamp);
         response.insert("created_at".to_string(), Value::from(created_at));
-        return Value::Object(response);
+        return Some(Value::Object(response));
     }
     if let Some(request_object) = report_context
         .get("original_request_body")
@@ -452,7 +468,7 @@ pub fn to_raw(canonical: &CanonicalResponse, report_context: &Value, compact: bo
     legacy_extension_fields.remove("raw_status");
     response.extend(legacy_extension_fields);
     ensure_modern_openai_responses_response_fields(&mut response);
-    Value::Object(response)
+    Some(Value::Object(response))
 }
 
 fn responses_tool_result_item_type(extensions: &BTreeMap<String, Value>) -> Option<&str> {

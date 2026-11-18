@@ -6,8 +6,8 @@ use crate::{
         canonical_extension_object_mut, canonical_message_to_openai_chat_messages,
         canonical_response_format_to_openai, canonical_tool_choice_to_openai,
         canonical_tool_is_openai_custom, canonical_tool_to_openai, is_claude_tool_result,
-        namespace_extension_object, openai_content_text, openai_extensions,
-        openai_generation_config, openai_message_content_blocks,
+        is_openai_custom_tool_call, namespace_extension_object, openai_content_text,
+        openai_extensions, openai_generation_config, openai_message_content_blocks,
         openai_response_format_to_canonical, openai_responses_extension, openai_role_to_canonical,
         openai_tool_choice_raw_to_chat, openai_tool_choice_to_canonical, openai_tools_to_canonical,
         write_openai_generation_config, CanonicalContentBlock, CanonicalInstruction,
@@ -283,8 +283,37 @@ fn raw_tool_choice_to_openai_chat_for_request(
     tools: &[CanonicalToolDefinition],
     aliases: &NamespaceToolAliases,
 ) -> Option<Value> {
-    let mut choice = openai_tool_choice_raw_to_chat(raw);
+    let mut raw = raw.clone();
+    resolve_qualified_tool_choices(&mut raw, aliases)?;
+    let mut choice = openai_tool_choice_raw_to_chat(&raw);
     rewrite_namespace_tool_choice_names(&mut choice, tools, aliases).then_some(choice)
+}
+
+fn resolve_qualified_tool_choices(
+    choice: &mut Value,
+    aliases: &NamespaceToolAliases,
+) -> Option<()> {
+    if choice.get("type").and_then(Value::as_str) == Some("allowed_tools") {
+        if let Some(tools) = choice.get_mut("tools").and_then(Value::as_array_mut) {
+            for tool in tools {
+                resolve_qualified_tool_choices(tool, aliases)?;
+            }
+        }
+    } else if let Some(namespace) = choice.get("namespace") {
+        let alias = aliases.chat_name(namespace.as_str()?, choice.get("name")?.as_str()?)?;
+        let kind = choice.get("type")?.as_str()?;
+        if kind
+            != if aliases.is_wrapped_custom(alias) {
+                "custom"
+            } else {
+                "function"
+            }
+        {
+            return None;
+        }
+        *choice = json!({"type":"function", "name":alias});
+    }
+    Some(())
 }
 
 pub(crate) fn raw_tool_choice_extension_is_representable_for_openai_chat(
@@ -379,15 +408,7 @@ fn rewrite_namespace_tool_choice_names(
                         && rewrite_named_function_choice(function, tools, aliases)
                 })
         }
-        "custom" => {
-            object_has_exact_keys(choice, &["type", "custom"])
-                && choice
-                    .get("custom")
-                    .and_then(Value::as_object)
-                    .is_some_and(|custom| {
-                        object_has_exact_keys(custom, &["name"]) && valid_named_choice(custom)
-                    })
-        }
+        "custom" => rewrite_custom_tool_choice(choice, tools, aliases),
         "allowed_tools" => {
             if !object_has_exact_keys(choice, &["type", "allowed_tools"]) {
                 return false;
@@ -424,19 +445,37 @@ fn rewrite_namespace_tool_choice_names(
                                         && rewrite_named_function_choice(function, tools, aliases)
                                 })
                     }
-                    Some("custom") => {
-                        object_has_exact_keys(tool, &["type", "custom"])
-                            && tool
-                                .get("custom")
-                                .and_then(Value::as_object)
-                                .is_some_and(|custom| {
-                                    object_has_exact_keys(custom, &["name"])
-                                        && valid_named_choice(custom)
-                                })
-                    }
+                    Some("custom") => rewrite_custom_tool_choice(tool, tools, aliases),
                     _ => false,
                 }
             })
+        }
+        _ => false,
+    }
+}
+
+fn rewrite_custom_tool_choice(
+    choice: &mut Map<String, Value>,
+    tools: &[CanonicalToolDefinition],
+    aliases: &NamespaceToolAliases,
+) -> bool {
+    let Some(custom) = choice.get("custom").and_then(Value::as_object) else {
+        return false;
+    };
+    if !object_has_exact_keys(choice, &["type", "custom"])
+        || !object_has_exact_keys(custom, &["name"])
+        || !valid_named_choice(custom)
+    {
+        return false;
+    }
+    match resolve_namespace_child_name(custom["name"].as_str().unwrap().trim(), tools, aliases) {
+        NamespaceNameResolution::Unchanged => true,
+        NamespaceNameResolution::Alias(alias) if aliases.is_wrapped_custom(alias) => {
+            let function = json!({"name":alias});
+            choice.remove("custom");
+            choice.insert("type".into(), "function".into());
+            choice.insert("function".into(), function);
+            true
         }
         _ => false,
     }
@@ -484,7 +523,10 @@ fn rewrite_namespaced_tool_uses_for_openai_chat(
 ) {
     for block in &mut message.content {
         let CanonicalContentBlock::ToolUse {
-            name, extensions, ..
+            name,
+            input,
+            extensions,
+            ..
         } = block
         else {
             continue;
@@ -494,6 +536,12 @@ fn rewrite_namespaced_tool_uses_for_openai_chat(
         };
         if let Some(alias) = aliases.chat_name(namespace, name) {
             *name = alias.to_string();
+            if aliases.is_wrapped_custom(alias) {
+                *input = json!({"input": input});
+                if let Some(marker) = extensions.get_mut("aether").and_then(Value::as_object_mut) {
+                    marker.remove("source");
+                }
+            }
         }
     }
 }
@@ -535,8 +583,7 @@ fn canonical_request_has_unrepresentable_namespace_tools_for_openai_chat(
             return true;
         }
     } else if let Some(raw) = raw_tool_choice_extension(request) {
-        let mut choice = openai_tool_choice_raw_to_chat(raw);
-        if !rewrite_namespace_tool_choice_names(&mut choice, &request.tools, aliases) {
+        if raw_tool_choice_to_openai_chat_for_request(raw, &request.tools, aliases).is_none() {
             return true;
         }
     }
@@ -544,7 +591,10 @@ fn canonical_request_has_unrepresentable_namespace_tools_for_openai_chat(
     request.messages.iter().any(|message| {
         message.content.iter().any(|block| {
             let CanonicalContentBlock::ToolUse {
-                name, extensions, ..
+                name,
+                input,
+                extensions,
+                ..
             } = block
             else {
                 return false;
@@ -553,10 +603,11 @@ fn canonical_request_has_unrepresentable_namespace_tools_for_openai_chat(
                 NamespaceField::Absent => false,
                 NamespaceField::Invalid => true,
                 NamespaceField::Name(namespace) => {
-                    aliases.chat_name(namespace, name).is_none()
-                        || !namespace_tool_use_sidecars_are_chat_representable(
-                            extensions, namespace,
-                        )
+                    aliases.chat_name(namespace, name).is_none_or(|alias| {
+                        let wrapped = aliases.is_wrapped_custom(alias);
+                        wrapped != is_openai_custom_tool_call(extensions)
+                            || (wrapped && !input.is_string())
+                    }) || !namespace_tool_use_sidecars_are_chat_representable(extensions, namespace)
                 }
             }
         })

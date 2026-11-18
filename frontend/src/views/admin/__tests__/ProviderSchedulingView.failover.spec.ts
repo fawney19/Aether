@@ -252,6 +252,27 @@ describe('ProviderSchedulingView failover persistence', () => {
 })
 
 describe('ProviderSchedulingView inline settings drafts', () => {
+  it.each([undefined, true])('loads strict format conversion (%s) and saves the toggled group policy', async (initial) => {
+    const strategy = group('strategy-a')
+    if (initial === undefined) {
+      Reflect.deleteProperty(strategy.config_json.default_policy, 'strict_format_conversion')
+    } else {
+      strategy.config_json.default_policy.strict_format_conversion = initial
+    }
+    const root = await mountPage([strategy])
+    button(root, '高级设置').click()
+    await flush()
+    const toggle = element<HTMLButtonElement>(root, '[role="switch"][aria-label="格式转换严谨模式"]')
+    expect(toggle.getAttribute('aria-checked')).toBe(String(initial === true))
+    toggle.click()
+    await flush()
+    button(root, '保存调度').click()
+    await flush()
+    expect(routingApi.updateRoutingGroup).toHaveBeenCalledOnce()
+    expect(routingApi.updateRoutingGroup.mock.calls[0][1].config_json.default_policy.strict_format_conversion).toBe(!initial)
+    expect(toggle.getAttribute('aria-checked')).toBe(String(!initial))
+  })
+
   it('preserves JSON drafts while failover settings are collapsed and saves from the header', async () => {
     const root = await mountPage()
     await editJson(root, '成功转移规则', '[{"pattern":"keep-after-collapse"}]')

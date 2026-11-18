@@ -327,6 +327,7 @@ pub fn build_same_format_provider_request_body(
         None,
         aether_ai_formats::OpenAiResponsesReasoningReplayPolicy::OpenAiItemIds,
         false,
+        false,
     )
 }
 
@@ -343,13 +344,19 @@ pub fn build_same_format_provider_request_body_with_compatibility_report_and_rea
     input: SameFormatProviderRequestBodyInput<'_>,
     reasoning_replay_policy: aether_ai_formats::OpenAiResponsesReasoningReplayPolicy,
 ) -> Option<SameFormatProviderRequestBodyOutput> {
-    build_same_format_provider_request_body_for_operation(input, reasoning_replay_policy, None)
+    build_same_format_provider_request_body_for_operation(
+        input,
+        reasoning_replay_policy,
+        None,
+        false,
+    )
 }
 
 pub fn build_same_format_provider_request_body_for_operation(
     input: SameFormatProviderRequestBodyInput<'_>,
     reasoning_replay_policy: aether_ai_formats::OpenAiResponsesReasoningReplayPolicy,
     api_operation: Option<aether_ai_formats::ApiOperation>,
+    strict_format_conversion: bool,
 ) -> Option<SameFormatProviderRequestBodyOutput> {
     let native_memories =
         api_operation == Some(aether_ai_formats::ApiOperation::OpenAiMemoriesSummarize);
@@ -371,6 +378,7 @@ pub fn build_same_format_provider_request_body_for_operation(
         Some(&mut compatibility_edits),
         reasoning_replay_policy,
         native_memories,
+        strict_format_conversion,
     )?;
     Some(SameFormatProviderRequestBodyOutput {
         body,
@@ -400,6 +408,7 @@ fn build_same_format_provider_request_body_inner(
     mut compatibility_edits: Option<&mut Vec<SameFormatProviderCompatibilityEdit>>,
     reasoning_replay_policy: aether_ai_formats::OpenAiResponsesReasoningReplayPolicy,
     native_memories: bool,
+    strict_format_conversion: bool,
 ) -> Option<Value> {
     if let Some(kiro_auth_config) = input.kiro_auth_config {
         let body = build_kiro_provider_request_body(
@@ -437,14 +446,15 @@ fn build_same_format_provider_request_body_inner(
                 .map(|(key, value)| (key.clone(), value.clone())),
         )
     } else {
-        aether_ai_formats::convert_request_pure_with_context(
+        aether_ai_formats::convert_request(
             input.client_api_format,
             input.provider_api_format,
             input.body_json,
-            &aether_ai_formats::FormatContext::default().with_mapped_model(input.mapped_model),
+            &aether_ai_formats::FormatContext::default()
+                .with_mapped_model(input.mapped_model)
+                .with_strict_format_conversion(strict_format_conversion),
         )
         .ok()?
-        .value
         .as_object()?
         .clone()
     };
@@ -1056,6 +1066,7 @@ mod tests {
             input,
             aether_ai_formats::OpenAiResponsesReasoningReplayPolicy::OpenAiItemIds,
             Some(aether_ai_formats::ApiOperation::OpenAiMemoriesSummarize),
+            false,
         )
         .unwrap();
         let mut expected = body.clone();
@@ -2029,6 +2040,49 @@ mod tests {
         });
 
         assert!(body.is_none());
+    }
+
+    #[test]
+    fn cross_format_embedding_and_rerank_extensions_follow_group_policy() {
+        for (source, target, body) in [
+            (
+                "openai:embedding",
+                "jina:embedding",
+                json!({"model":"client", "input":"text", "future_option":true}),
+            ),
+            (
+                "jina:rerank",
+                "openai:rerank",
+                json!({"model":"client", "query":"topic", "documents":["one"], "future_option":true}),
+            ),
+        ] {
+            let input = SameFormatProviderRequestBodyInput {
+                body_json: &body,
+                mapped_model: "upstream",
+                client_api_format: source,
+                provider_api_format: target,
+                source_model: Some("client"),
+                family: SameFormatProviderFamily::Standard,
+                body_rules: None,
+                request_headers: None,
+                upstream_is_stream: false,
+                force_body_stream_field: false,
+                kiro_auth_config: None,
+                is_claude_code: false,
+                is_vertex: false,
+                enable_model_directives: false,
+            };
+            let permissive = build_same_format_provider_request_body(input).unwrap();
+            assert_eq!(permissive["future_option"], true);
+            assert_eq!(permissive["model"], "upstream");
+            assert!(build_same_format_provider_request_body_for_operation(
+                input,
+                aether_ai_formats::OpenAiResponsesReasoningReplayPolicy::OpenAiItemIds,
+                None,
+                true,
+            )
+            .is_none());
+        }
     }
 
     #[test]

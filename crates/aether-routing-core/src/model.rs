@@ -37,6 +37,8 @@ pub const DEFAULT_STICKY_KEY_ATTEMPTS: u32 = 2;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Default)]
 pub struct RoutingExecutionPolicy {
     #[serde(default, skip_serializing_if = "is_false")]
+    pub strict_format_conversion: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
     pub enable_cf_heartbeat: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub cyber_continue_failover: bool,
@@ -58,6 +60,8 @@ impl<'de> Deserialize<'de> for RoutingExecutionPolicy {
         #[derive(Deserialize, Default)]
         struct LegacyCompatibleExecutionPolicy {
             #[serde(default)]
+            strict_format_conversion: bool,
+            #[serde(default)]
             enable_cf_heartbeat: bool,
             #[serde(default)]
             enable_openai_image_sync_heartbeat: bool,
@@ -77,6 +81,7 @@ impl<'de> Deserialize<'de> for RoutingExecutionPolicy {
 
         let value = LegacyCompatibleExecutionPolicy::deserialize(deserializer)?;
         Ok(Self {
+            strict_format_conversion: value.strict_format_conversion,
             enable_cf_heartbeat: value.enable_cf_heartbeat
                 || value.enable_openai_image_sync_heartbeat
                 || value.enable_standard_text_sync_heartbeat,

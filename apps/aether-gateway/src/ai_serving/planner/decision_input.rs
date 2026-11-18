@@ -87,6 +87,12 @@ pub(crate) struct LocalRoutingRequestContext {
 }
 
 impl LocalRequestedModelDecisionInput {
+    pub(crate) fn strict_format_conversion(&self) -> bool {
+        self.routing_policy
+            .as_ref()
+            .is_some_and(|policy| policy.execution_policy.strict_format_conversion)
+    }
+
     pub(crate) fn effective_body_json<'a>(&'a self, fallback: &'a Value) -> &'a Value {
         self.routing_context
             .as_ref()

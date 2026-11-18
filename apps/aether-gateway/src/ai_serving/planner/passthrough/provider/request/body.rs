@@ -54,6 +54,7 @@ pub(crate) fn build_same_format_provider_request_body_with_compatibility_report(
     is_vertex: bool,
     enable_model_directives: bool,
     reasoning_replay_policy: crate::ai_serving::OpenAiResponsesReasoningReplayPolicy,
+    strict_format_conversion: bool,
 ) -> Option<SameFormatProviderRequestBodyOutput> {
     build_same_format_provider_request_body_with_compatibility_report_impl(
         SameFormatProviderRequestBodyInput {
@@ -74,6 +75,7 @@ pub(crate) fn build_same_format_provider_request_body_with_compatibility_report(
         },
         reasoning_replay_policy,
         spec.operation,
+        strict_format_conversion,
     )
 }
 

@@ -230,6 +230,7 @@ mod tests {
                 "priority_mode": "global_key",
                 "scheduling_mode": "load_balance",
                 "keep_priority_on_conversion": true,
+                "strict_format_conversion": true,
                 "cancel_on_client_disconnect": true,
                 "max_transfer_count": 3,
                 "max_transfer_timeout_seconds": 90,
@@ -295,6 +296,7 @@ mod tests {
             RoutingSchedulingMode::LoadBalance
         );
         assert!(static_policy.keep_priority_on_conversion);
+        assert!(static_policy.execution_policy.strict_format_conversion);
         assert!(static_policy.mutation_plan.is_empty());
         assert!(static_policy.matched_rules.is_empty());
     }

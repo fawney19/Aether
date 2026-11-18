@@ -170,7 +170,17 @@ pub fn convert_request(
         &normalized_body,
         &request,
         ctx.mapped_model.as_deref(),
+        ctx.strict_format_conversion,
     )?;
+    if ctx.strict_format_conversion {
+        validate_request_conversion(
+            source_format,
+            target_format,
+            &normalized_body,
+            &request,
+            ctx.mapped_model.as_deref(),
+        )?;
+    }
     if let Some(mapped_model) = ctx
         .mapped_model
         .as_deref()
@@ -178,7 +188,20 @@ pub fn convert_request(
     {
         request.model = mapped_model.to_string();
     }
-    emit_request_inner(target_format, &request, ctx)
+    let mut value = emit_request_inner(target_format, &request, ctx)?;
+    if !ctx.strict_format_conversion && source != target {
+        if let (Some(input), Some(output)) = (body.as_object(), value.as_object_mut()) {
+            for (key, extension) in input {
+                // The converter owns destination fields, including fields it omitted.
+                if !standard_request_root_field_is_audited(source, key)
+                    && !standard_request_root_field_is_audited(target, key)
+                {
+                    output.entry(key).or_insert_with(|| extension.clone());
+                }
+            }
+        }
+    }
+    Ok(value)
 }
 
 fn normalize_openai_responses_to_chat_body(
@@ -241,7 +264,7 @@ fn normalize_openai_responses_to_chat_body(
     Ok(normalized)
 }
 
-fn is_openai_responses_additional_tools_item(value: &Value) -> bool {
+pub(super) fn is_openai_responses_additional_tools_item(value: &Value) -> bool {
     let Some(object) = value.as_object() else {
         return false;
     };
@@ -262,14 +285,37 @@ fn validate_runtime_request_conversion(
     body: &Value,
     request: &CanonicalRequest,
     mapped_model: Option<&str>,
+    strict: bool,
 ) -> Result<(), FormatError> {
+    if source != target && (is_embedding_format(source) || is_embedding_format(target)) {
+        return validate_embedding_request_conversion(source, target, request, strict);
+    }
+    if source != target && (is_rerank_format(source) || is_rerank_format(target)) {
+        return validate_rerank_request_conversion(source, target, request, strict);
+    }
+    if request.generation.n.is_some_and(|count| count > 1)
+        && matches!(
+            target,
+            FormatId::OpenAiResponses | FormatId::OpenAiResponsesCompact | FormatId::ClaudeMessages
+        )
+        && source != target
+    {
+        return lossy_generation_field(
+            source,
+            target,
+            "n",
+            "target format cannot produce multiple response choices",
+        );
+    }
     validate_gemini_mixed_tool_model(source, target, request, mapped_model)?;
     validate_openai_cross_format_store(source, target, body)?;
     validate_openai_prompt_cache_contract(source, body, mapped_model)?;
     validate_openai_reasoning_effort(source, target, body, mapped_model)?;
-    validate_openai_responses_cross_format_input(source, target, body)?;
-    validate_openai_responses_runtime_reasoning(source, target, body)?;
-    validate_openai_responses_namespace_tools_to_chat(source, target, request)?;
+    validate_openai_responses_cross_format_input(source, target, body, strict)?;
+    if strict {
+        validate_openai_responses_runtime_reasoning(source, target, body)?;
+    }
+    validate_openai_responses_namespace_tools_to_chat(source, target, request, strict)?;
     if matches!(source, FormatId::OpenAiChat)
         && matches!(
             target,
@@ -461,7 +507,7 @@ pub fn convert_response_pure(
     body: &Value,
 ) -> Result<Converted<Value>, FormatError> {
     let response = parse_response_pure(source_format, body)?;
-    validate_response_conversion(source_format, target_format, body, &response)?;
+    validate_response_conversion(source_format, target_format, body, &response, true)?;
     let value = emit_response_pure(target_format, &response)?;
     let report = build_response_conversion_report(source_format, target_format, body, &value);
     Ok(Converted { value, report })
@@ -474,7 +520,13 @@ pub fn convert_response(
     ctx: &FormatContext,
 ) -> Result<Value, FormatError> {
     let mut response = parse_response(source_format, body, ctx)?;
-    validate_response_conversion(source_format, target_format, body, &response)?;
+    validate_response_conversion(
+        source_format,
+        target_format,
+        body,
+        &response,
+        ctx.strict_format_conversion,
+    )?;
     if response.model.trim().is_empty() || response.model == "unknown" {
         if let Some(mapped_model) = ctx
             .mapped_model
@@ -524,13 +576,13 @@ fn validate_request_conversion(
         return Ok(());
     }
     if is_embedding_format(source) || is_embedding_format(target) {
-        return validate_embedding_request_conversion(source, target, request);
+        return validate_embedding_request_conversion(source, target, request, true);
     }
     if is_rerank_format(source) || is_rerank_format(target) {
-        return validate_rerank_request_conversion(source, target, request);
+        return validate_rerank_request_conversion(source, target, request, true);
     }
     validate_known_standard_request_root_fields(source, target, body)?;
-    validate_openai_responses_cross_format_input(source, target, body)?;
+    validate_openai_responses_cross_format_input(source, target, body, true)?;
     validate_cross_format_generation_target(source, target, request)?;
     validate_openai_cross_format_store(source, target, body)?;
     match (source, target) {
@@ -583,6 +635,7 @@ fn validate_openai_responses_cross_format_input(
     source: FormatId,
     target: FormatId,
     body: &Value,
+    strict: bool,
 ) -> Result<(), FormatError> {
     if !matches!(
         source,
@@ -629,19 +682,21 @@ fn validate_openai_responses_cross_format_input(
             .unwrap_or("message")
             .trim()
             .to_ascii_lowercase();
-        if !matches!(
-            item_type.as_str(),
-            "message"
-                | "reasoning"
-                | "function_call"
-                | "custom_tool_call"
-                | "function_call_output"
-                | "custom_tool_call_output"
-                | "local_shell_call_output"
-                | "shell_call_output"
-                | "apply_patch_call_output"
-                | "computer_call_output"
-        ) {
+        if strict
+            && !matches!(
+                item_type.as_str(),
+                "message"
+                    | "reasoning"
+                    | "function_call"
+                    | "custom_tool_call"
+                    | "function_call_output"
+                    | "custom_tool_call_output"
+                    | "local_shell_call_output"
+                    | "shell_call_output"
+                    | "apply_patch_call_output"
+                    | "computer_call_output"
+            )
+        {
             return openai_responses_lossy_input(
                 source,
                 target,
@@ -672,23 +727,25 @@ fn validate_openai_responses_cross_format_input(
                 .unwrap_or_default()
                 .trim()
                 .to_ascii_lowercase();
-            if !matches!(
-                block_type.as_str(),
-                "input_text"
-                    | "output_text"
-                    | "text"
-                    | "input_image"
-                    | "output_image"
-                    | "image_url"
-                    | "input_file"
-                    | "file"
-                    | "input_audio"
-                    | "audio"
-                    | "output_audio"
-                    | "reasoning"
-                    | "thinking"
-                    | "refusal"
-            ) {
+            if strict
+                && !matches!(
+                    block_type.as_str(),
+                    "input_text"
+                        | "output_text"
+                        | "text"
+                        | "input_image"
+                        | "output_image"
+                        | "image_url"
+                        | "input_file"
+                        | "file"
+                        | "input_audio"
+                        | "audio"
+                        | "output_audio"
+                        | "reasoning"
+                        | "thinking"
+                        | "refusal"
+                )
+            {
                 return openai_responses_lossy_input(
                     source,
                     target,
@@ -720,6 +777,7 @@ fn validate_response_conversion(
     target_format: &str,
     body: &Value,
     response: &CanonicalResponse,
+    strict: bool,
 ) -> Result<(), FormatError> {
     let source = parse_format(source_format)?;
     let target = parse_format(target_format)?;
@@ -727,7 +785,10 @@ fn validate_response_conversion(
         return Ok(());
     }
 
-    validate_source_response_stop_enums(source, target, body)?;
+    validate_source_response_stop_enums(source, target, body, strict)?;
+    if !strict {
+        return Ok(());
+    }
     validate_response_content_has_no_unknown_blocks(source, target, response)?;
     validate_openai_responses_cross_format_response_extensions(source, target, response)?;
     validate_canonical_response_stop_reasons(source, target, response)
@@ -1206,16 +1267,42 @@ fn standard_request_root_field_is_audited(source: FormatId, key: &str) -> bool {
                 | "tool_config"
                 | "tools"
         ),
-        FormatId::OpenAiEmbedding
-        | FormatId::OpenAiRealtime
-        | FormatId::OpenAiSearch
-        | FormatId::OpenAiRerank
-        | FormatId::GeminiEmbedding
-        | FormatId::JinaEmbedding
-        | FormatId::JinaRerank
-        | FormatId::DoubaoEmbedding
-        | FormatId::AliyunMultimodalEmbedding
-        | FormatId::CodexLive => true,
+        FormatId::OpenAiEmbedding | FormatId::JinaEmbedding | FormatId::DoubaoEmbedding => {
+            matches!(
+                key,
+                "model"
+                    | "input"
+                    | "encoding_format"
+                    | "dimensions"
+                    | "task"
+                    | "user"
+                    | "parameters"
+            )
+        }
+        FormatId::GeminiEmbedding => matches!(
+            key,
+            "model"
+                | "content"
+                | "requests"
+                | "outputDimensionality"
+                | "output_dimensionality"
+                | "taskType"
+                | "task_type"
+        ),
+        FormatId::AliyunMultimodalEmbedding => {
+            matches!(key, "model" | "input" | "parameters" | "dimensions")
+        }
+        FormatId::OpenAiRerank | FormatId::JinaRerank => matches!(
+            key,
+            "model"
+                | "query"
+                | "documents"
+                | "top_n"
+                | "topN"
+                | "return_documents"
+                | "returnDocuments"
+        ),
+        FormatId::OpenAiRealtime | FormatId::OpenAiSearch | FormatId::CodexLive => true,
     }
 }
 
@@ -1388,7 +1475,7 @@ fn validate_cross_format_request_extensions(
     target: FormatId,
     request: &CanonicalRequest,
 ) -> Result<(), FormatError> {
-    validate_openai_responses_namespace_tools_to_chat(source, target, request)?;
+    validate_openai_responses_namespace_tools_to_chat(source, target, request, true)?;
     validate_request_content_has_no_unknown_blocks(source, target, request)?;
     let namespace_aliases = NamespaceToolAliases::from_canonical_tools(&request.tools);
     let request_extensions = mapped_namespace_request_extensions(source, target, request);
@@ -1634,6 +1721,17 @@ fn openai_responses_custom_tool_key_is_cross_format_safe(
     extension: &Map<String, Value>,
     key: &str,
 ) -> bool {
+    if matches!(
+        source,
+        FormatId::OpenAiResponses | FormatId::OpenAiResponsesCompact
+    ) && target == FormatId::OpenAiChat
+        && location == "messages[].content[]"
+        && matches!(namespace, "openai_responses" | "openai_cli")
+        && key == "item_type"
+        && extension[key] == "custom_tool_call_output"
+    {
+        return true;
+    }
     matches!(
         (source, target, location, namespace),
         (
@@ -1860,14 +1958,17 @@ fn validate_source_response_stop_enums(
     source: FormatId,
     target: FormatId,
     body: &Value,
+    strict: bool,
 ) -> Result<(), FormatError> {
     match source {
-        FormatId::OpenAiChat => validate_openai_chat_response_finish_reasons(body),
+        FormatId::OpenAiChat => validate_openai_chat_response_finish_reasons(body, strict),
         FormatId::OpenAiResponses | FormatId::OpenAiResponsesCompact => {
             validate_openai_responses_response_status(body, target)
         }
-        FormatId::ClaudeMessages => validate_claude_response_stop_reason(body),
-        FormatId::GeminiGenerateContent => validate_gemini_response_finish_reasons(body, target),
+        FormatId::ClaudeMessages => validate_claude_response_stop_reason(body, strict),
+        FormatId::GeminiGenerateContent => {
+            validate_gemini_response_finish_reasons(body, target, strict)
+        }
         FormatId::GeminiInteractions => Ok(()),
         FormatId::OpenAiEmbedding
         | FormatId::OpenAiRealtime
@@ -1882,7 +1983,10 @@ fn validate_source_response_stop_enums(
     }
 }
 
-fn validate_openai_chat_response_finish_reasons(body: &Value) -> Result<(), FormatError> {
+fn validate_openai_chat_response_finish_reasons(
+    body: &Value,
+    strict: bool,
+) -> Result<(), FormatError> {
     let Some(choices) = body.get("choices").and_then(Value::as_array) else {
         return Ok(());
     };
@@ -1902,10 +2006,12 @@ fn validate_openai_chat_response_finish_reasons(body: &Value) -> Result<(), Form
         else {
             continue;
         };
-        if !matches!(
-            raw,
-            "stop" | "length" | "tool_calls" | "function_call" | "content_filter"
-        ) {
+        if (strict || raw == "error")
+            && !matches!(
+                raw,
+                "stop" | "length" | "tool_calls" | "function_call" | "content_filter"
+            )
+        {
             return Err(FormatError::InvalidEnumValue {
                 format: FormatId::OpenAiChat.as_str().to_string(),
                 field: "choices[].finish_reason".to_string(),
@@ -1956,7 +2062,7 @@ fn validate_openai_responses_response_status(
     }
 }
 
-fn validate_claude_response_stop_reason(body: &Value) -> Result<(), FormatError> {
+fn validate_claude_response_stop_reason(body: &Value, strict: bool) -> Result<(), FormatError> {
     let Some(value) = body.get("stop_reason") else {
         return Ok(());
     };
@@ -1968,16 +2074,18 @@ fn validate_claude_response_stop_reason(body: &Value) -> Result<(), FormatError>
     else {
         return Ok(());
     };
-    if !matches!(
-        raw,
-        "end_turn"
-            | "max_tokens"
-            | "stop_sequence"
-            | "tool_use"
-            | "pause_turn"
-            | "refusal"
-            | "content_filtered"
-    ) {
+    if (strict || raw == "error")
+        && !matches!(
+            raw,
+            "end_turn"
+                | "max_tokens"
+                | "stop_sequence"
+                | "tool_use"
+                | "pause_turn"
+                | "refusal"
+                | "content_filtered"
+        )
+    {
         return Err(FormatError::InvalidEnumValue {
             format: FormatId::ClaudeMessages.as_str().to_string(),
             field: "stop_reason".to_string(),
@@ -1990,6 +2098,7 @@ fn validate_claude_response_stop_reason(body: &Value) -> Result<(), FormatError>
 fn validate_gemini_response_finish_reasons(
     body: &Value,
     target: FormatId,
+    strict: bool,
 ) -> Result<(), FormatError> {
     let Some(candidates) = body.get("candidates").and_then(Value::as_array) else {
         return Ok(());
@@ -2014,7 +2123,9 @@ fn validate_gemini_response_finish_reasons(
             continue;
         };
         let normalized = raw.to_ascii_uppercase();
-        if gemini_finish_reason_is_cross_format_mappable(normalized.as_str()) {
+        if gemini_finish_reason_is_cross_format_mappable(normalized.as_str())
+            || (!strict && !gemini_generate_content::stream::is_gemini_failure_reason(&normalized))
+        {
             continue;
         }
         if gemini_finish_reason_is_known(normalized.as_str()) {
@@ -2125,6 +2236,7 @@ fn validate_embedding_request_conversion(
     source: FormatId,
     target: FormatId,
     request: &CanonicalRequest,
+    strict: bool,
 ) -> Result<(), FormatError> {
     if !is_embedding_format(source) || !is_embedding_format(target) {
         return Err(FormatError::UnsupportedField {
@@ -2145,7 +2257,9 @@ fn validate_embedding_request_conversion(
             reason: "embedding input must not be empty".to_string(),
         });
     }
-    validate_no_cross_format_embedding_extensions(source, target, embedding)?;
+    if strict {
+        validate_no_cross_format_embedding_extensions(source, target, embedding)?;
+    }
     match target {
         FormatId::OpenAiEmbedding => validate_openai_embedding_target(source, target, embedding),
         FormatId::JinaEmbedding => validate_text_embedding_target(source, target, embedding, true),
@@ -2397,6 +2511,7 @@ fn validate_rerank_request_conversion(
     source: FormatId,
     target: FormatId,
     request: &CanonicalRequest,
+    strict: bool,
 ) -> Result<(), FormatError> {
     if !is_rerank_format(source) || !is_rerank_format(target) {
         return Err(FormatError::UnsupportedField {
@@ -2425,8 +2540,7 @@ fn validate_rerank_request_conversion(
         });
     }
     let target_namespace = rerank_namespace(target);
-    if !rerank.extensions.is_empty() && !rerank.extensions.keys().all(|key| key == target_namespace)
-    {
+    if strict && !rerank.extensions.keys().all(|key| key == target_namespace) {
         return Err(FormatError::UnsupportedField {
             format: target.as_str().to_string(),
             field: "rerank.extensions".to_string(),
@@ -2670,6 +2784,7 @@ fn validate_openai_responses_to_chat(
         FormatId::OpenAiResponses,
         FormatId::OpenAiChat,
         request,
+        true,
     )?;
     let Some(object) = body.as_object() else {
         return Ok(());
@@ -2738,6 +2853,7 @@ fn validate_openai_responses_namespace_tools_to_chat(
     source: FormatId,
     target: FormatId,
     request: &CanonicalRequest,
+    strict: bool,
 ) -> Result<(), FormatError> {
     if !matches!(
         source,
@@ -2750,7 +2866,11 @@ fn validate_openai_responses_namespace_tools_to_chat(
     let aliases = NamespaceToolAliases::from_canonical_tools(&request.tools);
     for (tool_index, _) in request.tools.iter().enumerate() {
         if aliases.is_namespace_tool(tool_index)
-            && !aliases.is_representable_namespace_tool(tool_index)
+            && (!aliases.is_representable_namespace_tool(tool_index)
+                || strict
+                    && aliases
+                        .tools_for_source(tool_index)
+                        .any(|child| child.grammar.is_some()))
         {
             return Err(FormatError::LossyConversionBlocked {
                 source_format: source.as_str().to_string(),
@@ -4070,6 +4190,106 @@ mod tests {
     }
 
     #[test]
+    fn namespace_custom_tool_round_trips_chat_function_calls() {
+        use serde_json::Value;
+        let raw_input = "  { \"x\": \"a\\nb\" }\n";
+        let request = json!({
+            "model":"test", "tools":[
+                {"type":"function","name":"patch","parameters":{"type":"object"}},
+                {"type":"namespace","name":"editing","description":"Editing tools",
+                 "tools":[{"type":"custom","name":"patch","format":{"type":"text"}}]}
+            ],
+            "tool_choice":{"type":"custom","namespace":"editing","name":"patch"},
+            "input":[
+                {"type":"custom_tool_call","namespace":"editing","name":"patch","call_id":"call_1","input":raw_input},
+                {"type":"custom_tool_call_output","call_id":"call_1","output":"done"}
+            ]
+        });
+        let context =
+            FormatContext::default().with_report_context(json!({"original_request_body":request}));
+        let chat = convert_request("openai:responses", "openai:chat", &request, &context).unwrap();
+        let strict_chat = convert_request(
+            "openai:responses",
+            "openai:chat",
+            &request,
+            &context.clone().with_strict_format_conversion(true),
+        )
+        .unwrap();
+        assert_eq!(strict_chat, chat);
+        let mut allowed = request.clone();
+        allowed["tool_choice"] = json!({"type":"allowed_tools","mode":"required","tools":[{"type":"custom","namespace":"editing","name":"patch"}]});
+        let allowed_chat =
+            convert_request("openai:responses", "openai:chat", &allowed, &context).unwrap();
+        assert_eq!(
+            allowed_chat["tool_choice"]["allowed_tools"]["tools"][0],
+            json!({"type":"function","function":{"name":"editing__patch"}})
+        );
+        let function = &chat["tools"][1]["function"];
+        let name = &function["name"];
+        assert_eq!(name, "editing__patch");
+        assert_eq!(
+            function["parameters"]["properties"]["input"]["type"],
+            "string"
+        );
+        assert_eq!(
+            chat["tool_choice"],
+            json!({"type":"function","function":{"name":name}})
+        );
+        let call = &chat["messages"][0]["tool_calls"][0];
+        assert_eq!(call["function"]["name"], *name);
+        let arguments = call["function"]["arguments"].as_str().unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(arguments).unwrap(),
+            json!({"input":raw_input})
+        );
+        assert_eq!(chat["messages"][1]["tool_call_id"], "call_1");
+        let mut completion = json!({"model":"test","id":"chatcmpl-1","choices":[{"index":0,
+            "finish_reason":"tool_calls","message":{"role":"assistant","content":null,"tool_calls":[call]}}]});
+        let response =
+            convert_response("openai:chat", "openai:responses", &completion, &context).unwrap();
+        let item = &response["output"][0];
+        assert_eq!(item["type"], "custom_tool_call");
+        assert_eq!(item["namespace"], "editing");
+        assert_eq!(item["name"], "patch");
+        assert_eq!(item["call_id"], "call_1");
+        assert_eq!(item["input"], raw_input);
+        assert!(item.get("arguments").is_none());
+        let lite_context = FormatContext::default().with_report_context(json!({
+            "original_request_body":{"input":[{"type":"additional_tools","role":"developer","tools":request["tools"]}]}
+        }));
+        let lite = convert_response(
+            "openai:chat",
+            "openai:responses",
+            &completion,
+            &lite_context,
+        )
+        .unwrap();
+        assert_eq!(lite["output"][0], *item);
+        completion["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"] =
+            Value::String("{}".to_string());
+        assert!(
+            convert_response("openai:chat", "openai:responses", &completion, &context).is_err()
+        );
+    }
+
+    #[test]
+    fn namespace_custom_tool_grammar_requires_permissive_conversion() {
+        let request = json!({"model":"test","input":"hi","tools":[{
+            "type":"namespace","name":"editing","description":"Editing tools",
+            "tools":[{"type":"custom","name":"patch","format":{"type":"grammar","syntax":"lark","definition":"start: WORD"}}]
+        }]});
+        let ctx = FormatContext::default();
+        let chat = convert_request("openai:responses", "openai:chat", &request, &ctx).unwrap();
+        assert!(chat["tools"][0]["function"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("start: WORD"));
+        assert!(
+            matches!(convert_request("openai:responses","openai:chat",&request,&ctx.with_strict_format_conversion(true)), Err(FormatError::LossyConversionBlocked{field,..}) if field == "tools[0]")
+        );
+    }
+
+    #[test]
     fn responses_namespace_history_rejects_non_completed_status_for_chat() {
         let body = json!({
             "model": "gpt-source",
@@ -4178,7 +4398,7 @@ mod tests {
                 "tools": [{
                     "type": "custom",
                     "name": "write_report",
-                    "description": "custom child"
+                    "description": "custom child", "format": {"type":"unknown"}
                 }]
             }),
             json!({
@@ -5507,9 +5727,10 @@ mod tests {
     }
 
     #[test]
-    fn runtime_openai_responses_cross_format_rejects_unknown_content_block() {
+    fn runtime_openai_responses_cross_format_unknown_content_follows_policy() {
         let body = json!({
             "model": "gpt-5.6-sol",
+            "future_vendor_option": {"enabled": true},
             "input": [{
                 "type": "message",
                 "role": "user",
@@ -5520,18 +5741,50 @@ mod tests {
             }]
         });
 
-        let error = convert_request(
+        let converted = convert_request(
             "openai:responses",
             "claude:messages",
             &body,
             &FormatContext::default(),
         )
-        .expect_err("runtime conversion must fail closed for raw provider content blocks");
+        .expect("the ordinary message can be converted alongside an unknown block");
+        assert_eq!(converted["messages"][0]["content"], "hello");
+        assert_eq!(converted["future_vendor_option"], json!({"enabled": true}));
+
+        let error = convert_request(
+            "openai:responses",
+            "claude:messages",
+            &body,
+            &FormatContext::default().with_strict_format_conversion(true),
+        )
+        .expect_err("strict conversion must reject unknown content blocks");
 
         assert!(matches!(
             error,
             super::FormatError::LossyConversionBlocked { ref field, .. }
                 if field == "input[0].content[1]"
+        ));
+    }
+
+    #[test]
+    fn runtime_unknown_root_field_is_forwarded_only_in_permissive_mode() {
+        let body = json!({
+            "model": "source", "messages": [{"role": "user", "content": "hello"}],
+            "future_feature": {"a": 1}, "max_output_tokens": -1
+        });
+        let permissive = convert_request(
+            "openai:chat",
+            "openai:responses",
+            &body,
+            &FormatContext::default(),
+        )
+        .unwrap();
+        assert_eq!(permissive["future_feature"], json!({"a": 1}));
+        assert!(permissive.get("max_output_tokens").is_none());
+        let strict = FormatContext::default().with_strict_format_conversion(true);
+        assert!(matches!(
+            convert_request("openai:chat", "openai:responses", &body, &strict),
+            Err(FormatError::UnauditedField { .. })
         ));
     }
 
@@ -6016,9 +6269,9 @@ mod tests {
                 "openai:responses",
                 "openai:chat",
                 &body,
-                &FormatContext::default(),
+                &FormatContext::default().with_strict_format_conversion(true),
             )
-            .expect_err("runtime conversion must fail closed for provider-only fields");
+            .expect_err("strict runtime conversion must reject provider-only fields");
             assert!(
                 matches!(
                     error,
@@ -6405,6 +6658,24 @@ mod tests {
         let converted = convert_request_pure("openai:responses", "openai:chat", &responses)
             .expect("upstream should validate unpublished reasoning efforts");
         assert_eq!(converted.value["reasoning_effort"], "minimal");
+    }
+
+    #[test]
+    fn runtime_response_keeps_text_beside_an_opaque_item_unless_strict() {
+        let body = json!({
+            "id":"r","status":"completed","model":"m","output":[
+                {"type":"vendor_artifact","payload":"private"},
+                {"type":"message","role":"assistant","content":[{"type":"output_text","text":"hello"}]}
+            ]
+        });
+        let target = "claude:messages";
+        let response =
+            convert_response("openai:responses", target, &body, &FormatContext::default()).unwrap();
+        assert_eq!(response["content"], json!([{"type":"text","text":"hello"}]));
+        let strict = FormatContext::default().with_report_context(json!({
+            "routing_execution_policy":{"strict_format_conversion":true}
+        }));
+        assert!(convert_response("openai:responses", target, &body, &strict).is_err());
     }
 
     #[test]

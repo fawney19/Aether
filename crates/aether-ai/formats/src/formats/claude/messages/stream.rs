@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{json, Map, Value};
 
@@ -20,6 +20,7 @@ struct ClaudeProviderToolState {
 
 #[derive(Default)]
 pub struct ClaudeProviderState {
+    pub(crate) observed_end: bool,
     message_id: Option<String>,
     model: Option<String>,
     started: bool,
@@ -320,6 +321,15 @@ impl ClaudeProviderState {
                 let Some(delta) = event_object.get("delta").and_then(Value::as_object) else {
                     return Ok(out);
                 };
+                if !delta
+                    .get("stop_reason")
+                    .and_then(Value::as_str)
+                    .is_some_and(|reason| !reason.is_empty())
+                {
+                    self.merge_usage(canonical_usage_from_claude_usage(event_object.get("usage")));
+                    return Ok(out);
+                }
+                self.observed_end = true;
                 let finish_reason = map_claude_stop_reason(
                     delta.get("stop_reason").and_then(Value::as_str),
                     delta.get("stop_reason").and_then(Value::as_str) == Some("tool_use"),
@@ -352,7 +362,8 @@ impl ClaudeProviderState {
                     });
                 }
             }
-            "message_stop" | "ping" => {}
+            "message_stop" => self.observed_end = true,
+            "ping" => {}
             _ => {
                 out.push(self.unknown_frame(report_context, value.clone()));
             }
@@ -421,8 +432,9 @@ pub struct ClaudeClientEmitter {
     finished: bool,
     next_block_index: usize,
     open_block: Option<ClaudeOpenBlock>,
-    tool_block_indices: BTreeMap<usize, usize>,
-    tool_states: BTreeMap<usize, ClaudeClientToolState>,
+    active_tool: ClaudeClientToolState,
+    pending_tools: BTreeMap<usize, ClaudeClientToolState>,
+    closed_tools: BTreeSet<usize>,
 }
 
 impl ClaudeClientEmitter {
@@ -458,6 +470,22 @@ impl ClaudeClientEmitter {
     }
 
     fn close_open_block(&mut self) -> Result<Vec<u8>, AiSurfaceFinalizeError> {
+        let mut out = self.close_current_block()?;
+        for (index, tool) in std::mem::take(&mut self.pending_tools) {
+            let block_index = self.next_block_index;
+            out.extend(self.open_tool(index, tool)?);
+            if self.active_tool.name != "Read" && !self.active_tool.buffered_arguments.is_empty() {
+                out.extend(Self::tool_delta(
+                    block_index,
+                    &self.active_tool.buffered_arguments,
+                )?);
+            }
+            out.extend(self.close_current_block()?);
+        }
+        Ok(out)
+    }
+
+    fn close_current_block(&mut self) -> Result<Vec<u8>, AiSurfaceFinalizeError> {
         let Some(open_block) = self.open_block.take() else {
             return Ok(Vec::new());
         };
@@ -469,26 +497,15 @@ impl ClaudeClientEmitter {
                 tool_index,
                 block_index,
             } => {
-                if let Some(state) = self.tool_states.get_mut(&tool_index) {
-                    if state.name == "Read" && !state.buffered_arguments.is_empty() {
-                        let arguments = remove_empty_pages_from_tool_arguments(
-                            &state.name,
-                            &state.buffered_arguments,
-                        );
-                        state.buffered_arguments.clear();
-                        if !arguments.is_empty() {
-                            out.extend(encode_json_sse(
-                                Some("content_block_delta"),
-                                &json!({
-                                    "type": "content_block_delta",
-                                    "index": block_index,
-                                    "delta": {
-                                        "type": "input_json_delta",
-                                        "partial_json": arguments,
-                                    }
-                                }),
-                            )?);
-                        }
+                self.closed_tools.insert(tool_index);
+                let state = std::mem::take(&mut self.active_tool);
+                if state.name == "Read" && !state.buffered_arguments.is_empty() {
+                    let arguments = remove_empty_pages_from_tool_arguments(
+                        &state.name,
+                        &state.buffered_arguments,
+                    );
+                    if !arguments.is_empty() {
+                        out.extend(Self::tool_delta(block_index, &arguments)?);
                     }
                 }
                 block_index
@@ -550,50 +567,89 @@ impl ClaudeClientEmitter {
         Ok(out)
     }
 
-    fn ensure_tool_block(
+    fn open_tool(
         &mut self,
         tool_index: usize,
-        call_id: &str,
-        name: &str,
+        tool: ClaudeClientToolState,
     ) -> Result<Vec<u8>, AiSurfaceFinalizeError> {
-        let mut out = Vec::new();
-        if let Some(ClaudeOpenBlock::Tool {
-            tool_index: current_tool_index,
-            ..
-        }) = self.open_block
-        {
-            if current_tool_index == tool_index {
-                return Ok(out);
-            }
-        }
-        out.extend(self.close_open_block()?);
-        let block_index = self
-            .tool_block_indices
-            .get(&tool_index)
-            .copied()
-            .unwrap_or_else(|| {
-                let block_index = self.next_block_index;
-                self.next_block_index += 1;
-                self.tool_block_indices.insert(tool_index, block_index);
-                block_index
-            });
+        let block_index = self.next_block_index;
+        self.next_block_index += 1;
+        self.active_tool = tool;
         self.open_block = Some(ClaudeOpenBlock::Tool {
             tool_index,
             block_index,
         });
-        out.extend(encode_json_sse(
+        encode_json_sse(
             Some("content_block_start"),
             &json!({
                 "type": "content_block_start",
                 "index": block_index,
                 "content_block": {
                     "type": "tool_use",
-                    "id": call_id,
-                    "name": name,
+                    "id": self.active_tool.call_id,
+                    "name": self.active_tool.name,
                     "input": {},
                 }
             }),
-        )?);
+        )
+    }
+
+    fn tool_delta(index: usize, arguments: &str) -> Result<Vec<u8>, AiSurfaceFinalizeError> {
+        encode_json_sse(
+            Some("content_block_delta"),
+            &json!({
+                "type":"content_block_delta","index":index,
+                "delta":{"type":"input_json_delta","partial_json":arguments}
+            }),
+        )
+    }
+
+    fn start_tool(
+        &mut self,
+        index: usize,
+        call_id: String,
+        name: String,
+    ) -> Result<Vec<u8>, AiSurfaceFinalizeError> {
+        let mut out = self.ensure_started()?;
+        if self.closed_tools.contains(&index) {
+            return Err(AiSurfaceFinalizeError::new(
+                "received a tool call after its Claude content block closed",
+            ));
+        }
+        if let Some(ClaudeOpenBlock::Tool { tool_index, .. }) = self.open_block {
+            let existing = if tool_index == index {
+                Some(&self.active_tool)
+            } else {
+                self.pending_tools.get(&index)
+            };
+            if let Some(tool) = existing {
+                if tool.call_id != call_id || tool.name != name {
+                    return Err(AiSurfaceFinalizeError::new(
+                        "conflicting identity for a streamed tool call",
+                    ));
+                }
+                return Ok(out);
+            }
+        }
+        let tool = ClaudeClientToolState {
+            call_id,
+            name,
+            buffered_arguments: String::new(),
+        };
+        // Chat can interleave tool arguments. Claude needs one consecutive block per
+        // call. Only switch immediately if the active call already has a full value.
+        if matches!(self.open_block, Some(ClaudeOpenBlock::Tool { .. }))
+            && (!self.pending_tools.is_empty()
+                || serde_json::from_str::<serde::de::IgnoredAny>(
+                    &self.active_tool.buffered_arguments,
+                )
+                .is_err())
+        {
+            self.pending_tools.insert(index, tool);
+            return Ok(out);
+        }
+        out.extend(self.close_current_block()?);
+        out.extend(self.open_tool(index, tool)?);
         Ok(out)
     }
 
@@ -714,58 +770,29 @@ impl ClaudeClientEmitter {
                 index,
                 call_id,
                 name,
-            } => {
-                let mut out = self.ensure_started()?;
-                let state = self.tool_states.entry(index).or_default();
-                state.call_id = call_id.clone();
-                state.name = name.clone();
-                out.extend(self.ensure_tool_block(index, &call_id, &name)?);
-                Ok(out)
-            }
+            } => self.start_tool(index, call_id, name),
             CanonicalStreamEvent::ToolCallSignature { .. } => Ok(Vec::new()),
             CanonicalStreamEvent::ToolCallArgumentsDelta { index, arguments } => {
-                let (call_id, name) = {
-                    let state = self.tool_states.entry(index).or_default();
-                    let call_id = if state.call_id.is_empty() {
-                        format!("tool_{index}")
-                    } else {
-                        state.call_id.clone()
-                    };
-                    let name = if state.name.is_empty() {
-                        "unknown".to_string()
-                    } else {
-                        state.name.clone()
-                    };
-                    (call_id, name)
-                };
                 if arguments.is_empty() {
                     return Ok(Vec::new());
                 }
-                let mut out = self.ensure_started()?;
-                out.extend(self.ensure_tool_block(index, &call_id, &name)?);
-                if name == "Read" {
-                    self.tool_states
-                        .entry(index)
-                        .or_default()
-                        .buffered_arguments
-                        .push_str(&arguments);
-                    return Ok(out);
+                let mut out = Vec::new();
+                if !matches!(self.open_block, Some(ClaudeOpenBlock::Tool { tool_index, .. }) if tool_index == index)
+                    && !self.pending_tools.contains_key(&index)
+                {
+                    if self.closed_tools.contains(&index) && arguments.trim().is_empty() {
+                        return Ok(out);
+                    }
+                    out.extend(self.start_tool(index, format!("tool_{index}"), "unknown".to_string())?);
                 }
-                let block_index = match self.open_block {
-                    Some(ClaudeOpenBlock::Tool { block_index, .. }) => block_index,
-                    _ => return Ok(out),
-                };
-                out.extend(encode_json_sse(
-                    Some("content_block_delta"),
-                    &json!({
-                        "type": "content_block_delta",
-                        "index": block_index,
-                        "delta": {
-                            "type": "input_json_delta",
-                            "partial_json": arguments,
-                        }
-                    }),
-                )?);
+                if let Some(tool) = self.pending_tools.get_mut(&index) {
+                    tool.buffered_arguments.push_str(&arguments);
+                } else if let Some(ClaudeOpenBlock::Tool { block_index, .. }) = self.open_block {
+                    self.active_tool.buffered_arguments.push_str(&arguments);
+                    if self.active_tool.name != "Read" {
+                        out.extend(Self::tool_delta(block_index, &arguments)?);
+                    }
+                }
                 Ok(out)
             }
             CanonicalStreamEvent::ToolResultDelta {
@@ -808,6 +835,19 @@ impl ClaudeClientEmitter {
             } => {
                 if self.finished {
                     return Ok(Vec::new());
+                }
+                if !self.pending_tools.is_empty()
+                    && matches!(finish_reason.as_deref(), Some("tool_calls" | "function_call"))
+                {
+                    for tool in std::iter::once(&self.active_tool).chain(self.pending_tools.values()) {
+                        if !tool.buffered_arguments.is_empty()
+                            && serde_json::from_str::<serde::de::IgnoredAny>(&tool.buffered_arguments).is_err()
+                        {
+                            return Err(AiSurfaceFinalizeError::new(
+                                "upstream completed an interleaved tool call with invalid JSON arguments",
+                            ));
+                        }
+                    }
                 }
                 let mut out = self.ensure_started()?;
                 out.extend(self.close_open_block()?);
@@ -1257,6 +1297,137 @@ mod tests {
 
         assert!(merged.input_tokens_include_cache);
         assert_eq!(merged.total_tokens, 110_852);
+    }
+
+    #[test]
+    fn interleaved_chat_tools_emit_each_claude_block_once() {
+        use crate::formats::shared::stream_core::StreamingStandardFormatMatrix;
+
+        let ctx =
+            json!({"provider_api_format":"openai:chat","client_api_format":"claude:messages"});
+        let mut matrix = StreamingStandardFormatMatrix::default();
+        let mut events = Vec::<Value>::new();
+        let calls = [
+            json!({"index":0,"id":"call-a","function":{"name":"shell","arguments":"{\"cmd\":"}}),
+            json!({"index":1,"id":"call-b","function":{"name":"Read","arguments":"{\"file_path\":"}}),
+            json!({"index":2,"id":"call-c","function":{"name":"search","arguments":"{}"}}),
+            json!({"index":1,"id":"call-b","function":{"arguments":"\"x\",\"pages\":\"\"}"}}),
+            json!({"index":0,"id":"call-a","function":{"arguments":"\"a}b\"}"}}),
+        ];
+        for (i, call) in calls.iter().enumerate() {
+            let chunk = json!({"id":"m","choices":[{"delta":{"tool_calls":[call]}}]});
+            let bytes = matrix.transform_line(&ctx, data_line(chunk)).unwrap();
+            if i == 0 {
+                assert!(String::from_utf8_lossy(&bytes).contains("partial_json"));
+            }
+            events.extend(parse_claude_events(&bytes));
+        }
+        let finish = json!({"id":"m","choices":[{"delta":{},"finish_reason":"tool_calls"}]});
+        events.extend(parse_claude_events(
+            &matrix.transform_line(&ctx, data_line(finish)).unwrap(),
+        ));
+        events.extend(parse_claude_events(&matrix.finish(&ctx).unwrap()));
+        let mut calls = Vec::new();
+        let mut open: Option<(String, String, String)> = None;
+        for event in events {
+            match event["type"].as_str().unwrap() {
+                "content_block_start" => {
+                    assert!(open.is_none());
+                    assert_eq!(event["index"], calls.len());
+                    let block = &event["content_block"];
+                    open = Some((
+                        block["id"].as_str().unwrap().to_owned(),
+                        block["name"].as_str().unwrap().to_owned(),
+                        String::new(),
+                    ));
+                }
+                "content_block_delta" => {
+                    assert_eq!(event["index"], calls.len());
+                    open.as_mut()
+                        .unwrap()
+                        .2
+                        .push_str(event["delta"]["partial_json"].as_str().unwrap());
+                }
+                "content_block_stop" => {
+                    assert_eq!(event["index"], calls.len());
+                    let (id, name, args) = open.take().unwrap();
+                    calls.push(json!([
+                        id,
+                        name,
+                        serde_json::from_str::<Value>(&args).unwrap()
+                    ]));
+                }
+                _ => {}
+            }
+        }
+        assert!(open.is_none());
+        assert_eq!(
+            calls,
+            [
+                json!(["call-a", "shell", {"cmd":"a}b"}]),
+                json!(["call-b", "Read", {"file_path":"x"}]),
+                json!(["call-c", "search", {}]),
+            ]
+        );
+    }
+
+    fn parse_claude_events(bytes: &[u8]) -> Vec<Value> {
+        std::str::from_utf8(bytes)
+            .unwrap()
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .map(|data| serde_json::from_str(data).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn chat_error_never_flushes_pending_claude_tool_calls() {
+        use crate::formats::shared::stream_core::StreamingStandardFormatMatrix;
+        let ctx =
+            json!({"provider_api_format":"openai:chat","client_api_format":"claude:messages"});
+        let mut matrix = StreamingStandardFormatMatrix::default();
+        for (index, id) in [(0, "first"), (1, "pending")] {
+            let chunk = json!({"id":"m","choices":[{"delta":{"tool_calls":[{
+                "index":index,"id":id,"function":{"name":"search","arguments":"{"}
+            }]}}]});
+            let emitted = matrix.transform_line(&ctx, data_line(chunk)).unwrap();
+            assert!(!String::from_utf8_lossy(&emitted).contains("pending"));
+        }
+        let failure = json!({"error":{"message":"upstream failed","type":"server_error"}});
+        let emitted = matrix.transform_line(&ctx, data_line(failure)).unwrap();
+        assert!(String::from_utf8_lossy(&emitted).contains("event: error"));
+        assert!(matrix.finish(&ctx).unwrap().is_empty());
+    }
+
+    #[test]
+    fn incomplete_interleaved_tool_arguments_cannot_finish_as_success() {
+        let mut emitter = ClaudeClientEmitter::default();
+        let mut emit = |event| {
+            emitter.emit(CanonicalStreamFrame {
+                id: "m".into(),
+                model: "m".into(),
+                event,
+            })
+        };
+        for (index, args) in [(0, "{"), (1, "{}")] {
+            emit(CanonicalStreamEvent::ToolCallStart {
+                index,
+                call_id: format!("id-{index}"),
+                name: "test".into(),
+            })
+            .unwrap();
+            emit(CanonicalStreamEvent::ToolCallArgumentsDelta {
+                index,
+                arguments: args.into(),
+            })
+            .unwrap();
+        }
+        let failure = emit(CanonicalStreamEvent::Finish {
+            finish_reason: Some("tool_calls".into()),
+            usage: None,
+        })
+        .unwrap_err();
+        assert!(failure.to_string().contains("invalid JSON arguments"));
     }
 
     #[test]

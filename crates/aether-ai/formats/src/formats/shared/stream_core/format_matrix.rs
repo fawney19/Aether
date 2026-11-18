@@ -3,6 +3,7 @@ use aether_contracts::{ExecutionStreamTerminalSummary, StandardizedUsage};
 use serde_json::Value;
 
 use crate::formats::claude::messages::stream::{ClaudeClientEmitter, ClaudeProviderState};
+use crate::formats::context::strict_format_conversion;
 use crate::formats::gemini::generate_content::stream::{GeminiClientEmitter, GeminiProviderState};
 use crate::formats::openai::chat::stream::{
     OpenAIChatClientEmitter, OpenAIChatProviderState, OpenAIResponsesClientEmitter,
@@ -18,8 +19,8 @@ use crate::formats::shared::error_body::{
 use crate::formats::shared::sse::encode_json_sse;
 use crate::formats::shared::stream_core::common::{
     canonical_usage_from_openai_usage, decode_json_data_line, openai_stream_terminal_error_body,
-    openai_stream_terminal_error_message, unsupported_stream_event_message, CanonicalStreamEvent,
-    CanonicalStreamFrame, CanonicalUsage,
+    openai_stream_terminal_error_message, required_stream_end, unsupported_stream_event_message,
+    CanonicalStreamEvent, CanonicalStreamFrame, CanonicalUsage,
 };
 use crate::formats::shared::AiSurfaceFinalizeError;
 
@@ -28,6 +29,8 @@ const PROVIDER_STREAM_FINISH_ERROR_MESSAGE: &str =
 
 #[derive(Default)]
 pub struct StreamingStandardFormatMatrix {
+    required_end: Option<&'static str>,
+    pending_usage_finish: Option<CanonicalStreamFrame>,
     provider: Option<ProviderStreamParser>,
     client: Option<ClientStreamEmitter>,
     propagated_actual_service_tier: Option<String>,
@@ -60,7 +63,25 @@ impl StreamingStandardFormatMatrix {
         let Some(provider) = provider.as_mut() else {
             return Ok(Vec::new());
         };
-        let frames = provider.push_line(report_context, line)?;
+        let mut frames = provider.push_line(report_context, line)?;
+        if self.required_end.is_some() {
+            // A usage report may precede [DONE]. Release those counts only once
+            // the upstream has confirmed that its turn ended.
+            let finish = frames
+                .iter()
+                .position(|frame| matches!(frame.event, CanonicalStreamEvent::Finish { .. }));
+            if provider.observed_end() {
+                if let Some(pending) = self
+                    .pending_usage_finish
+                    .take()
+                    .filter(|_| finish.is_none())
+                {
+                    frames.push(pending);
+                }
+            } else if let Some(index) = finish {
+                self.pending_usage_finish = Some(frames.remove(index));
+            }
+        }
         if provider.actual_service_tier() != propagated_actual_service_tier.as_deref() {
             *propagated_actual_service_tier = provider.actual_service_tier().map(ToOwned::to_owned);
             if let Some(client) = client.as_mut() {
@@ -87,6 +108,22 @@ impl StreamingStandardFormatMatrix {
         let Some(provider) = provider.as_mut() else {
             return Ok(Vec::new());
         };
+        if let Some(marker) = self.required_end.filter(|_| !provider.observed_end()) {
+            self.terminated = true;
+            let Some(client) = client.as_mut() else {
+                return Ok(Vec::new());
+            };
+            let message = format!("Upstream stream ended before {marker}");
+            let Some(error_body) = build_core_error_body_for_client_format(
+                client.api_format(),
+                &message,
+                Some("stream_missing_terminal_event"),
+                LocalCoreSyncErrorKind::ServerError,
+            ) else {
+                return Ok(Vec::new());
+            };
+            return client.emit_error(error_body);
+        }
         let frames = provider.finish(report_context)?;
         if provider.actual_service_tier() != propagated_actual_service_tier.as_deref() {
             *propagated_actual_service_tier = provider.actual_service_tier().map(ToOwned::to_owned);
@@ -110,6 +147,7 @@ impl StreamingStandardFormatMatrix {
         let provider_api_format = provider_api_format_for_context(report_context);
         let client_api_format = client_api_format_for_context(report_context);
 
+        self.required_end = required_stream_end(provider_api_format.as_str(), report_context);
         self.provider = ProviderStreamParser::for_api_format(provider_api_format.as_str());
         self.client =
             ClientStreamEmitter::for_api_format(client_api_format.as_str(), report_context);
@@ -124,30 +162,39 @@ impl StreamingStandardFormatMatrix {
             return Ok(Vec::new());
         };
         let mut out = Vec::new();
-        for frame in frames {
+        let strict = strict_format_conversion(report_context).unwrap_or(false);
+        for mut frame in frames {
             if let CanonicalStreamEvent::Finish {
-                finish_reason: Some(ref finish_reason),
+                finish_reason: Some(finish_reason),
                 ..
-            } = frame.event
+            } = &mut frame.event
             {
                 if !canonical_stream_finish_reason_is_supported(finish_reason) {
-                    self.terminated = true;
-                    out.extend(client.emit_finish_reason_error(finish_reason)?);
-                    break;
+                    if strict || finish_reason.trim() == "error" {
+                        self.terminated = true;
+                        out.extend(client.emit_finish_reason_error(finish_reason)?);
+                        break;
+                    }
+                    *finish_reason = "stop".to_string();
                 }
             }
             if let CanonicalStreamEvent::UnknownEvent(payload) = &frame.event {
-                self.terminated = true;
                 if openai_stream_terminal_error_body(payload).is_some() {
                     out.extend(client.emit_terminal_error_frame(frame)?);
-                } else {
+                } else if strict {
                     out.extend(client.emit_unknown_event(payload)?);
+                } else {
+                    continue;
                 }
+                self.terminated = true;
                 break;
             }
             if let CanonicalStreamEvent::OpenAiResponsesOutputItem { raw_event, .. } = &frame.event
             {
                 if !matches!(client, ClientStreamEmitter::OpenAIResponses(_)) {
+                    if !strict {
+                        continue;
+                    }
                     self.terminated = true;
                     out.extend(client.emit_unknown_event(raw_event)?);
                     break;
@@ -224,7 +271,9 @@ fn apply_sse_event_type(pending_sse_event: &mut Option<String>, line: Vec<u8>) -
 
 #[derive(Default)]
 pub struct StreamingStandardTerminalObserver {
+    required_end: Option<&'static str>,
     provider: Option<TerminalStreamParser>,
+    strict: bool,
     latest_summary: Option<ExecutionStreamTerminalSummary>,
     pending_sse_event: Option<String>,
 }
@@ -308,6 +357,18 @@ impl StreamingStandardTerminalObserver {
         };
         match provider {
             TerminalStreamParser::Standard(provider) => {
+                if let Some(marker) = self.required_end.filter(|_| !provider.observed_end()) {
+                    let summary = self
+                        .latest_summary
+                        .get_or_insert_with(ExecutionStreamTerminalSummary::default);
+                    if summary.parser_error.is_none() {
+                        summary.observed_finish = false;
+                        summary.finish_reason = None;
+                        summary.parser_error =
+                            Some(format!("Upstream stream ended before {marker}"));
+                    }
+                    return Ok(self.latest_summary.clone());
+                }
                 let frames = provider.finish(report_context)?;
                 self.observe_frames(frames);
             }
@@ -344,6 +405,8 @@ impl StreamingStandardTerminalObserver {
             return;
         }
         let provider_api_format = provider_api_format_for_context(report_context);
+        self.strict = strict_format_conversion(report_context).unwrap_or(false);
+        self.required_end = required_stream_end(provider_api_format.as_str(), report_context);
         self.provider = TerminalStreamParser::for_api_format(provider_api_format.as_str());
     }
 
@@ -390,7 +453,10 @@ impl StreamingStandardTerminalObserver {
             } => {
                 if let Some(parser_error) = finish_reason
                     .as_deref()
-                    .filter(|reason| !canonical_stream_finish_reason_is_supported(reason))
+                    .filter(|reason| {
+                        reason.trim() == "error"
+                            || (self.strict && !canonical_stream_finish_reason_is_supported(reason))
+                    })
                     .map(|reason| {
                         if reason.trim() == "error" {
                             PROVIDER_STREAM_FINISH_ERROR_MESSAGE.to_string()
@@ -451,6 +517,15 @@ enum ProviderStreamParser {
 }
 
 impl ProviderStreamParser {
+    fn observed_end(&self) -> bool {
+        match self {
+            Self::OpenAIChat(state) => state.observed_end,
+            Self::OpenAIResponses(state) => state.observed_end(),
+            Self::Claude(state) => state.observed_end,
+            Self::Gemini(state) => state.observed_end,
+        }
+    }
+
     fn for_api_format(provider_api_format: &str) -> Option<Self> {
         Some(match FormatId::parse(provider_api_format)? {
             FormatId::OpenAiChat => Self::OpenAIChat(OpenAIChatProviderState::default()),
@@ -860,6 +935,114 @@ mod tests {
 
     fn data_line(value: Value) -> Vec<u8> {
         format!("data: {}\n", value).into_bytes()
+    }
+
+    #[test]
+    fn upstream_eof_requires_a_wire_terminal_only_on_identified_routes() {
+        let chat = json!({"choices":[{"index":0,"delta":{"content":"partial"}}]});
+        let gemini = json!({"candidates":[{"content":{"parts":[{"text":"partial"}]}}]});
+        for (source, url, chunk, missing) in [
+            (
+                "openai:chat",
+                "https://api.openai.com/v1/chat/completions",
+                chat.clone(),
+                true,
+            ),
+            (
+                "openai:chat",
+                "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+                chat.clone(),
+                true,
+            ),
+            (
+                "openai:chat",
+                "https://proxy.example/v1/chat/completions",
+                chat,
+                false,
+            ),
+            (
+                "gemini:generate_content",
+                "https://us-central1-aiplatform.googleapis.com/v1",
+                gemini.clone(),
+                true,
+            ),
+            (
+                "gemini:generate_content",
+                "https://proxy.example/v1",
+                gemini,
+                false,
+            ),
+            (
+                "claude:messages",
+                "https://api.anthropic.com/v1/messages",
+                json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"partial"}}),
+                true,
+            ),
+            (
+                "openai:responses",
+                "https://proxy.example/v1/responses",
+                json!({"type":"response.output_text.delta","delta":"partial"}),
+                true,
+            ),
+        ] {
+            let mut ctx = report_context(source, "claude:messages");
+            ctx["upstream_url"] = json!(url);
+            let mut matrix = StreamingStandardFormatMatrix::default();
+            let mut observer = StreamingStandardTerminalObserver::default();
+            matrix
+                .transform_line(&ctx, data_line(chunk.clone()))
+                .unwrap();
+            observer.push_line(&ctx, data_line(chunk)).unwrap();
+            let tail = String::from_utf8(matrix.finish(&ctx).unwrap()).unwrap();
+            assert_eq!(
+                tail.contains("event: error"),
+                missing,
+                "{source} {url}: {tail}"
+            );
+            assert_eq!(
+                tail.contains("event: message_stop"),
+                !missing,
+                "{source} {url}: {tail}"
+            );
+            let summary = observer.finish(&ctx).unwrap().unwrap();
+            assert_eq!(summary.parser_error.is_some(), missing, "{source} {url}");
+            assert_eq!(summary.observed_finish, !missing, "{source} {url}");
+        }
+    }
+
+    #[test]
+    fn chat_done_marker_allows_the_existing_successful_flush() {
+        let mut ctx = report_context("openai:chat", "claude:messages");
+        ctx["upstream_url"] = json!("https://api.openai.com/v1/chat/completions");
+        let mut matrix = StreamingStandardFormatMatrix::default();
+        matrix
+            .transform_line(
+                &ctx,
+                data_line(json!({"choices":[{"delta":{"content":"whole"}}]})),
+            )
+            .unwrap();
+        let before_done = matrix
+            .transform_line(
+                &ctx,
+                data_line(json!({"usage":{"completion_tokens":6,"prompt_tokens":2}})),
+            )
+            .unwrap();
+        assert!(!String::from_utf8(before_done)
+            .unwrap()
+            .contains("message_stop"));
+        let mut end = matrix
+            .transform_line(&ctx, b"data: [DONE]\r\n".to_vec())
+            .unwrap();
+        end.extend(matrix.finish(&ctx).unwrap());
+        let tail = String::from_utf8(end).unwrap();
+        assert!(tail.contains("event: message_stop"), "{tail}");
+        assert!(tail.contains("\"output_tokens\":6"), "{tail}");
+    }
+
+    fn strict_report_context(provider: &str, client: &str) -> Value {
+        let mut context = report_context(provider, client);
+        context["routing_execution_policy"] = json!({"strict_format_conversion": true});
+        context
     }
 
     fn json_data_events(bytes: &[u8]) -> Vec<Value> {
@@ -2002,6 +2185,50 @@ mod tests {
     }
 
     #[test]
+    fn permissive_stream_keeps_known_output_after_unknown_event_and_native_item() {
+        let ctx = report_context("openai:responses", "claude:messages");
+        let mut matrix = StreamingStandardFormatMatrix::default();
+        let mut out = Vec::new();
+        for event in [
+            json!({"type":"response.future.delta", "payload":"vendor-private"}),
+            json!({"type":"response.output_item.done","item":{"type":"compaction","encrypted_content":"opaque"}}),
+            json!({"type":"response.output_text.delta","response_id":"r","output_index":0,"content_index":0,"delta":"hello"}),
+            json!({"type":"response.completed","response":{"id":"r","status":"completed"}}),
+        ] {
+            out.extend(matrix.transform_line(&ctx, data_line(event)).unwrap());
+        }
+        out.extend(matrix.finish(&ctx).unwrap());
+        let output = String::from_utf8(out).unwrap();
+        assert!(
+            output.contains("hello") && output.contains("event: message_stop"),
+            "{output}"
+        );
+        assert!(
+            !output.contains("event: error") && !output.contains("opaque"),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn permissive_stream_maps_unrecognized_stop_and_observes_original_reason() {
+        let ctx = report_context("openai:chat", "claude:messages");
+        let line = data_line(json!({
+            "id":"c", "choices":[{"delta":{"content":"ok"},"finish_reason":"vendor_done"}],
+            "usage":{"prompt_tokens":1,"completion_tokens":1}
+        }));
+        let mut matrix = StreamingStandardFormatMatrix::default();
+        let mut output = matrix.transform_line(&ctx, line.clone()).unwrap();
+        output.extend(matrix.finish(&ctx).unwrap());
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("\"stop_reason\":\"end_turn\""), "{output}");
+        let mut observer = StreamingStandardTerminalObserver::default();
+        observer.push_line(&ctx, line).unwrap();
+        let summary = observer.finish(&ctx).unwrap().unwrap();
+        assert_eq!(summary.finish_reason.as_deref(), Some("vendor_done"));
+        assert!(summary.parser_error.is_none());
+    }
+
+    #[test]
     fn transforms_unknown_provider_stream_events_to_visible_client_errors() {
         let cases = [
             (
@@ -2027,7 +2254,7 @@ mod tests {
         ];
 
         for (client_api_format, prefix, marker) in cases {
-            let mut report_context = report_context("openai:responses", client_api_format);
+            let mut report_context = strict_report_context("openai:responses", client_api_format);
             report_context["provider_stream_event_api_format"] = json!("openai:responses");
             let mut matrix = StreamingStandardFormatMatrix::default();
             let output = matrix
@@ -2119,7 +2346,7 @@ mod tests {
 
         for client_api_format in ["openai:chat", "claude:messages", "gemini:generate_content"] {
             let mut matrix = StreamingStandardFormatMatrix::default();
-            let context = report_context("openai:responses", client_api_format);
+            let context = strict_report_context("openai:responses", client_api_format);
             let output = matrix
                 .transform_line(&context, data_line(compaction_event.clone()))
                 .expect("cross-format rejection should be encoded for the client");
@@ -2502,7 +2729,7 @@ mod tests {
         ];
 
         for (client_api_format, prefix, marker) in cases {
-            let report_context = report_context("openai:chat", client_api_format);
+            let report_context = strict_report_context("openai:chat", client_api_format);
             let mut matrix = StreamingStandardFormatMatrix::default();
             let output = matrix
                 .transform_line(
@@ -2570,7 +2797,8 @@ mod tests {
         ];
 
         for (client_api_format, prefix, marker) in cases {
-            let report_context = report_context("gemini:generate_content", client_api_format);
+            let report_context =
+                strict_report_context("gemini:generate_content", client_api_format);
             let mut matrix = StreamingStandardFormatMatrix::default();
             let output = matrix
                 .transform_line(
@@ -2640,7 +2868,7 @@ mod tests {
         ];
 
         for (client_api_format, prefix, marker) in cases {
-            let report_context = report_context("claude:messages", client_api_format);
+            let report_context = strict_report_context("claude:messages", client_api_format);
             let mut matrix = StreamingStandardFormatMatrix::default();
             let output = matrix
                 .transform_line(
@@ -3477,20 +3705,18 @@ mod structured_entry_tests {
         );
     }
 
-    /// 没有任何供应商终态事件。注意 `finish()` 会补一个 `stop`（这是 HTTP 与
-    /// WebSocket 共享的既有行为，C5 不改），所以 `observed_finish` 为真而 usage
-    /// 缺失——真正的「缺终态」判定看的是 usage 与被捕获的 body。这里要钉住的是
-    /// 两条入口在这种不完整序列上仍然给出同一个摘要。
     #[test]
     fn a_missing_terminal_agrees_across_both_entries() {
         let events = vec![created(), text_delta("truncated")];
         assert_entries_agree("a missing terminal", &events);
         let summary = summary_via_push_event(&events);
-        assert_eq!(summary.finish_reason.as_deref(), Some("stop"));
-        assert!(
-            summary.standardized_usage.is_none(),
-            "a synthesized finish carries no usage"
-        );
+        assert!(!summary.observed_finish);
+        assert!(summary.finish_reason.is_none());
+        assert!(summary
+            .parser_error
+            .as_deref()
+            .unwrap()
+            .contains("Responses terminal event"));
     }
 
     /// `openai:image` 没有结构化入口：必须显式报错，让调用方标记 parser_error，

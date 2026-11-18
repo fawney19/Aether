@@ -12,6 +12,17 @@ const OPENAI_CHAT_TOOL_NAME_MAX_LEN: usize = 64;
 const HASHED_ALIAS_PREFIX: &str = "aether_ns_";
 const HASH_HEX_LEN: usize = 32;
 
+pub(crate) fn wrapped_custom_input(arguments: &str) -> Option<String> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct CustomInput {
+        input: String,
+    }
+    serde_json::from_str::<CustomInput>(arguments)
+        .ok()
+        .map(|value| value.input)
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct NamespaceChatTool {
     pub source_tool_index: usize,
@@ -22,6 +33,8 @@ pub(crate) struct NamespaceChatTool {
     pub description: Option<String>,
     pub parameters: Option<Value>,
     pub strict: Option<Value>,
+    pub wrapped_custom: bool,
+    pub grammar: Option<String>,
 }
 
 impl NamespaceChatTool {
@@ -166,11 +179,26 @@ impl NamespaceToolAliases {
     }
 
     pub(crate) fn from_report_context(report_context: &Value) -> Self {
-        let Some(tools) = report_context
-            .get("original_request_body")
-            .and_then(|request| request.get("tools"))
-        else {
-            return Self::default();
+        let request = &report_context["original_request_body"];
+        let additional = request["input"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .take_while(|item| {
+                crate::formats::registry::is_openai_responses_additional_tools_item(item)
+            })
+            .flat_map(|item| item["tools"].as_array().into_iter().flatten());
+        let combined;
+        let tools = if additional.clone().next().is_some() {
+            combined = Value::Array(
+                additional
+                    .chain(request["tools"].as_array().into_iter().flatten())
+                    .cloned()
+                    .collect(),
+            );
+            &combined
+        } else {
+            &request["tools"]
         };
         let client_function_tool_names = client_function_tool_names(tools);
         let mut result = openai_responses_tools_to_canonical(Some(tools))
@@ -202,6 +230,12 @@ impl NamespaceToolAliases {
         self.by_chat_name
             .get(chat_name)
             .map(|(namespace, child_name)| (namespace.as_str(), child_name.as_str()))
+    }
+
+    pub(crate) fn is_wrapped_custom(&self, chat_name: &str) -> bool {
+        self.tools
+            .iter()
+            .any(|tool| tool.wrapped_custom && tool.chat_name == chat_name)
     }
 
     pub(crate) fn tools_for_source(
@@ -307,13 +341,17 @@ fn parse_namespace_tool(
     let mut parsed = Vec::with_capacity(children.len());
     for (source_child_index, child) in children.iter().enumerate() {
         let child = child.as_object()?;
-        if child.get("type").and_then(Value::as_str) != Some("function") {
-            return None;
-        }
-        if !object_has_only_keys(
-            child,
-            &["type", "name", "description", "parameters", "strict"],
-        ) {
+        let wrapped_custom = match child.get("type")?.as_str()? {
+            "function" => false,
+            "custom" => true,
+            _ => return None,
+        };
+        let allowed = if wrapped_custom {
+            &["type", "name", "description", "format"][..]
+        } else {
+            &["type", "name", "description", "parameters", "strict"][..]
+        };
+        if !object_has_only_keys(child, allowed) {
             return None;
         }
         let function = child;
@@ -325,7 +363,7 @@ fn parse_namespace_tool(
         // Completions only permits an omitted schema or an object. Treat null
         // as the omitted form instead of forwarding an invalid
         // `parameters: null` Chat tool definition.
-        let parameters = match function.get("parameters") {
+        let mut parameters = match function.get("parameters") {
             Some(parameters @ Value::Object(_)) => Some(parameters.clone()),
             Some(Value::Null) | None => None,
             Some(_) => return None,
@@ -335,10 +373,43 @@ fn parse_namespace_tool(
             Some(_) => return None,
             None => None,
         };
-        let description = match function.get("description") {
+        let mut description = match function.get("description") {
             Some(Value::String(description)) => Some(description.clone()),
             Some(Value::Null) | None => None,
             Some(_) => return None,
+        };
+        let grammar = if wrapped_custom {
+            let grammar = match child.get("format") {
+                None | Some(Value::Null) => None,
+                Some(format) if *format == json!({"type":"text"}) => None,
+                Some(format) => {
+                    let format = format.as_object()?;
+                    if !object_has_only_keys(format, &["type", "definition", "syntax"])
+                        || format.get("type")?.as_str()? != "grammar"
+                    {
+                        return None;
+                    }
+                    let syntax = non_empty_string(format.get("syntax"))?;
+                    let definition = non_empty_string(format.get("definition"))?;
+                    Some(format!(
+                        "Input must follow this {syntax} grammar:\n{definition}"
+                    ))
+                }
+            };
+            parameters = Some(
+                json!({"type":"object","properties":{"input":{"type":"string"}},"required":["input"],"additionalProperties":false}),
+            );
+            if let Some(grammar) = grammar.as_ref() {
+                description = Some(
+                    [description.as_deref().unwrap_or(""), grammar.as_str()]
+                        .join("\n")
+                        .trim_start()
+                        .to_string(),
+                );
+            }
+            grammar
+        } else {
+            None
         };
         parsed.push(NamespaceChatTool {
             source_tool_index,
@@ -349,6 +420,8 @@ fn parse_namespace_tool(
             description,
             parameters,
             strict,
+            wrapped_custom,
+            grammar,
         });
     }
     Some(parsed)
@@ -725,7 +798,7 @@ mod tests {
                 "type": "namespace",
                 "name": "broken",
                 "description": "Broken",
-                "tools": [{"type": "custom", "name": "raw"}]
+                "tools": [{"type": "custom", "name": "raw", "format": {"type":"unknown"}}]
             }),
             json!({
                 "type": "namespace",

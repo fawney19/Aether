@@ -411,6 +411,7 @@ mod tests {
             None,
             false,
             replay_policy,
+            false,
         )
         .expect("custom DeepSeek Responses body should build");
         crate::ai_serving::finalize_openai_provider_request_with_codex_model_capabilities_and_reasoning_replay_policy(

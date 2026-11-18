@@ -1,13 +1,6 @@
 use std::borrow::Cow;
 
-use aether_ai_formats::formats::conversion::request::{
-    convert_openai_chat_request_to_claude_request, convert_openai_chat_request_to_gemini_request,
-    convert_openai_chat_request_to_openai_responses_request,
-    normalize_claude_request_to_openai_chat_request,
-    normalize_gemini_request_to_openai_chat_request,
-    normalize_openai_responses_request_to_openai_chat_request,
-    normalize_openai_responses_request_to_openai_chat_request_with_history_scope,
-};
+use aether_ai_formats::convert_request;
 use aether_ai_formats::{request_conversion_kind, FormatContext, RequestConversionKind};
 use serde_json::{json, Value};
 
@@ -57,9 +50,15 @@ fn is_claude_tool_content_block(part: &Value) -> bool {
         .is_some_and(|block_type| matches!(block_type, "tool_use" | "tool_result"))
 }
 
-fn chat_compatible_body_for_openai_chat_endpoint(body_json: &Value) -> Option<Cow<'_, Value>> {
+fn chat_compatible_body_for_openai_chat_endpoint<'a>(
+    body_json: &'a Value,
+    context: &FormatContext,
+) -> Option<Cow<'a, Value>> {
     if is_responses_shaped_body_on_chat_endpoint(body_json) {
-        return normalize_openai_responses_request_to_openai_chat_request(body_json)
+        let normalization = FormatContext::default()
+            .with_strict_format_conversion(context.strict_format_conversion);
+        return convert_request("openai:responses", "openai:chat", body_json, &normalization)
+            .ok()
             .map(Cow::Owned);
     }
     Some(Cow::Borrowed(body_json))
@@ -68,22 +67,22 @@ fn chat_compatible_body_for_openai_chat_endpoint(body_json: &Value) -> Option<Co
 pub(crate) fn chat_compatible_body_for_standard_source<'a>(
     body_json: &'a Value,
     client_api_format: &str,
-    history_scope: Option<&str>,
+    context: &FormatContext,
 ) -> Option<Cow<'a, Value>> {
     match aether_ai_formats::normalize_api_format_alias(client_api_format).as_str() {
-        "openai:chat" => chat_compatible_body_for_openai_chat_endpoint(body_json),
+        "openai:chat" => chat_compatible_body_for_openai_chat_endpoint(body_json, context),
         "openai:responses" | "openai:responses:compact" => {
-            normalize_openai_responses_request_to_openai_chat_request_with_history_scope(
-                body_json,
-                history_scope,
-            )
-            .map(Cow::Owned)
+            convert_request("openai:responses", "openai:chat", body_json, context)
+                .ok()
+                .map(Cow::Owned)
         }
-        "claude:messages" => {
-            normalize_claude_request_to_openai_chat_request(body_json).map(Cow::Owned)
-        }
+        "claude:messages" => convert_request("claude:messages", "openai:chat", body_json, context)
+            .ok()
+            .map(Cow::Owned),
         "gemini:generate_content" => {
-            normalize_gemini_request_to_openai_chat_request(body_json, "").map(Cow::Owned)
+            convert_request("gemini:generate_content", "openai:chat", body_json, context)
+                .ok()
+                .map(Cow::Owned)
         }
         _ => None,
     }
@@ -108,7 +107,8 @@ pub fn build_local_openai_chat_request_body_with_model_directives(
     upstream_is_stream: bool,
     enable_model_directives: bool,
 ) -> Option<Value> {
-    let chat_body = chat_compatible_body_for_openai_chat_endpoint(body_json)?;
+    let chat_body =
+        chat_compatible_body_for_openai_chat_endpoint(body_json, &FormatContext::default())?;
     let request_body_object = chat_body.as_object()?;
     let mut provider_request_body = serde_json::Map::from_iter(
         request_body_object
@@ -177,9 +177,10 @@ pub fn build_cross_format_openai_chat_request_body_with_provider_context(
     upstream_is_stream: bool,
     enable_model_directives: bool,
     history_scope: Option<&str>,
+    strict_format_conversion: bool,
 ) -> Option<Value> {
     if super::standard_matrix::preserves_gemini_tool_schemas(provider_type, provider_api_format) {
-        return super::standard_matrix::build_standard_request_body_with_model_directives(
+        return super::standard_matrix::build_standard_request_body_with_model_directives_and_request_headers_and_reasoning_replay_policy(
             body_json,
             "openai:chat",
             mapped_model,
@@ -189,15 +190,19 @@ pub fn build_cross_format_openai_chat_request_body_with_provider_context(
             upstream_is_stream,
             None,
             history_scope,
+            None,
             enable_model_directives,
+            crate::OpenAiResponsesReasoningReplayPolicy::OpenAiItemIds,
+            strict_format_conversion,
         );
     }
-    build_cross_format_openai_chat_request_body_with_model_directives(
+    build_chat_cross_format_body(
         body_json,
         mapped_model,
         provider_api_format,
         upstream_is_stream,
         enable_model_directives,
+        strict_format_conversion,
     )
 }
 
@@ -208,32 +213,42 @@ pub fn build_cross_format_openai_chat_request_body_with_model_directives(
     upstream_is_stream: bool,
     enable_model_directives: bool,
 ) -> Option<Value> {
+    build_chat_cross_format_body(
+        body_json,
+        mapped_model,
+        provider_api_format,
+        upstream_is_stream,
+        enable_model_directives,
+        false,
+    )
+}
+
+fn build_chat_cross_format_body(
+    body_json: &Value,
+    mapped_model: &str,
+    provider_api_format: &str,
+    upstream_is_stream: bool,
+    enable_model_directives: bool,
+    strict_format_conversion: bool,
+) -> Option<Value> {
+    let ctx = FormatContext::default()
+        .with_strict_format_conversion(strict_format_conversion)
+        .with_mapped_model(mapped_model)
+        .with_upstream_stream(upstream_is_stream);
     let conversion_kind = request_conversion_kind("openai:chat", provider_api_format)?;
     let provider_request_body = match conversion_kind {
         RequestConversionKind::ToClaudeStandard => {
             if is_claude_messages_shaped_body_on_openai_chat_endpoint(body_json) {
-                convert_claude_compatible_chat_endpoint_request(
-                    body_json,
-                    mapped_model,
-                    provider_api_format,
-                    upstream_is_stream,
-                )?
+                convert_request("claude:messages", provider_api_format, body_json, &ctx).ok()?
             } else {
-                let chat_body = chat_compatible_body_for_openai_chat_endpoint(body_json)?;
-                convert_openai_chat_request_to_claude_request(
-                    chat_body.as_ref(),
-                    mapped_model,
-                    upstream_is_stream,
-                )?
+                let chat_body = chat_compatible_body_for_openai_chat_endpoint(body_json, &ctx)?;
+                convert_request("openai:chat", provider_api_format, chat_body.as_ref(), &ctx)
+                    .ok()?
             }
         }
         RequestConversionKind::ToGeminiStandard => {
-            let chat_body = chat_compatible_body_for_openai_chat_endpoint(body_json)?;
-            convert_openai_chat_request_to_gemini_request(
-                chat_body.as_ref(),
-                mapped_model,
-                upstream_is_stream,
-            )?
+            let chat_body = chat_compatible_body_for_openai_chat_endpoint(body_json, &ctx)?;
+            convert_request("openai:chat", provider_api_format, chat_body.as_ref(), &ctx).ok()?
         }
         RequestConversionKind::ToOpenAiResponses => {
             if is_responses_shaped_body_on_chat_endpoint(body_json) {
@@ -244,12 +259,7 @@ pub fn build_cross_format_openai_chat_request_body_with_model_directives(
                     enable_model_directives,
                 )?
             } else {
-                convert_openai_chat_request_to_openai_responses_request(
-                    body_json,
-                    mapped_model,
-                    upstream_is_stream,
-                    false,
-                )?
+                convert_request("openai:chat", "openai:responses", body_json, &ctx).ok()?
             }
         }
         _ => return None,
@@ -272,23 +282,6 @@ pub fn build_cross_format_openai_chat_request_body_with_model_directives(
         require_body_stream_field,
     );
     Some(provider_request_body)
-}
-
-fn convert_claude_compatible_chat_endpoint_request(
-    body_json: &Value,
-    mapped_model: &str,
-    provider_api_format: &str,
-    upstream_is_stream: bool,
-) -> Option<Value> {
-    aether_ai_formats::convert_request(
-        "claude:messages",
-        provider_api_format,
-        body_json,
-        &FormatContext::default()
-            .with_mapped_model(mapped_model)
-            .with_upstream_stream(upstream_is_stream),
-    )
-    .ok()
 }
 
 pub fn build_local_openai_responses_request_body(
@@ -388,9 +381,10 @@ pub fn build_cross_format_openai_responses_request_body_with_provider_context(
     upstream_is_stream: bool,
     enable_model_directives: bool,
     history_scope: Option<&str>,
+    strict_format_conversion: bool,
 ) -> Option<Value> {
     if super::standard_matrix::preserves_gemini_tool_schemas(provider_type, provider_api_format) {
-        return super::standard_matrix::build_standard_request_body_with_model_directives(
+        return super::standard_matrix::build_standard_request_body_with_model_directives_and_request_headers_and_reasoning_replay_policy(
             body_json,
             client_api_format,
             mapped_model,
@@ -400,10 +394,13 @@ pub fn build_cross_format_openai_responses_request_body_with_provider_context(
             upstream_is_stream,
             None,
             history_scope,
+            None,
             enable_model_directives,
+            crate::OpenAiResponsesReasoningReplayPolicy::OpenAiItemIds,
+            strict_format_conversion,
         );
     }
-    build_cross_format_openai_responses_request_body_with_model_directives_and_history_scope(
+    build_responses_cross_format_body(
         body_json,
         mapped_model,
         client_api_format,
@@ -411,6 +408,7 @@ pub fn build_cross_format_openai_responses_request_body_with_provider_context(
         upstream_is_stream,
         enable_model_directives,
         history_scope,
+        strict_format_conversion,
     )
 }
 
@@ -423,8 +421,38 @@ pub fn build_cross_format_openai_responses_request_body_with_model_directives_an
     enable_model_directives: bool,
     history_scope: Option<&str>,
 ) -> Option<Value> {
+    build_responses_cross_format_body(
+        body_json,
+        mapped_model,
+        client_api_format,
+        provider_api_format,
+        upstream_is_stream,
+        enable_model_directives,
+        history_scope,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_responses_cross_format_body(
+    body_json: &Value,
+    mapped_model: &str,
+    client_api_format: &str,
+    provider_api_format: &str,
+    upstream_is_stream: bool,
+    enable_model_directives: bool,
+    history_scope: Option<&str>,
+    strict_format_conversion: bool,
+) -> Option<Value> {
+    let mut ctx = FormatContext::default().with_strict_format_conversion(strict_format_conversion);
+    if let Some(scope) = history_scope {
+        ctx = ctx.with_history_scope(scope);
+    }
     let chat_like_request =
-        chat_compatible_body_for_standard_source(body_json, client_api_format, history_scope)?;
+        chat_compatible_body_for_standard_source(body_json, client_api_format, &ctx)?;
+    let ctx = ctx
+        .with_mapped_model(mapped_model)
+        .with_upstream_stream(upstream_is_stream);
     let conversion_kind = request_conversion_kind(client_api_format, provider_api_format)?;
     let provider_request_body = match conversion_kind {
         RequestConversionKind::ToOpenAIChat => {
@@ -435,24 +463,22 @@ pub fn build_cross_format_openai_responses_request_body_with_model_directives_an
                 enable_model_directives,
             )?
         }
-        RequestConversionKind::ToOpenAiResponses => {
-            convert_openai_chat_request_to_openai_responses_request(
+        RequestConversionKind::ToOpenAiResponses => convert_request(
+            "openai:chat",
+            "openai:responses",
+            chat_like_request.as_ref(),
+            &ctx,
+        )
+        .ok()?,
+        RequestConversionKind::ToClaudeStandard | RequestConversionKind::ToGeminiStandard => {
+            convert_request(
+                "openai:chat",
+                provider_api_format,
                 chat_like_request.as_ref(),
-                mapped_model,
-                upstream_is_stream,
-                false,
-            )?
+                &ctx,
+            )
+            .ok()?
         }
-        RequestConversionKind::ToClaudeStandard => convert_openai_chat_request_to_claude_request(
-            chat_like_request.as_ref(),
-            mapped_model,
-            upstream_is_stream,
-        )?,
-        RequestConversionKind::ToGeminiStandard => convert_openai_chat_request_to_gemini_request(
-            chat_like_request.as_ref(),
-            mapped_model,
-            upstream_is_stream,
-        )?,
     };
     let mut provider_request_body = with_model_directive_overrides(
         provider_request_body,
@@ -533,6 +559,7 @@ mod tests {
                                 stream,
                                 directives,
                                 Some("seam-test"),
+                                false,
                             );
                             let expected =
                                 if super::super::standard_matrix::preserves_gemini_tool_schemas(
@@ -564,6 +591,7 @@ mod tests {
                             stream,
                             directives,
                             Some("seam-test"),
+                            false,
                         );
                         let expected =
                             if super::super::standard_matrix::preserves_gemini_tool_schemas(
@@ -616,6 +644,7 @@ mod tests {
                         true,
                         false,
                         history_scope,
+                        false,
                     )
                 } else {
                     responses(
@@ -627,6 +656,7 @@ mod tests {
                         true,
                         false,
                         history_scope,
+                        false,
                     )
                 }
             };

@@ -1,5 +1,33 @@
 use serde_json::{json, Map, Value};
 
+/// Compatibility endpoints may deliberately end at EOF. Only require the
+/// vendor's terminal marker when the wire protocol or upstream identifies it.
+pub(crate) fn required_stream_end(format: &str, context: &Value) -> Option<&'static str> {
+    use crate::formats::id::FormatId;
+    let format = FormatId::parse(format)?;
+    match format {
+        FormatId::OpenAiResponses | FormatId::OpenAiResponsesCompact => {
+            Some("Responses terminal event")
+        }
+        FormatId::ClaudeMessages => Some("Anthropic stop_reason or message_stop"),
+        FormatId::OpenAiChat | FormatId::GeminiGenerateContent => {
+            let url = url::Url::parse(context.get("upstream_url")?.as_str()?).ok()?;
+            let host = url.host_str()?;
+            let google = host == "generativelanguage.googleapis.com"
+                || host == "aiplatform.googleapis.com"
+                || host.ends_with("-aiplatform.googleapis.com");
+            if format == FormatId::OpenAiChat && (host == "api.openai.com" || google) {
+                Some("Chat finish_reason or [DONE]")
+            } else if format == FormatId::GeminiGenerateContent && google {
+                Some("Gemini finishReason")
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
 use crate::formats::shared::model_directives::model_directive_display_model_from_report_context;
 
 pub use aether_ai_formats::protocol::stream::{

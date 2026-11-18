@@ -27,6 +27,7 @@ struct GeminiProviderToolResultState {
 
 #[derive(Default)]
 pub struct GeminiProviderState {
+    pub(crate) observed_end: bool,
     terminal_observation_only: bool,
     observed_tool_calls: bool,
     response_id: Option<String>,
@@ -145,6 +146,10 @@ impl GeminiProviderState {
             let Some(candidate_object) = candidate.as_object() else {
                 continue;
             };
+            self.observed_end |= candidate_object
+                .get("finishReason")
+                .and_then(Value::as_str)
+                .is_some_and(|reason| !reason.trim().is_empty());
             let (response_id, response_model) = self.identity(report_context);
             let terminal_error = gemini_stream_terminal_error_payload(
                 candidate_object,
@@ -443,6 +448,17 @@ impl GeminiProviderState {
     }
 }
 
+pub(crate) fn is_gemini_failure_reason(value: &str) -> bool {
+    matches!(
+        value,
+        "MALFORMED_FUNCTION_CALL"
+            | "UNEXPECTED_TOOL_CALL"
+            | "TOO_MANY_TOOL_CALLS"
+            | "MISSING_THOUGHT_SIGNATURE"
+            | "MALFORMED_RESPONSE"
+    )
+}
+
 fn gemini_stream_terminal_error_payload(
     candidate: &Map<String, Value>,
     response_id: &str,
@@ -454,16 +470,7 @@ fn gemini_stream_terminal_error_payload(
         .or_else(|| candidate.get("finish_reason"))
         .and_then(Value::as_str)
         .map(str::trim)
-        .filter(|value| {
-            matches!(
-                *value,
-                "MALFORMED_FUNCTION_CALL"
-                    | "UNEXPECTED_TOOL_CALL"
-                    | "TOO_MANY_TOOL_CALLS"
-                    | "MISSING_THOUGHT_SIGNATURE"
-                    | "MALFORMED_RESPONSE"
-            )
-        })?;
+        .filter(|value| is_gemini_failure_reason(value))?;
     let message = candidate
         .get("finishMessage")
         .or_else(|| candidate.get("finish_message"))

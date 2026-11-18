@@ -19,6 +19,50 @@ fn object_keys(value: &Value) -> Vec<&str> {
         .collect()
 }
 
+#[test]
+fn strict_format_conversion_controls_cross_format_chat_requests() {
+    let ordinary = json!({
+        "model": "client",
+        "messages": [{"role": "user", "content": "hello"}]
+    });
+    let mut extended = ordinary.clone();
+    extended["vendor_extension"] = json!({"version": 2});
+    for group in [
+        json!({}),
+        json!({"default_policy": {"strict_format_conversion": true}}),
+    ] {
+        let config: aether_routing_core::RoutingGroupConfig =
+            serde_json::from_value(group.clone()).unwrap();
+        let convert = |request: &Value| {
+            super::build_cross_format_openai_chat_request_body(
+                request,
+                "claude-test",
+                "anthropic",
+                "claude:messages",
+                false,
+                false,
+                None,
+                None,
+                &http::HeaderMap::new(),
+                false,
+                config
+                    .default_policy
+                    .execution_policy
+                    .strict_format_conversion,
+            )
+        };
+        assert!(convert(&ordinary).is_some());
+        if group.get("default_policy").is_some() {
+            assert!(convert(&extended).is_none());
+        } else {
+            assert_eq!(
+                convert(&extended).unwrap()["vendor_extension"],
+                extended["vendor_extension"]
+            );
+        }
+    }
+}
+
 fn sample_transport(base_url: &str, api_format: &str) -> GatewayProviderTransportSnapshot {
     GatewayProviderTransportSnapshot {
         provider: GatewayProviderTransportProvider {
@@ -694,6 +738,7 @@ fn omits_codex_prompt_cache_key_for_openai_chat_cross_format_requests() {
         None,
         Some("key-123"),
         &http::HeaderMap::new(),
+        false,
         false,
     )
     .expect("openai chat to codex request should build");

@@ -69,6 +69,7 @@ pub(crate) fn build_cross_format_openai_chat_request_body(
     user_api_key_id: Option<&str>,
     request_headers: &http::HeaderMap,
     enable_model_directives: bool,
+    strict_format_conversion: bool,
 ) -> Option<Value> {
     let provider_request_body = surface_build_cross_format_openai_chat_request_body(
         body_json,
@@ -78,6 +79,7 @@ pub(crate) fn build_cross_format_openai_chat_request_body(
         upstream_is_stream,
         enable_model_directives,
         user_api_key_id,
+        strict_format_conversion,
     )?;
     let mut provider_request_body =
         apply_standard_provider_request_body_rules_with_request_headers(
@@ -152,6 +154,7 @@ mod antigravity_schema_tests {
                     None,
                     None,
                     &http::HeaderMap::new(),
+                    false,
                     false,
                 )
                 .unwrap();

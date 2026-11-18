@@ -263,6 +263,25 @@
                           />
                         </div>
                         <div
+                          class="order-1 flex min-w-0 min-h-10 items-center justify-between gap-2 rounded-md border border-border/60 px-2 py-2 text-xs"
+                          data-testid="strict-format-conversion"
+                        >
+                          <div class="flex min-w-0 items-center gap-1.5">
+                            <span class="font-medium">{{ t('ui.strictFormatConversion') }}</span>
+                            <HelpHint
+                              portal
+                              :label="t('ui.strictFormatConversion')"
+                              :text="t('ui.strictFormatConversionHelp')"
+                            />
+                          </div>
+                          <Switch
+                            :model-value="draft.config_json.default_policy.strict_format_conversion"
+                            :disabled="saving"
+                            :aria-label="t('ui.strictFormatConversion')"
+                            @update:model-value="updateExecutionPolicy('strict_format_conversion', $event)"
+                          />
+                        </div>
+                        <div
                           class="order-3 flex min-w-0 min-h-10 items-center justify-between gap-2 rounded-md border border-border/60 px-2 py-2 text-xs"
                           data-testid="cf-heartbeat"
                         >
@@ -697,7 +716,7 @@ function updateKeepPriorityOnConversion(value: boolean): void {
   updateDraftConfig({ ...draft.value.config_json, default_policy: { ...draft.value.config_json.default_policy, keep_priority_on_conversion: value } })
 }
 
-function updateExecutionPolicy(field: 'enable_cf_heartbeat' | 'cyber_continue_failover' | 'cancel_on_client_disconnect', value: boolean): void {
+function updateExecutionPolicy(field: 'enable_cf_heartbeat' | 'cyber_continue_failover' | 'cancel_on_client_disconnect' | 'strict_format_conversion', value: boolean): void {
   if (!draft.value) return
   updateDraftConfig({ ...draft.value.config_json, default_policy: { ...draft.value.config_json.default_policy, [field]: value } })
 }
