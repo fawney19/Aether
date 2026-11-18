@@ -15,6 +15,7 @@ use super::models_responses::{
     build_gemini_model_detail_response, build_gemini_models_list_response,
     build_models_auth_error_response, build_models_not_found_response,
     build_openai_model_detail_response, build_openai_models_list_response,
+    build_static_codex_models_list_response,
 };
 use super::models_shared::{
     filter_eligible_model_rows, filter_rows_for_models, models_api_format, models_detail_id,
@@ -312,7 +313,9 @@ pub(super) async fn maybe_build_local_models_route_response(
         return None;
     }
     let api_format = models_api_format(request_context)?;
-    if !state.has_minimal_candidate_selection_reader() {
+    if decision.route_kind.as_deref() != Some("codex_catalog")
+        && !state.has_minimal_candidate_selection_reader()
+    {
         return None;
     }
 
@@ -357,6 +360,7 @@ pub(super) async fn maybe_build_local_models_route_response(
     let auth_snapshot = Some(auth_snapshot);
 
     match decision.route_kind.as_deref() {
+        Some("codex_catalog") => Some(build_static_codex_models_list_response()),
         Some("list") => {
             let listed =
                 match list_model_rows_for_client_format(state, api_format, auth_snapshot).await {

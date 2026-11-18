@@ -1,6 +1,7 @@
 # Codex CLI 通用协议对齐
 
 运行时版本刷新、每节点缓存同步及固定版本配置见[统一客户端画像](provider-client-profiles.md)。
+独立的 `/codex/models` 官方完整快照入口及不限定请求版本的客户端配置见[Codex 官方模型目录](codex-model-catalog.md)。下文的能力快照与动态上游目录仍按原协议处理。
 本次对齐以官方 `openai/codex` 稳定标签 `rust-v0.159.3` 为可发布版本依据，同时核查最新 `main` 的协议实现。稳定标签提交为 `01fc69f4026735edfdf6789820549727a4867b11`，核查的 main 提交为 `444da310e108da16aaeb18fd790b0ac464f08aca`。
 
 网关承接的是客户端与上游之间的协议，不复制 CLI 的本地工具执行、终端界面或个人账户状态。

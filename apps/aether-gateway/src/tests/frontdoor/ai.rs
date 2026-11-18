@@ -726,6 +726,156 @@ async fn gateway_handles_public_openai_models_without_hitting_fallback_probe() {
 }
 
 #[test]
+fn gateway_serves_static_codex_catalog_for_any_client_version_and_rechecks_auth() {
+    std::thread::Builder::new()
+        .name("static-codex-model-catalog".to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("static Codex catalog test runtime should build")
+                .block_on(run_static_codex_model_catalog_scenario());
+        })
+        .expect("static Codex catalog test thread should spawn")
+        .join()
+        .expect("static Codex catalog test thread should finish");
+}
+
+async fn run_static_codex_model_catalog_scenario() {
+    const API_KEY: &str = "sk-static-codex-catalog";
+    const KEY_ID: &str = "key-static-codex-catalog";
+    const USER_ID: &str = "user-static-codex-catalog";
+    let mut chat_only_snapshot = unrestricted_models_snapshot(
+        "key-static-catalog-chat-only",
+        "user-static-catalog-chat-only",
+    );
+    chat_only_snapshot.user_allowed_api_formats = Some(vec!["openai:chat".to_string()]);
+    chat_only_snapshot.api_key_allowed_api_formats = Some(vec!["openai:chat".to_string()]);
+    let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![
+        (
+            Some(hash_api_key(API_KEY)),
+            unrestricted_models_snapshot(KEY_ID, USER_ID),
+        ),
+        (
+            Some(hash_api_key("sk-static-catalog-chat-only")),
+            chat_only_snapshot,
+        ),
+    ]));
+    // The static catalog must work without candidate/provider repositories or
+    // an upstream execution runtime, including when no models are configured.
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(GatewayDataState::with_auth_api_key_reader_for_tests(
+                auth_repository.clone(),
+            )),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+    let client = reqwest::Client::new();
+    let expected: serde_json::Value = serde_json::from_str(include_str!(
+        "../../handlers/public/support/models/codex_models.json"
+    ))
+    .expect("embedded official Codex catalog should parse");
+    let expected_models = expected["models"]
+        .as_array()
+        .expect("official Codex catalog should have a models array");
+    for slug in ["gpt-6.2-sol", "gpt-6.2-astra"] {
+        assert!(expected_models.iter().any(|model| model["slug"] == slug));
+    }
+
+    for suffix in [
+        "",
+        "?client_version=0.169.0",
+        "?client_version=0.1.0",
+        "?client_version=9.999.999",
+        "?client_version=desktop-preview",
+        "?client_version=",
+        "/?client_version=0.169.0-alpha.11.1",
+    ] {
+        let response = client
+            .get(format!("{gateway_url}/codex/models{suffix}"))
+            .header("authorization", format!("Bearer {API_KEY}"))
+            .send()
+            .await
+            .expect("static Codex catalog request should complete");
+        assert_eq!(response.status(), StatusCode::OK, "query: {suffix}");
+        assert_eq!(
+            response
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok()),
+            Some("application/json"),
+            "query: {suffix}"
+        );
+        let payload: serde_json::Value = response
+            .json()
+            .await
+            .expect("static Codex catalog response should be JSON");
+        assert_eq!(payload, expected, "query: {suffix}");
+    }
+
+    let models_url = format!("{gateway_url}/codex/models");
+    for credential in [None, Some("Bearer sk-invalid-static-catalog")] {
+        let mut request = client.get(&models_url);
+        if let Some(credential) = credential {
+            request = request.header("authorization", credential);
+        }
+        let response = request
+            .send()
+            .await
+            .expect("unauthenticated catalog request should complete");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let payload: serde_json::Value = response
+            .json()
+            .await
+            .expect("catalog authentication error should be JSON");
+        assert!(payload.get("models").is_none());
+    }
+
+    let denied_response = client
+        .get(&models_url)
+        .header("authorization", "Bearer sk-static-catalog-chat-only")
+        .send()
+        .await
+        .expect("catalog format permission check should complete");
+    // Models endpoints use the existing authentication error response for
+    // credentials whose API-format permissions do not allow this route.
+    assert_eq!(denied_response.status(), StatusCode::UNAUTHORIZED);
+    let denied_payload: serde_json::Value = denied_response
+        .json()
+        .await
+        .expect("catalog format permission error should be JSON");
+    assert!(denied_payload.get("models").is_none());
+
+    assert!(auth_repository
+        .set_user_api_key_locked(USER_ID, KEY_ID, true)
+        .await
+        .expect("locking the static catalog API key should succeed"));
+    let locked_response = client
+        .get(&models_url)
+        .header("authorization", format!("Bearer {API_KEY}"))
+        .send()
+        .await
+        .expect("locked static catalog request should complete");
+    assert_eq!(locked_response.status(), StatusCode::UNAUTHORIZED);
+
+    assert!(auth_repository
+        .delete_user_api_key(USER_ID, KEY_ID)
+        .await
+        .expect("deleting the static catalog API key should succeed"));
+    let deleted_response = client
+        .get(&models_url)
+        .header("authorization", format!("Bearer {API_KEY}"))
+        .send()
+        .await
+        .expect("deleted static catalog key request should complete");
+    assert_eq!(deleted_response.status(), StatusCode::UNAUTHORIZED);
+
+    gateway_handle.abort();
+}
+
+#[test]
 fn gateway_versioned_models_fail_closed_when_cached_auth_becomes_unusable_or_missing() {
     std::thread::Builder::new()
         .name("codex-model-catalog-auth-race".to_string())

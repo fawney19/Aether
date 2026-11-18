@@ -24,7 +24,16 @@ pub(super) fn classify_public_support_route(
     normalized_path: &str,
     public_models_auth_signature: &str,
 ) -> Option<ClassifiedRoute> {
-    if method == http::Method::GET && normalized_path == "/v1/models" {
+    if method == http::Method::GET && matches!(normalized_path, "/codex/models" | "/codex/models/")
+    {
+        Some(classified(
+            "public_support",
+            "models",
+            "codex_catalog",
+            "openai:responses",
+            false,
+        ))
+    } else if method == http::Method::GET && normalized_path == "/v1/models" {
         Some(classified(
             "public_support",
             "models",

@@ -39,6 +39,58 @@ fn classifies_codex_models_list_with_responses_auth_signature() {
 }
 
 #[test]
+fn classifies_codex_catalog_with_fixed_responses_auth_signature() {
+    for header_map in [
+        headers(&[("authorization", "Bearer sk-test")]),
+        headers(&[
+            ("authorization", "Bearer sk-test"),
+            ("x-api-key", "sk-anthropic"),
+            ("anthropic-version", "2023-06-01"),
+            ("x-goog-api-key", "gemini-key"),
+        ]),
+    ] {
+        for path in [
+            "/codex/models",
+            "/codex/models/",
+            "/codex/models?client_version=0.169.0",
+            "/codex/models?client_version=",
+            "/codex/models/?client_version=not-semver&key=gemini-key",
+        ] {
+            let uri: Uri = path.parse().expect("catalog URI should parse");
+            let decision = classify_control_route(&http::Method::GET, &uri, &header_map)
+                .expect("Codex catalog route should classify");
+
+            assert_eq!(decision.route_class.as_deref(), Some("public_support"));
+            assert_eq!(decision.route_family.as_deref(), Some("models"));
+            assert_eq!(decision.route_kind.as_deref(), Some("codex_catalog"));
+            assert_eq!(
+                decision.auth_endpoint_signature.as_deref(),
+                Some("openai:responses"),
+                "{path} must use Responses authentication regardless of client hints",
+            );
+            assert!(!decision.is_execution_runtime_candidate());
+        }
+    }
+}
+
+#[test]
+fn codex_catalog_does_not_classify_writes_or_model_details() {
+    let headers = headers(&[("authorization", "Bearer sk-test")]);
+    for (method, path) in [
+        (http::Method::POST, "/codex/models"),
+        (http::Method::PUT, "/codex/models/"),
+        (http::Method::DELETE, "/codex/models"),
+        (http::Method::GET, "/codex/models/gpt-6.2-sol"),
+    ] {
+        let uri: Uri = path.parse().expect("catalog URI should parse");
+        assert!(
+            classify_control_route(&method, &uri, &headers).is_none(),
+            "{method} {path} should not classify as a catalog route",
+        );
+    }
+}
+
+#[test]
 fn empty_codex_client_version_uses_responses_signature_for_bounded_fallback() {
     let headers = headers(&[("authorization", "Bearer sk-test")]);
     let uri: Uri = "/v1/models?client_version="

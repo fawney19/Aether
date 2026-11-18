@@ -9,6 +9,14 @@ use serde_json::json;
 
 const PUBLIC_MODELS_OWNER: &str = "aether";
 
+pub(super) fn build_static_codex_models_list_response() -> Response<Body> {
+    (
+        [(http::header::CONTENT_TYPE, "application/json")],
+        include_str!("codex_models.json"),
+    )
+        .into_response()
+}
+
 pub(crate) fn build_models_auth_error_response(api_format: &str) -> Response<Body> {
     match api_format {
         "claude:messages" => (
