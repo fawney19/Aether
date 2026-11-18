@@ -8,9 +8,6 @@ ARG RUST_BASE_IMAGE=docker.m.daocloud.io/library/rust:${RUST_VERSION}-slim
 
 # ==================== 前端构建 ====================
 FROM ${NODE_BASE_IMAGE} AS frontend-builder
-ARG AETHER_BUILD_VERSION
-ENV AETHER_BUILD_VERSION=${AETHER_BUILD_VERSION} \
-    AETHER_VERSION=${AETHER_BUILD_VERSION}
 WORKDIR /app/aether-vscodex/web
 COPY aether-vscodex/web/package*.json ./
 RUN --mount=type=cache,id=aether-vscodex-npm-cache,target=/root/.npm,sharing=locked \
@@ -26,6 +23,9 @@ RUN --mount=type=cache,id=aether-npm-cache,target=/root/.npm,sharing=locked \
     npm config set registry https://registry.npmmirror.com && \
     npm ci --no-audit --no-fund
 COPY frontend/ ./
+ARG AETHER_BUILD_VERSION
+ENV AETHER_BUILD_VERSION=${AETHER_BUILD_VERSION} \
+    AETHER_VERSION=${AETHER_BUILD_VERSION}
 RUN npm run build
 
 # ==================== Rust gateway 构建 ====================
@@ -64,9 +64,6 @@ COPY crates/ ./crates/
 RUN cargo chef prepare --recipe-path recipe.json
 
 FROM gateway-base AS gateway-builder
-ARG AETHER_BUILD_VERSION
-ENV AETHER_BUILD_VERSION=${AETHER_BUILD_VERSION} \
-    AETHER_VERSION=${AETHER_BUILD_VERSION}
 COPY --from=gateway-planner /build/recipe.json ./recipe.json
 RUN --mount=type=cache,id=aether-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=aether-cargo-git,target=/usr/local/cargo/git,sharing=locked \
@@ -76,6 +73,10 @@ RUN --mount=type=cache,id=aether-cargo-registry,target=/usr/local/cargo/registry
 COPY Cargo.toml Cargo.lock ./
 COPY apps/ ./apps/
 COPY crates/ ./crates/
+# Keep per-build metadata out of the cargo-chef dependency layer.
+ARG AETHER_BUILD_VERSION
+ENV AETHER_BUILD_VERSION=${AETHER_BUILD_VERSION} \
+    AETHER_VERSION=${AETHER_BUILD_VERSION}
 RUN --mount=type=cache,id=aether-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=aether-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=aether-cargo-target-local,target=/build/target,sharing=locked \
