@@ -183,7 +183,11 @@ async fn frontend_static_middleware(
 fn frontend_path_bypasses_static(path: &str) -> bool {
     matches!(
         path,
-        "/health" | "/test-connection" | crate::constants::READYZ_PATH
+        "/health"
+            | "/test-connection"
+            | "/codex/models"
+            | "/codex/models/"
+            | crate::constants::READYZ_PATH
     ) || path.starts_with("/api/")
         || path.starts_with("/v1/")
         || path == "/openai/v1/videos"

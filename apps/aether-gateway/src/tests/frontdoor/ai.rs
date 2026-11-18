@@ -746,6 +746,16 @@ async fn run_static_codex_model_catalog_scenario() {
     const API_KEY: &str = "sk-static-codex-catalog";
     const KEY_ID: &str = "key-static-codex-catalog";
     const USER_ID: &str = "user-static-codex-catalog";
+    const FRONTEND_HTML: &str = "<!doctype html><html><body>Aether Frontend</body></html>";
+    let unique_suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock should be monotonic enough for tests")
+        .as_nanos();
+    let static_dir =
+        std::env::temp_dir().join(format!("aether-static-codex-catalog-test-{unique_suffix}"));
+    std::fs::create_dir_all(&static_dir).expect("static frontend dir should be created");
+    std::fs::write(static_dir.join("index.html"), FRONTEND_HTML)
+        .expect("static frontend index should be written");
     let mut chat_only_snapshot = unrestricted_models_snapshot(
         "key-static-catalog-chat-only",
         "user-static-catalog-chat-only",
@@ -764,6 +774,8 @@ async fn run_static_codex_model_catalog_scenario() {
     ]));
     // The static catalog must work without candidate/provider repositories or
     // an upstream execution runtime, including when no models are configured.
+    // Attach the real frontend middleware so its SPA fallback cannot silently
+    // shadow the catalog or bypass the catalog's authentication checks.
     let gateway = build_router_with_state(
         AppState::new()
             .expect("gateway should build")
@@ -771,8 +783,22 @@ async fn run_static_codex_model_catalog_scenario() {
                 auth_repository.clone(),
             )),
     );
+    let gateway = crate::attach_static_frontend(gateway, &static_dir);
     let (gateway_url, gateway_handle) = start_server(gateway).await;
     let client = reqwest::Client::new();
+    let frontend_response = client
+        .get(format!("{gateway_url}/"))
+        .send()
+        .await
+        .expect("static frontend request should complete");
+    assert_eq!(frontend_response.status(), StatusCode::OK);
+    assert_eq!(
+        frontend_response
+            .text()
+            .await
+            .expect("static frontend body should be readable"),
+        FRONTEND_HTML
+    );
     let expected: serde_json::Value = serde_json::from_str(include_str!(
         "../../handlers/public/support/models/codex_models.json"
     ))
@@ -873,6 +899,7 @@ async fn run_static_codex_model_catalog_scenario() {
     assert_eq!(deleted_response.status(), StatusCode::UNAUTHORIZED);
 
     gateway_handle.abort();
+    std::fs::remove_dir_all(&static_dir).expect("static frontend dir should be removed");
 }
 
 #[test]
