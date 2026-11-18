@@ -193,6 +193,17 @@ pub fn build_standard_request_body_with_model_directives_and_request_headers_and
         )
         .ok()?
     };
+    if antigravity_chat_body.is_some()
+        && crate::formats::shared::standard_normalize::is_openai_responses_source_format(
+            source_api_format.as_ref(),
+        )
+    {
+        crate::formats::shared::standard_normalize::restore_gemini_tool_signatures_from_openai_responses(
+            &mut provider_request_body,
+            body_json,
+            user_api_key_id,
+        );
+    }
 
     if enable_model_directives {
         apply_model_directive_overrides_from_request(
