@@ -2,6 +2,7 @@
 members = [
     "apps/aether-tunnel",
     "crates/aether-ai/formats",
+    "crates/aether-ai/metadata",
     "crates/aether-admin",
     "crates/aether-admission-core",
     "crates/aether-ai/serving",
@@ -57,6 +58,7 @@ repository = "https://github.com/fawney19/Aether.git"
 aether-admin = { path = "crates/aether-admin" }
 aether-admission-core = { path = "crates/aether-admission-core" }
 aether-ai-formats = { path = "crates/aether-ai/formats" }
+aether-api-metadata = { path = "crates/aether-ai/metadata" }
 aether-ai-serving = { path = "crates/aether-ai/serving" }
 aether-pool-core = { path = "crates/aether-pool-core" }
 aether-provider-core = { path = "crates/aether-provider/core" }

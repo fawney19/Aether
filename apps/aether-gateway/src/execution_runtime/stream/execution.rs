@@ -1108,17 +1108,15 @@ fn append_budgeted_stream_capture_bytes(
 }
 
 struct StreamUsageObservationBuffer {
-    line: Vec<u8>,
     fallback: StreamUsageFallback,
-    recovered_usage_after_parser_error: bool,
+    recovered_usage: bool,
 }
 
 impl StreamUsageObservationBuffer {
     fn new(record_limit: usize) -> Self {
         Self {
-            line: Vec::new(),
             fallback: StreamUsageFallback::new(record_limit),
-            recovered_usage_after_parser_error: false,
+            recovered_usage: false,
         }
     }
 }
@@ -1130,60 +1128,20 @@ fn observe_stream_usage_bytes(
     chunk: &[u8],
 ) {
     buffer.fallback.observe(report_context, chunk);
-    let buffered = &mut buffer.line;
-    if chunk.is_empty()
-        || observer
-            .latest_summary()
-            .and_then(|summary| summary.parser_error.as_deref())
-            .is_some()
-    {
-        return;
-    }
-
-    let mut remaining = chunk;
-    while !remaining.is_empty() {
-        let line_part_len = remaining
-            .iter()
-            .position(|byte| *byte == b'\n')
-            .map_or(remaining.len(), |index| index + 1);
-        if buffered.len().saturating_add(line_part_len) > SSE_TERMINAL_DETECTOR_MAX_LINE_BYTES {
-            observer.disable_with_error(format!(
-                "stream usage event exceeded {SSE_TERMINAL_DETECTOR_MAX_LINE_BYTES} bytes"
-            ));
-            *buffered = Vec::new();
-            return;
-        }
-        buffered.extend_from_slice(&remaining[..line_part_len]);
-        remaining = &remaining[line_part_len..];
-        if buffered.last() == Some(&b'\n') {
-            let line = std::mem::take(buffered);
-            if let Err(_err) = observer.push_line(report_context, line) {
-                observer.disable_with_error("stream usage parsing failed");
-                *buffered = Vec::new();
-                return;
-            }
-        }
-    }
+    observer.push_bytes(report_context, chunk);
 }
 
 fn finalize_stream_usage_observer(
     observer: &mut Option<StreamingStandardTerminalObserver>,
     report_context: Option<&Value>,
     buffer: &mut StreamUsageObservationBuffer,
+    confirmed_end: bool,
 ) -> Option<ExecutionStreamTerminalSummary> {
     let (Some(observer), Some(report_context)) = (observer.as_mut(), report_context) else {
         return None;
     };
 
-    let buffered = &mut buffer.line;
-    if !buffered.is_empty() {
-        let line = std::mem::take(buffered);
-        if let Err(_err) = observer.push_line(report_context, line) {
-            observer.disable_with_error("stream usage parsing failed");
-        }
-    }
-
-    let mut summary = match observer.finish(report_context) {
+    let mut summary = match observer.finish_with_confirmed_end(report_context, confirmed_end) {
         Ok(summary) => summary,
         Err(_err) => {
             observer.disable_with_error("stream usage parsing failed");
@@ -1193,12 +1151,12 @@ fn finalize_stream_usage_observer(
     let mut fallback_usage = buffer.fallback.finish(report_context);
     let fallback_tier = buffer.fallback.take_service_tier();
     if let Some(summary) = summary.as_mut() {
-        if summary.parser_error.is_some() && fallback_usage.is_some() {
-            // A disabled parser can retain an earlier usage snapshot. Later
+        if (summary.parser_error.is_some() || summary.observation_error.is_some()) && fallback_usage.is_some() {
+            // A partial observation can retain an earlier usage snapshot. Later
             // complete fallback events remain authoritative even when their
             // signal score is unchanged or an explicit zero reduces it.
             summary.standardized_usage = fallback_usage.take();
-            buffer.recovered_usage_after_parser_error = true;
+            buffer.recovered_usage = true;
         }
         if summary.provider_actual_service_tier.is_none() {
             summary.provider_actual_service_tier = fallback_tier.clone();
@@ -1218,7 +1176,7 @@ fn merge_observed_stream_terminal_summary(
     usage_buffer: &StreamUsageObservationBuffer,
 ) -> Option<ExecutionStreamTerminalSummary> {
     let recovered_usage = usage_buffer
-        .recovered_usage_after_parser_error
+        .recovered_usage
         .then(|| {
             observed
                 .as_ref()
@@ -1268,6 +1226,10 @@ fn merge_stream_terminal_summary(
         .saturating_add(observed.unknown_event_count);
     if current_summary.parser_error.is_none() {
         current_summary.parser_error = observed.parser_error;
+    }
+
+    if current_summary.observation_error.is_none() {
+        current_summary.observation_error = observed.observation_error;
     }
 
     current
@@ -2287,6 +2249,7 @@ impl DirectPassthroughFinalizerCore {
             &mut self.stream_usage_observer,
             self.stream_usage_report_context.as_ref(),
             &mut self.stream_usage_observer_buffered,
+            false,
         );
 
         let DirectPassthroughFinalizerCore {
@@ -3568,6 +3531,7 @@ async fn execute_stream_from_direct_passthrough(
             &mut stream_usage_observer,
             stream_usage_report_context.as_ref(),
             &mut stream_usage_observer_buffered,
+            false,
         );
 
         if downstream_dropped && client_visible_stream_completed && terminal_failure.is_none() {
@@ -5305,18 +5269,22 @@ enum SseTerminalPolicy {
     AnthropicMessageStop,
 }
 
-#[derive(Default)]
 pub(crate) struct ClientVisibleStreamCompletionTracker {
-    line_buffer: Vec<u8>,
-    event_type: Option<String>,
-    data_payload: String,
-    has_data_payload: bool,
-    record_bytes: usize,
-    dropping_oversized_record: bool,
-    discarded_line_nonempty: bool,
-    skip_next_lf: bool,
+    records: aether_ai_formats::formats::shared::sse::SseRecordReader,
     completed: bool,
     successfully_completed: bool,
+}
+
+impl Default for ClientVisibleStreamCompletionTracker {
+    fn default() -> Self {
+        Self {
+            records: aether_ai_formats::formats::shared::sse::SseRecordReader::new(
+                SSE_TERMINAL_DETECTOR_MAX_RECORD_BYTES,
+            ),
+            completed: false,
+            successfully_completed: false,
+        }
+    }
 }
 
 impl ClientVisibleStreamCompletionTracker {
@@ -5354,169 +5322,43 @@ impl ClientVisibleStreamCompletionTracker {
         if self.completed {
             return None;
         }
-        if chunk.is_empty() {
-            return None;
-        }
-
-        for (index, byte) in chunk.iter().enumerate() {
-            self.record_bytes = self.record_bytes.saturating_add(1);
-            if self.record_bytes > SSE_TERMINAL_DETECTOR_MAX_RECORD_BYTES
-                && !self.dropping_oversized_record
-            {
-                self.dropping_oversized_record = true;
-                self.discarded_line_nonempty = !self.line_buffer.is_empty();
-                self.line_buffer.clear();
-                self.reset_current_event();
-            }
-
-            if self.skip_next_lf {
-                self.skip_next_lf = false;
-                if *byte == b'\n' {
-                    continue;
+        let mut remaining = chunk;
+        while let Some(record) = self.records.next_record(&mut remaining) {
+            let Ok(record) = record else { continue };
+            let event = record.event.as_deref();
+            let data = record.data.as_deref().unwrap_or_default().trim_ascii();
+            let payload = serde_json::from_slice::<Value>(data).ok();
+            let kind = payload
+                .as_ref()
+                .and_then(|p| p.get("type"))
+                .and_then(Value::as_str);
+            let done = data == b"[DONE]";
+            self.completed = match policy {
+                SseTerminalPolicy::AnthropicMessageStop => {
+                    kind == Some("message_stop") && event.is_none_or(|e| e == "message_stop")
                 }
-            }
-
-            if self.dropping_oversized_record {
-                match *byte {
-                    b'\n' => self.finish_discarded_line(),
-                    b'\r' => {
-                        self.finish_discarded_line();
-                        self.skip_next_lf = true;
-                    }
-                    _ => self.discarded_line_nonempty = true,
+                SseTerminalPolicy::AnyKnown => {
+                    done || event.is_some_and(is_terminal_sse_event_type)
+                        || kind.is_some_and(is_terminal_sse_event_type)
                 }
-                continue;
-            }
-
-            match *byte {
-                b'\n' => self.finish_line(policy),
-                b'\r' => {
-                    self.finish_line(policy);
-                    self.skip_next_lf = true;
-                }
-                _ => self.line_buffer.push(*byte),
-            }
-
+            };
             if self.completed {
-                let terminal_end = if *byte == b'\r' && chunk.get(index + 1) == Some(&b'\n') {
-                    index + 2
-                } else {
-                    index + 1
-                };
-                return Some(terminal_end);
-            }
-        }
-
-        None
-    }
-
-    fn finish_line(&mut self, policy: SseTerminalPolicy) {
-        let line = std::mem::take(&mut self.line_buffer);
-        let Ok(line) = std::str::from_utf8(&line) else {
-            self.reset_current_event();
-            return;
-        };
-        let line = line.trim();
-
-        if line.is_empty() {
-            self.completed = self.current_event_is_terminal(policy);
-            if self.completed {
-                self.successfully_completed = self.current_event_is_successful();
-            }
-            self.reset_current_event();
-            self.record_bytes = 0;
-            return;
-        }
-
-        if let Some(event_type) = line.strip_prefix("event:").map(str::trim) {
-            self.event_type = Some(event_type.to_string());
-            return;
-        }
-
-        if let Some(data) = line.strip_prefix("data:").map(str::trim) {
-            if data.is_empty() {
-                return;
-            }
-            if self.has_data_payload {
-                self.data_payload.push('\n');
-            }
-            self.data_payload.push_str(data);
-            self.has_data_payload = true;
-        }
-    }
-
-    fn finish_discarded_line(&mut self) {
-        if !self.discarded_line_nonempty {
-            self.dropping_oversized_record = false;
-            self.record_bytes = 0;
-            self.reset_current_event();
-        }
-        self.discarded_line_nonempty = false;
-    }
-
-    fn current_event_is_terminal(&self, policy: SseTerminalPolicy) -> bool {
-        match policy {
-            SseTerminalPolicy::AnyKnown => {
-                self.event_type
-                    .as_deref()
-                    .is_some_and(is_terminal_sse_event_type)
-                    || (self.has_data_payload && sse_data_payload_is_terminal(&self.data_payload))
-            }
-            SseTerminalPolicy::AnthropicMessageStop => {
-                let payload_type = self
-                    .has_data_payload
-                    .then(|| serde_json::from_str::<serde_json::Value>(&self.data_payload).ok())
+                let failed = [event, kind]
+                    .into_iter()
                     .flatten()
-                    .and_then(|value| {
-                        value
-                            .get("type")
-                            .and_then(serde_json::Value::as_str)
-                            .map(ToOwned::to_owned)
-                    });
-                payload_type.as_deref() == Some("message_stop")
-                    && self
-                        .event_type
-                        .as_deref()
-                        .is_none_or(|event_type| event_type == "message_stop")
+                    .any(|e| matches!(e, "response.failed" | "response.incomplete" | "error"))
+                    || payload
+                        .as_ref()
+                        .and_then(|p| p.pointer("/response/status"))
+                        .and_then(Value::as_str)
+                        .is_some_and(|s| s != "completed");
+                self.successfully_completed = !failed
+                    && (done
+                        || matches!(kind.or(event), Some("message_stop" | "response.completed")));
+                return Some(chunk.len() - remaining.len());
             }
         }
-    }
-
-    fn reset_current_event(&mut self) {
-        self.event_type = None;
-        self.data_payload.clear();
-        self.has_data_payload = false;
-    }
-
-    fn current_event_is_successful(&self) -> bool {
-        let payload = self
-            .has_data_payload
-            .then(|| serde_json::from_str::<Value>(&self.data_payload).ok())
-            .flatten();
-        let payload_type = payload
-            .as_ref()
-            .and_then(|value| value.get("type"))
-            .and_then(Value::as_str);
-        if [self.event_type.as_deref(), payload_type]
-            .into_iter()
-            .flatten()
-            .any(|kind| matches!(kind, "response.failed" | "response.incomplete" | "error"))
-        {
-            return false;
-        }
-        if payload
-            .as_ref()
-            .and_then(|value| value.pointer("/response/status"))
-            .and_then(Value::as_str)
-            .is_some_and(|status| status != "completed")
-        {
-            return false;
-        }
-        self.data_payload == "[DONE]"
-            || matches!(
-                payload_type.or(self.event_type.as_deref()),
-                Some("message_stop" | "response.completed")
-            )
+        None
     }
 }
 
@@ -5525,16 +5367,6 @@ fn is_terminal_sse_event_type(event_type: &str) -> bool {
         event_type,
         "message_stop" | "response.completed" | "response.failed" | "response.incomplete" | "error"
     )
-}
-
-fn sse_data_payload_is_terminal(data: &str) -> bool {
-    data == "[DONE]"
-        || serde_json::from_str::<serde_json::Value>(data).is_ok_and(|value| {
-            value
-                .get("type")
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(is_terminal_sse_event_type)
-        })
 }
 
 fn stream_chunk_contains_sse_done(chunk: &[u8]) -> bool {
@@ -8224,6 +8056,7 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
             &mut stream_usage_observer,
             stream_usage_report_context.as_ref(),
             &mut stream_usage_observer_buffered,
+            stream_terminal_summary.as_ref().is_some_and(|summary| summary.observed_finish),
         );
         stream_terminal_summary = merge_observed_stream_terminal_summary(
             stream_terminal_summary,
@@ -9885,6 +9718,7 @@ mod tests {
                 &mut core.stream_usage_observer,
                 core.stream_usage_report_context.as_ref(),
                 &mut core.stream_usage_observer_buffered,
+                false,
             )
             .unwrap();
             assert!(summary.observed_finish);
@@ -9920,7 +9754,7 @@ mod tests {
     }
 
     #[test]
-    fn stream_capture_fallback_after_disabled_observer_updates_tokens_zero_cache_and_tier() {
+    fn stream_capture_fallback_after_skipped_event_updates_tokens_zero_cache_and_tier() {
         let context = json!({"provider_api_format": "openai:chat"});
         let mut observer = Some(super::StreamingStandardTerminalObserver::default());
         let mut buffer =
@@ -9942,13 +9776,14 @@ mod tests {
         super::observe_stream_usage_bytes(observer.as_mut().unwrap(), &context, &mut buffer,
             b"data: {\"\\u0075sage\":{\"prompt_tokens\":100,\"completion_tokens\":500,\"prompt_tokens_details\":{\"cached_tokens\":0}},\"service_tier\":\"priority\"}\n\n");
         let summary =
-            super::finalize_stream_usage_observer(&mut observer, Some(&context), &mut buffer)
+            super::finalize_stream_usage_observer(&mut observer, Some(&context), &mut buffer, false)
                 .unwrap();
         assert!(summary
-            .parser_error
+            .observation_error
             .as_deref()
             .unwrap()
             .contains("exceeded"));
+        assert!(summary.parser_error.is_none());
         assert!(summary.observed_finish);
         assert_eq!(
             summary.provider_actual_service_tier.as_deref(),
@@ -9980,7 +9815,8 @@ mod tests {
         assert_eq!(merged.response_id.as_deref(), Some("authoritative-eof-id"));
         assert_eq!(merged.finish_reason.as_deref(), Some("stop"));
         assert!(merged.observed_finish);
-        assert!(merged.parser_error.as_deref().unwrap().contains("exceeded"));
+        assert!(merged.observation_error.as_deref().unwrap().contains("exceeded"));
+        assert!(!super::stream_terminal_summary_represents_failure_with_requirement(Some(&merged), true));
         let usage = merged.standardized_usage.unwrap();
         assert_eq!(usage.input_tokens, 100);
         assert_eq!(usage.output_tokens, 500);
@@ -10032,7 +9868,7 @@ mod tests {
             client.append(&tail, 32 * 1024, &mut client_truncated);
             delivered.extend(tail);
             let summary =
-                super::finalize_stream_usage_observer(&mut observer, Some(&context), &mut buffer)
+                super::finalize_stream_usage_observer(&mut observer, Some(&context), &mut buffer, false)
                     .unwrap();
             assert!(summary.observed_finish);
             assert!(summary.parser_error.is_none());
@@ -11686,12 +11522,10 @@ mod tests {
         let mut tracker = ClientVisibleStreamCompletionTracker::default();
 
         assert!(!tracker.observe_anthropic_message_stop(&oversized_record));
-        assert!(tracker.dropping_oversized_record);
-        assert!(tracker.line_buffer.is_empty());
-        assert!(tracker.data_payload.is_empty());
-
+        assert!(!tracker.observe_anthropic_message_stop(
+            b"event: message_stop\r\ndata: {\"type\":\"message_stop\"}\r\n"
+        ));
         assert!(!tracker.observe_anthropic_message_stop(b"\r\n"));
-        assert!(!tracker.dropping_oversized_record);
         assert!(tracker.observe_anthropic_message_stop(
             b"event: message_stop\r\ndata: {\"type\":\"message_stop\"}\r\n\r\n"
         ));

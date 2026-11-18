@@ -32,6 +32,7 @@ use crate::formats::openai::chat::response::openai_chat_reasoning_texts;
 use crate::formats::openai::chat::stream::{OpenAIChatProviderState, OpenAIResponsesProviderState};
 use crate::formats::shared::model_directives::model_directive_display_model_from_report_context;
 use crate::formats::shared::response::sanitize_claude_read_tool_inputs;
+use crate::formats::shared::sse::{SseRecord, SseRecordReader};
 use crate::formats::shared::stream_core::common::{
     content_part_from_openai_image_generation_item, gemini_usage_metadata_from_usage,
     map_openai_finish_reason_to_gemini, openai_stream_payload_is_terminal_error,
@@ -2042,6 +2043,15 @@ fn normalize_openai_responses_family_api_format(api_format: &str) -> String {
     aether_ai_formats::normalize_api_format_alias(api_format)
 }
 
+// The whole response is already captured, so it bounds the largest possible record.
+fn captured_sse_records(mut body: &[u8]) -> impl Iterator<Item = SseRecord> + '_ {
+    let mut reader = SseRecordReader::new(body.len());
+    std::iter::from_fn(move || match reader.next_record(&mut body) {
+        Some(record) => Some(record.expect("record is bounded by the input body")),
+        None => reader.finish(),
+    })
+}
+
 fn parse_stream_json_events(body: &[u8]) -> Option<Vec<Value>> {
     let text = std::str::from_utf8(body).ok()?;
     let trimmed = text.trim();
@@ -2061,40 +2071,27 @@ fn parse_stream_json_events(body: &[u8]) -> Option<Vec<Value>> {
         );
     }
 
-    let mut events = Vec::new();
-    let mut current_event_type: Option<String> = None;
-
-    for raw_line in text.lines() {
-        let line = raw_line.trim_matches('\r').trim();
-        if line.is_empty() || line.starts_with(':') {
-            continue;
-        }
-        if let Some(event_name) = line.strip_prefix("event:") {
-            current_event_type = Some(event_name.trim().to_string());
-            continue;
-        }
-        let data_line = if let Some(rest) = line.strip_prefix("data:") {
-            rest.trim()
-        } else {
-            line
-        };
-        if data_line.is_empty() || data_line == "[DONE]" {
-            continue;
-        }
-
-        let mut event: Value = serde_json::from_str(data_line).ok()?;
-        if let Some(event_object) = event.as_object_mut() {
-            if !event_object.contains_key("type") {
-                if let Some(event_name) = current_event_type.take() {
-                    event_object.insert("type".to_string(), Value::String(event_name));
-                }
-            }
-        }
-        events.push(event);
-        current_event_type = None;
+    if trimmed.starts_with('{') {
+        return serde_json::Deserializer::from_str(trimmed)
+            .into_iter::<Value>()
+            .collect::<Result<_, _>>()
+            .ok();
     }
-
-    Some(events)
+    captured_sse_records(body)
+        .filter_map(|record| {
+            let data = record.data?;
+            if matches!(data.trim_ascii(), b"" | b"[DONE]") {
+                return None;
+            }
+            Some(serde_json::from_slice::<Value>(&data).map(|mut value| {
+                if let (Some(event), Some(object)) = (record.event, value.as_object_mut()) {
+                    object.entry("type").or_insert(Value::String(event));
+                }
+                value
+            }))
+        })
+        .collect::<Result<_, _>>()
+        .ok()
 }
 
 fn try_aggregate_openai_chat_stream_sync_response(
@@ -2130,32 +2127,19 @@ fn ensure_no_unknown_openai_responses_stream_events(
     allow_authoritative_terminal_output_extensions: bool,
     strict: bool,
 ) -> Result<(), AiSurfaceFinalizeError> {
-    let Ok(text) = std::str::from_utf8(body) else {
-        return Ok(());
-    };
     let report_context = Value::Object(Map::new());
     let mut provider = OpenAIResponsesProviderState::default();
-    let mut declared_event_type: Option<String> = None;
-    for raw_line in text.lines() {
-        let frames = provider.push_line(&report_context, raw_line.as_bytes().to_vec())?;
-        let raw_payload = raw_line.trim();
-        if let Some(event_type) = raw_payload.strip_prefix("event:") {
-            declared_event_type = Some(event_type.trim().to_string());
+    for record in captured_sse_records(body) {
+        let Some(data) = record.data else { continue };
+        if matches!(data.trim_ascii(), b"" | b"[DONE]") {
             continue;
         }
-        let payload = raw_payload
-            .strip_prefix("data:")
-            .map(str::trim)
-            .unwrap_or(raw_payload);
-        let declared_event_type = declared_event_type.take();
-        let payload_event_type = serde_json::from_str::<Value>(payload)
-            .ok()
-            .and_then(|payload| {
-                payload
-                    .get("type")
-                    .and_then(Value::as_str)
-                    .map(ToOwned::to_owned)
-            });
+        let mut payload: Value = serde_json::from_slice(&data)?;
+        let declared_event_type = record.event;
+        let payload_event_type = payload
+            .get("type")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned);
         if matches!(
             (declared_event_type.as_deref(), payload_event_type.as_deref()),
             (Some(declared), Some(payload)) if declared != payload
@@ -2165,6 +2149,12 @@ fn ensure_no_unknown_openai_responses_stream_events(
             ));
         }
         let event_type = payload_event_type.or(declared_event_type);
+        if let (Some(event), Some(object)) = (&event_type, payload.as_object_mut()) {
+            object
+                .entry("type")
+                .or_insert_with(|| Value::String(event.clone()));
+        }
+        let frames = provider.push_event(&report_context, &payload)?;
         let terminal_output_extensions_are_lossless = allow_authoritative_terminal_output_extensions
             && event_type.as_deref().is_some_and(|event_type| {
                 matches!(
@@ -2210,11 +2200,8 @@ fn ensure_no_unknown_provider_stream_events(
     strict: bool,
     mut push_line: impl FnMut(Vec<u8>) -> Result<Vec<CanonicalStreamFrame>, AiSurfaceFinalizeError>,
 ) -> Result<(), AiSurfaceFinalizeError> {
-    let Ok(text) = std::str::from_utf8(body) else {
-        return Ok(());
-    };
-    for raw_line in text.lines() {
-        let frames = push_line(raw_line.as_bytes().to_vec())?;
+    for line in captured_sse_records(body).filter_map(SseRecord::into_data_line) {
+        let frames = push_line(line)?;
         if let Some(payload) = frames.iter().find_map(|frame| match &frame.event {
             CanonicalStreamEvent::UnknownEvent(payload)
                 if strict || openai_stream_payload_is_terminal_error(payload) =>
@@ -2230,7 +2217,6 @@ fn ensure_no_unknown_provider_stream_events(
 }
 
 pub fn aggregate_openai_chat_stream_sync_response(body: &[u8]) -> Option<Value> {
-    let text = std::str::from_utf8(body).ok()?;
     let mut response_id: Option<String> = None;
     let mut model: Option<String> = None;
     let mut created: Option<u64> = None;
@@ -2238,21 +2224,12 @@ pub fn aggregate_openai_chat_stream_sync_response(body: &[u8]) -> Option<Value> 
     let mut choices: BTreeMap<usize, OpenAIChatChoiceState> = BTreeMap::new();
     let mut saw_chunk = false;
 
-    for raw_line in text.lines() {
-        let line = raw_line.trim_matches('\r').trim();
-        if line.is_empty() || line.starts_with(':') || line.starts_with("event:") {
+    for data in captured_sse_records(body).filter_map(|record| record.data) {
+        if matches!(data.trim_ascii(), b"" | b"[DONE]") {
             continue;
         }
 
-        let Some(data_line) = line.strip_prefix("data:") else {
-            continue;
-        };
-        let data_line = data_line.trim();
-        if data_line.is_empty() || data_line == "[DONE]" {
-            continue;
-        }
-
-        let chunk: Value = serde_json::from_str(data_line).ok()?;
+        let chunk: Value = serde_json::from_slice(&data).ok()?;
         let chunk_object = chunk.as_object()?;
         saw_chunk = true;
 
@@ -7593,6 +7570,25 @@ mod tests {
         assert_eq!(body_json["id"], "resp_same_family_capture_123");
         assert_eq!(body_json["output"][0]["content"][0]["text"], "same family");
         assert!(body_json.get("chunks").is_none());
+    }
+
+    #[test]
+    fn multiline_sse_converts_chat_text_usage_and_responses_event_names() {
+        let chat = concat!(
+            ": keepalive\r\nid: token\r\ndata: {\"choices\":[{\"index\":0,\r\n",
+            "data: \"delta\":{\"content\":\"hello\"},\"finish_reason\":\"stop\"}],\r\n",
+            "data: \"usage\":{\"completion_tokens\":2}}\r\n\r\n"
+        );
+        let body = super::aggregate_openai_chat_stream_sync_response(chat.as_bytes()).unwrap();
+        assert_eq!(body["choices"][0]["message"]["content"], "hello");
+        assert_eq!(body["usage"]["completion_tokens"], 2);
+        let responses = concat!(
+            "event: response.completed\rdata: {\"response\": {\r",
+            "data: \"id\":\"resp_multiline\",\"status\":\"completed\",\"output\":[]}}\r\r"
+        );
+        let body =
+            super::aggregate_openai_responses_stream_sync_response(responses.as_bytes()).unwrap();
+        assert_eq!(body["id"], "resp_multiline");
     }
 
     #[test]

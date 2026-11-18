@@ -4800,7 +4800,7 @@ mod tests {
                 provider_actual_service_tier: None,
                 observed_finish: true,
                 unknown_event_count: 0,
-                parser_error: None,
+                ..ExecutionStreamTerminalSummary::default()
             }),
             telemetry: None,
         };
@@ -5007,7 +5007,7 @@ mod tests {
                 provider_actual_service_tier: Some("Default".to_string()),
                 observed_finish: true,
                 unknown_event_count: 0,
-                parser_error: None,
+                ..ExecutionStreamTerminalSummary::default()
             }),
             telemetry: None,
         };
@@ -5471,7 +5471,7 @@ mod tests {
                 provider_actual_service_tier: None,
                 observed_finish: true,
                 unknown_event_count: 0,
-                parser_error: None,
+                ..ExecutionStreamTerminalSummary::default()
             }),
             telemetry: None,
         };
@@ -5730,7 +5730,7 @@ mod tests {
                 provider_actual_service_tier: None,
                 observed_finish: true,
                 unknown_event_count: 0,
-                parser_error: None,
+                ..ExecutionStreamTerminalSummary::default()
             }),
             telemetry: None,
         };

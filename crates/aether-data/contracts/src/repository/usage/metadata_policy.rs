@@ -1,6 +1,6 @@
 use std::net::IpAddr;
 
-use aether_ai_formats::api::{
+use aether_api_metadata::{
     sanitize_request_path, sanitize_request_path_and_query, sanitize_request_query_string,
 };
 use serde_json::{Map, Value};

@@ -74,6 +74,7 @@ pub struct OpenAiImageStreamTerminalState {
     usage: Option<Value>,
     observed_finish: bool,
     parser_error: Option<String>,
+    observation_error: Option<String>,
 }
 
 impl OpenAiImageStreamState {
@@ -653,7 +654,7 @@ impl OpenAiImageStreamTerminalState {
         let event = match serde_json::from_str::<Value>(&data) {
             Ok(event) => event,
             Err(err) => {
-                self.parser_error.get_or_insert_with(|| err.to_string());
+                self.observation_error.get_or_insert_with(|| err.to_string());
                 return Ok(());
             }
         };
@@ -759,6 +760,7 @@ impl OpenAiImageStreamTerminalState {
             && self.response_id.is_none()
             && self.model.is_none()
             && self.parser_error.is_none()
+            && self.observation_error.is_none()
         {
             return None;
         }
@@ -778,6 +780,7 @@ impl OpenAiImageStreamTerminalState {
             observed_finish: self.observed_finish,
             unknown_event_count: 0,
             parser_error: self.parser_error.clone(),
+            observation_error: self.observation_error.clone(),
         })
     }
 }

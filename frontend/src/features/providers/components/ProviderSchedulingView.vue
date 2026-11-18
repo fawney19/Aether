@@ -376,14 +376,19 @@
                         >
                           <span>{{ t('ui.errorRetryCount') }}</span>
                           <Input
-                            :model-value="stickyKeyAttempts"
+                            :model-value="invalidStickyKeyInput ?? stickyKeyAttempts"
                             type="number"
                             min="0"
-                            max="99"
+                            :max="MAX_STICKY_KEY_ATTEMPTS"
+                            :aria-invalid="invalidStickyKeyInput !== null"
+                            :aria-describedby="invalidStickyKeyInput !== null ? 'sticky-key-attempts-error' : undefined"
                             :disabled="saving"
                             :aria-label="t('ui.errorRetryCount')"
                             @update:model-value="updateStickyKeyAttempts"
                           />
+                          <span v-if="invalidStickyKeyInput !== null" id="sticky-key-attempts-error" class="text-destructive" role="alert">
+                            {{ t('ui.invalidStickyKeyAttempts') }}
+                          </span>
                         </label>
                       </template>
                     </RoutingFailoverPolicyEditor>
@@ -461,7 +466,8 @@ import HelpHint from '@/components/common/HelpHint.vue'
 import {
   DEFAULT_STICKY_KEY_ATTEMPTS,
   createEmptyRoutingGroupConfig,
-  normalizeStickyKeyAttempts,
+  MAX_STICKY_KEY_ATTEMPTS,
+  parseStickyKeyAttempts,
   parseBillingMultiplier,
   type RoutingModelPolicy,
   type RoutingPriorityMode,
@@ -533,6 +539,7 @@ const saveConflict = ref(false)
 const deleting = ref(false)
 const busy = computed(() => loading.value || saving.value || deleting.value)
 const billingMultiplierInput = ref('1')
+const invalidStickyKeyInput = ref<string | null>(null)
 const draftGeneration = ref(0)
 const groupMetadata = ref<HTMLElement | null>(null)
 const panelCollapsed = useLocalStorage('aether-provider-policy-collapsed', false)
@@ -555,8 +562,8 @@ const cfHeartbeat = computed(() => draft.value?.config_json.default_policy.enabl
 const cyberContinueFailover = computed(() => draft.value?.config_json.default_policy.cyber_continue_failover ?? false)
 const cancelOnClientDisconnect = computed(() => draft.value?.config_json.default_policy.cancel_on_client_disconnect ?? false)
 const billingMultiplierError = computed(() => parseBillingMultiplier(billingMultiplierInput.value) == null ? t('providers.migration.groupMultiplierMustBeA3664f4') : null)
-const draftDirty = computed(() => draft.value != null && (Boolean(billingMultiplierError.value) || routingFailoverPending.value || savedDraftSnapshot.value !== draftSnapshotValue(draft.value)))
-const canSaveDraft = computed(() => Boolean(draft.value) && !busy.value && draftDirty.value && routingSchedulingValid.value && !billingMultiplierError.value)
+const draftDirty = computed(() => draft.value != null && (Boolean(billingMultiplierError.value) || invalidStickyKeyInput.value !== null || routingFailoverPending.value || savedDraftSnapshot.value !== draftSnapshotValue(draft.value)))
+const canSaveDraft = computed(() => Boolean(draft.value) && !busy.value && draftDirty.value && routingSchedulingValid.value && !billingMultiplierError.value && invalidStickyKeyInput.value === null)
 
 function togglePanel(): void {
   panelCollapsed.value = !panelCollapsed.value
@@ -597,6 +604,7 @@ function draftSnapshotValue(value: RoutingGroupDraft): string {
 }
 
 function resetEditors(): void {
+  invalidStickyKeyInput.value = null
   activePolicy.value = null
   initialSchedulingSelection.value = null
   saveConflict.value = false
@@ -708,7 +716,9 @@ function updatePriorityPolicy(policy: RoutingModelPolicy): void {
 
 function updateStickyKeyAttempts(value: string | number): void {
   if (!draft.value) return
-  updateDraftConfig({ ...draft.value.config_json, default_policy: { ...draft.value.config_json.default_policy, sticky_key_attempts: normalizeStickyKeyAttempts(value) } })
+  const parsed = parseStickyKeyAttempts(value)
+  invalidStickyKeyInput.value = parsed === null ? String(value) : null
+  if (parsed !== null) updateDraftConfig({ ...draft.value.config_json, default_policy: { ...draft.value.config_json.default_policy, sticky_key_attempts: parsed } })
 }
 
 function updateKeepPriorityOnConversion(value: boolean): void {
@@ -800,10 +810,10 @@ async function saveDraft(): Promise<boolean> {
     return false
   }
   const failoverError = validateRoutingFailoverPolicy(draft.value.config_json.default_policy)
-  if (failoverError) {
+  if (failoverError || invalidStickyKeyInput.value !== null) {
     panelCollapsed.value = false
     failoverOpen.value = true
-    showError(failoverError)
+    showError(failoverError ?? t('ui.invalidStickyKeyAttempts'))
     return false
   }
   if (!routingSchedulingValid.value) {
@@ -814,7 +824,10 @@ async function saveDraft(): Promise<boolean> {
   const targetGroupId = draft.value.id
   const submittedGeneration = draftGeneration.value
   const submittedSnapshot = draftSnapshotValue(draft.value)
-  const payload = { name, enabled: draft.value.enabled, is_system_default: draft.value.is_system_default, config_json: cloneConfig(draft.value.config_json) }
+  const config = cloneConfig(draft.value.config_json)
+  const savedGroup = groups.value.find(group => group.id === targetGroupId)
+  const configChanged = !savedGroup || JSON.stringify(config) !== JSON.stringify(savedGroup.config_json)
+  const payload = { name, enabled: draft.value.enabled, is_system_default: draft.value.is_system_default, ...(configChanged ? { config_json: config } : {}) }
   const expectedVersion = draft.value.version
   saving.value = true
   try {

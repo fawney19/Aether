@@ -8,7 +8,7 @@ use crate::formats::id::api_format_uses_body_stream_field;
 /// renames cannot silently desync them — a string-literal mismatch here would
 /// degrade to default values (e.g. assuming streaming) without any compile-time
 /// signal.
-pub const UPSTREAM_IS_STREAM_KEY: &str = "upstream_is_stream";
+pub use aether_api_metadata::UPSTREAM_IS_STREAM_KEY;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum UpstreamStreamPolicy {

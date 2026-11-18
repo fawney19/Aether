@@ -1620,7 +1620,7 @@ fn sanitize_candidate_phase(value: &str) -> Option<&'static str> {
 }
 
 fn sanitize_candidate_api_format(value: &str) -> Option<&'static str> {
-    match aether_ai_formats::normalize_api_format_alias(value).as_str() {
+    match aether_api_metadata::normalize_api_format_alias(value).as_str() {
         "openai:chat" => Some("openai:chat"),
         "openai:responses" => Some("openai:responses"),
         "openai:responses:compact" => Some("openai:responses:compact"),

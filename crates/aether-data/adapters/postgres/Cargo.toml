@@ -8,7 +8,7 @@ description = "PostgreSQL repositories, pools, transactions, and migrations for 
 
 [dependencies]
 serde.workspace = true
-aether-ai-formats.workspace = true
+aether-api-metadata.workspace = true
 aether-data-contracts.workspace = true
 aether-data-query.workspace = true
 async-trait.workspace = true

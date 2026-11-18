@@ -7,6 +7,7 @@ export type RoutingSortingScope = 'unified' | 'per_model'
 
 /** 首个候选（粘性 Key）的总尝试次数默认值：失败后同 Key 重试 1 次 */
 export const DEFAULT_STICKY_KEY_ATTEMPTS = 2
+export const MAX_STICKY_KEY_ATTEMPTS = 0xffff_ffff
 
 export interface RoutingDefaultPolicy extends RoutingFailoverPolicy {
   priority_mode: RoutingPriorityMode
@@ -107,10 +108,14 @@ export function parseBillingMultiplier(value: unknown): number | null {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : null
 }
 
+export function parseStickyKeyAttempts(value: unknown): number | null {
+  if (typeof value !== 'number' && (typeof value !== 'string' || !value.trim())) return null
+  const parsed = Number(value)
+  return Number.isInteger(parsed) && parsed >= 0 && parsed <= MAX_STICKY_KEY_ATTEMPTS ? parsed : null
+}
+
 export function normalizeStickyKeyAttempts(value: unknown): number {
-  const parsed = Math.trunc(Number(value))
-  if (!Number.isFinite(parsed) || parsed < 0) return DEFAULT_STICKY_KEY_ATTEMPTS
-  return Math.min(parsed, 99)
+  return parseStickyKeyAttempts(value) ?? DEFAULT_STICKY_KEY_ATTEMPTS
 }
 
 export function createEmptyModelPolicy(model = ''): RoutingModelPolicy {

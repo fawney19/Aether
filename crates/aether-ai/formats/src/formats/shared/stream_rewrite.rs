@@ -10,7 +10,7 @@ use crate::formats::shared::model_directives::model_directive_display_model_from
 use crate::formats::shared::response::{
     remove_empty_pages_from_tool_arguments, remove_empty_pages_from_tool_input_value,
 };
-use crate::formats::shared::sse::encode_json_sse;
+use crate::formats::shared::sse::{encode_json_sse, SseRecordReader};
 use crate::formats::shared::stream_core::StreamingStandardFormatMatrix;
 use crate::formats::shared::sync_products::anthropic_legacy_compatibility_enabled;
 use crate::formats::shared::AiSurfaceFinalizeError;
@@ -229,6 +229,7 @@ enum AiSurfaceStreamRewriteState {
 pub struct AiSurfaceStreamRewriter<'a> {
     report_context: Cow<'a, Value>,
     buffered: Vec<u8>,
+    records: SseRecordReader,
     state: AiSurfaceStreamRewriteState,
 }
 
@@ -274,6 +275,7 @@ pub fn maybe_build_ai_surface_stream_rewriter<'a>(
     Some(AiSurfaceStreamRewriter {
         report_context: Cow::Borrowed(report_context),
         buffered: Vec::new(),
+        records: SseRecordReader::new(MAX_STREAM_REWRITE_BUFFER_BYTES).including_empty_records(),
         state,
     })
 }
@@ -284,6 +286,7 @@ impl AiSurfaceStreamRewriter<'_> {
         AiSurfaceStreamRewriter {
             report_context: Cow::Owned(self.report_context.into_owned()),
             buffered: self.buffered,
+            records: self.records,
             state: self.state,
         }
     }
@@ -304,17 +307,33 @@ impl AiSurfaceStreamRewriter<'_> {
             }
             AiSurfaceStreamRewriteState::KiroToClaudeCliThenStandard { kiro, standard } => {
                 let claude_bytes = kiro.push_chunk(self.report_context.as_ref(), chunk)?;
-                transform_standard_bytes(standard, self.report_context.as_ref(), claude_bytes)
+                transform_standard_bytes(
+                    &mut self.records,
+                    standard,
+                    self.report_context.as_ref(),
+                    &claude_bytes,
+                )
             }
+            AiSurfaceStreamRewriteState::Standard(standard) => transform_standard_bytes(
+                &mut self.records,
+                standard,
+                self.report_context.as_ref(),
+                chunk,
+            ),
             AiSurfaceStreamRewriteState::EnvelopeUnwrap
             | AiSurfaceStreamRewriteState::ModelDirectiveDisplay
-            | AiSurfaceStreamRewriteState::OpenAiResponsesCompat
-            | AiSurfaceStreamRewriteState::Standard(_) => {
-                append_bounded_stream_rewrite_chunk(&mut self.buffered, chunk)?;
+            | AiSurfaceStreamRewriteState::OpenAiResponsesCompat => {
                 let mut output = Vec::new();
-                while let Some(line_end) = self.buffered.iter().position(|byte| *byte == b'\n') {
-                    let line = self.buffered.drain(..=line_end).collect::<Vec<_>>();
-                    output.extend(self.transform_line(line)?);
+                let mut remaining = chunk;
+                while !remaining.is_empty() {
+                    let before = remaining;
+                    let record = self.records.next_record(&mut remaining).transpose()
+                        .map_err(|_| AiSurfaceFinalizeError::new(format!("stream rewrite buffer exceeds {MAX_STREAM_REWRITE_BUFFER_BYTES} bytes")))?;
+                    self.buffered
+                        .extend_from_slice(&before[..before.len() - remaining.len()]);
+                    if let Some(record) = record {
+                        output.extend(self.rewrite_record(record)?);
+                    }
                 }
                 Ok(output)
             }
@@ -337,29 +356,29 @@ impl AiSurfaceStreamRewriter<'_> {
             }
             AiSurfaceStreamRewriteState::KiroToClaudeCliThenStandard { kiro, standard } => {
                 let mut output = transform_standard_bytes(
+                    &mut self.records,
                     standard,
                     self.report_context.as_ref(),
-                    kiro.finish(self.report_context.as_ref())?,
+                    &kiro.finish(self.report_context.as_ref())?,
                 )?;
-                output.extend(standard.finish(self.report_context.as_ref())?);
+                output.extend(finish_standard_records(
+                    &mut self.records,
+                    standard,
+                    self.report_context.as_ref(),
+                )?);
                 Ok(output)
+            }
+            AiSurfaceStreamRewriteState::Standard(standard) => {
+                finish_standard_records(&mut self.records, standard, self.report_context.as_ref())
             }
             AiSurfaceStreamRewriteState::EnvelopeUnwrap
             | AiSurfaceStreamRewriteState::ModelDirectiveDisplay
-            | AiSurfaceStreamRewriteState::OpenAiResponsesCompat
-            | AiSurfaceStreamRewriteState::Standard(_) => {
-                if self.buffered.is_empty() {
-                    if let AiSurfaceStreamRewriteState::Standard(state) = &mut self.state {
-                        return state.finish(self.report_context.as_ref());
-                    }
-                    return Ok(Vec::new());
+            | AiSurfaceStreamRewriteState::OpenAiResponsesCompat => {
+                if let Some(record) = self.records.finish() {
+                    self.rewrite_record(record)
+                } else {
+                    Ok(std::mem::take(&mut self.buffered))
                 }
-                let line = std::mem::take(&mut self.buffered);
-                let mut output = self.transform_line(line)?;
-                if let AiSurfaceStreamRewriteState::Standard(state) = &mut self.state {
-                    output.extend(state.finish(self.report_context.as_ref())?);
-                }
-                Ok(output)
             }
         }
     }
@@ -374,30 +393,74 @@ impl AiSurfaceStreamRewriter<'_> {
         }
     }
 
-    fn transform_line(&mut self, line: Vec<u8>) -> Result<Vec<u8>, AiSurfaceFinalizeError> {
-        match &mut self.state {
+    fn rewrite_record(
+        &mut self,
+        record: crate::formats::shared::sse::SseRecord,
+    ) -> Result<Vec<u8>, AiSurfaceFinalizeError> {
+        let raw = std::mem::take(&mut self.buffered);
+        if record.event.as_deref() == Some("error")
+            && matches!(self.state, AiSurfaceStreamRewriteState::EnvelopeUnwrap)
+        {
+            return Ok(raw);
+        }
+        let Some(line) = record.into_data_line() else {
+            return Ok(raw);
+        };
+        let rewritten = match &mut self.state {
             AiSurfaceStreamRewriteState::EnvelopeUnwrap => {
-                let output =
-                    transform_provider_private_stream_line(self.report_context.as_ref(), line)
-                        .map_err(AiSurfaceFinalizeError::from)?;
+                let output = transform_provider_private_stream_line(
+                    self.report_context.as_ref(),
+                    line.clone(),
+                )
+                .map_err(AiSurfaceFinalizeError::from)?;
                 rewrite_model_directive_stream_line(self.report_context.as_ref(), output)
             }
             AiSurfaceStreamRewriteState::ModelDirectiveDisplay => {
-                rewrite_model_directive_stream_line(self.report_context.as_ref(), line)
+                rewrite_model_directive_stream_line(self.report_context.as_ref(), line.clone())
             }
             AiSurfaceStreamRewriteState::OpenAiResponsesCompat => {
-                rewrite_openai_responses_compat_stream_line(self.report_context.as_ref(), line)
+                rewrite_openai_responses_compat_stream_line(
+                    self.report_context.as_ref(),
+                    line.clone(),
+                )
             }
-            AiSurfaceStreamRewriteState::Standard(state) => {
-                transform_standard_line(state, self.report_context.as_ref(), line)
-            }
-            AiSurfaceStreamRewriteState::OpenAiImage(_)
-            | AiSurfaceStreamRewriteState::OpenAiImageToOpenAiChat(_)
-            | AiSurfaceStreamRewriteState::ClaudeReadToolSanitize(_)
-            | AiSurfaceStreamRewriteState::KiroToClaudeCli(_)
-            | AiSurfaceStreamRewriteState::KiroToClaudeCliThenStandard { .. } => Ok(Vec::new()),
+            _ => return Ok(raw),
+        }?;
+        if rewritten.trim_ascii_end() == line.trim_ascii_end() {
+            return Ok(raw);
         }
+        Ok(replace_record_data(&raw, rewritten.trim_ascii_end()))
     }
+}
+
+/// Keep comments, event/id/retry fields and the original line terminators.
+/// The changed JSON fits on one data line, replacing all the source data lines.
+fn replace_record_data(mut raw: &[u8], data_line: &[u8]) -> Vec<u8> {
+    let mut output = Vec::new();
+    let mut replaced = false;
+    while !raw.is_empty() {
+        let end = raw
+            .iter()
+            .position(|b| matches!(b, b'\r' | b'\n'))
+            .unwrap_or(raw.len());
+        let (line, suffix) = raw.split_at(end);
+        let width = if suffix.starts_with(b"\r\n") {
+            2
+        } else {
+            usize::from(!suffix.is_empty())
+        };
+        if line == b"data" || line.starts_with(b"data:") {
+            if !replaced {
+                output.extend_from_slice(data_line);
+                output.extend_from_slice(&suffix[..width]);
+                replaced = true;
+            }
+        } else {
+            output.extend_from_slice(&raw[..end + width]);
+        }
+        raw = &suffix[width..];
+    }
+    output
 }
 
 #[derive(Default)]
@@ -798,21 +861,35 @@ fn rewrite_stream_payload_model_from_context(report_context: &Value, value: &mut
 }
 
 fn transform_standard_bytes(
+    reader: &mut SseRecordReader,
     standard: &mut StreamingStandardFormatMatrix,
     report_context: &Value,
-    bytes: Vec<u8>,
+    mut bytes: &[u8],
 ) -> Result<Vec<u8>, AiSurfaceFinalizeError> {
-    if bytes.is_empty() {
-        return Ok(Vec::new());
-    }
     let mut output = Vec::new();
-    for line in bytes.split_inclusive(|byte| *byte == b'\n') {
-        output.extend(transform_standard_line(
-            standard,
-            report_context,
-            line.to_vec(),
-        )?);
+    while let Some(record) = reader.next_record(&mut bytes) {
+        let record = record.map_err(|_| {
+            AiSurfaceFinalizeError::new(format!(
+                "stream rewrite buffer exceeds {MAX_STREAM_REWRITE_BUFFER_BYTES} bytes"
+            ))
+        })?;
+        if let Some(line) = record.into_data_line() {
+            output.extend(transform_standard_line(standard, report_context, line)?);
+        }
     }
+    Ok(output)
+}
+
+fn finish_standard_records(
+    reader: &mut SseRecordReader,
+    standard: &mut StreamingStandardFormatMatrix,
+    report_context: &Value,
+) -> Result<Vec<u8>, AiSurfaceFinalizeError> {
+    let mut output = Vec::new();
+    if let Some(line) = reader.finish().and_then(|record| record.into_data_line()) {
+        output.extend(transform_standard_line(standard, report_context, line)?);
+    }
+    output.extend(standard.finish(report_context)?);
     Ok(output)
 }
 
@@ -1146,6 +1223,60 @@ data: {\"type\":\"response.reasoning_summary_text.delta\",\"response_id\":\"resp
         assert!(output.contains("\"reasoning_content\":\"Need to inspect first.\""));
         assert!(!output.contains("\"content\""));
         assert!(!output.contains("data: [DONE]"));
+    }
+
+    #[test]
+    fn multiline_chat_body_reaches_claude_before_its_message_stop() {
+        let ctx = json!({"provider_api_format":"openai:chat","client_api_format":"claude:messages","needs_conversion":true});
+        let wire = b"data: {\"choices\":[{\"delta\":\r\ndata: {\"content\":\"BODY\"}}]}\r\n\r\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\r\n\r\ndata: [DONE]\r\n\r\n";
+        let mut rewriter = maybe_build_ai_surface_stream_rewriter(Some(&ctx)).unwrap();
+        let mut output = Vec::new();
+        for chunk in wire.chunks(5) {
+            output.extend(rewriter.push_chunk(chunk).unwrap());
+        }
+        output.extend(rewriter.finish().unwrap());
+        let output = String::from_utf8(output).unwrap();
+        assert_eq!(output.matches("\"text\":\"BODY\"").count(), 1);
+        assert!(output.find("BODY").unwrap() < output.find("event: message_stop").unwrap());
+    }
+
+    #[test]
+    fn model_directive_adapter_keeps_nondata_bytes_when_rewriting_multiline_records() {
+        let ctx = json!({"provider_api_format":"openai:chat","client_api_format":"openai:chat",
+            "model":"gpt-5.5-xhigh","mapped_model":"gpt-5.5","needs_conversion":false});
+        let unchanged =
+            ": heartbeat\r\n\r\nevent: extension\r\ndata: {\r\nid: a\r\ndata: \"extra\":1}\r\n\r\n";
+        let changed =
+            "id: b\r\ndata: {\r\n:mid\r\ndata: \"model\":\"gpt-5.5\"}\r\nretry: 5\r\n\r\n";
+        let mut rewriter = maybe_build_ai_surface_stream_rewriter(Some(&ctx)).unwrap();
+        let mut output = Vec::new();
+        for chunk in [unchanged, changed].concat().as_bytes().chunks(1) {
+            output.extend(rewriter.push_chunk(chunk).unwrap());
+        }
+        output.extend(rewriter.finish().unwrap());
+        assert_eq!(String::from_utf8(output).unwrap(),format!("{unchanged}id: b\r\ndata: {{\"model\":\"gpt-5.5-xhigh\"}}\r\n:mid\r\nretry: 5\r\n\r\n"));
+    }
+
+    #[test]
+    fn standard_rewriter_converts_split_multiline_responses_delta() {
+        let ctx = json!({"provider_api_format":"openai:responses","client_api_format":"openai:chat","needs_conversion":true});
+        let wire = b"event: response.output_text.delta\r\ndata: {\"response_id\":\"r\",\r\ndata: \"delta\":\"visible\"}\r\n\r\nevent: response.completed\r\ndata: {\"response\":{\"id\":\"r\",\"status\":\"completed\"}}";
+        for width in [1, 7, wire.len()] {
+            let mut rewriter = maybe_build_ai_surface_stream_rewriter(Some(&ctx)).unwrap();
+            let mut bytes = Vec::new();
+            for chunk in wire.chunks(width) {
+                bytes.extend(rewriter.push_chunk(chunk).unwrap());
+            }
+            bytes.extend(rewriter.finish().unwrap());
+            let output = String::from_utf8(bytes).unwrap();
+            assert_eq!(
+                output.matches("\"content\":\"visible\"").count(),
+                1,
+                "{output}"
+            );
+            assert!(output.contains("[DONE]"), "{output}");
+            assert!(!output.contains("stream_terminal_error"), "{output}");
+        }
     }
 
     #[test]

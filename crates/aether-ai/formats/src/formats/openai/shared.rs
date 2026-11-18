@@ -139,14 +139,7 @@ pub fn map_openai_reasoning_effort_to_gemini_budget(value: &str) -> Option<u64> 
     map_openai_reasoning_effort_to_thinking_budget(value)
 }
 
-pub fn map_thinking_budget_to_openai_reasoning_effort(value: u64) -> &'static str {
-    match value {
-        0..=1664 => "low",
-        1665..=3072 => "medium",
-        3073..=6144 => "high",
-        _ => "xhigh",
-    }
-}
+pub use aether_api_metadata::map_thinking_budget_to_openai_reasoning_effort;
 
 pub fn extract_openai_reasoning_effort(request: &Map<String, Value>) -> Option<String> {
     request

@@ -357,7 +357,8 @@ enum ProviderPrivateStreamNormalizeMode {
 pub struct ProviderPrivateStreamNormalizer<'a> {
     report_context: Cow<'a, Value>,
     buffered: Vec<u8>,
-    current_event_type: Option<String>,
+    records: crate::formats::shared::sse::SseRecordReader,
+    connect_binary: Option<bool>,
     mode: ProviderPrivateStreamNormalizeMode,
 }
 
@@ -404,7 +405,8 @@ pub fn maybe_build_provider_private_stream_normalizer<'a>(
     Some(ProviderPrivateStreamNormalizer {
         report_context: Cow::Borrowed(report_context),
         buffered: Vec::new(),
-        current_event_type: None,
+        records: crate::formats::shared::sse::SseRecordReader::new(MAX_PRIVATE_STREAM_BUFFER_BYTES),
+        connect_binary: None,
         mode,
     })
 }
@@ -428,7 +430,8 @@ impl ProviderPrivateStreamNormalizer<'_> {
         ProviderPrivateStreamNormalizer {
             report_context: Cow::Owned(self.report_context.into_owned()),
             buffered: self.buffered,
-            current_event_type: self.current_event_type,
+            records: self.records,
+            connect_binary: self.connect_binary,
             mode: self.mode,
         }
     }
@@ -439,6 +442,27 @@ impl ProviderPrivateStreamNormalizer<'_> {
                 state.push_chunk(self.report_context.as_ref(), chunk)
             }
             ProviderPrivateStreamNormalizeMode::EnvelopeUnwrap => {
+                if chunk.is_empty() {
+                    return Ok(Vec::new());
+                }
+                let binary = *self.connect_binary.get_or_insert_with(|| {
+                    report_context_is_windsurf_envelope(self.report_context.as_ref())
+                        && buffer_looks_like_connect_frame(chunk)
+                });
+                if !binary {
+                    let mut output = Vec::new();
+                    let mut remaining = chunk;
+                    while let Some(record) = self.records.next_record(&mut remaining) {
+                        let record = record.map_err(|_| AiSurfaceFinalizeError::new(format!(
+                            "provider stream normalization buffer exceeds {MAX_PRIVATE_STREAM_BUFFER_BYTES} bytes"
+                        )))?;
+                        output.extend(normalize_private_sse_record(
+                            self.report_context.as_ref(),
+                            record,
+                        )?);
+                    }
+                    return Ok(output);
+                }
                 let next_len = self
                     .buffered
                     .len()
@@ -452,24 +476,7 @@ impl ProviderPrivateStreamNormalizer<'_> {
                     )));
                 }
                 self.buffered.extend_from_slice(chunk);
-                if report_context_is_windsurf_envelope(self.report_context.as_ref())
-                    && buffer_looks_like_connect_frame(&self.buffered)
-                {
-                    return drain_windsurf_connect_json_frames(&mut self.buffered);
-                }
-                let mut output = Vec::new();
-                while let Some(line_end) = self.buffered.iter().position(|byte| *byte == b'\n') {
-                    let line = self.buffered.drain(..=line_end).collect::<Vec<_>>();
-                    output.extend(
-                        transform_provider_private_stream_line_with_event_state(
-                            self.report_context.as_ref(),
-                            line,
-                            &mut self.current_event_type,
-                        )
-                        .map_err(AiSurfaceFinalizeError::from)?,
-                    );
-                }
-                Ok(output)
+                drain_windsurf_connect_json_frames(&mut self.buffered)
             }
         }
     }
@@ -480,24 +487,50 @@ impl ProviderPrivateStreamNormalizer<'_> {
                 state.finish(self.report_context.as_ref())
             }
             ProviderPrivateStreamNormalizeMode::EnvelopeUnwrap => {
-                if self.buffered.is_empty() {
-                    return Ok(Vec::new());
-                }
-                if report_context_is_windsurf_envelope(self.report_context.as_ref())
-                    && buffer_looks_like_connect_frame(&self.buffered)
-                {
+                if self.connect_binary == Some(true) {
                     return drain_windsurf_connect_json_frames(&mut self.buffered);
                 }
-                let line = std::mem::take(&mut self.buffered);
-                transform_provider_private_stream_line_with_event_state(
-                    self.report_context.as_ref(),
-                    line,
-                    &mut self.current_event_type,
-                )
-                .map_err(AiSurfaceFinalizeError::from)
+                match self.records.finish() {
+                    Some(record) => {
+                        normalize_private_sse_record(self.report_context.as_ref(), record)
+                    }
+                    None => Ok(Vec::new()),
+                }
             }
         }
     }
+}
+
+fn normalize_private_sse_record(
+    context: &Value,
+    record: crate::formats::shared::sse::SseRecord,
+) -> Result<Vec<u8>, AiSurfaceFinalizeError> {
+    let error_event = record
+        .event
+        .as_deref()
+        .is_some_and(|name| name.eq_ignore_ascii_case("error"));
+    let Some(data) = record.data else {
+        return Ok(Vec::new());
+    };
+    let mut output = Vec::new();
+    if error_event {
+        output.extend_from_slice(b"event: error\n");
+    }
+    if !error_event {
+        let mut line = b"data: ".to_vec();
+        line.extend_from_slice(&data);
+        let normalized = transform_provider_private_stream_line(context, line)?;
+        if normalized.ends_with(b"\n\n") {
+            return Ok(normalized);
+        }
+    }
+    for part in data.split(|byte| *byte == b'\n') {
+        output.extend_from_slice(b"data: ");
+        output.extend_from_slice(part);
+        output.push(b'\n');
+    }
+    output.push(b'\n');
+    Ok(output)
 }
 
 fn normalize_windsurf_sync_response_value(data: Value) -> Option<Value> {
@@ -1241,6 +1274,24 @@ mod tests {
         let output_text = String::from_utf8(output).expect("text should decode");
         assert!(output_text.contains("\"_v1internal_response_id\":\"resp_123\""));
         assert!(output_text.contains("\"id\":\"call_get_weather_0\""));
+    }
+
+    #[test]
+    fn private_sse_preserves_multiline_boundaries_across_handoff() {
+        let ctx = json!({"provider_api_format":"gemini:generate_content","client_api_format":"openai:chat","envelope_name":"gemini_cli:v1internal","has_envelope":true});
+        let mut normalizer = maybe_build_provider_private_stream_normalizer(Some(&ctx)).unwrap();
+        assert!(normalizer
+            .push_chunk(b"data: {\"response\":\r\n")
+            .unwrap()
+            .is_empty());
+        let mut normalizer = normalizer.into_owned();
+        let output = normalizer
+            .push_chunk(b"data: {\"responseId\":\"first\"}}\r\n\r\ndata: [DONE]\r\n\r\n")
+            .unwrap();
+        assert_eq!(
+            output,
+            b"data: {\"responseId\":\"first\"}\n\ndata: [DONE]\n\n"
+        );
     }
 
     #[test]

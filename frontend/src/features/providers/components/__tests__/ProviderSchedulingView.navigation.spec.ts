@@ -634,8 +634,11 @@ describe('ProviderSchedulingView workspace navigation', () => {
     expect(routingApi.updateRoutingGroup).not.toHaveBeenCalled()
   })
 
-  it('saves strategy metadata with scheduling and updates the default marker', async () => {
-    const { root } = await mountWorkspace({ group: 'last' })
+  it('preserves API-provided retry budgets and policy fields when saving only group metadata', async () => {
+    const config = createEmptyRoutingGroupConfig()
+    config.default_policy.sticky_key_attempts = 120
+    const { root } = await mountWorkspace({ group: 'last' }, [group('default', { is_system_default: true }), group('last', { config_json: config })])
+    expect(contextChange.mock.lastCall?.[0].config.default_policy.sticky_key_attempts).toBe(120)
     await editName(root, '主要策略')
     expect(button(root, '设为系统默认').getAttribute('aria-pressed')).toBe('false')
     button(root, '设为系统默认').click()
@@ -644,7 +647,9 @@ describe('ProviderSchedulingView workspace navigation', () => {
     expect(routingApi.updateRoutingGroup).not.toHaveBeenCalled()
     button(root, '保存调度').click()
     await flush()
-    expect(routingApi.updateRoutingGroup).toHaveBeenCalledWith('last', expect.objectContaining({ name: '主要策略', is_system_default: true, config_json: expect.any(Object) }))
+    expect(routingApi.updateRoutingGroup).toHaveBeenCalledWith('last', expect.objectContaining({ name: '主要策略', is_system_default: true }))
+    expect(routingApi.updateRoutingGroup.mock.lastCall?.[1]).not.toHaveProperty('config_json')
+    expect(contextChange.mock.lastCall?.[0].config.default_policy.sticky_key_attempts).toBe(120)
     expect(selector(root).textContent?.trim()).toBe('主要策略 · 默认')
     const options = await openGroupOptions(root)
     expect(options.find(option => option.getAttribute('aria-selected') === 'true')?.textContent?.trim()).toBe('主要策略 · 默认')

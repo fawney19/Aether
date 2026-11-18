@@ -292,7 +292,7 @@ fn constrain_api_key_api_format_policy_to_user_policy(
         return;
     };
     let effective =
-        aether_ai_formats::intersect_api_format_allowed_lists(api_key_values, user_values);
+        aether_api_metadata::intersect_api_format_allowed_lists(api_key_values, user_values);
     *user_policy = Some(effective.clone());
     *api_key_policy = Some(effective);
 }
@@ -1196,34 +1196,34 @@ mod tests {
     #[test]
     fn api_format_policy_intersection_preserves_companion_scope() {
         assert_eq!(
-            aether_ai_formats::intersect_api_format_allowed_lists(
+            aether_api_metadata::intersect_api_format_allowed_lists(
                 &["openai:search".to_string()],
                 &["openai:responses".to_string()],
             ),
             vec!["openai:search".to_string()]
         );
         assert_eq!(
-            aether_ai_formats::intersect_api_format_allowed_lists(
+            aether_api_metadata::intersect_api_format_allowed_lists(
                 &["openai:responses".to_string()],
                 &["openai:search".to_string()],
             ),
             vec!["openai:search".to_string()]
         );
         assert_eq!(
-            aether_ai_formats::intersect_api_format_allowed_lists(
+            aether_api_metadata::intersect_api_format_allowed_lists(
                 &["openai:responses".to_string()],
                 &["openai:responses:compact".to_string()],
             ),
             vec!["openai:responses:compact".to_string()]
         );
         assert_eq!(
-            aether_ai_formats::intersect_api_format_allowed_lists(
+            aether_api_metadata::intersect_api_format_allowed_lists(
                 &["openai:responses:compact".to_string()],
                 &["openai:responses".to_string()],
             ),
             vec!["openai:responses:compact".to_string()]
         );
-        assert!(aether_ai_formats::intersect_api_format_allowed_lists(
+        assert!(aether_api_metadata::intersect_api_format_allowed_lists(
             &["openai:search".to_string()],
             &["openai:chat".to_string()],
         )

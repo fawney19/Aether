@@ -547,7 +547,7 @@ pub fn extract_global_priority_for_format(
 }
 
 pub fn normalize_api_format(value: &str) -> String {
-    aether_ai_formats::normalize_api_format_alias(value)
+    aether_api_metadata::normalize_api_format_alias(value)
 }
 
 fn row_has_candidate_model_name(
@@ -585,7 +585,7 @@ fn requested_model_name_candidates(
     }
     if enable_model_directives {
         if let Some(base_model) =
-            aether_ai_formats::model_directive_base_model(requested_model_name)
+            aether_api_metadata::model_directive_base_model(requested_model_name)
         {
             for alias in requested_model_name_aliases(&base_model) {
                 push_model_name_candidate(&mut candidates, Cow::Owned(alias));

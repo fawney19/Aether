@@ -221,11 +221,11 @@ fn stable_pool_key_hash(seed: &str, key_id: &str) -> u64 {
 }
 
 fn normalize_api_format(value: &str) -> String {
-    aether_ai_formats::normalize_api_format_alias(value)
+    aether_api_metadata::normalize_api_format_alias(value)
 }
 
 fn api_format_matches(left: &str, right: &str) -> bool {
-    aether_ai_formats::api_format_alias_matches(left, right)
+    aether_api_metadata::api_format_alias_matches(left, right)
 }
 
 fn row_matches_requested_model(

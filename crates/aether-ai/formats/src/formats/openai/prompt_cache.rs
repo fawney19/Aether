@@ -33,30 +33,7 @@ pub fn validate_openai_prompt_cache_request(
     )
 }
 
-pub fn resolve_openai_prompt_cache_ttl_minutes(
-    provider_api_format: &str,
-    provider_model: &str,
-    source_model: &str,
-    body: &Value,
-) -> Option<i64> {
-    OpenAiPromptCacheApi::parse(provider_api_format)?;
-    let request = body.as_object()?;
-    let explicit_ttl = request
-        .get("prompt_cache_options")
-        .and_then(Value::as_object)
-        .and_then(|options| options.get("ttl"))
-        .and_then(Value::as_str);
-    if explicit_ttl == Some("30m") {
-        return Some(30);
-    }
-
-    let capability_model =
-        crate::formats::shared::model_directives::openai_model_capability_identity(
-            provider_model,
-            source_model,
-        );
-    crate::openai_model_supports_prompt_cache_options(&capability_model).then_some(30)
-}
+pub use aether_api_metadata::resolve_openai_prompt_cache_ttl_minutes;
 
 pub(crate) fn validate_openai_prompt_cache_request_with_source_model(
     source_api_format: &str,
@@ -103,21 +80,7 @@ pub(crate) fn validate_openai_prompt_cache_request_with_source_model(
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum OpenAiPromptCacheApi {
-    Chat,
-    Responses,
-}
-
-impl OpenAiPromptCacheApi {
-    fn parse(api_format: &str) -> Option<Self> {
-        match crate::normalize_api_format_alias(api_format).as_str() {
-            "openai:chat" => Some(Self::Chat),
-            "openai:responses" | "openai:responses:compact" => Some(Self::Responses),
-            _ => None,
-        }
-    }
-}
+use aether_api_metadata::OpenAiPromptCacheApi;
 
 fn normalize_provider_model(model: &str) -> &str {
     model.trim().rsplit('/').next().unwrap_or_default()

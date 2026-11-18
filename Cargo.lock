@@ -82,6 +82,7 @@ dependencies = [
 name = "aether-ai-formats"
 version = "0.1.0"
 dependencies = [
+ "aether-api-metadata",
  "aether-contracts",
  "base64 0.22.1",
  "http",
@@ -111,6 +112,14 @@ dependencies = [
  "serde_json",
  "tokio",
  "url",
+]
+
+[[package]]
+name = "aether-api-metadata"
+version = "0.1.0"
+dependencies = [
+ "form_urlencoded",
+ "serde_json",
 ]
 
 [[package]]
@@ -166,7 +175,7 @@ dependencies = [
 name = "aether-data"
 version = "0.1.0"
 dependencies = [
- "aether-ai-formats",
+ "aether-api-metadata",
  "aether-cache",
  "aether-data-contracts",
  "aether-data-postgres",
@@ -191,7 +200,7 @@ dependencies = [
 name = "aether-data-contracts"
 version = "0.1.0"
 dependencies = [
- "aether-ai-formats",
+ "aether-api-metadata",
  "aether-contracts",
  "aether-routing-core",
  "async-trait",
@@ -212,7 +221,7 @@ dependencies = [
 name = "aether-data-postgres"
 version = "0.1.0"
 dependencies = [
- "aether-ai-formats",
+ "aether-api-metadata",
  "aether-data-contracts",
  "aether-data-query",
  "async-trait",
@@ -618,7 +627,7 @@ dependencies = [
 name = "aether-scheduler-core"
 version = "0.1.0"
 dependencies = [
- "aether-ai-formats",
+ "aether-api-metadata",
  "aether-contracts",
  "aether-data-contracts",
  "aether-wallet",

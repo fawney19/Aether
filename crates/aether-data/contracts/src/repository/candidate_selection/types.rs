@@ -125,17 +125,17 @@ pub fn provider_model_mapping_api_format_covers(
     mapping_api_format: &str,
     requested_api_format: &str,
 ) -> bool {
-    if aether_ai_formats::api_format_permission_covers(mapping_api_format, requested_api_format) {
+    if aether_api_metadata::api_format_permission_covers(mapping_api_format, requested_api_format) {
         return true;
     }
 
     provider_type.trim().eq_ignore_ascii_case("codex")
-        && aether_ai_formats::normalize_api_format_alias(requested_api_format) == "codex:live"
-        && aether_ai_formats::normalize_api_format_alias(mapping_api_format) == "openai:responses"
+        && aether_api_metadata::normalize_api_format_alias(requested_api_format) == "codex:live"
+        && aether_api_metadata::normalize_api_format_alias(mapping_api_format) == "openai:responses"
 }
 
 fn api_format_permission_covers(allowed: &str, requested: &str) -> bool {
-    aether_ai_formats::api_format_permission_covers(allowed, requested)
+    aether_api_metadata::api_format_permission_covers(allowed, requested)
 }
 
 #[async_trait]

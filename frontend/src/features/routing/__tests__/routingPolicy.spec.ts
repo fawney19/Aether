@@ -148,7 +148,10 @@ describe('routingPolicy', () => {
     expect(normalizeStickyKeyAttempts('5')).toBe(5)
     expect(normalizeStickyKeyAttempts(-1)).toBe(2)
     expect(normalizeStickyKeyAttempts('abc')).toBe(2)
-    expect(normalizeStickyKeyAttempts(500)).toBe(99)
+    expect(normalizeStickyKeyAttempts(500)).toBe(500)
+    expect(normalizeStickyKeyAttempts(4294967295)).toBe(4294967295)
+    expect(normalizeStickyKeyAttempts(4294967296)).toBe(2)
+    expect(normalizeStickyKeyAttempts(1.5)).toBe(2)
     expect(getModelScheduling(createEmptyRoutingGroupConfig(), 'gpt-5').sticky_key_attempts).toBe(2)
   })
 

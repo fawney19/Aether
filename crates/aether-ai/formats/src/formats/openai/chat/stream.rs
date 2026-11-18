@@ -247,8 +247,8 @@ impl OpenAIChatProviderState {
                 if let Some(finish_reason) = normalize_openai_finish_reason(
                     choice_object.get("finish_reason").and_then(Value::as_str),
                 ) {
+                    self.ensure_started(report_context, &mut out);
                     if let Some(usage) = Self::finish_usage(chunk_object.get("usage")) {
-                        self.ensure_started(report_context, &mut out);
                         let (id, model) = self.identity(report_context);
                         out.push(CanonicalStreamFrame {
                             id,
@@ -407,8 +407,8 @@ impl OpenAIChatProviderState {
                 choice_object.get("finish_reason").and_then(Value::as_str),
             ) {
                 recognized_delta = true;
+                self.ensure_started(report_context, &mut out);
                 if let Some(usage) = Self::finish_usage(chunk_object.get("usage")) {
-                    self.ensure_started(report_context, &mut out);
                     let (id, model) = self.identity(report_context);
                     out.push(CanonicalStreamFrame {
                         id,

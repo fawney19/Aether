@@ -1178,15 +1178,15 @@ fn requested_model_selection_page_sql() -> String {
 }
 
 fn api_format_aliases(api_format: &str) -> Vec<String> {
-    aether_ai_formats::api_format_storage_aliases(api_format)
+    aether_api_metadata::api_format_storage_aliases(api_format)
 }
 
 fn api_format_permission_aliases(api_format: &str) -> Vec<String> {
-    aether_ai_formats::api_format_permission_storage_aliases(api_format)
+    aether_api_metadata::api_format_permission_storage_aliases(api_format)
 }
 
 fn normalize_api_format(api_format: &str) -> String {
-    aether_ai_formats::normalize_api_format_alias(api_format)
+    aether_api_metadata::normalize_api_format_alias(api_format)
 }
 
 fn sql_match_aliases(api_formats: &[String]) -> Vec<String> {
@@ -1587,7 +1587,7 @@ fn parse_provider_model_mapping_object_lenient(
     .map(|formats| {
         formats
             .into_iter()
-            .map(|value| aether_ai_formats::normalize_api_format_alias(&value))
+            .map(|value| aether_api_metadata::normalize_api_format_alias(&value))
             .collect()
     });
     let endpoint_ids = parse_string_list(

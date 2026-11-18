@@ -13,7 +13,7 @@ postgres = ["dep:aether-data-postgres", "sqlx/postgres"]
 all-drivers = ["postgres"]
 
 [dependencies]
-aether-ai-formats.workspace = true
+aether-api-metadata.workspace = true
 aether-data-contracts.workspace = true
 aether-data-postgres = { workspace = true, optional = true }
 aether-cache.workspace = true

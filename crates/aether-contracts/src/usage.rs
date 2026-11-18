@@ -162,6 +162,9 @@ pub struct ExecutionStreamTerminalSummary {
     pub unknown_event_count: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parser_error: Option<String>,
+    /// Diagnostic from best-effort observation. Independent of the provider outcome.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation_error: Option<String>,
 }
 
 fn is_zero_u64(value: &u64) -> bool {

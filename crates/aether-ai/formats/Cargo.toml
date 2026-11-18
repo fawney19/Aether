@@ -7,6 +7,7 @@ repository.workspace = true
 description = "Pure AI API format, surface, planning, and finalize logic for Aether"
 
 [dependencies]
+aether-api-metadata.workspace = true
 aether-contracts.workspace = true
 base64.workspace = true
 http.workspace = true

@@ -1,0 +1,11 @@
+[package]
+name = "aether-api-metadata"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared API format identity, model capabilities, and request metadata"
+
+[dependencies]
+form_urlencoded = "1"
+serde_json.workspace = true

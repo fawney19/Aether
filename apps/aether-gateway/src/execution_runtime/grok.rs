@@ -1133,7 +1133,7 @@ fn grok_stream_terminal_summary(
         provider_actual_service_tier: None,
         observed_finish: true,
         unknown_event_count: 0,
-        parser_error: None,
+        ..ExecutionStreamTerminalSummary::default()
     }
 }
 

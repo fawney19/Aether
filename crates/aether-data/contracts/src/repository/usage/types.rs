@@ -1,4 +1,4 @@
-use aether_ai_formats::normalize_api_format_alias;
+use aether_api_metadata::normalize_api_format_alias;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -112,7 +112,7 @@ fn extract_gemini_reasoning_effort_from_body(
             if budget == 0 {
                 "none".to_string()
             } else {
-                aether_ai_formats::formats::openai::shared::map_thinking_budget_to_openai_reasoning_effort(budget)
+                aether_api_metadata::map_thinking_budget_to_openai_reasoning_effort(budget)
                     .to_string()
             }
         })
@@ -440,7 +440,7 @@ pub fn resolve_provider_cache_ttl_minutes(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or(provider_model);
-    aether_ai_formats::resolve_openai_prompt_cache_ttl_minutes(
+    aether_api_metadata::resolve_openai_prompt_cache_ttl_minutes(
         provider_api_format,
         provider_model,
         source_model,

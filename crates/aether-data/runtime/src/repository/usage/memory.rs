@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::RwLock;
 
-use aether_ai_formats::UPSTREAM_IS_STREAM_KEY;
+use aether_api_metadata::UPSTREAM_IS_STREAM_KEY;
 use aether_data_contracts::repository::usage::{
     canonical_usage_body_ref_for, parse_usage_body_ref, preserve_usage_routing_group_snapshot,
     sanitize_usage_request_metadata, usage_body_ref, StoredUsageAuditAggregation,

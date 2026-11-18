@@ -56,7 +56,7 @@ pub fn api_format_matches_allowed_value(allowed_value: &str, api_format: &str) -
     if allowed_value.is_empty() || api_format.is_empty() {
         return false;
     }
-    aether_ai_formats::api_format_permission_covers(allowed_value, api_format)
+    aether_api_metadata::api_format_permission_covers(allowed_value, api_format)
 }
 
 pub fn auth_constraints_allow_model(
@@ -84,7 +84,7 @@ pub fn auth_constraints_allow_model_with_model_directives(
     };
 
     let base_model = enable_model_directives
-        .then(|| aether_ai_formats::model_directive_base_model(requested_model_name))
+        .then(|| aether_api_metadata::model_directive_base_model(requested_model_name))
         .flatten();
     allowed.iter().any(|value| {
         value == requested_model_name

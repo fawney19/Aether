@@ -1,3 +1,4 @@
+use aether_ai_formats::formats::shared::sse::SseRecordReader;
 use aether_contracts::StandardizedUsage;
 use aether_data_contracts::repository::usage::extract_provider_actual_service_tier_from_response;
 use aether_usage_runtime::{map_usage, map_usage_from_response};
@@ -161,23 +162,35 @@ impl StreamUsageFallback {
             .split(['\r', '\n'])
             .filter_map(|line| line.trim().strip_prefix("data:").map(str::trim));
         let Some(first) = data_lines.next() else {
-            self.observe_json(context, record);
+            self.observe_json(context, record, None);
             return;
         };
-        let Some(second) = data_lines.next() else {
-            self.observe_json(context, first);
+        if data_lines.next().is_none() {
+            let event = record
+                .split(['\r', '\n'])
+                .rev()
+                .find_map(|line| line.strip_prefix("event:").map(str::trim));
+            self.observe_json(context, first, event);
             return;
-        };
-        let mut payload = String::with_capacity(record.len());
-        payload.push_str(first);
-        for line in std::iter::once(second).chain(data_lines) {
-            payload.push('\n');
-            payload.push_str(line);
         }
-        self.observe_json(context, &payload);
+        let mut reader = SseRecordReader::new(self.limit);
+        let mut bytes = record.as_bytes();
+        let parsed = match reader.next_record(&mut bytes) {
+            Some(result) => result.ok(),
+            None => reader.finish(),
+        };
+        if let Some(parsed) = parsed {
+            if let Some(payload) = parsed
+                .data
+                .as_deref()
+                .and_then(|data| std::str::from_utf8(data).ok())
+            {
+                self.observe_json(context, payload, parsed.event.as_deref());
+            }
+        }
     }
 
-    fn observe_json(&mut self, context: &Value, json: &str) {
+    fn observe_json(&mut self, context: &Value, json: &str, declared_event: Option<&str>) {
         // serde ignores text/image/output fields instead of allocating another
         // copy of a large completed response just to recover its usage object.
         let Ok(envelope) = serde_json::from_str::<UsageEnvelope>(json) else {
@@ -197,7 +210,10 @@ impl StreamUsageFallback {
         if provider_family.eq_ignore_ascii_case("claude")
             || provider_family.eq_ignore_ascii_case("anthropic")
         {
-            let event_type = envelope.get("type").and_then(Value::as_str);
+            let event_type = envelope
+                .get("type")
+                .and_then(Value::as_str)
+                .or(declared_event);
             let raw_usage = match event_type {
                 Some("message_start") => {
                     self.claude_usage = Value::Object(serde_json::Map::new());
@@ -1052,6 +1068,25 @@ mod tests {
         let usage = fallback.finish(&context).unwrap();
         assert_eq!(usage.output_tokens, 20);
         assert_eq!(usage.cache_read_tokens, 0);
+    }
+
+    #[test]
+    fn stream_capture_fallback_uses_sse_event_for_claude_partial_usage_without_json_type() {
+        let context = json!({"provider_api_format": "claude:messages"});
+        let records = concat!(
+            "event: message_start\r\ndata: {\"message\":{\"usage\":{\"input_tokens\":17}}}\r\n\r\n",
+            "event: message_delta\r\ndata: {\"usage\":\r\ndata: {\"output_tokens\":3}}\r\n\r\n",
+            "event: message_start\r\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}\r\n\r\n"
+        );
+        for width in [1, 13, records.len()] {
+            let mut fallback = StreamUsageFallback::new(1024);
+            for chunk in records.as_bytes().chunks(width) {
+                fallback.observe(&context, chunk);
+            }
+            let usage = fallback.finish(&context).unwrap();
+            assert_eq!(usage.input_tokens, 17);
+            assert_eq!(usage.output_tokens, 7);
+        }
     }
 
     #[test]

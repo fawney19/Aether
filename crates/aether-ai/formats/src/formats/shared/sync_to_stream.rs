@@ -564,7 +564,7 @@ fn openai_image_terminal_summary(
         provider_actual_service_tier: None,
         observed_finish: true,
         unknown_event_count: 0,
-        parser_error: None,
+        ..ExecutionStreamTerminalSummary::default()
     }
 }
 
@@ -1237,7 +1237,7 @@ fn build_terminal_summary_from_openai_responses_response(
         provider_actual_service_tier,
         observed_finish: true,
         unknown_event_count: 0,
-        parser_error: None,
+        ..ExecutionStreamTerminalSummary::default()
     })
 }
 
