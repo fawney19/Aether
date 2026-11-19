@@ -34,6 +34,7 @@ pub(crate) enum LocalFailoverClassification {
     StopErrorPattern,
     StopExecutionError,
     StopCyberPolicy,
+    StopContextOverflow,
     RetrySuccessPattern,
     RetryStatusCode,
     RetryUpstreamFailure,
@@ -47,6 +48,7 @@ impl LocalFailoverClassification {
             Self::StopErrorPattern => "stop_error_pattern",
             Self::StopExecutionError => "stop_execution_error",
             Self::StopCyberPolicy => "stop_cyber_policy",
+            Self::StopContextOverflow => "stop_context_overflow",
             Self::RetrySuccessPattern => "retry_success_pattern",
             Self::RetryStatusCode => "retry_status_code",
             Self::RetryUpstreamFailure => "retry_upstream_failure",
@@ -147,7 +149,8 @@ pub(crate) const fn failure_disposition_from_local_classification(
         LocalFailoverClassification::StopStatusCode
         | LocalFailoverClassification::StopErrorPattern
         | LocalFailoverClassification::StopExecutionError
-        | LocalFailoverClassification::StopCyberPolicy => FailureDisposition::new(
+        | LocalFailoverClassification::StopCyberPolicy
+        | LocalFailoverClassification::StopContextOverflow => FailureDisposition::new(
             FailureRetryAction::Stop,
             FailureScope::None,
             FailureTokenAction::None,
@@ -185,6 +188,7 @@ pub(crate) const fn classify_anthropic_failure_disposition(
             | LocalFailoverClassification::StopErrorPattern
             | LocalFailoverClassification::StopExecutionError
             | LocalFailoverClassification::StopCyberPolicy
+            | LocalFailoverClassification::StopContextOverflow
     ) {
         let generic = failure_disposition_from_local_classification(classification, status_code);
         return match status_code {
@@ -347,6 +351,13 @@ pub(crate) fn classify_local_failover(
         return LocalFailoverClassification::StopErrorPattern;
     }
 
+    // Context overflow is a deterministic property of the request. Retrying the
+    // same payload only delays the client and can turn the useful upstream 400
+    // into an opaque 503 after every candidate has exhausted its retries.
+    if input.status_code >= 400 && local_error_response_is_context_overflow(input.response_text) {
+        return LocalFailoverClassification::StopContextOverflow;
+    }
+
     if input.status_code == 200
         && input.response_text.is_some_and(|text| {
             policy
@@ -397,6 +408,25 @@ fn local_error_response_has_cyber_policy_code(response_text: Option<&str>) -> bo
         return false;
     };
     json_value_has_cyber_policy_code(&value, 0)
+}
+
+fn local_error_response_is_context_overflow(response_text: Option<&str>) -> bool {
+    let Some(response_text) = response_text else {
+        return false;
+    };
+    let fingerprinted = response_text.to_ascii_lowercase();
+    [
+        "prompt is too long",
+        "prompt_too_long",
+        "context_length_exceeded",
+        "context length exceeded",
+        "context window exceeded",
+        "maximum context length",
+        "input context exceeds",
+        "request context exceeds",
+    ]
+    .iter()
+    .any(|marker| fingerprinted.contains(marker))
 }
 
 fn json_value_has_cyber_policy_code(value: &Value, depth: usize) -> bool {
@@ -824,10 +854,6 @@ mod tests {
         for (status_code, response_text) in [
             (
                 400,
-                "{\"error\":{\"type\":\"invalid_request_error\",\"message\":\"prompt is too long\"}}",
-            ),
-            (
-                400,
                 "{\"error\":{\"message\":\"Unsupported parameter: max_tokens is not supported with this model\"}}",
             ),
             (
@@ -869,6 +895,38 @@ mod tests {
                 LocalFailoverClassification::RetryUpstreamFailure
             );
         }
+    }
+
+    #[test]
+    fn classifier_stops_context_overflow_before_default_client_error_retry() {
+        let response_text = r#"{"error":{"code":"prompt_too_long","type":"api_error","message":"{\"code\":11115,\"msg\":\"prompt is too long: 1203525 tokens > 1048576 maximum\"}","gateway_hint":"request context exceeds the model's limit; reduce history/message size"}}"#;
+
+        assert_eq!(
+            classify_local_failover(
+                &LocalFailoverPolicy::default(),
+                LocalFailoverInput::new(400, Some(response_text))
+            ),
+            LocalFailoverClassification::StopContextOverflow
+        );
+        let disposition = failure_disposition_from_local_classification(
+            LocalFailoverClassification::StopContextOverflow,
+            400,
+        );
+        assert_eq!(disposition.retry_action, FailureRetryAction::Stop);
+        assert_eq!(disposition.failure_scope, FailureScope::None);
+        assert!(disposition.preserve_upstream_error);
+    }
+
+    #[test]
+    fn classifier_does_not_confuse_max_tokens_parameter_errors_with_context_overflow() {
+        let response_text = r#"{"error":{"message":"Unsupported parameter: max_tokens is not supported with this model"}}"#;
+        assert_eq!(
+            classify_local_failover(
+                &LocalFailoverPolicy::default(),
+                LocalFailoverInput::new(400, Some(response_text))
+            ),
+            LocalFailoverClassification::RetryUpstreamFailure
+        );
     }
 
     #[test]

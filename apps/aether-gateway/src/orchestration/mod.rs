@@ -129,6 +129,7 @@ pub(crate) fn build_local_error_flow_metadata(
             | LocalFailoverClassification::StopErrorPattern
             | LocalFailoverClassification::StopExecutionError
             | LocalFailoverClassification::StopCyberPolicy
+            | LocalFailoverClassification::StopContextOverflow
     );
     let propagation = match analysis.decision {
         LocalFailoverDecision::RetryNextCandidate => "suppressed",

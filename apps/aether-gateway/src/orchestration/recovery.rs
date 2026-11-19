@@ -118,7 +118,10 @@ const fn decision_from_classification(
         LocalFailoverClassification::StopStatusCode
         | LocalFailoverClassification::StopErrorPattern
         | LocalFailoverClassification::StopExecutionError
-        | LocalFailoverClassification::StopCyberPolicy => LocalFailoverDecision::StopLocalFailover,
+        | LocalFailoverClassification::StopCyberPolicy
+        | LocalFailoverClassification::StopContextOverflow => {
+            LocalFailoverDecision::StopLocalFailover
+        }
         LocalFailoverClassification::RetrySuccessPattern
         | LocalFailoverClassification::RetryStatusCode
         | LocalFailoverClassification::RetryUpstreamFailure => {
